@@ -59,11 +59,9 @@ export function imageSizeLabel(size: string): string {
   const divisor = gcd(width, height);
   return `${size} (${width / divisor}:${height / divisor})`;
 }
-export function sub2apiQualityOptions(model: string, current: string): string[] {
-  const supported = imageQualities(model).filter(value => ['auto', 'low', 'medium'].includes(value));
-  return supported.includes(current) ? supported : [...supported, current];
-}
-export function sub2apiSizeOptions(current: string): string[] {
-  const sizes = ['auto', '1024x1024', '1536x1024', '1024x1536', '1152x864', '864x1152', '1280x720', '720x1280'];
-  return sizes.includes(current) ? sizes : [...sizes, current];
+export function imageQualityLabel(value: string, t: Translator): string {
+  const keys: Record<string, Parameters<Translator>[0]> = { auto: 'generationAuto', low: 'generationLow', medium: 'generationMedium', high: 'generationHigh', xhigh: 'generationXhigh', max: 'generationMax' };
+  if (!keys[value]) return value;
+  const label = t(keys[value]);
+  return label.toLowerCase() === value ? label : `${label} (${value})`;
 }

@@ -8,7 +8,7 @@ import qualityIcon from '../assets/generation-controls/quality.png';
 import { api, mediaUrl } from '../api/client';
 import type { ClusterRecord, GenerationJobAcceptAsNewItemPayload, GenerationJobCreate, GenerationJobRecord, GenerationJobSetRecord, GenerationProviderQueueState, GenerationProviderStatus, GenerationSetCount, ImageRecord, ItemDetail, ItemSummary, TagRecord, AiProvider } from '../types';
 import type { Translator } from '../utils/i18n';
-import { IMAGE25_MODELS, imageQualities, restoreCompatibleRecipe, compatibleParameters, compatibleValidation, imageSizeLabel, sub2apiQualityOptions, type CompatibleRecipe } from '../utils/compatibleRecipe';
+import { IMAGE25_MODELS, imageQualities, restoreCompatibleRecipe, compatibleParameters, compatibleValidation, imageSizeLabel, imageQualityLabel, type CompatibleRecipe } from '../utils/compatibleRecipe';
 import { generationAspectRatio } from '../utils/generationAspectRatio';
 import { generationResultActions } from '../utils/generationResultActions';
 import { providerPauseSeconds } from '../utils/generationSets';
@@ -500,13 +500,12 @@ export default function GenerationPanel({
   const selectedModelLabel = provider === 'openai_compatible' && compatibleModelSelected ? compatibleRecipe.model : selectedProvider?.model || selectedProvider?.default_image_model || (provider === 'xai_grok_oauth' ? 'grok-imagine-image-2.0' : '');
   const effectiveRecipe = { ...compatibleRecipe, model: selectedModelLabel };
   const compatibleError = provider === 'openai_compatible' ? compatibleValidation(effectiveRecipe) : undefined;
-  const isSub2api = provider === 'openai_compatible' && /sub2api/i.test(selectedProvider?.display_name || '');
-  const currentQualityOptions = provider === 'openai_compatible' ? (isSub2api ? sub2apiQualityOptions(selectedModelLabel, compatibleQuality) : imageQualities(selectedModelLabel)).map(value => ({ value, label: value })) : QUALITY_OPTIONS;
+  const currentQualityOptions = provider === 'openai_compatible' ? imageQualities(selectedModelLabel).map(value => ({ value, label: value })) : QUALITY_OPTIONS;
   const sizeLabel = (size: string) => size === 'auto' ? optionLabel(ASPECT_RATIO_OPTIONS, 'auto', t) : imageSizeLabel(size);
   const compatibleModels = [...new Set([IMAGE25_MODELS[1], IMAGE25_MODELS[0], ...(selectedModelLabel ? [selectedModelLabel] : [])])];
   const selectedOutputLabel = provider === 'xai_grok_oauth'
     ? `${optionLabel(GROK_QUALITY_OPTIONS, grokQuality, t)} · ${optionLabel(GROK_RESOLUTION_OPTIONS, grokResolution, t)}`
-    : optionLabel(QUALITY_OPTIONS, provider === 'openai_compatible' ? compatibleQuality : quality, t);
+    : provider === 'openai_compatible' ? imageQualityLabel(compatibleQuality, t) : optionLabel(QUALITY_OPTIONS, quality, t);
   const selectedOutputAriaLabel = provider === 'xai_grok_oauth'
     ? `${t('queueQuality')}: ${optionLabel(GROK_QUALITY_OPTIONS, grokQuality, t)}, ${t('generationResolution')}: ${optionLabel(GROK_RESOLUTION_OPTIONS, grokResolution, t)}`
     : `${t('queueQuality')}: ${selectedOutputLabel}`;
@@ -2174,9 +2173,7 @@ export default function GenerationPanel({
                     {!selectedModelLabel && <option value="">—</option>}
                     {compatibleModels.map(model => <option key={model} value={model}>{model === 'gpt-image-2.5-sunburst' ? 'Sunburst' : model === 'gpt-image-2.5-flare' ? 'Flare' : model}</option>)}
                   </select></label>
-                  {isSub2api && <small>{t('sub2apiOutputLimit')}</small>}
                   {compatibleRecipe.size !== 'auto' && <small>{t('imageHistoricalSize')}: {sizeLabel(compatibleRecipe.size)}</small>}
-                  {isSub2api && !['auto', 'low', 'medium'].includes(compatibleQuality) && <small role="status">{t('sub2apiLegacyQuality')} ({compatibleQuality})</small>}
                   {compatibleError && <p role="alert">{t(compatibleError)}</p>}
                 </div>}
                 <div className={`generation-compact-controls${provider === 'openai_compatible' ? ' is-compatible' : ''}${selectedProviderCanGenerateDraft ? '' : ' has-provider-attention'}`}>
@@ -2278,7 +2275,7 @@ export default function GenerationPanel({
                             const selected = (provider === 'openai_compatible' ? compatibleQuality : quality) === option.value;
                             return (
                               <button key={option.value} type="button" role="menuitemradio" aria-checked={selected} className={selected ? 'is-selected' : ''} onClick={() => { if (provider === 'openai_compatible') setCompatibleQuality(option.value); else setQuality(option.value); closeGenerationControl('quality'); }}>
-                                <span className="generation-control-option-label">{optionLabel(QUALITY_OPTIONS, option.value, t)}{isSub2api && !['auto', 'low', 'medium'].includes(option.value) && <small className="generation-legacy-quality-note">{t('sub2apiLegacyQuality')}</small>}</span>
+                                <span className="generation-control-option-label">{provider === 'openai_compatible' ? imageQualityLabel(option.value, t) : optionLabel(QUALITY_OPTIONS, option.value, t)}</span>
                                 {selected && <Check className="generation-control-option-check" size={15} aria-hidden="true" />}
                               </button>
                             );
@@ -2509,7 +2506,7 @@ export default function GenerationPanel({
                 </span>
                 <span className="generation-history-status-grid" aria-hidden="true">
                   <span className="generation-history-cell"><b>{job.provider === 'openai_compatible' ? t('requestedImageSize') : t('queueAspectRatio')}</b><em>{job.provider === 'openai_compatible' ? sizeLabel(String(job.parameters?.size || '—')) : optionLabel(ASPECT_RATIO_OPTIONS, jobAspectRatio(job), t)}</em></span>
-                  <span className="generation-history-cell"><b>{t('queueQuality')}</b><em>{optionLabel(QUALITY_OPTIONS, jobQuality(job), t)}</em></span>
+                  <span className="generation-history-cell"><b>{t('queueQuality')}</b><em>{job.provider === 'openai_compatible' ? imageQualityLabel(jobQuality(job), t) : optionLabel(QUALITY_OPTIONS, jobQuality(job), t)}</em></span>
                   {job.provider === 'xai_grok_oauth' && <span className="generation-history-cell"><b>{t('generationResolution')}</b><em>{optionLabel(GROK_RESOLUTION_OPTIONS, jobResolution(job), t)}</em></span>}
                   <span className="generation-history-cell"><b>{t('queueModel')}</b><em>{jobModel(job)}</em></span>
                   <span className="generation-history-cell"><b>{t('queueStatus')}</b><em>{statusLabel(job.status, t, isUsedAsGenerationReference(job))}</em></span>

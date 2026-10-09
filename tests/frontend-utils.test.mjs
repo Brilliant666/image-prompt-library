@@ -581,7 +581,7 @@ test('transparency requested but absent is visible without opening records', () 
   assert.equal(renderResultSummary(summaryJob({ provider: 'codex' })), '');
 });
 
-const { imageSizeLabel, sub2apiQualityOptions, sub2apiSizeOptions } = await importTypescript('../frontend/src/utils/compatibleRecipe.ts');
+const { imageSizeLabel, imageQualityLabel } = await importTypescript('../frontend/src/utils/compatibleRecipe.ts');
 test('size labels retain exact pixels and reduce aspect ratios', () => {
   assert.equal(imageSizeLabel('1024x1024'), '1024x1024 (1:1)');
   assert.equal(imageSizeLabel('720x1280'), '720x1280 (9:16)');
@@ -589,11 +589,11 @@ test('size labels retain exact pixels and reduce aspect ratios', () => {
   assert.equal(imageSizeLabel('auto'), 'auto');
   assert.equal(imageSizeLabel('0x0'), '0x0');
 });
-test('sub2api UI guidance preserves historical requests without exposing high quality as default', () => {
-  assert.deepEqual(sub2apiQualityOptions('gpt-image-2.5-flare', 'low'), ['auto', 'low', 'medium']);
-  assert.deepEqual(sub2apiQualityOptions('gpt-image-2.5-sunburst', 'max'), ['auto', 'low', 'medium', 'max']);
-  assert.ok(sub2apiSizeOptions('2160x3840').includes('2160x3840'));
-  assert.ok(!sub2apiSizeOptions('auto').includes('2160x3840'));
+test('compatible quality choices depend on model, not provider display name', () => {
+  for (const model of ['gpt-image-2.5-flare', 'gpt-image-2.5-sunburst']) assert.deepEqual(imageQualities(model), ['auto','low','medium','high','xhigh','max']);
+  assert.equal(imageQualityLabel('high', makeTranslator('zh_hans')), '高 (high)');
+  assert.equal(imageQualityLabel('xhigh', makeTranslator('zh_hans')), '超高 (xhigh)');
+  assert.equal(imageQualityLabel('max', makeTranslator('zh_hans')), '最高 (max)');
   const restored = restoreCompatibleRecipe({parameters: {model:'gpt-image-2.5-sunburst', quality:'max', size:'2160x3840'}});
   assert.equal(compatibleParameters(restored).quality, 'max');
   assert.equal(compatibleParameters(restored).size, '2160x3840');
