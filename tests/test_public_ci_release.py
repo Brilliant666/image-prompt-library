@@ -1,6 +1,18 @@
 from pathlib import Path
+import re
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_source_maintenance_disables_publication_and_deployment_jobs():
+    for filename in ("pages.yml", "release-assets.yml", "release-candidate-smoke.yml"):
+        workflow = (ROOT / ".github" / "workflows" / filename).read_text(encoding="utf-8")
+        jobs = re.split(r"(?m)^  [a-z][a-z0-9-]*:\s*$", workflow.split("jobs:\n", 1)[1])[1:]
+        assert jobs, filename
+        for job in jobs:
+            assert "    if: ${{ false }}" in job, filename
+    pages = (ROOT / ".github" / "workflows" / "pages.yml").read_text(encoding="utf-8")
+    assert "  push:" not in pages
 
 
 def test_ci_workflow_runs_full_public_alpha_checks():
@@ -11,7 +23,7 @@ def test_ci_workflow_runs_full_public_alpha_checks():
     assert "name: CI" in workflow
     assert "pull_request:" in workflow
     assert "push:" in workflow
-    assert "branches: [main]" in workflow
+    assert "branches: [main, codex/sub2api-images]" in workflow
     assert "actions/checkout@v5" in workflow
     assert "actions/setup-node@v5" in workflow
     assert "node-version: 24" in workflow
@@ -253,9 +265,10 @@ def test_v010_release_docs_define_stable_update_behavior():
     assert "stable promotion" not in notes.lower()
     assert "## Release gate" not in notes
     assert "No paid generation request" not in notes
-    assert "`v0.11.2` is the current stable release" in readmes[0]
-    assert "`v0.11.2` 是目前穩定版本" in readmes[1]
-    assert "`v0.11.2` 是当前稳定版本" in readmes[2]
+    for readme in readmes:
+        assert "**v0.11.2**" in readme
+        assert "independently maintained" in readme
+        assert "No release installer is offered" in readme
     assert "`v0.10.0` is the current stable release" not in readmes[0]
     assert "`v0.10.0` 已是目前 stable release" not in readmes[1]
     assert "`v0.10.0` 已是当前 stable release" not in readmes[2]

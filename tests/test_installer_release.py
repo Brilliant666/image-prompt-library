@@ -18,6 +18,16 @@ from backend.db import init_db
 from backend.repositories import ItemRepository
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(scope="module", autouse=True)
+def use_isolated_legacy_release_source(legacy_release_source):
+    global ROOT
+    original_root = ROOT
+    ROOT = legacy_release_source
+    yield
+    ROOT = original_root
+
 GIT_BASH_SHIM = Path(tempfile.gettempdir()) / "image-prompt-library-git-bash-test-bin"
 GIT_BASH_SHIM.mkdir(exist_ok=True)
 (GIT_BASH_SHIM / "python3").write_text(
@@ -531,13 +541,22 @@ def test_release_assets_workflow_builds_and_uploads_candidate_artifacts():
     assert "EXISTING_RELEASE_ID" in workflow
 
 
-def test_readme_prefers_installer_for_users_and_keeps_source_setup_for_developers():
+def test_readme_prefers_independent_source_maintenance_and_preserves_historical_guide():
     readme = read("README.md")
     installation = read("docs/INSTALLATION.md")
+    maintenance = read("docs/INDEPENDENT_MAINTENANCE.md")
 
     assert "## Quick start" in readme
+    assert "docs/INDEPENDENT_MAINTENANCE.md" in readme
+    assert "No release installer is offered" in readme
+    assert "raw.githubusercontent.com/EddieTYP" not in readme
+    assert "npm ci" in maintenance
+    assert "npm run build" in maintenance
+    assert "uvicorn backend.main:app --host 127.0.0.1" in maintenance
+    assert "IMAGE_PROMPT_LIBRARY_PATH" in maintenance
+    assert "codex/sub2api-images" in maintenance
     assert "scripts/install.sh" in installation
-    assert "image-prompt-library start" in readme
+    assert "image-prompt-library start" in maintenance
     assert "image-prompt-library status" in readme
     assert "image-prompt-library update" in installation
     assert "image-prompt-library update --version <version>" in installation
@@ -546,11 +565,10 @@ def test_readme_prefers_installer_for_users_and_keeps_source_setup_for_developer
     assert "image-prompt-library sample-data en" in readme
     assert "image-prompt-library uninstall" in installation
     assert "Python 3.10+" in readme
-    assert "`curl`" in readme
-    assert "do not require Node.js" in readme
+    assert "Node.js 24" in readme
     assert "GitHub Release assets" in installation
     assert "source/development installs" in installation
-    assert "git clone https://github.com/EddieTYP/image-prompt-library.git" in (
+    assert "git clone https://github.com/Brilliant666/image-prompt-library.git" in (
         ROOT / "docs" / "DEVELOPMENT.md"
     ).read_text(encoding="utf-8")
     assert "Node.js" in installation
@@ -972,7 +990,7 @@ def test_posix_latest_release_skips_prerelease_and_installs_stable(tmp_path):
             {
                 "name": name.replace(stable_version, version),
                 "browser_download_url": (
-                    "https://github.com/EddieTYP/image-prompt-library/"
+                    "https://github.com/Brilliant666/image-prompt-library/"
                     f"releases/download/{version}/{name.replace(stable_version, version)}"
                 ),
             }
@@ -1012,7 +1030,7 @@ def test_posix_latest_release_skips_prerelease_and_installs_stable(tmp_path):
         "    def geturl(self): return self.url\n"
         "def _open(url, *args, **kwargs):\n"
         "    value = getattr(url, 'full_url', str(url))\n"
-        f"    if value.endswith('/releases/latest'): return Response(b'', 'https://github.com/EddieTYP/image-prompt-library/releases/tag/{incompatible_version}')\n"
+        f"    if value.endswith('/releases/latest'): return Response(b'', 'https://github.com/Brilliant666/image-prompt-library/releases/tag/{incompatible_version}')\n"
         "    if '/releases?per_page=' in value:\n"
         "        page = urllib.parse.parse_qs(urllib.parse.urlparse(value).query).get('page', ['1'])[0]\n"
         "        return io.BytesIO(json.dumps(FIRST_PAGE if page == '1' else RELEASES).encode())\n"

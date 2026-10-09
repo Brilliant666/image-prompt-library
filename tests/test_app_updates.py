@@ -175,7 +175,7 @@ def test_latest_web_redirect_avoids_rate_limited_api(monkeypatch):
     monkeypatch.setattr("backend.routers.app_updates.sys.platform", "darwin")
     monkeypatch.setattr(
         "backend.routers.app_updates.resolve_url",
-        lambda *_args, **_kwargs: "https://github.com/EddieTYP/image-prompt-library/releases/tag/v2.0.0",
+        lambda *_args, **_kwargs: "https://github.com/Brilliant666/image-prompt-library/releases/tag/v2.0.0",
     )
     monkeypatch.setattr(
         "backend.routers.app_updates.open_url_text",
@@ -201,7 +201,7 @@ def test_incompatible_latest_falls_back_to_older_compatible_release(monkeypatch)
     monkeypatch.setattr("backend.routers.app_updates.sys.platform", "darwin")
     monkeypatch.setattr(
         "backend.routers.app_updates.resolve_url",
-        lambda *_args, **_kwargs: "https://github.com/EddieTYP/image-prompt-library/releases/tag/v3.0.0",
+        lambda *_args, **_kwargs: "https://github.com/Brilliant666/image-prompt-library/releases/tag/v3.0.0",
     )
     releases = []
     for version in ("v3.0.0", "v2.0.0"):

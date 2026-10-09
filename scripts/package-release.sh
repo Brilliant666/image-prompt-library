@@ -86,6 +86,7 @@ copy_path() {
 
 for path in \
   backend \
+  SOURCE_MAINTENANCE.json \
   scripts/appctl.sh \
   scripts/library-archive.py \
   scripts/install.sh \
@@ -148,9 +149,12 @@ rm -f \
 rm -f "$RELEASE_DIR/$ARTIFACT" "$RELEASE_DIR/$CHECKSUM_FILE" "$RELEASE_DIR/$MANIFEST"
 (
   cd "$STAGING"
+  maintenance_files=()
+  if [ -f SOURCE_MAINTENANCE.json ]; then maintenance_files+=(SOURCE_MAINTENANCE.json); fi
   tar -czf "../../$ARTIFACT" \
     VERSION \
     backend \
+    "${maintenance_files[@]}" \
     frontend \
     LICENSE \
     NOTICE \

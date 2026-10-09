@@ -39,3 +39,15 @@ dist-release/
 *.egg-info/
 *.pyc
 .DS_Store
+
+# Local credentials and runtime evidence (keep tracked fixtures/docs assets).
+.env.*
+!.env.example
+!.env.*.example
+!frontend/.env.demo
+sub2api.txt
+openai-compatible.json
+.image-prompt-library/
+logs/
+*.log
+venv/

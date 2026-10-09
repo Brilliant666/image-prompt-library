@@ -1004,6 +1004,9 @@ function Rollback-App {
 
 function Update-App {
     param($Context, [string[]]$Arguments)
+    if (Test-Path -LiteralPath (Join-Path $Context.AppRoot "SOURCE_MAINTENANCE.json")) {
+        throw "Release updates are disabled. Maintain source at https://github.com/Brilliant666/image-prompt-library; see README."
+    }
     $version = "latest"
     if (@($Arguments).Count) {
         if (@($Arguments).Count -ne 2 -or $Arguments[0] -ne "--version" -or -not $Arguments[1]) {

@@ -32,8 +32,8 @@ RELEASE_RE = re.compile(
     r"$"
 )
 SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
-DEFAULT_RELEASE_BASE_URL = "https://github.com/EddieTYP/image-prompt-library/releases/download"
-LATEST_RELEASE_URL = "https://github.com/EddieTYP/image-prompt-library/releases/latest"
+DEFAULT_RELEASE_BASE_URL = "https://github.com/Brilliant666/image-prompt-library/releases/download"
+LATEST_RELEASE_URL = "https://github.com/Brilliant666/image-prompt-library/releases/latest"
 UPDATE_TIMEOUT_SECONDS = 180
 UPDATE_LOCK = threading.Lock()
 UPDATE_CHECK_CACHE_LOCK = threading.Lock()
@@ -194,7 +194,7 @@ def local_release_versions() -> list[str]:
 
 
 def github_release_versions(limit: int = 10) -> list[str]:
-    api_url = "https://api.github.com/repos/EddieTYP/image-prompt-library/releases?per_page=100"
+    api_url = "https://api.github.com/repos/Brilliant666/image-prompt-library/releases?per_page=100"
     try:
         data = json.loads(open_url_text(api_url, timeout=5))
     except Exception as exc:
@@ -249,7 +249,7 @@ def github_latest_release_version() -> str:
         raise ReleaseCheckError("Latest release check failed") from exc
     parsed = urlparse(final_url)
     path = unquote(parsed.path).rstrip("/")
-    prefix = "/EddieTYP/image-prompt-library/releases/tag/"
+    prefix = "/Brilliant666/image-prompt-library/releases/tag/"
     trusted_pointer = (
         parsed.scheme == "https"
         and parsed.netloc.lower() == "github.com"
@@ -375,6 +375,8 @@ def detect_service_mode() -> str:
 def detect_update_capability() -> tuple[str, str | None]:
     """Return the truthful update path for this app checkout."""
     root = app_root()
+    if (root / "SOURCE_MAINTENANCE.json").exists():
+        return "source", "independent_source_maintenance"
     if (root / ".git").exists() or not (root / "VERSION").is_file():
         return "source", "source_checkout_managed_outside_app"
     if sys.platform == "win32":
@@ -446,7 +448,7 @@ def get_update_status(request: Request, refresh: bool = False):
         current_version=current,
         latest_version=latest,
         update_available=update_available,
-        release_url=f"https://github.com/EddieTYP/image-prompt-library/releases/tag/{latest}" if latest else None,
+        release_url=f"https://github.com/Brilliant666/image-prompt-library/releases/tag/{latest}" if latest else None,
         update_command=f"image-prompt-library update --version {latest}" if latest and update_capability != "source" else None,
         checked_at=utc_now(),
         update_capability=update_capability,

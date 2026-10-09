@@ -298,6 +298,10 @@ PY
 }
 
 update_app() {
+  if [ -e "$APP_ROOT/SOURCE_MAINTENANCE.json" ]; then
+    echo "Release updates are disabled. Maintain source at https://github.com/Brilliant666/image-prompt-library; see README." >&2
+    return 1
+  fi
   VERSION_ARG="latest"
   while [ "$#" -gt 0 ]; do
     case "$1" in

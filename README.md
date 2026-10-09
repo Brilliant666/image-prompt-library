@@ -1,8 +1,14 @@
 # Image Prompt Library
 
-[![CI](https://github.com/EddieTYP/image-prompt-library/workflows/CI/badge.svg)](https://github.com/EddieTYP/image-prompt-library/actions/workflows/ci.yml)
-[![GitHub Pages demo](https://github.com/EddieTYP/image-prompt-library/workflows/Deploy%20GitHub%20Pages%20demo/badge.svg)](https://github.com/EddieTYP/image-prompt-library/actions/workflows/pages.yml)
-[![Release](https://img.shields.io/github/v/release/EddieTYP/image-prompt-library?label=release)](https://github.com/EddieTYP/image-prompt-library/releases/latest)
+**Independent maintenance / 独立维护**
+
+This project is independently maintained by [Brilliant666](https://github.com/Brilliant666/image-prompt-library), based on [EddieTYP/image-prompt-library](https://github.com/EddieTYP/image-prompt-library) **v0.11.2**. The original AGPL-3.0-or-later license and author notices are retained.
+
+本仓库采用源码维护，尚未建立自己的 Releases。请勿执行上游安装或更新命令覆盖定制版；发行更新入口已暂停。开发与启动方法见 [独立维护说明](docs/INDEPENDENT_MAINTENANCE.md)。
+
+**2026-10-09 local changes:** OpenAI-compatible image provider (including sub2api), credentials outside the asset library, original aspect-ratio controls, existing queue integration for 3/5/10-image batches, and actions for saved generation history. Existing ChatGPT/Codex and Grok OAuth providers are retained. This migration does not move private library data into Git.
+
+[![CI](https://github.com/Brilliant666/image-prompt-library/workflows/CI/badge.svg)](https://github.com/Brilliant666/image-prompt-library/actions/workflows/ci.yml)
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue)](LICENSE)
 
 **English** · [繁體中文](README_zh-TW.md) · [简体中文](README_zh-CN.md)
@@ -15,34 +21,11 @@ Your library uses local SQLite and local image files. You do not need an account
 
 *The local app with optional sample references loaded. A new library starts empty.*
 
-## Release status
+## Quick start / 源码启动
 
-`v0.11.2` is the current stable release, available from [GitHub Latest](https://github.com/EddieTYP/image-prompt-library/releases/latest). It simplifies **ChatGPT image generation and editing** with direct Images endpoints and removes the generation-only chat-model selector. See the [v0.11.2 release notes](docs/releases/v0.11.2.md). Grok, multi-image cards, and batch organization introduced in [v0.11.0](docs/releases/v0.11.0.md) remain available.
+Use the current checkout and follow [source setup and maintenance](docs/INDEPENDENT_MAINTENANCE.md). No release installer is offered by this independent repository yet. The original [v0.11.2 release notes](docs/releases/v0.11.2.md) and [v0.11.0 Grok release notes](docs/releases/v0.11.0.md) remain as upstream history.
 
-## Quick start
-
-### Windows
-
-Requires Windows 10/11, PowerShell 5.1+, and **Python 3.10+**. Install Python first; the installer does not install it for you.
-
-```powershell
-irm https://raw.githubusercontent.com/EddieTYP/image-prompt-library/main/scripts/install.ps1 | iex
-```
-
-The installer starts the app in the background and opens your browser. Use `image-prompt-library stop` to stop it.
-
-### macOS, Linux, and WSL 2
-
-Requires **Python 3.10+** and `curl`. Release installs do not require Node.js.
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/EddieTYP/image-prompt-library/main/scripts/install.sh | bash
-image-prompt-library start
-```
-
-Keep the terminal open and visit [http://127.0.0.1:8000](http://127.0.0.1:8000). Press `Ctrl-C` in that terminal to stop the server.
-
-For an inspect-before-running installation, updates, rollback, or uninstall, see the [installation guide](docs/INSTALLATION.md). If the app does not start, run `image-prompt-library status` and `image-prompt-library doctor`, then check [Troubleshooting](docs/TROUBLESHOOTING.md).
+Requires **Python 3.10+** and **Node.js 24** for source builds. Existing installed versions can be checked with `image-prompt-library status` and `image-prompt-library doctor`.
 
 ### Save your first prompt
 

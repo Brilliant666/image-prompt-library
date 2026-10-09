@@ -1,5 +1,12 @@
 # Installation and Runtime Guide
 
+> This independently maintained branch currently uses source maintenance in
+> [Brilliant666/image-prompt-library](https://github.com/Brilliant666/image-prompt-library).
+> Remote release installation and the managed updater are paused. Use
+> [Independent maintenance](INDEPENDENT_MAINTENANCE.md) for current instructions.
+> The upstream installation examples below are retained as historical reference;
+> they are not the update path for this customized branch.
+
 This guide keeps operational details out of the main README.
 
 ## Native Windows PowerShell (v0.8.0+)

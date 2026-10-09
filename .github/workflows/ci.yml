@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, codex/sub2api-images]
   pull_request:
-    branches: [main]
+    branches: [main, codex/sub2api-images]
   workflow_dispatch:
 
 permissions:

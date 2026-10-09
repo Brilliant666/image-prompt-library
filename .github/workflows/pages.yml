@@ -1,8 +1,6 @@
 name: Deploy GitHub Pages demo
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -19,6 +17,8 @@ env:
 
 jobs:
   build:
+    # Source-only maintenance: publishing/deployment is intentionally disabled.
+    if: ${{ false }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -49,6 +49,8 @@ jobs:
           path: frontend/dist
 
   deploy:
+    # Source-only maintenance: publishing/deployment is intentionally disabled.
+    if: ${{ false }}
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

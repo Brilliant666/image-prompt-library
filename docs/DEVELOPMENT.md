@@ -1,11 +1,11 @@
 # Development Guide
 
-Use this path if you want to develop the app, inspect unreleased `main`, or run from a checkout.
+Use this path if you want to develop the app, inspect the maintained `codex/sub2api-images` branch, or run from a checkout.
 
 ## Source setup
 
 ```bash
-git clone https://github.com/EddieTYP/image-prompt-library.git
+git clone https://github.com/Brilliant666/image-prompt-library.git
 cd image-prompt-library
 ./scripts/setup.sh
 ./scripts/start.sh

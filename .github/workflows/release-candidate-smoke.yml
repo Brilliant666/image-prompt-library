@@ -22,6 +22,8 @@ concurrency:
 
 jobs:
   release-contract:
+    # Source-only maintenance: publishing/deployment is intentionally disabled.
+    if: ${{ false }}
     runs-on: ubuntu-latest
     env:
       CANDIDATE_VERSION: ${{ inputs.version }}
@@ -98,6 +100,7 @@ jobs:
             --source-sha "$TAG_SHA" --capability portable-backup-v1
 
   posix-default-paths:
+    if: ${{ false }}
     needs: release-contract
     strategy:
       fail-fast: false
@@ -251,6 +254,7 @@ jobs:
           printf '%s\n' "- clean install and uninstall \`$CANDIDATE_VERSION\`: PASS" >> "$GITHUB_STEP_SUMMARY"
 
   windows-default-paths:
+    if: ${{ false }}
     needs: release-contract
     runs-on: windows-latest
     env:

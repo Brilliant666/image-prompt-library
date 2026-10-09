@@ -14,7 +14,18 @@ param(
 $RunningFromFile = [bool]$MyInvocation.MyCommand.Path
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$Repo = "EddieTYP/image-prompt-library"
+# Explicit local source-built archives remain supported; remote release updates are disabled.
+$localReleaseSource = $false
+if ($ReleaseBaseUrl) {
+    $releaseSourceUri = $null
+    if ([Uri]::TryCreate($ReleaseBaseUrl, [UriKind]::Absolute, [ref]$releaseSourceUri)) {
+        $localReleaseSource = $releaseSourceUri.IsFile -and -not $releaseSourceUri.IsUnc -and -not $releaseSourceUri.Host
+    }
+}
+if ($PSScriptRoot -and (Test-Path -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) "SOURCE_MAINTENANCE.json")) -and -not $localReleaseSource) {
+    throw "Release installation is disabled. Maintain source at https://github.com/Brilliant666/image-prompt-library; see README."
+}
+$Repo = "Brilliant666/image-prompt-library"
 $Capability = "windows-powershell-v1"
 
 function Fail-Friendly {

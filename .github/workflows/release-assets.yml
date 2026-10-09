@@ -17,6 +17,8 @@ concurrency:
 
 jobs:
   release-assets:
+    # Source-only maintenance: publishing/deployment is intentionally disabled.
+    if: ${{ false }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout release source

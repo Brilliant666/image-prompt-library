@@ -24,6 +24,16 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture(scope="module", autouse=True)
+def use_isolated_legacy_release_source(legacy_release_source):
+    global ROOT
+    original_root = ROOT
+    ROOT = legacy_release_source
+    yield
+    ROOT = original_root
+
+
+
 def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 

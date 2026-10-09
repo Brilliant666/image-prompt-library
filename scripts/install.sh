@@ -1,11 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_SOURCE_ROOT="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+LOCAL_RELEASE_SOURCE=0
+case "${IMAGE_PROMPT_LIBRARY_RELEASE_BASE_URL:-}" in
+  file:///*) LOCAL_RELEASE_SOURCE=1 ;;
+esac
+if [ -e "$SCRIPT_SOURCE_ROOT/SOURCE_MAINTENANCE.json" ] && [ "$LOCAL_RELEASE_SOURCE" != 1 ]; then
+  echo "Release installation is disabled. Maintain source at https://github.com/Brilliant666/image-prompt-library; see README." >&2
+  exit 1
+fi
+
 VERSION_INPUT="latest"
 PREFIX="$HOME/.image-prompt-library"
 LIBRARY_PATH="$HOME/ImagePromptLibrary"
 CREATE_SHIM=1
-REPO="EddieTYP/image-prompt-library"
+REPO="Brilliant666/image-prompt-library"
 RELEASE_BASE_URL="${IMAGE_PROMPT_LIBRARY_RELEASE_BASE_URL:-}"
 SKIP_RUNTIME_SETUP="${IMAGE_PROMPT_LIBRARY_INSTALL_SKIP_RUNTIME_SETUP:-0}"
 

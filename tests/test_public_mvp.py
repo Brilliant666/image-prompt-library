@@ -46,12 +46,12 @@ def test_public_docs_do_not_use_edward_specific_setup_paths():
 def test_public_readme_badges_use_public_status_urls():
     readme = (ROOT / "README.md").read_text()
 
-    assert "https://github.com/EddieTYP/image-prompt-library/workflows/CI/badge.svg" in readme
-    assert "https://github.com/EddieTYP/image-prompt-library/workflows/Deploy%20GitHub%20Pages%20demo/badge.svg" in readme
+    assert "https://github.com/Brilliant666/image-prompt-library/workflows/CI/badge.svg" in readme
+    assert "workflows/Deploy%20GitHub%20Pages%20demo/badge.svg" not in readme
     assert "actions/workflows/ci.yml/badge.svg" not in readme
     assert "actions/workflows/pages.yml/badge.svg" not in readme
-    assert "https://img.shields.io/github/v/release/EddieTYP/image-prompt-library?label=release" in readme
-    assert "https://github.com/EddieTYP/image-prompt-library/releases/latest" in readme
+    assert "https://img.shields.io/github/v/release/" not in readme
+    assert "docs/INDEPENDENT_MAINTENANCE.md" in readme
 
 
 def test_public_import_and_example_data_section_prefers_attributed_demo_source():
@@ -133,7 +133,7 @@ def test_public_readme_explains_current_workflows_and_screenshots():
     assert "## Verification" not in readme
     assert "## Repository layout" not in readme
     assert "For the next version, the default is therefore" not in readme
-    assert "current stable release" in readme.lower()
+    assert "no release installer is offered" in readme.lower()
 
     screenshots = [
         "local-app-library-overview.jpg",
