@@ -82,6 +82,92 @@ def test_legacy_size_and_invalid_ratio(config):
             OpenAICompatibleProvider(config, client).generate("Test", {"requested_aspect_ratio": "bad"})
 
 
+@pytest.mark.parametrize("ratio", ["1:1", "3:4", "9:16", "4:3", "16:9"])
+@pytest.mark.parametrize("use_edits", [False, True])
+def test_ratio_prompt_hint_keeps_auto_size_and_original_prompt(config, ratio, use_edits):
+    original_prompt = "A small geometric shape.\nKeep the margins clear."
+    parameters = {"aspect_ratio_prompt_injection": True, "requested_aspect_ratio": ratio, "quality": "auto"}
+    expected_prompt = original_prompt + f"\n\nRequested output aspect ratio: {ratio} (width:height). Compose the image in this aspect ratio."
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        if use_edits:
+            assert request.url.path == "/v1/images/edits"
+            assert expected_prompt.encode() in request.content
+            assert b'name="size"\r\n\r\nauto' in request.content
+            assert b"aspect_ratio_prompt_injection" not in request.content
+        else:
+            payload = json.loads(request.content)
+            assert payload["prompt"] == expected_prompt
+            assert payload["size"] == "auto"
+            assert "aspect_ratio_prompt_injection" not in payload
+        return httpx.Response(200, json={"data": [{"b64_json": base64.b64encode(png()).decode()}]})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        _, _, metadata = OpenAICompatibleProvider(config, client).generate(
+            original_prompt, parameters, [("reference.png", png(), "image/png")] if use_edits else None,
+        )
+    assert len(calls) == 1
+    assert original_prompt == "A small geometric shape.\nKeep the margins clear."
+    assert parameters == {"aspect_ratio_prompt_injection": True, "requested_aspect_ratio": ratio, "quality": "auto"}
+    assert metadata["requested"]["prompt"] == expected_prompt
+    assert metadata["original_prompt"] == original_prompt
+    assert metadata["requested"]["aspect_ratio_prompt_injection"] is True
+    assert metadata["requested"]["requested_aspect_ratio"] == ratio
+    assert metadata["requested"]["size"] == "auto"
+
+
+@pytest.mark.parametrize("parameters", [
+    {"aspect_ratio_prompt_injection": True, "requested_aspect_ratio": "auto"},
+    {"aspect_ratio_prompt_injection": False, "requested_aspect_ratio": "9:16", "size": "auto"},
+    {"requested_aspect_ratio": "9:16", "size": "auto"},
+])
+def test_ratio_hint_leaves_auto_and_legacy_prompts_unchanged(config, parameters):
+    def handler(request):
+        assert json.loads(request.content)["prompt"] == "Original prompt"
+        return httpx.Response(200, json={"data": [{"b64_json": base64.b64encode(png()).decode()}]})
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        _, _, metadata = OpenAICompatibleProvider(config, client).generate("Original prompt", parameters)
+    assert metadata["requested"]["prompt"] == "Original prompt"
+
+
+def test_ratio_hint_rejects_unsupported_ratio_before_request(config):
+    with httpx.Client(transport=httpx.MockTransport(lambda request: pytest.fail("Must not submit invalid ratio"))) as client:
+        with pytest.raises(OpenAICompatibleError, match="Unsupported requested aspect ratio"):
+            OpenAICompatibleProvider(config, client).generate("Test", {
+                "aspect_ratio_prompt_injection": True, "requested_aspect_ratio": "bad", "size": "auto",
+            })
+
+
+def test_ratio_retry_restores_flag_and_does_not_duplicate_hint(config, tmp_path):
+    from backend.schemas import GenerationJobRecord
+    from backend.services.generation_jobs import GenerationJobRepository
+
+    sent_prompts = []
+    def handler(request):
+        sent_prompts.append(json.loads(request.content)["prompt"])
+        return httpx.Response(200, json={"data": [{"b64_json": base64.b64encode(png()).decode()}]})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenAICompatibleProvider(config, client)
+        _, _, metadata = provider.generate("Original draft", {
+            "aspect_ratio_prompt_injection": True, "requested_aspect_ratio": "9:16", "size": "auto",
+        })
+        # Restore even when only response provenance retains the ratio control flag.
+        job = GenerationJobRecord(id="test", status="succeeded", provider="openai_compatible",
+                                  prompt_text="Original draft", parameters={}, metadata=metadata,
+                                  created_at="2026-01-01", updated_at="2026-01-01")
+        restored = GenerationJobRepository(tmp_path / "library")._restore_compatible_request(job)
+        assert restored.prompt_text == "Original draft"
+        assert restored.parameters["aspect_ratio_prompt_injection"] is True
+        _, _, retried_metadata = provider.generate(restored.prompt_text, restored.parameters)
+    assert len(sent_prompts) == 2
+    assert sent_prompts[0] == sent_prompts[1]
+    assert sent_prompts[1].count("Requested output aspect ratio:") == 1
+    assert retried_metadata["original_prompt"] == "Original draft"
+
+
 @pytest.mark.parametrize("status", [302, 401, 429, 500])
 def test_no_retry_or_redirect_and_errors_do_not_leak(config, status):
     calls = []

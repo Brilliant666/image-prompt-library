@@ -1,6 +1,7 @@
 import type { UiLanguage } from '../types';
 export type { UiLanguage } from '../types';
 type TranslationKey =
+  | 'imageHistoricalSize'
   | 'sub2apiOutputLimit' | 'sub2apiLegacyQuality' | 'imageOutputOptions' | 'imageWidth' | 'imageHeight' | 'imageQualityMismatch'
   | 'imageCompositionHelp' | 'imageResultMismatch' | 'imageResultDecoded' | 'imageResultUnverified' | 'imageRequestedOutput' | 'imageActualOutput' | 'imageActualTransparent' | 'imageActualOpaque' | 'imageMoreDetails' | 'imageRawRecords' | 'imageServiceQuality' | 'imageServiceSize' | 'imageRequestId' | 'imageElapsed' | 'imageHttpStatus'
   | 'imageMissingRecipe' | 'imageBackgroundInvalid' | 'imageFormatInvalid'
@@ -67,6 +68,7 @@ export function normalizeUiLanguage(value?: string | null): UiLanguage {
 
 const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
   zh_hant: {
+    imageHistoricalSize: '歷史固定尺寸（重新選擇比例後改為自動尺寸）',
     sub2apiOutputLimit: '目前 sub2api 渠道暫按最高 medium、約 2K 檔位使用；以實際回覆為準。',
     sub2apiLegacyQuality: '歷史請求值，超出目前渠道預期能力',
     imageOutputOptions: '背景與輸出格式',
@@ -178,6 +180,7 @@ const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
 
   },
   zh_hans: {
+    imageHistoricalSize: '历史固定尺寸（重新选择比例后改为自动尺寸）',
     sub2apiOutputLimit: '当前 sub2api 渠道暂按最高 medium、约 2K 档位使用；以实际返回为准。',
     sub2apiLegacyQuality: '历史请求值，超出当前渠道预期能力',
     imageOutputOptions: '背景与输出格式',
@@ -290,6 +293,7 @@ const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
 
   },
   en: {
+    imageHistoricalSize: 'Historical fixed size (select a ratio to use automatic sizing)',
     sub2apiOutputLimit: 'This sub2api channel is currently treated as up to medium, approximately the 2K tier; actual output may differ.',
     sub2apiLegacyQuality: 'Historical request exceeds the current channel expectation',
     imageOutputOptions: 'Background and output format',

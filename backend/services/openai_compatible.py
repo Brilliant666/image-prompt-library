@@ -38,6 +38,12 @@ class OpenAICompatibleError(RuntimeError):
 
 
 def requested_image_size(parameters):
+    if parameters.get("aspect_ratio_prompt_injection") is True:
+        ratio = parameters.get("requested_aspect_ratio", "auto")
+        if ratio not in ASPECT_RATIO_SIZES:
+            raise OpenAICompatibleError("Unsupported requested aspect ratio")
+        # Ratio-only controls leave pixels to the service; historical explicit sizes remain exact.
+        return str(parameters.get("size") or "auto")
     # Explicit pixels (including auto) and frozen historical values always win.
     if parameters.get("size") is not None:
         return str(parameters["size"])
@@ -281,7 +287,12 @@ class OpenAICompatibleProvider:
         if not isinstance(prompt, str) or not prompt.strip():
             raise OpenAICompatibleError("Generation prompt is required")
         payload = {key: normalized[key] for key in ("model", "size", "quality", "background", "output_format", "output_compression") if key in normalized}
-        payload.update(prompt=prompt, n=1)
+        request_prompt = prompt
+        ratio = normalized.get("requested_aspect_ratio", "auto")
+        if normalized.get("aspect_ratio_prompt_injection") is True and ratio in ASPECT_RATIO_SIZES and ratio != "auto":
+            # Apply only at transport so the user's original prompt and historical jobs stay intact.
+            request_prompt += f"\n\nRequested output aspect ratio: {ratio} (width:height). Compose the image in this aspect ratio."
+        payload.update(prompt=request_prompt, n=1)
         inputs = input_images or []
         endpoint = "/images/edits" if inputs else "/images/generations"
         url = normalize_base_url(settings["base_url"]) + endpoint
@@ -354,6 +365,8 @@ class OpenAICompatibleProvider:
         requested = dict(payload)
         if "requested_aspect_ratio" in parameters:
             requested["requested_aspect_ratio"] = parameters["requested_aspect_ratio"]
+        if normalized.get("aspect_ratio_prompt_injection") is True:
+            requested["aspect_ratio_prompt_injection"] = True
         mismatches = []
         if payload["size"] != "auto" and payload["size"] != f"{width}x{height}":
             mismatches.append({"field": "size", "requested": payload["size"], "actual": f"{width}x{height}"})
@@ -365,6 +378,8 @@ class OpenAICompatibleProvider:
                     "model": actual.get("model"), "image_model": actual.get("model"), "decoded_image": decoded, "mismatches": mismatches,
                     "request_diagnostics": {**diagnostics, "elapsed_seconds": round(time.monotonic() - started, 3)},
                     "mode": "image_edit" if inputs else "text_to_image", "input_image_count": len(inputs)}
+        if normalized.get("aspect_ratio_prompt_injection") is True:
+            metadata["original_prompt"] = prompt
         extension = {"PNG": "png", "JPEG": "jpg", "WEBP": "webp"}[fmt]
         return data, "openai-compatible." + extension, metadata
 

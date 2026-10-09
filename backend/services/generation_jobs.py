@@ -337,7 +337,7 @@ class GenerationJobRepository:
         parameters = dict(job.parameters or {})
         requested = job.metadata.get("requested", {})
         if isinstance(requested, dict):
-            for key in ("model", "quality", "size", "requested_aspect_ratio", "background", "output_format", "output_compression"):
+            for key in ("model", "quality", "size", "requested_aspect_ratio", "aspect_ratio_prompt_injection", "background", "output_format", "output_compression"):
                 if key in requested:
                     parameters[key] = requested[key]
         model = parameters.get("model") or job.model
