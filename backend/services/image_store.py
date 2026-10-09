@@ -68,7 +68,10 @@ def store_image(library_path: Path | str, data: bytes, filename: str = "image.pn
         width, height = im.size
         if width * height > MAX_IMAGE_PIXELS:
             raise ValueError(f"image too large: {width}x{height}")
-        image = im.convert("RGB")
+        # PNG palette/tRNS and grayscale alpha need the same treatment as RGBA.
+        # Keep transparency in derivatives; originals remain byte-for-byte intact.
+        has_alpha = "A" in im.getbands() or "transparency" in im.info
+        image = im.convert("RGBA" if has_alpha else "RGB")
     original_rel = _rel("originals", sha, suffix)
     thumb_rel = _rel("thumbs", sha, ".webp")
     preview_rel = _rel("previews", sha, ".webp")

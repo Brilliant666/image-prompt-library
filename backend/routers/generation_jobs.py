@@ -26,6 +26,7 @@ from backend.services.openai_codex_native import (
     CodexNativeRateLimitError,
 )
 from backend.services.xai_grok_oauth import GrokOAuthError, GrokOAuthRateLimitError
+from backend.services.openai_compatible import OpenAICompatibleError
 
 router = APIRouter(prefix="/generation-jobs", tags=["generation-jobs"])
 
@@ -59,7 +60,9 @@ def _sanitize_generation_job_parameters(parameters: object) -> object:
     return redacted
 
 
-def _sanitize_generation_job_record(job: GenerationJobRecord) -> GenerationJobRecord:
+def _sanitize_generation_job_record(job: GenerationJobRecord, repository: GenerationJobRepository | None = None) -> GenerationJobRecord:
+    if repository is not None:
+        job = repository.prepare_recipe_references(job)
     payload = job.model_dump()
     payload["parameters"] = _sanitize_generation_job_parameters(payload.get("parameters"))
     metadata = payload.get("metadata")
@@ -75,16 +78,16 @@ def _sanitize_generation_job_record(job: GenerationJobRecord) -> GenerationJobRe
     return GenerationJobRecord(**payload)
 
 
-def _sanitize_generation_job_list(jobs: GenerationJobList) -> GenerationJobList:
+def _sanitize_generation_job_list(jobs: GenerationJobList, repository: GenerationJobRepository | None = None) -> GenerationJobList:
     return GenerationJobList(
-        jobs=[_sanitize_generation_job_record(job) for job in jobs.jobs],
+        jobs=[_sanitize_generation_job_record(job, repository) for job in jobs.jobs],
         total=jobs.total,
         limit=jobs.limit,
         offset=jobs.offset,
         status_counts=jobs.status_counts,
         generation_sets=[
             GenerationJobSetRecord(
-                **{**group.model_dump(), "jobs": [_sanitize_generation_job_record(job) for job in group.jobs]}
+                **{**group.model_dump(), "jobs": [_sanitize_generation_job_record(job, repository) for job in group.jobs]}
             )
             for group in jobs.generation_sets
         ],
@@ -100,6 +103,8 @@ def repo(request: Request) -> GenerationJobRepository:
 def create_generation_job(payload: GenerationJobCreate, request: Request):
     try:
         created = repo(request).create_job(payload)
+    except OpenAICompatibleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Source item not found") from exc
     except GenerationJobConflict as exc:
@@ -113,6 +118,8 @@ def create_generation_job(payload: GenerationJobCreate, request: Request):
 def create_generation_job_set(payload: GenerationJobSetCreate, request: Request):
     try:
         created = repo(request).create_job_set(payload.job, payload.count)
+    except OpenAICompatibleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Source item not found") from exc
     except GenerationJobConflict as exc:
@@ -138,7 +145,7 @@ def list_generation_jobs(
             source_item_id=source_item_id,
             limit=limit,
             offset=offset,
-        )
+        ), repo(request)
     )
 
 
@@ -166,10 +173,18 @@ def cancel_remaining_generation_job_set(generation_group_id: str, request: Reque
         raise HTTPException(status_code=404) from exc
 
 
+@router.get("/for-image/{image_id}", response_model=GenerationJobRecord)
+def get_generation_recipe_for_image(image_id: str, request: Request):
+    try:
+        return _sanitize_generation_job_record(repo(request).job_for_image(image_id), repo(request))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="No saved generation recipe for this image") from exc
+
+
 @router.get("/{job_id}", response_model=GenerationJobRecord)
 def get_generation_job(job_id: str, request: Request):
     try:
-        return _sanitize_generation_job_record(repo(request).get_job(job_id))
+        return _sanitize_generation_job_record(repo(request).get_job(job_id), repo(request))
     except KeyError as exc:
         raise HTTPException(status_code=404) from exc
 
@@ -222,7 +237,7 @@ def run_generation_job(job_id: str, request: Request):
         if provider in AUTOMATED_PROVIDER_IDS:
             _continue_generation_queue(request.app.state.library_path, provider)
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except (CodexNativeAuthError, GrokOAuthError) as exc:
+    except (CodexNativeAuthError, GrokOAuthError, OpenAICompatibleError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 

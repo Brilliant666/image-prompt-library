@@ -11,6 +11,7 @@ const LANGUAGE_OPTIONS: PromptCopyLanguage[] = ['origin', 'en', 'zh_hant', 'zh_h
 const UI_LANGUAGE_OPTIONS: UiLanguage[] = ['zh_hant', 'zh_hans', 'en'];
 
 function providerStateLabel(provider: GenerationProviderStatus, t: Translator) {
+  if (provider.provider === 'openai_compatible' && provider.configured) return t('imageConfigured');
   if (provider.state === 'not_configured') return t('providerStateNotConfigured');
   if (provider.state === 'not_connected') return t('providerStateNotConnected');
   if (provider.state === 'connected') return t('providerStateConnected');

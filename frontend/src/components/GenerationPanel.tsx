@@ -1,12 +1,15 @@
+import { recipeInputs, restoreRecipeInputs, fillRecipeInputs, type RecipeInput } from '../utils/recipeInputs';
+import { GenerationResultSummary } from './GenerationResultSummary';
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { createPortal } from 'react-dom';
-import { ArrowLeft, Check, ChevronDown, ChevronLeft, ChevronRight, Clipboard, Clock3, Download, FilePlus2, Images, Info, Maximize2, Paperclip, Plus, RotateCcw, Trash2, Upload, X } from 'lucide-react';
+import { ArrowLeft, Check, ChevronDown, ChevronLeft, ChevronRight, Clipboard, Clock3, Download, FilePlus2, Images, Info, Maximize2, Paperclip, Plus, Settings2, RotateCcw, Trash2, Upload, X } from 'lucide-react';
 import aspectRatioIcon from '../assets/generation-controls/aspect-ratio.png';
 import brainAiIcon from '../assets/generation-controls/model.png';
 import qualityIcon from '../assets/generation-controls/quality.png';
 import { api, mediaUrl } from '../api/client';
 import type { ClusterRecord, GenerationJobAcceptAsNewItemPayload, GenerationJobCreate, GenerationJobRecord, GenerationJobSetRecord, GenerationProviderQueueState, GenerationProviderStatus, GenerationSetCount, ImageRecord, ItemDetail, ItemSummary, TagRecord, AiProvider } from '../types';
 import type { Translator } from '../utils/i18n';
+import { IMAGE25_MODELS, imageQualities, restoreCompatibleRecipe, compatibleParameters, compatibleValidation, imageSizeLabel, imageQualityLabel, type CompatibleRecipe } from '../utils/compatibleRecipe';
 import { generationAspectRatio } from '../utils/generationAspectRatio';
 import { generationResultActions } from '../utils/generationResultActions';
 import { providerPauseSeconds } from '../utils/generationSets';
@@ -29,6 +32,7 @@ function providerCanGenerate(provider?: GenerationProviderStatus) {
 
 function providerReadinessLabel(provider: GenerationProviderStatus | undefined, t: Translator) {
   if (!provider) return t('providerUnavailable');
+  if (provider?.provider === 'openai_compatible' && providerCanGenerate(provider)) return t('imageConfigured');
   if (providerCanGenerate(provider)) return t('providerReady').replace('${provider}', provider.display_name);
   if (provider.status === 'login_required' || provider.state === 'not_connected') return t('connectProvider').replace('${provider}', provider.display_name);
   if (provider.status === 'auth_error') return t('providerNeedsAttention').replace('${provider}', provider.display_name);
@@ -37,6 +41,7 @@ function providerReadinessLabel(provider: GenerationProviderStatus | undefined, 
 }
 
 function compactProviderReadinessLabel(provider: GenerationProviderStatus | undefined, t: Translator) {
+  if (provider?.provider === 'openai_compatible' && providerCanGenerate(provider)) return t('imageConfigured');
   if (providerCanGenerate(provider)) return t('generationReady');
   return providerReadinessLabel(provider, t);
 }
@@ -48,6 +53,7 @@ function compactProviderLabel(provider: GenerationProviderStatus | undefined) {
 }
 
 function compactProviderStateLabel(provider: GenerationProviderStatus | undefined, t: Translator) {
+  if (provider?.provider === 'openai_compatible' && providerCanGenerate(provider)) return t('imageConfigured');
   if (providerCanGenerate(provider)) return t('providerStateAvailable');
   if (provider?.authenticated) return t('providerStateUnavailable');
   return t('providerStateNotConnected');
@@ -102,17 +108,7 @@ const SAVE_NEW_LANGUAGE_OPTIONS = [
   { value: 'zh_hans', labelKey: 'simplifiedChinesePrompt' },
 ] as const;
 
-type EditAttachment = {
-  id: string;
-  name: string;
-  source: 'uploaded' | 'generated_result' | 'library';
-  previewUrl: string;
-  dataUrl?: string;
-  resultPath?: string;
-  imageId?: string;
-  sourceItemId?: string;
-  role?: string;
-};
+type EditAttachment = RecipeInput;
 
 function libraryAttachment(image: ImageRecord, title: string): EditAttachment {
   return {
@@ -127,25 +123,7 @@ function libraryAttachment(image: ImageRecord, title: string): EditAttachment {
 }
 
 function jobAttachments(job?: GenerationJobRecord): EditAttachment[] {
-  const inputs = job?.parameters?.input_images;
-  if (!Array.isArray(inputs)) return [];
-  return inputs.flatMap((raw, index) => {
-    if (!raw || typeof raw !== 'object') return [];
-    const input = raw as Record<string, unknown>;
-    const source = input.source === 'library' ? 'library' : input.source === 'generated_result' ? 'generated_result' : 'uploaded';
-    const resultPath = typeof input.result_path === 'string' ? input.result_path : undefined;
-    const previewPath = typeof input.preview_path === 'string' ? input.preview_path : undefined;
-    return [{
-      id: typeof input.id === 'string' ? input.id : `job-${job?.id}-${index}`,
-      name: typeof input.name === 'string' ? input.name : `Reference ${index + 1}`,
-      source,
-      previewUrl: previewPath ? mediaUrl(previewPath) : resultPath ? mediaUrl(resultPath) : '',
-      resultPath,
-      imageId: typeof input.image_id === 'string' ? input.image_id : undefined,
-      sourceItemId: typeof input.source_item_id === 'string' ? input.source_item_id : undefined,
-      role: typeof input.role === 'string' ? input.role : undefined,
-    }];
-  });
+  return job ? recipeInputs(job, mediaUrl) : [];
 }
 
 function restorableJobAttachments(job?: GenerationJobRecord): EditAttachment[] {
@@ -153,7 +131,7 @@ function restorableJobAttachments(job?: GenerationJobRecord): EditAttachment[] {
 }
 
 function buildInitialMetadata(job: GenerationJobRecord, item?: ItemDetail): GenerationJobAcceptAsNewItemPayload {
-  const prompt = (job.edited_prompt_text || job.prompt_text || '').trim();
+  const prompt = jobPrompt(job);
   const position = generationResultPosition(job);
   const titleSuffix = position ? ` Variant ${position.index}` : ' Variant';
   return {
@@ -170,14 +148,19 @@ function buildInitialMetadata(job: GenerationJobRecord, item?: ItemDetail): Gene
 }
 
 function jobPrompt(job?: GenerationJobRecord) {
-  return job ? (job.edited_prompt_text || job.prompt_text || '').trim() : '';
+  if (typeof job?.metadata?.original_prompt === 'string') return job.metadata.original_prompt;
+  const requested = job?.metadata?.requested as Record<string, unknown> | undefined;
+  return typeof requested?.prompt === 'string' ? requested.prompt : job ? (job.edited_prompt_text ?? job.prompt_text ?? '') : '';
 }
 
 function jobAspectRatio(job?: GenerationJobRecord) {
-  return generationAspectRatio(job?.parameters, job?.provider === 'openai_compatible');
+  const requested = job?.metadata?.requested;
+  const parameters = job?.provider === 'openai_compatible' && requested && typeof requested === 'object' ? { ...job.parameters, ...requested } : job?.parameters;
+  return generationAspectRatio(parameters, job?.provider === 'openai_compatible');
 }
 
 function jobQuality(job?: GenerationJobRecord) {
+  if (job?.provider === 'openai_compatible') return restoreCompatibleRecipe(job).quality;
   const value = job?.parameters?.quality;
   if (value === 'standard') return 'medium';
   return typeof value === 'string' && ['low', 'medium', 'high'].includes(value) ? value : job?.provider === 'xai_grok_oauth' ? 'medium' : 'high';
@@ -204,7 +187,7 @@ function canRetryFailedJob(job?: GenerationJobRecord) {
 }
 
 function isStaleRunningJob(job?: GenerationJobRecord) {
-  if (job?.status !== 'running') return false;
+  if (job?.status !== 'running' || job.provider === 'openai_compatible') return false;
   const started = Date.parse(job.started_at || job.updated_at || job.created_at);
   return Number.isFinite(started) && Date.now() - started > STALE_RUNNING_JOB_MS;
 }
@@ -217,7 +200,7 @@ function reportedModel(job?: GenerationJobRecord): string {
 }
 
 function jobModel(job?: GenerationJobRecord) {
-  if (job?.provider === 'openai_compatible') return job.model || 'Default';
+  if (job?.provider === 'openai_compatible') return restoreCompatibleRecipe(job).model || '—';
   if (job?.metadata?.generation_route === 'images') return job.model || 'gpt-image-2';
   const parameterModel = job?.parameters?.orchestrator_model;
   const metadataModel = job?.metadata?.orchestrator_model;
@@ -302,6 +285,7 @@ export default function GenerationPanel({
   onAccepted,
   t,
   initialJobId,
+  sourceImageId,
   clusters = [],
   tags = [],
   promptVariablesEnabled = false,
@@ -315,6 +299,7 @@ export default function GenerationPanel({
   onAccepted: (item?: ItemDetail, message?: string) => void;
   t: Translator;
   initialJobId?: string;
+  sourceImageId?: string;
   clusters?: ClusterRecord[];
   tags?: TagRecord[];
   promptVariablesEnabled?: boolean;
@@ -330,15 +315,29 @@ export default function GenerationPanel({
   const [provider, setProvider] = useState<string>(defaultAiProvider);
   const [aspectRatio, setAspectRatio] = useState('auto');
   const [quality, setQuality] = useState('high');
-  const [compatibleQuality, setCompatibleQuality] = useState('low');
+  const [compatibleRecipe, setCompatibleRecipe] = useState<CompatibleRecipe>({ model: '', quality: 'auto', size: 'auto', background: 'auto', output_format: 'png' });
+  const restoredLibraryRecipeRef = useRef(false);
+  const recipeRequestRef = useRef(0);
+  const [recipeLoading, setRecipeLoading] = useState(false);
+  const invalidateRecipeRestore = () => {
+    recipeRequestRef.current += 1;
+    restoredLibraryRecipeRef.current = true;
+    setRecipeLoading(false);
+  };
+  useEffect(() => () => { recipeRequestRef.current += 1; }, []);
+  const [compatibleModelSelected, setCompatibleModelSelected] = useState(false);
+  const compatibleQuality = compatibleRecipe.quality;
+  const setCompatibleQuality = (quality: string) => setCompatibleRecipe(current => ({ ...current, quality }));
   const [grokQuality, setGrokQuality] = useState('medium');
   const [grokResolution, setGrokResolution] = useState('1k');
-  const [openControl, setOpenControl] = useState<'provider' | 'aspect' | 'quality' | null>(null);
+  const [openControl, setOpenControl] = useState<'provider' | 'aspect' | 'quality' | 'output' | null>(null);
   const [generationCountMenuOpen, setGenerationCountMenuOpen] = useState(false);
   const [cancelSetBusy, setCancelSetBusy] = useState(false);
   const [queueClock, setQueueClock] = useState(() => Date.now());
   const [promptText, setPromptText] = useState(defaultPrompt);
   const [editAttachments, setEditAttachments] = useState<EditAttachment[]>([]);
+  const missingRecipeInputs = editAttachments.filter(input => input.missing);
+  const recipeBlocked = recipeLoading || missingRecipeInputs.length > 0;
   const [referenceMenuOpen, setReferenceMenuOpen] = useState(false);
   const [referencePicker, setReferencePicker] = useState<'library' | 'recent' | null>(null);
   const [libraryItems, setLibraryItems] = useState<ItemSummary[]>([]);
@@ -383,7 +382,7 @@ export default function GenerationPanel({
   const generationCountTriggerRef = useRef<HTMLButtonElement | null>(null);
   const generationCountFocusOnOpenRef = useRef(false);
   const generationCountCloseTimerRef = useRef<number | undefined>(undefined);
-  const controlTriggerRefs = useRef<Record<'provider' | 'aspect' | 'quality', HTMLButtonElement | null>>({ provider: null, aspect: null, quality: null });
+  const controlTriggerRefs = useRef<Record<'provider' | 'aspect' | 'quality' | 'output', HTMLButtonElement | null>>({ provider: null, aspect: null, quality: null, output: null });
   const referenceAddTriggerRef = useRef<HTMLButtonElement | null>(null);
   const referenceAddWrapRef = useRef<HTMLDivElement | null>(null);
   const historyTriggerRef = useRef<HTMLButtonElement | null>(null);
@@ -400,6 +399,14 @@ export default function GenerationPanel({
   const jobsRef = useRef<GenerationJobRecord[]>(jobs);
   const batchReviewCursorJobIdRef = useRef<string | undefined>(initialJobId);
   jobsRef.current = jobs;
+  useEffect(() => {
+    if (provider !== 'openai_compatible' || !openControl || !['aspect', 'output'].includes(openControl)) return;
+    const frame = window.requestAnimationFrame(() => {
+      controlTriggerRefs.current[openControl]?.parentElement?.querySelector<HTMLElement>('.generation-control-popover button, .generation-parameter-popover select, .generation-parameter-popover input')?.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [openControl, provider]);
+
 
   const clearGenerationCountCloseTimer = () => {
     if (generationCountCloseTimerRef.current === undefined) return;
@@ -473,10 +480,15 @@ export default function GenerationPanel({
     : t('providerUnavailableForGeneration');
   const selectedProviderQueueState = providerQueueStates.find(state => state.provider === provider);
   const selectedProviderPauseSeconds = selectedProviderQueueState ? providerPauseSeconds(selectedProviderQueueState, queueClock) : 0;
-  const selectedModelLabel = selectedProvider?.model || selectedProvider?.default_image_model || (provider === 'xai_grok_oauth' ? 'grok-imagine-image-2.0' : '');
+  const selectedModelLabel = provider === 'openai_compatible' && compatibleModelSelected ? compatibleRecipe.model : selectedProvider?.model || selectedProvider?.default_image_model || (provider === 'xai_grok_oauth' ? 'grok-imagine-image-2.0' : '');
+  const effectiveRecipe = { ...compatibleRecipe, model: selectedModelLabel };
+  const compatibleError = provider === 'openai_compatible' ? compatibleValidation(effectiveRecipe) : undefined;
+  const currentQualityOptions = provider === 'openai_compatible' ? imageQualities(selectedModelLabel).map(value => ({ value, label: value })) : QUALITY_OPTIONS;
+  const sizeLabel = (size: string) => size === 'auto' ? optionLabel(ASPECT_RATIO_OPTIONS, 'auto', t) : imageSizeLabel(size);
+  const compatibleModels = [...new Set([IMAGE25_MODELS[1], IMAGE25_MODELS[0], ...(selectedModelLabel ? [selectedModelLabel] : [])])];
   const selectedOutputLabel = provider === 'xai_grok_oauth'
     ? `${optionLabel(GROK_QUALITY_OPTIONS, grokQuality, t)} · ${optionLabel(GROK_RESOLUTION_OPTIONS, grokResolution, t)}`
-    : optionLabel(QUALITY_OPTIONS, provider === 'openai_compatible' ? compatibleQuality : quality, t);
+    : provider === 'openai_compatible' ? imageQualityLabel(compatibleQuality, t) : optionLabel(QUALITY_OPTIONS, quality, t);
   const selectedOutputAriaLabel = provider === 'xai_grok_oauth'
     ? `${t('queueQuality')}: ${optionLabel(GROK_QUALITY_OPTIONS, grokQuality, t)}, ${t('generationResolution')}: ${optionLabel(GROK_RESOLUTION_OPTIONS, grokResolution, t)}`
     : `${t('queueQuality')}: ${selectedOutputLabel}`;
@@ -484,7 +496,7 @@ export default function GenerationPanel({
   const [templateValues, setTemplateValues] = useState<Record<string, string>>({});
   const hasTemplateVariables = templateVariables.length > 0;
   const hasMissingTemplateValues = hasTemplateVariables && templateVariables.some(variable => !templateValues[variable.key]?.trim());
-  const resolvedPrompt = hasTemplateVariables ? resolvePromptTemplate(promptText, templateValues).trim() : promptText.trim();
+  const resolvedPrompt = hasTemplateVariables ? resolvePromptTemplate(promptText, templateValues) : promptText;
   const promptChangedFromSource = hasTemplateVariables ? resolvedPrompt !== defaultPrompt.trim() : promptText.trim() !== defaultPrompt.trim();
   const promptTemplateValues = useMemo(() => Object.fromEntries(templateVariables.map(variable => [variable.key, templateValues[variable.key] || ''])), [templateVariables, templateValues]);
   const templateVariableKeySignature = useMemo(() => templateVariables.map(variable => variable.key).join('\u0000'), [templateVariables]);
@@ -666,7 +678,7 @@ export default function GenerationPanel({
         setProviders(automatedProviders);
         const preferredProvider = automatedProviders.find(candidate => candidate.provider === defaultAiProvider);
         const initialProvider = preferredProvider || automatedProviders.find(providerCanGenerate) || automatedProviders[0];
-        if (initialProvider) {
+        if (initialProvider && !restoredLibraryRecipeRef.current) {
           setProvider(initialProvider.provider);
         }
       })
@@ -928,8 +940,10 @@ export default function GenerationPanel({
   };
 
   const createJob = async (count: GenerationSetCount = 1) => {
-    const prompt = promptText.trim();
-    if (!prompt || hasMissingTemplateValues || !resolvedPrompt || !selectedProviderCanGenerateDraft || (provider === 'manual_upload' && count !== 1)) return;
+    const prompt = promptText;
+    if (recipeBlocked) return;
+    if (compatibleError) { setMessage(t(compatibleError)); return; }
+    if (!prompt.trim() || hasMissingTemplateValues || !resolvedPrompt || !selectedProviderCanGenerateDraft || (provider === 'manual_upload' && count !== 1)) return;
     const preservePausedReview = Boolean(batchReviewSession && batchReviewPaused);
     setBusy(true);
     setMessage('');
@@ -941,7 +955,7 @@ export default function GenerationPanel({
     try {
       const attachments = imageAttachmentPayload();
       const sourcePrompt = defaultPrompt || prompt;
-      const jobEditedPromptText = resolvedPrompt === sourcePrompt.trim() ? null : resolvedPrompt;
+      const jobEditedPromptText = resolvedPrompt === sourcePrompt ? null : resolvedPrompt;
       const templateParameters = hasTemplateVariables ? {
         prompt_template: prompt,
         prompt_template_values: promptTemplateValues,
@@ -951,16 +965,16 @@ export default function GenerationPanel({
         source_item_id: item?.id,
         mode: attachments.length > 0 ? 'image_edit' : 'text_to_image',
         provider,
-        model: selectedProvider?.model || selectedProvider?.default_image_model || (provider === 'openai_codex_oauth_native' ? 'gpt-image-2' : null),
+        model: selectedModelLabel || (provider === 'openai_codex_oauth_native' ? 'gpt-image-2' : null),
         prompt_language: defaultPromptLanguage,
         prompt_text: sourcePrompt,
         edited_prompt_text: jobEditedPromptText,
         reference_image_ids: [],
         parameters: {
           requested_aspect_ratio: aspectRatio,
-          aspect_ratio_prompt_injection: provider === 'openai_codex_oauth_native' && aspectRatio !== 'auto',
+          aspect_ratio_prompt_injection: ['openai_codex_oauth_native', 'openai_compatible'].includes(provider) && aspectRatio !== 'auto' && (provider !== 'openai_compatible' || compatibleRecipe.size === 'auto'),
           ...(provider === 'openai_compatible'
-            ? { quality: compatibleQuality, n: 1 }
+            ? compatibleParameters(effectiveRecipe)
             : provider === 'openai_codex_oauth_native'
             ? { quality }
             : provider === 'xai_grok_oauth'
@@ -1330,9 +1344,11 @@ export default function GenerationPanel({
   }));
 
   const addUploadedAttachments = async (files: FileList | null) => {
+    invalidateRecipeRestore();
+    const draftRequestId = recipeRequestRef.current;
     const nextFiles = Array.from(files || []).filter(file => file.type.startsWith('image/'));
     if (nextFiles.length === 0) return;
-    const slots = selectedProviderMaxInputImages - editAttachments.length;
+    const slots = selectedProviderMaxInputImages - editAttachments.filter(input => !input.missing).length;
     const limitedFiles = nextFiles.slice(0, Math.max(0, slots));
     try {
       const loaded = await Promise.all(limitedFiles.map(file => new Promise<EditAttachment>((resolve, reject) => {
@@ -1341,7 +1357,8 @@ export default function GenerationPanel({
         reader.onerror = () => reject(reader.error || new Error(t('attachmentReadFailed')));
         reader.readAsDataURL(file);
       })));
-      setEditAttachments(current => [...current, ...loaded].slice(0, selectedProviderMaxInputImages));
+      if (draftRequestId !== recipeRequestRef.current) return;
+      setEditAttachments(current => fillRecipeInputs(current, loaded, selectedProviderMaxInputImages));
       setMessage(loaded.length < nextFiles.length
         ? t('attachmentsAdded').replace('${count}', String(loaded.length)).replace('${limit}', String(selectedProviderMaxInputImages))
         : t('attachmentAdded'));
@@ -1353,10 +1370,12 @@ export default function GenerationPanel({
   };
 
   const removeAttachment = (id: string) => {
+    invalidateRecipeRestore();
     setEditAttachments(current => current.filter(attachment => attachment.id !== id));
   };
 
   const moveAttachment = (index: number, offset: -1 | 1) => {
+    invalidateRecipeRestore();
     setEditAttachments(current => {
       const nextIndex = index + offset;
       if (nextIndex < 0 || nextIndex >= current.length) return current;
@@ -1367,9 +1386,10 @@ export default function GenerationPanel({
   };
 
   const addLibraryAttachment = (image: ImageRecord, title: string) => {
+    invalidateRecipeRestore();
     setEditAttachments(current => {
-      if (current.length >= selectedProviderMaxInputImages || current.some(attachment => attachment.imageId === image.id)) return current;
-      return [...current, libraryAttachment(image, title)];
+      if (current.filter(input => !input.missing).length >= selectedProviderMaxInputImages || current.some(attachment => !attachment.missing && attachment.imageId === image.id)) return current;
+      return fillRecipeInputs(current, [libraryAttachment(image, title)], selectedProviderMaxInputImages);
     });
   };
 
@@ -1432,10 +1452,11 @@ export default function GenerationPanel({
   };
 
   const addResultAsAttachment = (job: GenerationJobRecord, pauseBatchReview = false) => {
-    if (!job.result_path || editAttachments.length >= selectedProviderMaxInputImages) return;
+    invalidateRecipeRestore();
+    if (!job.result_path || editAttachments.filter(input => !input.missing).length >= selectedProviderMaxInputImages) return;
     const reviewSession = pauseBatchReview ? ensureBatchReviewSession(job) : undefined;
     setEditAttachments(current => {
-      if (current.some(attachment => attachment.resultPath === job.result_path)) return current;
+      if (current.some(attachment => !attachment.missing && attachment.resultPath === job.result_path)) return current;
       const resultAttachment: EditAttachment = {
         id: `result-${job.id}`,
         name: `${job.id}.png`,
@@ -1443,7 +1464,7 @@ export default function GenerationPanel({
         previewUrl: jobResultUrl(job),
         resultPath: job.result_path || undefined,
       };
-      return [...current, resultAttachment].slice(0, selectedProviderMaxInputImages);
+      return fillRecipeInputs(current, [resultAttachment], selectedProviderMaxInputImages);
     });
     setHistoryReviewJobId(undefined);
     if (reviewSession) setBatchReviewPaused(true);
@@ -1587,7 +1608,8 @@ export default function GenerationPanel({
       setPromptText(jobPrompt(retryJob));
       setAspectRatio(jobAspectRatio(retryJob));
       if (retryJob.provider === 'openai_compatible') {
-        setCompatibleQuality(jobQuality(retryJob));
+        setCompatibleRecipe(restoreCompatibleRecipe(retryJob));
+        setCompatibleModelSelected(true);
       } else if (retryJob.provider === 'xai_grok_oauth') {
         setGrokQuality(jobQuality(retryJob) === 'low' ? 'low' : 'medium');
         setGrokResolution(jobResolution(retryJob));
@@ -1673,7 +1695,8 @@ export default function GenerationPanel({
       setPromptText(jobPrompt(retry));
       setAspectRatio(jobAspectRatio(retry));
       if (retryJob.provider === 'openai_compatible') {
-        setCompatibleQuality(jobQuality(retryJob));
+        setCompatibleRecipe(restoreCompatibleRecipe(retryJob));
+        setCompatibleModelSelected(true);
       } else if (retryJob.provider === 'xai_grok_oauth') {
         setGrokQuality(jobQuality(retryJob) === 'low' ? 'low' : 'medium');
         setGrokResolution(jobResolution(retryJob));
@@ -1733,14 +1756,17 @@ export default function GenerationPanel({
     closeHistoryDrawer();
   };
 
-  const useJobAsDraft = (job: GenerationJobRecord) => {
-    const reviewSession = ensureBatchReviewSession(job);
+  const restoreJobDraft = async (job: GenerationJobRecord, requestId: number) => {
+    if (requestId !== recipeRequestRef.current) return;
+    restoredLibraryRecipeRef.current = true;
     const attachments = jobAttachments(job);
-    const restorableAttachments = restorableJobAttachments(job);
+    setRecipeLoading(attachments.length > 0);
+    setEditAttachments(attachments.map(input => ({ ...input, missing: true })));
     setPromptText(jobPrompt(job));
     setAspectRatio(jobAspectRatio(job));
     if (job.provider === 'openai_compatible') {
-      setCompatibleQuality(jobQuality(job));
+      setCompatibleRecipe(restoreCompatibleRecipe(job));
+      setCompatibleModelSelected(true);
     } else if (job.provider === 'xai_grok_oauth') {
       setGrokQuality(jobQuality(job) === 'low' ? 'low' : 'medium');
       setGrokResolution(jobResolution(job));
@@ -1748,15 +1774,78 @@ export default function GenerationPanel({
       setQuality(jobQuality(job));
     }
     setProvider(job.provider || provider);
-    setEditAttachments(restorableAttachments);
+    const restored = await restoreRecipeInputs(attachments, async input => {
+      let dataUrl = input.dataUrl;
+      // Persisted result_path is the original reference snapshot and takes priority.
+      let url = input.resultPath ? mediaUrl(input.resultPath) : '';
+      if (!url && !dataUrl && input.imageId && input.sourceItemId) {
+        const original = (await api.item(input.sourceItemId)).images.find(image => image.id === input.imageId);
+        if (original) url = mediaUrl(original.original_path);
+      }
+      if (url) {
+        const response = await fetch(url);
+        if (!response.ok) throw new Error('Reference unavailable');
+        const blob = await response.blob();
+        dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result));
+          reader.onerror = () => reject(new Error('Reference unreadable'));
+          reader.readAsDataURL(blob);
+        });
+      }
+      if (!dataUrl) throw new Error('Reference missing');
+      const image = new Image();
+      image.src = dataUrl;
+      await image.decode();
+      return dataUrl;
+    });
+    if (requestId !== recipeRequestRef.current) return;
+    setEditAttachments(restored);
+    setRecipeLoading(false);
+  };
+
+  const useJobAsDraft = (job: GenerationJobRecord) => {
+    const reviewSession = ensureBatchReviewSession(job);
+    const requestId = ++recipeRequestRef.current;
+    void restoreJobDraft(job, requestId);
     setHistoryReviewJobId(undefined);
     if (reviewSession) setBatchReviewPaused(true);
-    setMessage(attachments.length > restorableAttachments.length ? `${t('copyPrompt')}. ${t('uploadImage')}.` : `${t('copyPrompt')}.`);
-    window.requestAnimationFrame(() => {
-      scrollIntoViewRespectingMotion(promptInputRef.current, 'center');
-      promptInputRef.current?.focus({ preventScroll: true });
-    });
+    window.requestAnimationFrame(() => promptInputRef.current?.focus({ preventScroll: true }));
   };
+
+  useEffect(() => {
+    if (!item || initialJobId) return;
+    const sourceImage = sourceImageId ? item.images?.find(image => image.id === sourceImageId) : item.images?.find(image => image.generation_provider === 'openai_compatible');
+    if (!sourceImage?.generation_provider) return;
+    let cancelled = false;
+    const requestId = ++recipeRequestRef.current;
+    restoredLibraryRecipeRef.current = false;
+    setRecipeLoading(true);
+    setEditAttachments([{ id: 'pending-recipe-input', name: t('imageMissingRecipe'), source: 'uploaded', previewUrl: '', missing: true }]);
+    api.generationJobForImage(sourceImage.id).then(job => {
+      if (cancelled || requestId !== recipeRequestRef.current) return;
+      return restoreJobDraft(job, requestId);
+    }).catch(() => {
+      if (cancelled || requestId !== recipeRequestRef.current) return;
+      setRecipeLoading(false);
+      setEditAttachments([{ id: 'unknown-recipe-input', name: t('imageMissingRecipe'), source: 'uploaded', previewUrl: '', missing: true }]);
+      const generatedImages = item.images.filter(image => image.generation_provider === 'openai_compatible');
+      const prompt = generatedImages.length === 1 ? item.prompts.find(prompt => prompt.provenance?.provider === 'openai_compatible') : undefined;
+      const provenance = prompt?.provenance;
+      restoredLibraryRecipeRef.current = true;
+      setProvider('openai_compatible');
+      setCompatibleModelSelected(true);
+      setCompatibleRecipe(restoreCompatibleRecipe({
+        model: typeof provenance?.requested_model === 'string' ? provenance.requested_model : '',
+        parameters: provenance?.parameters as Record<string, unknown> | undefined,
+        metadata: provenance ? { requested: provenance.requested } : undefined,
+      }));
+      const requested = provenance?.requested as Record<string, unknown> | undefined;
+      if (typeof requested?.prompt === 'string') setPromptText(requested.prompt);
+      setMessage(t('imageMissingRecipe'));
+    });
+    return () => { cancelled = true; recipeRequestRef.current += 1; };
+  }, [item?.id, initialJobId, sourceImageId]);
 
   const copyJobPrompt = async (job: GenerationJobRecord) => {
     const text = jobPrompt(job);
@@ -1790,13 +1879,13 @@ export default function GenerationPanel({
               <span className="generation-reference-actions">
                 <button type="button" onClick={() => moveAttachment(index, -1)} disabled={index === 0} aria-label={`${t('moveReferenceLeft')}: ${attachment.name}`}><ChevronLeft size={13} /></button>
                 <button type="button" onClick={() => moveAttachment(index, 1)} disabled={index === attachments.length - 1} aria-label={`${t('moveReferenceRight')}: ${attachment.name}`}><ChevronRight size={13} /></button>
-                <button type="button" onClick={() => removeAttachment(attachment.id)} aria-label={`${t('removeReference')}: ${attachment.name}`}><X size={13} /></button>
+                <button type="button" disabled={attachment.missing} onClick={() => removeAttachment(attachment.id)} aria-label={`${t('removeReference')}: ${attachment.name}`}><X size={13} /></button>
               </span>
             )}
           </div>
           ))}
         </div>
-        {!readOnly && attachments.length < limit && (
+        {!readOnly && attachments.filter(input => !input.missing).length < limit && (
           <div ref={referenceAddWrapRef} className="generation-reference-add-wrap">
             <button ref={referenceAddTriggerRef} type="button" className="generation-reference-add" onClick={() => setReferenceMenuOpen(current => !current)} aria-label={t('addGenerationReference')} aria-haspopup="menu" aria-expanded={referenceMenuOpen}><Plus size={16} /> {t('add')}</button>
             {referenceMenuOpen && (
@@ -1828,7 +1917,7 @@ export default function GenerationPanel({
       {generationResultActions(job).save && <button ref={saveAsNewTriggerRef} className="stage-action" onClick={() => openSaveAsNewReview(job)} disabled={busy} aria-label={t('saveAsNewItem')} title={t('saveAsNewItem')}>
         <FilePlus2 size={16} aria-hidden="true" />
       </button>}
-      <button className="stage-action" onClick={() => addResultAsAttachment(job, true)} disabled={busy || editAttachments.length >= selectedProviderMaxInputImages || !job.result_path} aria-label={t('useResultAsEditInput')} title={t('useResultAsEditInput')}>
+      <button className="stage-action" onClick={() => addResultAsAttachment(job, true)} disabled={busy || editAttachments.filter(input => !input.missing).length >= selectedProviderMaxInputImages || !job.result_path} aria-label={t('useResultAsEditInput')} title={t('useResultAsEditInput')}>
         <Plus size={16} aria-hidden="true" />
       </button>
       {generationResultActions(job).discardAndRetry && <button className="stage-action" onClick={() => discardAndRetryJob(job)} disabled={busy} aria-label={t('retry')} title={t('retry')}>
@@ -2018,7 +2107,7 @@ export default function GenerationPanel({
       return (
         <div className={`generation-stage generation-stage-result${isStageFullscreen ? ' is-mobile-fullscreen' : ''}`}>
           <div ref={fullscreenFrameRef} className="generation-fullscreen-frame">
-            <img ref={resultImageRef} className="generation-result-image generation-result-fade-in" src={resultUrl} alt={t('saveGeneratedResultPreview')} />
+            <img ref={resultImageRef} className={`generation-result-image generation-result-fade-in${(selectedStageJob.metadata?.decoded_image as Record<string, unknown> | undefined)?.has_transparent_pixels === true ? ' has-transparency' : ''}`} src={resultUrl} alt={t('saveGeneratedResultPreview')} />
             {renderSiblingNavigation()}
             {batchReviewSession && outcomeLabel && <span className="generation-stage-outcome-label" role="status">{outcomeLabel}</span>}
             {batchReviewSession && reviewTargetId && (reviewOutcome === 'saved' || reviewOutcome === 'attached') && (
@@ -2066,12 +2155,16 @@ export default function GenerationPanel({
           </button>
         </header>
         {!reviewJob || !metadataDraft ? <div className="generation-layout" inert={showHistoryDrawer} aria-hidden={showHistoryDrawer || undefined}>
-          <section className="generation-compose-card generation-composer-card">
+          <section onChangeCapture={invalidateRecipeRestore} className={`generation-compose-card generation-composer-card${provider === 'openai_compatible' ? ' has-image-settings' : ''}`}>
             {!isHistoryReview ? (
               <>
                 <div className="generation-prompt-area">
                       <textarea ref={promptInputRef} data-modal-initial-focus value={promptText} onChange={event => setPromptText(event.currentTarget.value)} placeholder={t('promptPlaceholder')} aria-label={t('generationPrompt')} />
                   {renderReferenceTray(editAttachments)}
+                  {recipeBlocked && <div role="alert" className="generation-provider-status">
+                    <p>{recipeLoading ? t('recipeRestoreLoading') : `${t('recipeInputsMissing')} ${missingRecipeInputs.map(input => input.name).join(', ')}`}</p>
+                    {!recipeLoading && <button type="button" onClick={() => { invalidateRecipeRestore(); setEditAttachments([]); }}>{t('recipeTextOnly')}</button>}
+                  </div>}
                 </div>
                 {renderBatchReviewResume()}
                 {renderBatchReviewSummary()}
@@ -2102,7 +2195,15 @@ export default function GenerationPanel({
                     </div>
                   </div>
                 )}
-                <div className={`generation-compact-controls${selectedProviderCanGenerateDraft ? '' : ' has-provider-attention'}`}>
+                {provider === 'openai_compatible' && <div className="generation-compatible-header">
+                  <label>{t('requestedImageModel')}<select aria-label={t('requestedImageModel')} value={selectedModelLabel} onChange={e => { setCompatibleModelSelected(true); setCompatibleRecipe(r => ({ ...r, model: e.target.value })); }}>
+                    {!selectedModelLabel && <option value="">—</option>}
+                    {compatibleModels.map(model => <option key={model} value={model}>{model}</option>)}
+                  </select></label>
+                  {compatibleRecipe.size !== 'auto' && <small>{t('imageHistoricalSize')}: {sizeLabel(compatibleRecipe.size)}</small>}
+                  {compatibleError && <p role="alert">{t(compatibleError)}</p>}
+                </div>}
+                <div className={`generation-compact-controls${provider === 'openai_compatible' ? ' is-compatible' : ''}${selectedProviderCanGenerateDraft ? '' : ' has-provider-attention'}`}>
                   <div className="generation-control-wrap generation-provider-control">
                     <button
                       ref={element => { controlTriggerRefs.current.provider = element; }}
@@ -2128,7 +2229,7 @@ export default function GenerationPanel({
                               aria-checked={selected}
                               className={selected ? 'is-selected' : ''}
                               onClick={() => {
-                                setProvider(option.provider);
+                                invalidateRecipeRestore(); setProvider(option.provider);
                                 closeGenerationControl('provider');
                               }}
                             >
@@ -2140,7 +2241,7 @@ export default function GenerationPanel({
                             </button>
                           );
                         })}
-                        {provider === 'xai_grok_oauth' && (
+                  {provider === 'xai_grok_oauth' && (
                           <p className="generation-provider-popover-help">
                             <Info size={14} aria-hidden="true" />
                             <span>{t('grokCapabilityGap')}</span>
@@ -2150,7 +2251,7 @@ export default function GenerationPanel({
                     )}
                   </div>
                   <div className="generation-control-wrap">
-                     <button ref={element => { controlTriggerRefs.current.aspect = element; }} className="generation-control-trigger generation-aspect-trigger" type="button" onClick={() => setOpenControl(openControl === 'aspect' ? null : 'aspect')} aria-label={`${t('queueAspectRatio')}: ${optionLabel(ASPECT_RATIO_OPTIONS, aspectRatio, t)}`} title={`${t('queueAspectRatio')}: ${optionLabel(ASPECT_RATIO_OPTIONS, aspectRatio, t)}`}>
+                    <button ref={element => { controlTriggerRefs.current.aspect = element; }} className={`generation-control-trigger generation-aspect-trigger${provider === 'openai_compatible' ? ' show-value' : ''}`} type="button" onClick={() => setOpenControl(openControl === 'aspect' ? null : 'aspect')} aria-haspopup="menu" aria-expanded={openControl === 'aspect'} aria-label={`${t('queueAspectRatio')}: ${optionLabel(ASPECT_RATIO_OPTIONS, aspectRatio, t)}`} title={`${t('queueAspectRatio')}: ${optionLabel(ASPECT_RATIO_OPTIONS, aspectRatio, t)}`}>
                       <img className="generation-control-icon" src={aspectRatioIcon} alt="" aria-hidden="true" />
                       <span className="generation-control-value">{optionLabel(ASPECT_RATIO_OPTIONS, aspectRatio, t)}</span>
                     </button>
@@ -2158,23 +2259,18 @@ export default function GenerationPanel({
                       <div className="generation-control-popover" role="menu">
                         {ASPECT_RATIO_OPTIONS.map(option => {
                           const selected = aspectRatio === option.value;
-                          return (
-                            <button key={option.value} type="button" role="menuitemradio" aria-checked={selected} className={selected ? 'is-selected' : ''} onClick={() => { setAspectRatio(option.value); closeGenerationControl('aspect'); }}>
-                              <span className="generation-control-option-label">{optionLabel(ASPECT_RATIO_OPTIONS, option.value, t)}</span>
-                              {selected && <Check className="generation-control-option-check" size={15} aria-hidden="true" />}
-                            </button>
-                          );
+                          return <button key={option.value} type="button" role="menuitemradio" aria-checked={selected} className={selected ? 'is-selected' : ''} onClick={() => { invalidateRecipeRestore(); setAspectRatio(option.value); if (provider === 'openai_compatible') setCompatibleRecipe(r => ({ ...r, size: 'auto', legacyDerived: false })); closeGenerationControl('aspect'); }}><span className="generation-control-option-label">{optionLabel(ASPECT_RATIO_OPTIONS, option.value, t)}</span>{selected && <Check className="generation-control-option-check" size={15} aria-hidden="true" />}</button>;
                         })}
                       </div>
                     )}
                   </div>
                   <div className="generation-control-wrap">
-                     <button ref={element => { controlTriggerRefs.current.quality = element; }} className="generation-control-trigger generation-quality-trigger" type="button" onClick={() => setOpenControl(openControl === 'quality' ? null : 'quality')} aria-label={selectedOutputAriaLabel} title={selectedOutputAriaLabel}>
+                     <button ref={element => { controlTriggerRefs.current.quality = element; }} className={`generation-control-trigger generation-quality-trigger${provider === 'openai_compatible' ? ' show-value' : ''}`} type="button" onClick={() => setOpenControl(openControl === 'quality' ? null : 'quality')} aria-label={selectedOutputAriaLabel} title={selectedOutputAriaLabel}>
                       <img className="generation-control-icon" src={qualityIcon} alt="" aria-hidden="true" />
-                      <span className="generation-control-value">{selectedOutputLabel}</span>
+                      <span className="generation-control-value">{provider === 'openai_compatible' ? compatibleQuality : selectedOutputLabel}</span>
                     </button>
                     {openControl === 'quality' && (
-                      <div className={`generation-control-popover${provider === 'xai_grok_oauth' ? ' generation-output-popover' : ''}`} role="menu">
+                      <div className={`generation-control-popover generation-quality-popover${provider === 'xai_grok_oauth' ? ' generation-output-popover' : ''}`} role="menu">
                         {provider === 'xai_grok_oauth' ? (
                           <>
                             <div className="generation-control-option-group" role="group" aria-label={t('queueQuality')}>
@@ -2182,7 +2278,7 @@ export default function GenerationPanel({
                               {GROK_QUALITY_OPTIONS.map(option => {
                                 const selected = grokQuality === option.value;
                                 return (
-                                  <button key={option.value} type="button" role="menuitemradio" aria-checked={selected} className={selected ? 'is-selected' : ''} onClick={() => { setGrokQuality(option.value); closeGenerationControl('quality'); }}>
+                                  <button key={option.value} type="button" role="menuitemradio" aria-checked={selected} className={selected ? 'is-selected' : ''} onClick={() => { invalidateRecipeRestore(); setGrokQuality(option.value); closeGenerationControl('quality'); }}>
                                     <span className="generation-control-option-label">{optionLabel(GROK_QUALITY_OPTIONS, option.value, t)}</span>
                                     {selected && <Check className="generation-control-option-check" size={15} aria-hidden="true" />}
                                   </button>
@@ -2194,7 +2290,7 @@ export default function GenerationPanel({
                               {GROK_RESOLUTION_OPTIONS.map(option => {
                                 const selected = grokResolution === option.value;
                                 return (
-                                  <button key={option.value} type="button" role="menuitemradio" aria-checked={selected} className={selected ? 'is-selected' : ''} onClick={() => { setGrokResolution(option.value); closeGenerationControl('quality'); }}>
+                                  <button key={option.value} type="button" role="menuitemradio" aria-checked={selected} className={selected ? 'is-selected' : ''} onClick={() => { invalidateRecipeRestore(); setGrokResolution(option.value); closeGenerationControl('quality'); }}>
                                     <span className="generation-control-option-label">{optionLabel(GROK_RESOLUTION_OPTIONS, option.value, t)}</span>
                                     {selected && <Check className="generation-control-option-check" size={15} aria-hidden="true" />}
                                   </button>
@@ -2202,11 +2298,11 @@ export default function GenerationPanel({
                               })}
                             </div>
                           </>
-                        ) : QUALITY_OPTIONS.map(option => {
+                        ) : currentQualityOptions.map(option => {
                             const selected = (provider === 'openai_compatible' ? compatibleQuality : quality) === option.value;
                             return (
-                              <button key={option.value} type="button" role="menuitemradio" aria-checked={selected} className={selected ? 'is-selected' : ''} onClick={() => { if (provider === 'openai_compatible') setCompatibleQuality(option.value); else setQuality(option.value); closeGenerationControl('quality'); }}>
-                                <span className="generation-control-option-label">{optionLabel(QUALITY_OPTIONS, option.value, t)}</span>
+                              <button key={option.value} type="button" role="menuitemradio" aria-checked={selected} className={selected ? 'is-selected' : ''} onClick={() => { invalidateRecipeRestore(); if (provider === 'openai_compatible') setCompatibleQuality(option.value); else setQuality(option.value); closeGenerationControl('quality'); }}>
+                                <span className="generation-control-option-label">{provider === 'openai_compatible' ? imageQualityLabel(option.value, t) : optionLabel(QUALITY_OPTIONS, option.value, t)}</span>
                                 {selected && <Check className="generation-control-option-check" size={15} aria-hidden="true" />}
                               </button>
                             );
@@ -2214,7 +2310,16 @@ export default function GenerationPanel({
                       </div>
                     )}
                   </div>
-                  {['xai_grok_oauth', 'openai_compatible'].includes(provider) && (
+                        {provider === 'openai_compatible' && <div className="generation-control-wrap generation-output-options-control">
+                    <button ref={element => { controlTriggerRefs.current.output = element; }} className="generation-control-trigger" type="button" aria-haspopup="dialog" aria-expanded={openControl === 'output'} aria-label={`${t('imageOutputOptions')}: ${compatibleRecipe.background}, ${compatibleRecipe.output_format}`} title={`${t('imageOutputOptions')}: ${compatibleRecipe.background}, ${compatibleRecipe.output_format}`} onClick={() => setOpenControl(openControl === 'output' ? null : 'output')}><Settings2 size={20} aria-hidden="true" /></button>
+                    {openControl === 'output' && <div className="generation-control-popover generation-parameter-popover generation-output-options-popover" role="dialog" aria-label={t('imageOutputOptions')}>
+                      <label>{t('imageBackground')}<select aria-label={t('imageBackground')} value={compatibleRecipe.background} onChange={e => setCompatibleRecipe(r => ({ ...r, background: e.target.value }))}>{['auto', 'opaque', 'transparent'].map(value => <option key={value}>{value}</option>)}</select></label>
+                      <label>{t('imageFormat')}<select aria-label={t('imageFormat')} value={compatibleRecipe.output_format} onChange={e => setCompatibleRecipe(r => ({ ...r, output_format: e.target.value }))}>{['png', 'jpeg', 'webp'].map(value => <option key={value}>{value}</option>)}</select></label>
+                      {compatibleRecipe.output_format !== 'png' && <label>{t('imageCompression')}<input type="number" min="0" max="100" aria-label={t('imageCompression')} value={compatibleRecipe.output_compression ?? ''} onChange={e => setCompatibleRecipe(r => ({ ...r, output_compression: e.target.value === '' ? undefined : Number(e.target.value) }))} /></label>}
+                      {compatibleError && <p role="alert">{t(compatibleError)}</p>}
+                    </div>}
+                  </div>}
+                  {provider === 'xai_grok_oauth' && (
                     <div className="generation-control-wrap generation-model-control">
                       <button className="generation-control-trigger generation-model-trigger generation-has-long-value" type="button" disabled aria-label={`${t('queueModel')}: ${selectedModelLabel}`} title={selectedModelLabel}>
                         <img className="generation-control-icon" src={brainAiIcon} alt="" aria-hidden="true" />
@@ -2251,7 +2356,7 @@ export default function GenerationPanel({
                       className="primary generation-primary-action"
                       type="button"
                       onClick={() => createJob(1)}
-                      disabled={busy || !selectedProviderCanGenerateDraft || !promptText.trim() || hasMissingTemplateValues}
+                      disabled={busy || recipeBlocked || Boolean(compatibleError) || !selectedProviderCanGenerateDraft || !promptText.trim() || hasMissingTemplateValues}
                        aria-label={`${t('generate')} 1`}
                      >{t('generate')}</button>
                     <button
@@ -2278,7 +2383,7 @@ export default function GenerationPanel({
                           generationCountFocusOnOpenRef.current = true;
                           setGenerationCountMenuOpen(true);
                         }}
-                        disabled={busy || !selectedProviderCanGenerateDraft || !promptText.trim() || hasMissingTemplateValues}
+                        disabled={busy || recipeBlocked || Boolean(compatibleError) || !selectedProviderCanGenerateDraft || !promptText.trim() || hasMissingTemplateValues}
                       ><ChevronDown size={17} aria-hidden="true" /></button>
                     {generationCountMenuOpen && (
                        <div id="generation-count-menu" className="generation-count-menu" role="menu" aria-label={t('generateVariations')}>
@@ -2331,12 +2436,15 @@ export default function GenerationPanel({
             )}
           </section>
 
-          <section ref={stageRef} className="generation-stage-card">
+          <div className="generation-result-column"><section ref={stageRef} className="generation-stage-card">
              {selectedStageJob?.result_path && !['discarded', 'cancelled', 'failed'].includes(selectedStageJob.status) && <a className="modal-icon-button generation-download-overlay" href={jobResultUrl(selectedStageJob)} download={downloadFileName('generation-result', selectedStageJob.result_path)} aria-label={t('download')} title={t('download')}><Download size={16} /></a>}
              <button ref={fullscreenTriggerRef} className="modal-icon-button generation-fullscreen-overlay" onClick={toggleStageFullscreen} aria-label={t('viewFullscreen')} title={t('viewFullscreen')}><Maximize2 size={16} /></button>
              {(!selectedStageJob || !jobResultUrl(selectedStageJob)) && renderSiblingNavigation()}
             {renderStage()}
+
           </section>
+          {selectedStageJob && <GenerationResultSummary job={selectedStageJob} t={t} />}
+          </div>
         </div> : null}
 
         {referencePicker && createPortal((
@@ -2374,9 +2482,9 @@ export default function GenerationPanel({
                   <h4>{libraryItem.title}</h4>
                   <div className="generation-reference-picker-grid images">
                     {libraryItem.images.map(image => {
-                      const selected = editAttachments.some(attachment => attachment.imageId === image.id);
+                      const selected = editAttachments.some(attachment => !attachment.missing && attachment.imageId === image.id);
                       return (
-                        <button type="button" className={`generation-reference-picker-card${selected ? ' is-selected' : ''}`} key={image.id} onClick={() => addLibraryAttachment(image, libraryItem.title)} disabled={selected || editAttachments.length >= selectedProviderMaxInputImages}>
+                        <button type="button" className={`generation-reference-picker-card${selected ? ' is-selected' : ''}`} key={image.id} onClick={() => addLibraryAttachment(image, libraryItem.title)} disabled={selected || editAttachments.filter(input => !input.missing).length >= selectedProviderMaxInputImages}>
                           <img src={mediaUrl(image.preview_path || image.thumb_path || image.original_path)} alt="" loading="lazy" />
                           <span><b>{image.role === 'reference_image' ? t('reference') : t('result')}</b><em>{selected ? t('selected') : t('addReference')}</em></span>
                         </button>
@@ -2388,9 +2496,9 @@ export default function GenerationPanel({
               {referencePicker === 'recent' && (
                 <div className="generation-reference-picker-grid">
                   {recentJobs.map(job => {
-                    const selected = editAttachments.some(attachment => attachment.resultPath === job.result_path);
+                    const selected = editAttachments.some(attachment => !attachment.missing && attachment.resultPath === job.result_path);
                     return (
-                      <button type="button" className={`generation-reference-picker-card${selected ? ' is-selected' : ''}`} key={job.id} onClick={() => addResultAsAttachment(job)} disabled={selected || editAttachments.length >= selectedProviderMaxInputImages}>
+                      <button type="button" className={`generation-reference-picker-card${selected ? ' is-selected' : ''}`} key={job.id} onClick={() => addResultAsAttachment(job)} disabled={selected || editAttachments.filter(input => !input.missing).length >= selectedProviderMaxInputImages}>
                         {job.result_path && <img src={jobResultUrl(job)} alt="" loading="lazy" />}
                         <span><b>{jobPrompt(job) || t('generatedResult')}</b><em>{selected ? t('selected') : t('generatedResult')}</em></span>
                       </button>
@@ -2424,8 +2532,8 @@ export default function GenerationPanel({
                   {jobResultUrl(job) ? <img src={jobResultUrl(job)} alt="" /> : <span className="generation-history-placeholder">{statusLabel(job.status, t, isUsedAsGenerationReference(job))}</span>}
                 </span>
                 <span className="generation-history-status-grid" aria-hidden="true">
-                  <span className="generation-history-cell"><b>{job.provider === 'openai_compatible' && !job.parameters?.requested_aspect_ratio ? t('requestedImageSize') : t('queueAspectRatio')}</b><em>{job.provider === 'openai_compatible' && !job.parameters?.requested_aspect_ratio ? String(job.parameters?.size || '—') : optionLabel(ASPECT_RATIO_OPTIONS, jobAspectRatio(job), t)}</em></span>
-                  <span className="generation-history-cell"><b>{t('queueQuality')}</b><em>{optionLabel(QUALITY_OPTIONS, jobQuality(job), t)}</em></span>
+                  <span className="generation-history-cell"><b>{job.provider === 'openai_compatible' ? t('requestedImageSize') : t('queueAspectRatio')}</b><em>{job.provider === 'openai_compatible' ? sizeLabel(String(job.parameters?.size || '—')) : optionLabel(ASPECT_RATIO_OPTIONS, jobAspectRatio(job), t)}</em></span>
+                  <span className="generation-history-cell"><b>{t('queueQuality')}</b><em>{job.provider === 'openai_compatible' ? imageQualityLabel(jobQuality(job), t) : optionLabel(QUALITY_OPTIONS, jobQuality(job), t)}</em></span>
                   {job.provider === 'xai_grok_oauth' && <span className="generation-history-cell"><b>{t('generationResolution')}</b><em>{optionLabel(GROK_RESOLUTION_OPTIONS, jobResolution(job), t)}</em></span>}
                   <span className="generation-history-cell"><b>{t('queueModel')}</b><em>{jobModel(job)}</em></span>
                   <span className="generation-history-cell"><b>{t('queueStatus')}</b><em>{statusLabel(job.status, t, isUsedAsGenerationReference(job))}</em></span>
@@ -2477,7 +2585,7 @@ export default function GenerationPanel({
                     <div><dt>{t('providers')}</dt><dd>{providers.find(providerStatus => providerStatus.provider === reviewJob.provider)?.display_name || (reviewJob.provider === 'openai_codex_oauth_native' ? 'ChatGPT / Codex OAuth' : t('providers'))}</dd></div>
                     <div><dt>{reviewJob.provider === 'openai_compatible' ? t('requestedImageModel') : t('queueModel')}</dt><dd>{jobModel(reviewJob)}</dd></div>
                     {reviewJob.provider === 'openai_compatible' && <>
-                      <div><dt>{t('requestedImageSize')}</dt><dd>{String(reviewJob.parameters?.size || '—')}</dd></div>
+                      <div><dt>{t('requestedImageSize')}</dt><dd>{restoreCompatibleRecipe(reviewJob).size}</dd></div>
                       <div><dt>{t('returnedImageModel')}</dt><dd>{reportedModel(reviewJob) || t('notReported')}</dd></div>
                       <div><dt>{t('returnedImageDimensions')}</dt><dd>{reviewJob.result_width && reviewJob.result_height ? `${reviewJob.result_width} × ${reviewJob.result_height}` : '—'}</dd></div>
                     </>}

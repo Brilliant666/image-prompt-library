@@ -206,7 +206,7 @@ export default function ItemDetailModal({
   onChanged: () => void;
   onDelete?: (item: ItemDetail) => void | Promise<void>;
   onOpenItem?: (id: string) => void;
-  onGenerate: (item: ItemDetail) => void;
+  onGenerate: (item: ItemDetail, imageId?: string) => void;
   showMutations?: boolean;
   showManagementActions?: boolean;
   canGenerate?: boolean;
@@ -548,7 +548,7 @@ export default function ItemDetailModal({
                       {allowManagementActions && <button className="modal-icon-button detail-delete-button" onClick={handleDelete} disabled={deleteBusy} aria-label={t('deleteReference')} title={t('deleteReference')}>
                         <Trash2 size={18} />
                       </button>}
-                       {showMutations && canGenerate && <button className="modal-icon-button mobile-generate-variant-button" onClick={() => onGenerate(item)} aria-label={t('generateVariant')} title={t('generateVariant')}>
+                       {showMutations && canGenerate && <button className="modal-icon-button mobile-generate-variant-button" onClick={() => onGenerate(item, selectedImage?.id)} aria-label={t('generateVariant')} title={t('generateVariant')}>
                          <Plus size={18} />
                          <span className="mobile-generate-variant-label">{t('generate')}</span>
                       </button>}
@@ -577,7 +577,7 @@ export default function ItemDetailModal({
               <aside className="detail-side">
                 <div className="detail-side-actions">
                   <span className="detail-side-primary-actions">
-                     {showMutations && canGenerate && <button className="secondary generate-variant-button" onClick={() => onGenerate(item)} aria-label={t('generateVariant')} title={t('generateVariant')}>{t('generate')}</button>}
+                     {showMutations && canGenerate && <button className="secondary generate-variant-button" onClick={() => onGenerate(item, selectedImage?.id)} aria-label={t('generateVariant')} title={t('generateVariant')}>{t('generate')}</button>}
                      {selectedImage && <a className="modal-icon-button download-button" href={mediaUrl(selectedImage.original_path || imageHeroPath(selectedImage))} download={downloadFileName(displayTitle || item.title, selectedImage?.original_path || imageHeroPath(selectedImage))} aria-label={t('download')} title={t('download')}><Download size={18} /></a>}
                     {allowManagementActions && <button className="modal-icon-button favorite-button" onClick={toggleFavorite} aria-label={item.favorite ? t('saved') : t('favorite')}>
                       <Heart size={18} fill={item.favorite ? 'currentColor' : 'none'} />

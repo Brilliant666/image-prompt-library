@@ -1,6 +1,7 @@
 from io import BytesIO
 from pathlib import Path
 from PIL import Image
+import pytest
 from backend.services.image_store import store_image
 
 
@@ -44,3 +45,43 @@ def test_store_image_rejects_too_many_pixels(tmp_path: Path):
         assert "too large" in str(exc)
     else:
         raise AssertionError("expected oversized image to be rejected")
+
+
+@pytest.mark.parametrize("mode", ["RGBA", "LA", "P", "RGB"])
+def test_store_image_preserves_transparency_and_original_bytes(tmp_path: Path, mode):
+    if mode == "P":
+        source = Image.new("P", (1600, 800), 1)
+        source.putpalette([0, 0, 0, 120, 40, 220] + [0] * 762)
+        source.paste(0, (0, 0, 800, 800))
+        source.info["transparency"] = bytes([0, 255])
+    elif mode == "RGB":
+        # RGB PNG can also encode transparency without an explicit alpha band.
+        source = Image.new("RGB", (1600, 800), (120, 40, 220))
+        source.paste((0, 0, 0), (0, 0, 800, 800))
+        source.info["transparency"] = (0, 0, 0)
+    else:
+        source = Image.new(mode, (1600, 800), (120, 40, 220, 255) if mode == "RGBA" else (120, 255))
+        source.paste((0, 0, 0, 0) if mode == "RGBA" else (0, 0), (0, 0, 800, 800))
+    output = BytesIO()
+    source.save(output, "PNG")
+    data = output.getvalue()
+    stored = store_image(tmp_path, data, "transparent.png")
+    assert (tmp_path / stored.original_path).read_bytes() == data
+    for relative, expected_size in [(stored.thumb_path, (420, 210)), (stored.preview_path, (1400, 700))]:
+        with Image.open(tmp_path / relative) as derivative:
+            assert derivative.format == "WEBP"
+            assert derivative.size == expected_size
+            assert "A" in derivative.getbands()
+            alpha = derivative.getchannel("A")
+            assert alpha.getpixel((10, 10)) == 0
+            assert alpha.getpixel((derivative.width - 10, 10)) == 255
+
+
+def test_store_image_keeps_opaque_derivatives_rgb(tmp_path: Path):
+    data = png_bytes()
+    stored = store_image(tmp_path, data)
+    assert (tmp_path / stored.original_path).read_bytes() == data
+    for relative in [stored.thumb_path, stored.preview_path]:
+        with Image.open(tmp_path / relative) as derivative:
+            assert derivative.mode == "RGB"
+            assert derivative.size == (320, 200)
