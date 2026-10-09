@@ -1,6 +1,7 @@
 import type { UiLanguage } from '../types';
 export type { UiLanguage } from '../types';
 type TranslationKey =
+  | 'imageCompositionHelp' | 'imageResultMismatch' | 'imageResultDecoded' | 'imageResultUnverified' | 'imageRequestedOutput' | 'imageActualOutput' | 'imageActualTransparent' | 'imageActualOpaque' | 'imageMoreDetails' | 'imageRawRecords' | 'imageServiceQuality' | 'imageServiceSize' | 'imageRequestId' | 'imageElapsed' | 'imageHttpStatus'
   | 'imageMissingRecipe' | 'imageBackgroundInvalid' | 'imageFormatInvalid'
   | 'imageSettings' | 'imageConfigured' | 'imageCustomSize' | 'imageBackground' | 'imageFormat' | 'imageCompression' | 'imageModelHelp' | 'imageSizeHelp' | 'imageExperimental' | 'imageRatioConflict' | 'imageModelRequired' | 'imageQualityUnsupported' | 'imageTransparencyConflict' | 'imageCompressionInvalid' | 'imageSizeInvalid' | 'imageLegacyDerived' | 'imageRequestDetails' | 'imageResponseDetails' | 'imageDecodedDetails' | 'imageSizeMismatch' | 'imageFormatMismatch' | 'imageAlphaMismatch' | 'imageLocalCancelNote' | 'imageDiagnostics'
   | 'filters' | 'searchAria' | 'searchPlaceholder' | 'config' | 'referencesShown' | 'collectionChip'
@@ -65,6 +66,21 @@ export function normalizeUiLanguage(value?: string | null): UiLanguage {
 
 const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
   zh_hant: {
+    imageCompositionHelp: '構圖比例僅作提示；實際請求尺寸以像素設定為準。',
+    imageResultMismatch: '已返回圖片 · 與請求不一致',
+    imageResultDecoded: '已返回並解碼圖片',
+    imageResultUnverified: '尚無已驗證的圖片結果',
+    imageRequestedOutput: '請求輸出',
+    imageActualOutput: '實際檔案',
+    imageActualTransparent: '含透明像素',
+    imageActualOpaque: '不含透明像素',
+    imageMoreDetails: '服務回覆與診斷',
+    imageRawRecords: '原始記錄（含提示詞）',
+    imageServiceQuality: '服務回報品質',
+    imageServiceSize: '服務回報尺寸',
+    imageRequestId: '請求 ID',
+    imageElapsed: '請求耗時',
+    imageHttpStatus: 'HTTP 狀態',
     newVariantCreated: '已建立新變體參考', imageAddedToItem: '圖片已加入參考', viewItem: '檢視參考', dismiss: '關閉提示', restartRequired: '需要重新啟動', updateAvailable: '有可用更新',
     suggestTitle: '建議標題', suggestingTitle: '建議中…', suggestedTitle: '建議', titleSuggestionProvider: 'via ChatGPT', useSuggestedTitle: '採用', titleSuggestionLoginRequired: '請先在設定連接 ChatGPT / Codex。', titleSuggestionRateLimited: '暫時太多請求，請稍後再試。', titleSuggestionUnavailable: '暫時無法建議標題。', titleSuggestionFailed: '無法建議標題。',
     imageMissingRecipe: '未找到原任务；仅恢复可确认的配方。未知模型请明确选择。',
@@ -154,6 +170,21 @@ const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
 
   },
   zh_hans: {
+    imageCompositionHelp: '构图比例仅作提示；实际请求尺寸以像素设置为准。',
+    imageResultMismatch: '已返回图片 · 与请求不一致',
+    imageResultDecoded: '已返回并解码图片',
+    imageResultUnverified: '尚无已验证的图片结果',
+    imageRequestedOutput: '请求输出',
+    imageActualOutput: '实际文件',
+    imageActualTransparent: '含透明像素',
+    imageActualOpaque: '不含透明像素',
+    imageMoreDetails: '服务返回与诊断',
+    imageRawRecords: '原始记录（含提示词）',
+    imageServiceQuality: '服务回报质量',
+    imageServiceSize: '服务回报尺寸',
+    imageRequestId: '请求 ID',
+    imageElapsed: '请求耗时',
+    imageHttpStatus: 'HTTP 状态',
     newVariantCreated: '已创建新变体参考', imageAddedToItem: '图片已添加到参考', viewItem: '查看参考', dismiss: '关闭提示', restartRequired: '需要重新启动', updateAvailable: '有可用更新',
     suggestTitle: '建议标题', suggestingTitle: '建议中…', suggestedTitle: '建议', titleSuggestionProvider: 'via ChatGPT', useSuggestedTitle: '采用', titleSuggestionLoginRequired: '请先在设置连接 ChatGPT / Codex。', titleSuggestionRateLimited: '暂时请求过多，请稍后再试。', titleSuggestionUnavailable: '暂时无法建议标题。', titleSuggestionFailed: '无法建议标题。',
     imageMissingRecipe: '未找到原任务；仅恢复可确认的配方。未知模型请明确选择。',
@@ -244,6 +275,21 @@ const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
 
   },
   en: {
+    imageCompositionHelp: 'Composition is a hint; pixel settings determine the requested size.',
+    imageResultMismatch: 'Image returned · differs from request',
+    imageResultDecoded: 'Image returned and decoded',
+    imageResultUnverified: 'No verified image result yet',
+    imageRequestedOutput: 'Requested output',
+    imageActualOutput: 'Actual file',
+    imageActualTransparent: 'Contains transparent pixels',
+    imageActualOpaque: 'No transparent pixels',
+    imageMoreDetails: 'Service response and diagnostics',
+    imageRawRecords: 'Raw records (including prompt)',
+    imageServiceQuality: 'Service quality label',
+    imageServiceSize: 'Service size label',
+    imageRequestId: 'Request ID',
+    imageElapsed: 'Elapsed time',
+    imageHttpStatus: 'HTTP status',
     newVariantCreated: 'New variant item created', imageAddedToItem: 'Image added to item', viewItem: 'View item', dismiss: 'Dismiss', restartRequired: 'Restart required', updateAvailable: 'Update available',
     suggestTitle: 'Suggest title', suggestingTitle: 'Suggesting…', suggestedTitle: 'Suggestion', titleSuggestionProvider: 'via ChatGPT', useSuggestedTitle: 'Use title', titleSuggestionLoginRequired: 'Connect ChatGPT / Codex in Config first.', titleSuggestionRateLimited: 'Too many requests. Try again shortly.', titleSuggestionUnavailable: 'Title suggestion is temporarily unavailable.', titleSuggestionFailed: 'Could not suggest a title.',
     imageMissingRecipe: 'Original job unavailable; only recorded settings restored. Explicitly select any unknown model.',

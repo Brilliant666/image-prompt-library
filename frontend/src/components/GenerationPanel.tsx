@@ -1,3 +1,4 @@
+import { GenerationResultSummary } from './GenerationResultSummary';
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { ArrowLeft, Check, ChevronDown, ChevronLeft, ChevronRight, Clipboard, Clock3, Download, FilePlus2, Images, Info, Maximize2, Paperclip, Plus, RotateCcw, Trash2, Upload, X } from 'lucide-react';
@@ -7,7 +8,7 @@ import qualityIcon from '../assets/generation-controls/quality.png';
 import { api, mediaUrl } from '../api/client';
 import type { ClusterRecord, GenerationJobAcceptAsNewItemPayload, GenerationJobCreate, GenerationJobRecord, GenerationJobSetRecord, GenerationProviderQueueState, GenerationProviderStatus, GenerationSetCount, ImageRecord, ItemDetail, ItemSummary, TagRecord, AiProvider } from '../types';
 import type { Translator } from '../utils/i18n';
-import { IMAGE25_MODELS, IMAGE_SIZES, imageQualities, restoreCompatibleRecipe, compatibleParameters, compatibleValidation, imageSizeInfo, compatibleMismatches, type CompatibleRecipe } from '../utils/compatibleRecipe';
+import { IMAGE25_MODELS, IMAGE_SIZES, imageQualities, restoreCompatibleRecipe, compatibleParameters, compatibleValidation, imageSizeInfo, type CompatibleRecipe } from '../utils/compatibleRecipe';
 import { generationAspectRatio } from '../utils/generationAspectRatio';
 import { generationResultActions } from '../utils/generationResultActions';
 import { providerPauseSeconds } from '../utils/generationSets';
@@ -2074,7 +2075,7 @@ export default function GenerationPanel({
       return (
         <div className={`generation-stage generation-stage-result${isStageFullscreen ? ' is-mobile-fullscreen' : ''}`}>
           <div ref={fullscreenFrameRef} className="generation-fullscreen-frame">
-            <img ref={resultImageRef} className="generation-result-image generation-result-fade-in" src={resultUrl} alt={t('saveGeneratedResultPreview')} />
+            <img ref={resultImageRef} className={`generation-result-image generation-result-fade-in${(selectedStageJob.metadata?.decoded_image as Record<string, unknown> | undefined)?.has_transparent_pixels === true ? ' has-transparency' : ''}`} src={resultUrl} alt={t('saveGeneratedResultPreview')} />
             {renderSiblingNavigation()}
             {batchReviewSession && outcomeLabel && <span className="generation-stage-outcome-label" role="status">{outcomeLabel}</span>}
             {batchReviewSession && reviewTargetId && (reviewOutcome === 'saved' || reviewOutcome === 'attached') && (
@@ -2122,7 +2123,7 @@ export default function GenerationPanel({
           </button>
         </header>
         {!reviewJob || !metadataDraft ? <div className="generation-layout" inert={showHistoryDrawer} aria-hidden={showHistoryDrawer || undefined}>
-          <section className="generation-compose-card generation-composer-card">
+          <section className={`generation-compose-card generation-composer-card${provider === 'openai_compatible' ? ' has-image-settings' : ''}`}>
             {!isHistoryReview ? (
               <>
                 <div className="generation-prompt-area">
@@ -2160,18 +2161,17 @@ export default function GenerationPanel({
                 )}
                 {provider === 'openai_compatible' && <div className="generation-image-settings">
                   <label>{t('requestedImageModel')}<input list="compatible-image-models" aria-label={t('requestedImageModel')} value={selectedModelLabel} onChange={e => { setCompatibleModelSelected(true); setCompatibleRecipe(r => ({ ...r, model: e.target.value })); }} /><datalist id="compatible-image-models">{IMAGE25_MODELS.map(model => <option key={model} value={model} />)}</datalist></label>
-                  <small>{t('imageModelHelp')}</small>
                   <label>{t('requestedImageSize')}<select aria-label={t('requestedImageSize')} value={customSize || !IMAGE_SIZES.includes(compatibleRecipe.size) ? 'custom' : compatibleRecipe.size} onChange={e => { setCustomSize(e.target.value === 'custom'); if(e.target.value !== 'custom') setCompatibleRecipe(r => ({ ...r, size: e.target.value, legacyDerived: false })); }}>{IMAGE_SIZES.map(size => <option key={size}>{size}</option>)}<option value="custom">{t('imageCustomSize')}</option></select></label>
                   {(customSize || !IMAGE_SIZES.includes(compatibleRecipe.size)) && <div className="generation-image-dimensions">{['width', 'height'].map((label, index) => <label key={label}>{label}<input type="number" min="16" step="16" aria-label={label} value={compatibleRecipe.size.split('x')[index] || ''} onChange={e => setCompatibleRecipe(r => { const dimensions = r.size === 'auto' ? ['', ''] : r.size.split('x'); dimensions[index] = e.target.value; return { ...r, size: dimensions.join('x'), legacyDerived: false }; })} /></label>)}</div>}
-                  <small>{t('requestedImageSize')}: {compatibleRecipe.size} · {t('imageSizeHelp')}</small>
+                  <small>{t('imageCompositionHelp')}</small>
                   {compatibleRecipe.legacyDerived && <small>{t('imageLegacyDerived')}</small>}
                   {compatibleSizeInfo.experimental && <strong>{t('imageExperimental')}</strong>}
                   {compatibleSizeInfo.conflict && <p role="status">{t('imageRatioConflict')}</p>}
+                  <details className="generation-advanced-settings"><summary>{t('imageBackground')} · {t('imageFormat')} · {t('imageCompression')}</summary>
                   <div className="generation-image-dimensions"><label>{t('imageBackground')}<select value={compatibleRecipe.background} onChange={e => setCompatibleRecipe(r => ({ ...r, background: e.target.value }))}>{['auto', 'opaque', 'transparent'].map(value => <option key={value}>{value}</option>)}</select></label><label>{t('imageFormat')}<select value={compatibleRecipe.output_format} onChange={e => setCompatibleRecipe(r => ({ ...r, output_format: e.target.value }))}>{['png', 'jpeg', 'webp'].map(value => <option key={value}>{value}</option>)}</select></label></div>
                   {compatibleRecipe.output_format !== 'png' && <label>{t('imageCompression')}<input type="number" min="0" max="100" value={compatibleRecipe.output_compression ?? ''} onChange={e => setCompatibleRecipe(r => ({ ...r, output_compression: e.target.value === '' ? undefined : Number(e.target.value) }))} /></label>}
+                  <small>{t('imageSizeHelp')}</small><small>{t('imageModelHelp')}</small><small>{t('imageLocalCancelNote')}</small></details>
                   {compatibleError && <p role="alert">{t(compatibleError)}</p>}
-                  <small>{t('imageConfigured')}</small>
-                  <small>{t('imageLocalCancelNote')}</small>
                 </div>}
                 <div className={`generation-compact-controls${selectedProviderCanGenerateDraft ? '' : ' has-provider-attention'}`}>
                   <div className="generation-control-wrap generation-provider-control">
@@ -2240,9 +2240,9 @@ export default function GenerationPanel({
                     )}
                   </div>
                   <div className="generation-control-wrap">
-                     <button ref={element => { controlTriggerRefs.current.quality = element; }} className="generation-control-trigger generation-quality-trigger" type="button" onClick={() => setOpenControl(openControl === 'quality' ? null : 'quality')} aria-label={selectedOutputAriaLabel} title={selectedOutputAriaLabel}>
+                     <button ref={element => { controlTriggerRefs.current.quality = element; }} className={`generation-control-trigger generation-quality-trigger${provider === 'openai_compatible' ? ' show-value' : ''}`} type="button" onClick={() => setOpenControl(openControl === 'quality' ? null : 'quality')} aria-label={selectedOutputAriaLabel} title={selectedOutputAriaLabel}>
                       <img className="generation-control-icon" src={qualityIcon} alt="" aria-hidden="true" />
-                      <span className="generation-control-value">{selectedOutputLabel}</span>
+                      <span className="generation-control-value">{provider === 'openai_compatible' ? compatibleQuality : selectedOutputLabel}</span>
                     </button>
                     {openControl === 'quality' && (
                       <div className={`generation-control-popover${provider === 'xai_grok_oauth' ? ' generation-output-popover' : ''}`} role="menu">
@@ -2402,13 +2402,15 @@ export default function GenerationPanel({
             )}
           </section>
 
-          <section ref={stageRef} className="generation-stage-card">
+          <div className="generation-result-column"><section ref={stageRef} className="generation-stage-card">
              {selectedStageJob?.result_path && !['discarded', 'cancelled', 'failed'].includes(selectedStageJob.status) && <a className="modal-icon-button generation-download-overlay" href={jobResultUrl(selectedStageJob)} download={downloadFileName('generation-result', selectedStageJob.result_path)} aria-label={t('download')} title={t('download')}><Download size={16} /></a>}
              <button ref={fullscreenTriggerRef} className="modal-icon-button generation-fullscreen-overlay" onClick={toggleStageFullscreen} aria-label={t('viewFullscreen')} title={t('viewFullscreen')}><Maximize2 size={16} /></button>
              {(!selectedStageJob || !jobResultUrl(selectedStageJob)) && renderSiblingNavigation()}
             {renderStage()}
-            {selectedStageJob?.provider === 'openai_compatible' && <details className="generation-image-details"><summary>{t('generationRecord')}</summary><p>{t('imageLocalCancelNote')}</p>{compatibleMismatches(selectedStageJob).map(key => <p role="status" key={key}>{t(key)}</p>)}{[['imageRequestDetails', selectedStageJob.metadata?.requested], ['imageResponseDetails', selectedStageJob.metadata?.response], ['imageDecodedDetails', selectedStageJob.metadata?.decoded_image], ['imageDiagnostics', selectedStageJob.metadata?.error_diagnostics || selectedStageJob.metadata?.request_diagnostics]].map(([label, value]) => <div key={String(label)}><strong>{t(String(label) as Parameters<Translator>[0])}</strong><pre>{value ? JSON.stringify(value, null, 2) : t('notReported')}</pre></div>)}<p>{selectedStageJob.started_at || selectedStageJob.created_at} → {selectedStageJob.completed_at || '—'}</p></details>}
+
           </section>
+          {selectedStageJob && <GenerationResultSummary job={selectedStageJob} t={t} />}
+          </div>
         </div> : null}
 
         {referencePicker && createPortal((

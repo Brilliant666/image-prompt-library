@@ -517,3 +517,66 @@ test('actual frontend API serializes frozen single/batch/edit recipes and preser
     assert.equal(requests.at(-1).body.mode, 'image_edit');
   } finally { globalThis.fetch = originalFetch; }
 });
+
+async function loadResultSummaryRenderer() {
+  const { createRequire } = await import('node:module');
+  const { pathToFileURL } = await import('node:url');
+  const require = createRequire(import.meta.url);
+  const toModule = source => `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
+  const recipeSource = await readFile(new URL('../frontend/src/utils/compatibleRecipe.ts', import.meta.url), 'utf8');
+  const recipeModule = toModule(ts.transpileModule(recipeSource, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText);
+  const source = await readFile(new URL('../frontend/src/components/GenerationResultSummary.tsx', import.meta.url), 'utf8');
+  const javascript = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText
+    .replace(/(['"])react\/jsx-runtime\1/g, JSON.stringify(pathToFileURL(require.resolve('react/jsx-runtime')).href))
+    .replace(/(['"])\.\.\/utils\/compatibleRecipe\1/g, JSON.stringify(recipeModule));
+  const { GenerationResultSummary } = await import(toModule(javascript));
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const { createElement } = await import('react');
+  return job => renderToStaticMarkup(createElement(GenerationResultSummary, { job, t: key => key }));
+}
+
+const renderResultSummary = await loadResultSummaryRenderer();
+function summaryJob(overrides = {}) {
+  return { id: 'test', provider: 'openai_compatible', status: 'succeeded', prompt_text: '', result_path: 'synthetic.png', created_at: '', updated_at: '', metadata: {
+    requested: { size: '2160x3840', output_format: 'png', quality: 'low' },
+    decoded_image: { width: 941, height: 1672, format: 'PNG', has_transparent_pixels: false },
+  }, ...overrides };
+}
+
+test('result summary exposes dimension mismatch before diagnostics are expanded', () => {
+  const html = renderResultSummary(summaryJob());
+  const visibleSummary = html.slice(0, html.indexOf('<details'));
+  assert.match(visibleSummary, /imageResultMismatch/);
+  assert.match(visibleSummary, /2160 × 3840/);
+  assert.match(visibleSummary, /941 × 1672/);
+  assert.match(visibleSummary, /imageSizeMismatch/);
+  assert.match(visibleSummary, /low/);
+});
+
+test('HTTP success and service labels alone cannot verify an image', () => {
+  const html = renderResultSummary(summaryJob({ metadata: { response: { size: '2160x3840' }, request_diagnostics: { http_status: 200 } } }));
+  assert.match(html, /imageResultUnverified/);
+  assert.doesNotMatch(html, /imageResultDecoded|is-success/);
+  const failed = renderResultSummary(summaryJob({ status: 'failed' }));
+  assert.match(failed, /imageResultUnverified/);
+  assert.doesNotMatch(failed, /imageResultDecoded|is-success/);
+});
+
+test('auto-sized decoded result is successful without a size mismatch', () => {
+  const job = summaryJob();
+  job.metadata.requested.size = 'auto';
+  const html = renderResultSummary(job);
+  assert.match(html, /imageResultDecoded/);
+  assert.doesNotMatch(html, /imageSizeMismatch|imageResultMismatch/);
+});
+
+test('transparency requested but absent is visible without opening records', () => {
+  const job = summaryJob();
+  job.metadata.requested = { size: 'auto', output_format: 'png', background: 'transparent', quality: 'max' };
+  const html = renderResultSummary(job);
+  const visibleSummary = html.slice(0, html.indexOf('<details'));
+  assert.match(visibleSummary, /imageAlphaMismatch/);
+  assert.match(visibleSummary, /imageActualOpaque/);
+  assert.match(visibleSummary, /max/);
+  assert.equal(renderResultSummary(summaryJob({ provider: 'codex' })), '');
+});
