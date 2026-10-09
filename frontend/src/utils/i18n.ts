@@ -1,6 +1,7 @@
 import type { UiLanguage } from '../types';
 export type { UiLanguage } from '../types';
 type TranslationKey =
+  | 'sub2apiOutputLimit' | 'sub2apiLegacyQuality' | 'imageOutputOptions' | 'imageWidth' | 'imageHeight' | 'imageQualityMismatch'
   | 'imageCompositionHelp' | 'imageResultMismatch' | 'imageResultDecoded' | 'imageResultUnverified' | 'imageRequestedOutput' | 'imageActualOutput' | 'imageActualTransparent' | 'imageActualOpaque' | 'imageMoreDetails' | 'imageRawRecords' | 'imageServiceQuality' | 'imageServiceSize' | 'imageRequestId' | 'imageElapsed' | 'imageHttpStatus'
   | 'imageMissingRecipe' | 'imageBackgroundInvalid' | 'imageFormatInvalid'
   | 'imageSettings' | 'imageConfigured' | 'imageCustomSize' | 'imageBackground' | 'imageFormat' | 'imageCompression' | 'imageModelHelp' | 'imageSizeHelp' | 'imageExperimental' | 'imageRatioConflict' | 'imageModelRequired' | 'imageQualityUnsupported' | 'imageTransparencyConflict' | 'imageCompressionInvalid' | 'imageSizeInvalid' | 'imageLegacyDerived' | 'imageRequestDetails' | 'imageResponseDetails' | 'imageDecodedDetails' | 'imageSizeMismatch' | 'imageFormatMismatch' | 'imageAlphaMismatch' | 'imageLocalCancelNote' | 'imageDiagnostics'
@@ -66,6 +67,13 @@ export function normalizeUiLanguage(value?: string | null): UiLanguage {
 
 const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
   zh_hant: {
+    sub2apiOutputLimit: '目前 sub2api 渠道暫按最高 medium、約 2K 檔位使用；以實際回覆為準。',
+    sub2apiLegacyQuality: '歷史請求值，超出目前渠道預期能力',
+    imageOutputOptions: '背景與輸出格式',
+    imageWidth: '寬度',
+    imageHeight: '高度',
+    imageQualityMismatch: '服務回報品質與請求不一致。',
+
     imageCompositionHelp: '構圖比例僅作提示；實際請求尺寸以像素設定為準。',
     imageResultMismatch: '已返回圖片 · 與請求不一致',
     imageResultDecoded: '已返回並解碼圖片',
@@ -170,6 +178,13 @@ const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
 
   },
   zh_hans: {
+    sub2apiOutputLimit: '当前 sub2api 渠道暂按最高 medium、约 2K 档位使用；以实际返回为准。',
+    sub2apiLegacyQuality: '历史请求值，超出当前渠道预期能力',
+    imageOutputOptions: '背景与输出格式',
+    imageWidth: '宽度',
+    imageHeight: '高度',
+    imageQualityMismatch: '服务回报质量与请求不一致。',
+
     imageCompositionHelp: '构图比例仅作提示；实际请求尺寸以像素设置为准。',
     imageResultMismatch: '已返回图片 · 与请求不一致',
     imageResultDecoded: '已返回并解码图片',
@@ -275,6 +290,13 @@ const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
 
   },
   en: {
+    sub2apiOutputLimit: 'This sub2api channel is currently treated as up to medium, approximately the 2K tier; actual output may differ.',
+    sub2apiLegacyQuality: 'Historical request exceeds the current channel expectation',
+    imageOutputOptions: 'Background and output format',
+    imageWidth: 'Width',
+    imageHeight: 'Height',
+    imageQualityMismatch: 'The service quality label differs from the request.',
+
     imageCompositionHelp: 'Composition is a hint; pixel settings determine the requested size.',
     imageResultMismatch: 'Image returned · differs from request',
     imageResultDecoded: 'Image returned and decoded',

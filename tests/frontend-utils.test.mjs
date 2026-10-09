@@ -580,3 +580,26 @@ test('transparency requested but absent is visible without opening records', () 
   assert.match(visibleSummary, /max/);
   assert.equal(renderResultSummary(summaryJob({ provider: 'codex' })), '');
 });
+
+const { imageSizeLabel, sub2apiQualityOptions, sub2apiSizeOptions } = await importTypescript('../frontend/src/utils/compatibleRecipe.ts');
+test('size labels retain exact pixels and reduce aspect ratios', () => {
+  assert.equal(imageSizeLabel('1024x1024'), '1024x1024 (1:1)');
+  assert.equal(imageSizeLabel('720x1280'), '720x1280 (9:16)');
+  assert.equal(imageSizeLabel('2160x3840'), '2160x3840 (9:16)');
+  assert.equal(imageSizeLabel('auto'), 'auto');
+  assert.equal(imageSizeLabel('0x0'), '0x0');
+});
+test('sub2api UI guidance preserves historical requests without exposing high quality as default', () => {
+  assert.deepEqual(sub2apiQualityOptions('gpt-image-2.5-flare', 'low'), ['auto', 'low', 'medium']);
+  assert.deepEqual(sub2apiQualityOptions('gpt-image-2.5-sunburst', 'max'), ['auto', 'low', 'medium', 'max']);
+  assert.ok(sub2apiSizeOptions('2160x3840').includes('2160x3840'));
+  assert.ok(!sub2apiSizeOptions('auto').includes('2160x3840'));
+  const restored = restoreCompatibleRecipe({parameters: {model:'gpt-image-2.5-sunburst', quality:'max', size:'2160x3840'}});
+  assert.equal(compatibleParameters(restored).quality, 'max');
+  assert.equal(compatibleParameters(restored).size, '2160x3840');
+});
+test('quality mismatch is detected from service labels even without decoded metadata', () => {
+  assert.deepEqual(compatibleMismatches({metadata:{requested:{quality:'max'},response:{quality:'medium'}}}), ['imageQualityMismatch']);
+  assert.deepEqual(compatibleMismatches({metadata:{requested:{quality:'auto'},response:{quality:'medium'}}}), []);
+  assert.deepEqual(compatibleMismatches({metadata:{requested:{quality:'max'}}}), []);
+});

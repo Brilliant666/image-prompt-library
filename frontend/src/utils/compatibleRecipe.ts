@@ -39,10 +39,31 @@ export function imageSizeInfo(size: string, ratio: string) {
 export function compatibleMismatches(job: GenerationJobRecord): Parameters<Translator>[0][] {
   const requested = job.metadata?.requested as Record<string, unknown> | undefined;
   const decoded = job.metadata?.decoded_image as Record<string, unknown> | undefined;
-  if (!requested || !decoded) return [];
+  if (!requested) return [];
   const issues: Parameters<Translator>[0][] = [];
-  if (requested.size && requested.size !== 'auto' && decoded.width && decoded.height && requested.size !== `${decoded.width}x${decoded.height}`) issues.push('imageSizeMismatch');
-  if (requested.output_format && decoded.format && String(requested.output_format).toLowerCase().replace('jpg', 'jpeg') !== String(decoded.format).toLowerCase().replace('jpg', 'jpeg')) issues.push('imageFormatMismatch');
-  if (requested.background === 'transparent' && decoded.has_transparent_pixels === false) issues.push('imageAlphaMismatch');
+  if (requested.size && requested.size !== 'auto' && decoded?.width && decoded?.height && requested.size !== `${decoded?.width}x${decoded?.height}`) issues.push('imageSizeMismatch');
+  if (requested.output_format && decoded?.format && String(requested.output_format).toLowerCase().replace('jpg', 'jpeg') !== String(decoded?.format).toLowerCase().replace('jpg', 'jpeg')) issues.push('imageFormatMismatch');
+  if (requested.background === 'transparent' && decoded?.has_transparent_pixels === false) issues.push('imageAlphaMismatch');
+  const response = job.metadata?.response as Record<string, unknown> | undefined;
+  if (requested.quality && requested.quality !== 'auto' && response?.quality && requested.quality !== response.quality) issues.push('imageQualityMismatch');
   return issues;
+}
+
+/** Display the exact request dimensions; never derive or replace a stored size. */
+export function imageSizeLabel(size: string): string {
+  const match = /^([1-9][0-9]*)x([1-9][0-9]*)$/.exec(size);
+  if (!match) return size;
+  const width = Number(match[1]), height = Number(match[2]);
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height)) return size;
+  const gcd = (a: number, b: number): number => b ? gcd(b, a % b) : a;
+  const divisor = gcd(width, height);
+  return `${size} (${width / divisor}:${height / divisor})`;
+}
+export function sub2apiQualityOptions(model: string, current: string): string[] {
+  const supported = imageQualities(model).filter(value => ['auto', 'low', 'medium'].includes(value));
+  return supported.includes(current) ? supported : [...supported, current];
+}
+export function sub2apiSizeOptions(current: string): string[] {
+  const sizes = ['auto', '1024x1024', '1536x1024', '1024x1536', '1152x864', '864x1152', '1280x720', '720x1280'];
+  return sizes.includes(current) ? sizes : [...sizes, current];
 }

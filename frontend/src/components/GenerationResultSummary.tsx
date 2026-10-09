@@ -38,7 +38,7 @@ export function GenerationResultSummary({ job, t }: { job: GenerationJobRecord; 
     <strong className="generation-result-summary-status">{t(status)}</strong>
     <div className="generation-result-comparison">
       <div><span>{t('imageRequestedOutput')}</span><strong>{size(requested.size)} · {format(requested.output_format)}</strong><small>{t('queueQuality')}: {reported(requested.quality, t)}</small></div>
-      <div><span>{t('imageActualOutput')}</span><strong>{hasDecodedImage ? `${decoded.width} × ${decoded.height} · ${format(decoded.format)}` : t('notReported')}</strong><small>{decoded.has_transparent_pixels === true ? t('imageActualTransparent') : decoded.has_transparent_pixels === false ? t('imageActualOpaque') : t('notReported')}</small></div>
+      <div><span>{t('imageActualOutput')}</span><strong>{hasDecodedImage ? `${decoded.width} × ${decoded.height} · ${format(decoded.format)}` : t('notReported')}</strong><small>{t('imageServiceQuality')}: {reported(response.quality, t)}</small><small>{decoded.has_transparent_pixels === true ? t('imageActualTransparent') : decoded.has_transparent_pixels === false ? t('imageActualOpaque') : t('notReported')}</small></div>
     </div>
     {mismatches.length > 0 && <p className="generation-result-warning" role="status">{mismatches.map(key => t(key)).join(' ')}</p>}
     <details className="generation-result-diagnostics">
