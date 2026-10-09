@@ -1126,7 +1126,7 @@ test('redesign interaction guards keep overlays mutually exclusive and focus-saf
 
   assert.match(app, /setGenerationQueueOpen\(false\); setFiltersOpen\(true\)/);
   assert.match(app, /setGenerationQueueOpen\(false\); setConfigOpen\(true\)/);
-  assert.match(app, /const openGenerationFromDetail = \(item: ItemDetail\) => \{[\s\S]*?setGenerationSourceItem\(item\);[\s\S]*?setStandaloneGenerationOpen\(true\)/);
+  assert.match(app, /const openGenerationFromDetail = \(item: ItemDetail, imageId\?: string\) => \{[\s\S]*?setGenerationSourceItem\(item\);[\s\S]*?setStandaloneGenerationOpen\(true\)/);
   assert.match(app, /const closeStandaloneGeneration = \(\) => \{[\s\S]*?setStandaloneGenerationOpen\(false\);[\s\S]*?setGenerationSourceItem\(undefined\);[\s\S]*?\};/);
   assert.match(app, /\{!standaloneGenerationOpen && detailId && <ItemDetailModal key=\{detailId\}/);
   assert.match(app, /\{standaloneGenerationOpen && <GenerationPanel item=\{generationSourceItem\}/);
@@ -1282,7 +1282,7 @@ test('Explore/detail CSS keeps responsive grids, token controls, CJK hierarchy, 
 test('compatible image providers retain the existing batch count menu and queue-set submission', async () => {
   const generation = await readFile(`${ROOT}/frontend/src/components/GenerationPanel.tsx`, 'utf8');
   const countTrigger = generation.slice(generation.indexOf('ref={generationCountTriggerRef}'), generation.indexOf('><ChevronDown size={17}', generation.indexOf('ref={generationCountTriggerRef}')));
-  assert.match(countTrigger, /disabled=\{busy \|\| !selectedProviderCanGenerateDraft \|\| !promptText\.trim\(\) \|\| hasMissingTemplateValues\}/);
+  assert.match(countTrigger, /disabled=\{busy \|\| Boolean\(compatibleError\) \|\| !selectedProviderCanGenerateDraft \|\| !promptText\.trim\(\) \|\| hasMissingTemplateValues\}/);
   assert.doesNotMatch(countTrigger, /openai_compatible/);
   assert.match(generation, /GENERATION_SET_OPTIONS: Exclude<GenerationSetCount, 1>\[\] = \[3, 5, 10\]/);
   assert.match(generation, /onClick=\{\(\) => createJob\(count\)\}/);

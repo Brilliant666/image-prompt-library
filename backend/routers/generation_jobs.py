@@ -26,6 +26,7 @@ from backend.services.openai_codex_native import (
     CodexNativeRateLimitError,
 )
 from backend.services.xai_grok_oauth import GrokOAuthError, GrokOAuthRateLimitError
+from backend.services.openai_compatible import OpenAICompatibleError
 
 router = APIRouter(prefix="/generation-jobs", tags=["generation-jobs"])
 
@@ -100,6 +101,8 @@ def repo(request: Request) -> GenerationJobRepository:
 def create_generation_job(payload: GenerationJobCreate, request: Request):
     try:
         created = repo(request).create_job(payload)
+    except OpenAICompatibleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Source item not found") from exc
     except GenerationJobConflict as exc:
@@ -113,6 +116,8 @@ def create_generation_job(payload: GenerationJobCreate, request: Request):
 def create_generation_job_set(payload: GenerationJobSetCreate, request: Request):
     try:
         created = repo(request).create_job_set(payload.job, payload.count)
+    except OpenAICompatibleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Source item not found") from exc
     except GenerationJobConflict as exc:
@@ -164,6 +169,14 @@ def cancel_remaining_generation_job_set(generation_group_id: str, request: Reque
         )
     except KeyError as exc:
         raise HTTPException(status_code=404) from exc
+
+
+@router.get("/for-image/{image_id}", response_model=GenerationJobRecord)
+def get_generation_recipe_for_image(image_id: str, request: Request):
+    try:
+        return _sanitize_generation_job_record(repo(request).job_for_image(image_id))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="No saved generation recipe for this image") from exc
 
 
 @router.get("/{job_id}", response_model=GenerationJobRecord)
@@ -222,7 +235,7 @@ def run_generation_job(job_id: str, request: Request):
         if provider in AUTOMATED_PROVIDER_IDS:
             _continue_generation_queue(request.app.state.library_path, provider)
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except (CodexNativeAuthError, GrokOAuthError) as exc:
+    except (CodexNativeAuthError, GrokOAuthError, OpenAICompatibleError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 

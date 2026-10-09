@@ -2160,3 +2160,15 @@ html:lang(zh-Hans) .editor-head h2{
   outline-color:var(--studio-accent);
 }
 .field>span,.provider-card-head b{font-size:12px}
+
+/* Image requests retain explicit pixel sizes independently of composition. */
+.generation-image-settings { display: grid; gap: .55rem; padding: .75rem; border: 1px solid var(--border, #ddd); border-radius: 12px; max-height: 34vh; overflow: auto; }
+.generation-image-settings label { display: grid; gap: .3rem; font-size: .85rem; min-width: 0; }
+.generation-image-settings input, .generation-image-settings select { width: 100%; min-width: 0; padding: .45rem; border: 1px solid var(--border, #ccc); border-radius: 6px; background: var(--surface, #fff); color: inherit; }
+.generation-image-settings small { font-size: .75rem; opacity: .8; }
+.generation-image-settings p { margin: 0; font-size: .8rem; }
+.generation-image-dimensions { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; }
+.generation-image-details { position: absolute; bottom: 76px; left: 12px; right: 12px; z-index: 3; background: var(--surface, #fff); border-radius: 8px; padding: .5rem; max-height: 45%; overflow: auto; font-size: .8rem; }
+.generation-image-details pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .75rem; }
+.generation-image-details summary { cursor: pointer; }
+.generation-result-image.generation-result-fade-in, .save-new-metadata-grid > img, .detail-fullscreen-frame .hero-image, .generation-reference-chip img { background-color: #eee; background-image: conic-gradient(#ddd 25%, transparent 0 50%, #ddd 0 75%, transparent 0); background-size: 20px 20px; }

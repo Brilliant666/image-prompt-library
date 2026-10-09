@@ -454,3 +454,66 @@ test('image-only compatible provider is selectable independently of title sugges
   assert.equal(resolveDefaultAiProvider('openai_compatible', []), 'openai_compatible');
   assert.equal(resolveDefaultAiProvider(null, [{ ...compatible, configured: false }]), 'openai_codex_oauth_native');
 });
+
+const { IMAGE25_MODELS, IMAGE25_QUALITIES, compatibleParameters, compatibleValidation, restoreCompatibleRecipe, imageSizeInfo, compatibleMismatches, imageQualities } = await importTypescript('../frontend/src/utils/compatibleRecipe.ts');
+
+test('Image 2.5 recipes retain all model snapshots and six qualities without changing other model capabilities', () => {
+  for (const model of IMAGE25_MODELS) for (const quality of IMAGE25_QUALITIES) {
+    const recipe = { model, quality, size: '2160x3840', background: 'opaque', output_format: 'png' };
+    assert.equal(compatibleValidation(recipe), undefined);
+    assert.deepEqual(compatibleParameters(recipe), { ...recipe, n: 1 });
+    assert.deepEqual(restoreCompatibleRecipe({ model: 'old-default', parameters: { quality: 'low' }, metadata: { requested: recipe } }), { ...recipe, legacyDerived: false });
+  }
+  assert.equal(compatibleValidation(restoreCompatibleRecipe({ parameters: {} })), 'imageModelRequired');
+  assert.equal(imageQualities('gpt-image-2').includes('max'), false);
+  assert.equal(imageQualities('custom-mapping').includes('xhigh'), false);
+});
+
+test('explicit image dimensions are validated independently of legacy composition ratio', () => {
+  const recipe = { model: IMAGE25_MODELS[0], quality: 'low', size: 'auto', background: 'auto', output_format: 'png' };
+  for (const size of ['auto', '1024x1024', '1536x1024', '1024x1536', '2048x2048', '2048x1152', '3840x2160', '2160x3840', '800x832']) assert.equal(compatibleValidation({ ...recipe, size }), undefined, size);
+  for (const size of ['2880x3840', '0x1024', '1025x1024', '4096x1024', '1024x128', '16x16', 'abc', '-1x1024', '01024x1024']) assert.equal(compatibleValidation({ ...recipe, size }), 'imageSizeInvalid', size);
+  assert.equal(restoreCompatibleRecipe({ parameters: { requested_aspect_ratio: '9:16', size: '2160x3840' } }).size, '2160x3840');
+  assert.equal(restoreCompatibleRecipe({ parameters: { requested_aspect_ratio: '9:16' } }).size, '720x1280');
+  assert.equal(restoreCompatibleRecipe({ parameters: { requested_aspect_ratio: '9:16', size: '2160x3840' }, metadata: { requested: { size: '720x1280' } } }).size, '720x1280');
+  assert.deepEqual(imageSizeInfo('2160x3840', '1:1'), { experimental: true, conflict: true });
+});
+
+test('transparency conflicts are blocked and compression zero survives JSON serialization', () => {
+  const recipe = { model: IMAGE25_MODELS[1], quality: 'max', size: 'auto', background: 'transparent', output_format: 'webp' };
+  for (const output_compression of [0, 100]) assert.equal(JSON.parse(JSON.stringify(compatibleParameters({ ...recipe, output_compression }))).output_compression, output_compression);
+  assert.equal(compatibleValidation({ ...recipe, output_format: 'jpeg' }), 'imageTransparencyConflict');
+  assert.equal(compatibleValidation({ ...recipe, output_compression: 101 }), 'imageCompressionInvalid');
+  assert.equal('output_compression' in compatibleParameters({ ...recipe, output_format: 'png', output_compression: 0 }), false);
+  assert.deepEqual(compatibleMismatches({ metadata: { requested: { size: '2160x3840', background: 'transparent', output_format: 'png' }, decoded_image: { width: 1024, height: 1536, format: 'JPEG', has_transparent_pixels: false } } }), ['imageSizeMismatch', 'imageFormatMismatch', 'imageAlphaMismatch']);
+  assert.deepEqual(compatibleMismatches({ metadata: { requested: { size: 'auto' }, decoded_image: { width: 1024, height: 1536 } } }), []);
+});
+
+test('actual frontend API serializes frozen single/batch/edit recipes and preserves prompt bytes', async () => {
+  let source = await readFile(new URL('../frontend/src/api/client.ts', import.meta.url), 'utf8');
+  source = source.replace("import { DEFAULT_ITEM_SORT } from '../utils/searchSort';", "const DEFAULT_ITEM_SORT = 'updated_desc';").replaceAll('import.meta.env', '({})');
+  const javascript = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
+  const { api } = await import(`data:text/javascript;base64,${Buffer.from(javascript).toString('base64')}`);
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (url, init) => { requests.push({ url, body: JSON.parse(init.body) }); return { ok: true, json: async () => ({}) }; };
+  try {
+    const recipe = { model: IMAGE25_MODELS[3], quality: 'xhigh', size: '2160x3840', background: 'transparent', output_format: 'webp', output_compression: 0 };
+    const prompt = '  A simple object.\n\nKeep original text.  \n';
+    const job = { provider: 'openai_compatible', model: recipe.model, mode: 'text_to_image', prompt_text: prompt, parameters: { requested_aspect_ratio: '9:16', ...compatibleParameters(recipe) } };
+    await api.createGenerationJob(job);
+    for (const count of [3, 5, 10]) await api.createGenerationSet({ job, count });
+    await api.createGenerationJob({ ...job, mode: 'image_edit', parameters: { ...job.parameters, input_images: [{ image_id: 'fixture' }] } });
+    for (const request of requests) {
+      const payload = request.body.job || request.body;
+      assert.equal(payload.prompt_text, prompt);
+      assert.equal(payload.model, recipe.model);
+      assert.equal(payload.parameters.size, '2160x3840');
+      assert.equal(payload.parameters.quality, 'xhigh');
+      assert.equal(payload.parameters.output_compression, 0);
+      assert.equal(payload.parameters.n, 1);
+    }
+    assert.deepEqual(requests.slice(1, 4).map(r => r.body.count), [3, 5, 10]);
+    assert.equal(requests.at(-1).body.mode, 'image_edit');
+  } finally { globalThis.fetch = originalFetch; }
+});

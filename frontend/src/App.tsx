@@ -118,6 +118,7 @@ export default function App() {
   const [generationQueueRefreshKey, setGenerationQueueRefreshKey] = useState(0);
   const [focusedGenerationJobId, setFocusedGenerationJobId] = useState<string>();
   const [generationSourceItem, setGenerationSourceItem] = useState<ItemDetail>();
+  const [generationSourceImageId, setGenerationSourceImageId] = useState<string>();
   const generationJobRequestRef = useRef(0);
   const editItemRequestRef = useRef(0);
   const [editingItemId, setEditingItemId] = useState<string>();
@@ -282,7 +283,8 @@ export default function App() {
   const saved = () => { refreshClusters(); refreshLibraryTotal(); refreshTags(); setItemsReloadKey(k => k + 1); };
   const clearSelection = () => setSelectedItemIds(new Set());
   const exitSelectionMode = () => { setBatchActionDialog(undefined); setSelectionActionsOpen(false); setSelectionMode(false); clearSelection(); };
-  const deleted = () => { setDetailId(undefined); setEditing(undefined); setFocusedGenerationJobId(undefined); setGenerationSourceItem(undefined); exitSelectionMode(); refreshClusters(); refreshLibraryTotal(); refreshTags(); setItemsReloadKey(k => k + 1); };
+  const deleted = () => { setDetailId(undefined); setEditing(undefined); setFocusedGenerationJobId(undefined); setGenerationSourceItem(undefined);
+    setGenerationSourceImageId(undefined); exitSelectionMode(); refreshClusters(); refreshLibraryTotal(); refreshTags(); setItemsReloadKey(k => k + 1); };
   const refreshAfterBatch = () => { refreshClusters(); refreshLibraryTotal(); refreshTags(); setItemsReloadKey(k => k + 1); };
   const updatePreferredLanguage = (language: PromptCopyLanguage) => {
     setPreferredLanguage(language);
@@ -389,10 +391,12 @@ export default function App() {
     cancelPendingEdit();
     setFocusedGenerationJobId(undefined);
     setGenerationSourceItem(undefined);
+    setGenerationSourceImageId(undefined);
     setStandaloneGenerationOpen(true);
     setGenerationQueueOpen(false);
   };
-  const openGenerationFromDetail = (item: ItemDetail) => {
+  const openGenerationFromDetail = (item: ItemDetail, imageId?: string) => {
+    setGenerationSourceImageId(imageId);
     generationJobRequestRef.current += 1;
     cancelPendingEdit();
     setFocusedGenerationJobId(undefined);
@@ -405,6 +409,7 @@ export default function App() {
     setStandaloneGenerationOpen(false);
     setFocusedGenerationJobId(undefined);
     setGenerationSourceItem(undefined);
+    setGenerationSourceImageId(undefined);
   };
   const openGenerationJob = (job: GenerationJobRecord) => {
     cancelPendingEdit();
@@ -425,6 +430,7 @@ export default function App() {
       return;
     }
     setGenerationSourceItem(undefined);
+    setGenerationSourceImageId(undefined);
     setDetailId(undefined);
     setGenerationQueueOpen(false);
     setStandaloneGenerationOpen(true);
@@ -636,7 +642,7 @@ export default function App() {
     {!standaloneGenerationOpen && detailId && <ItemDetailModal key={detailId} t={t} id={detailId} uiLanguage={uiLanguage} preferredLanguage={preferredLanguage} clusters={localizedClusters} tags={tags} onClose={closeItemDetail} onCopyPrompt={showCopyToast} onChanged={saved} onDelete={isDemoMode ? undefined : deleteDetail} onOpenItem={setDetailId} onGenerate={openGenerationFromDetail} onEdit={(item) => { closeItemDetail(); setEditing(item); setEditorOpen(true); }} showMutations={!isDemoMode} showManagementActions={showManagementActions} canGenerate={!isDemoMode} />}
     {toast && <div className={`toast copy-toast elegant-toast ${toast.tone}${toastClosing ? ' is-closing' : ''}`} role="status"><span className="toast-icon">{toast.tone === 'success' ? <Check size={16} /> : <XCircle size={16} />}</span><span className="toast-title">{toast.title}</span></div>}
     {editorOpen && <ItemEditorModal t={t} item={editing} clusters={localizedClusters} tags={tags} defaultAiProvider={defaultAiProvider} onClose={() => setEditorOpen(false)} onSaved={saved} onDeleted={deleted} allowDelete={showManagementActions} />}
-    {standaloneGenerationOpen && <GenerationPanel item={generationSourceItem} t={t} preferredLanguage={preferredLanguage} clusters={localizedClusters} tags={tags} defaultAiProvider={defaultAiProvider} promptVariablesEnabled={Boolean(appConfig?.features?.camelot?.percival)} initialJobId={focusedGenerationJobId} onClose={closeStandaloneGeneration} onOpenProviders={openProviders} onQueueChanged={() => setGenerationQueueRefreshKey(key => key + 1)} onAccepted={(item, message) => { saved(); setToast({ title: message || t('saveReference'), tone: 'success' }); if (item?.id) setDetailId(item.id); }} />}
+    {standaloneGenerationOpen && <GenerationPanel item={generationSourceItem} sourceImageId={generationSourceImageId} t={t} preferredLanguage={preferredLanguage} clusters={localizedClusters} tags={tags} defaultAiProvider={defaultAiProvider} promptVariablesEnabled={Boolean(appConfig?.features?.camelot?.percival)} initialJobId={focusedGenerationJobId} onClose={closeStandaloneGeneration} onOpenProviders={openProviders} onQueueChanged={() => setGenerationQueueRefreshKey(key => key + 1)} onAccepted={(item, message) => { saved(); setToast({ title: message || t('saveReference'), tone: 'success' }); if (item?.id) setDetailId(item.id); }} />}
     </div>
   </div>
 }

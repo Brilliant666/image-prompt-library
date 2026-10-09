@@ -7,6 +7,7 @@ import qualityIcon from '../assets/generation-controls/quality.png';
 import { api, mediaUrl } from '../api/client';
 import type { ClusterRecord, GenerationJobAcceptAsNewItemPayload, GenerationJobCreate, GenerationJobRecord, GenerationJobSetRecord, GenerationProviderQueueState, GenerationProviderStatus, GenerationSetCount, ImageRecord, ItemDetail, ItemSummary, TagRecord, AiProvider } from '../types';
 import type { Translator } from '../utils/i18n';
+import { IMAGE25_MODELS, IMAGE_SIZES, imageQualities, restoreCompatibleRecipe, compatibleParameters, compatibleValidation, imageSizeInfo, compatibleMismatches, type CompatibleRecipe } from '../utils/compatibleRecipe';
 import { generationAspectRatio } from '../utils/generationAspectRatio';
 import { generationResultActions } from '../utils/generationResultActions';
 import { providerPauseSeconds } from '../utils/generationSets';
@@ -29,6 +30,7 @@ function providerCanGenerate(provider?: GenerationProviderStatus) {
 
 function providerReadinessLabel(provider: GenerationProviderStatus | undefined, t: Translator) {
   if (!provider) return t('providerUnavailable');
+  if (provider?.provider === 'openai_compatible' && providerCanGenerate(provider)) return t('imageConfigured');
   if (providerCanGenerate(provider)) return t('providerReady').replace('${provider}', provider.display_name);
   if (provider.status === 'login_required' || provider.state === 'not_connected') return t('connectProvider').replace('${provider}', provider.display_name);
   if (provider.status === 'auth_error') return t('providerNeedsAttention').replace('${provider}', provider.display_name);
@@ -37,6 +39,7 @@ function providerReadinessLabel(provider: GenerationProviderStatus | undefined, 
 }
 
 function compactProviderReadinessLabel(provider: GenerationProviderStatus | undefined, t: Translator) {
+  if (provider?.provider === 'openai_compatible' && providerCanGenerate(provider)) return t('imageConfigured');
   if (providerCanGenerate(provider)) return t('generationReady');
   return providerReadinessLabel(provider, t);
 }
@@ -48,6 +51,7 @@ function compactProviderLabel(provider: GenerationProviderStatus | undefined) {
 }
 
 function compactProviderStateLabel(provider: GenerationProviderStatus | undefined, t: Translator) {
+  if (provider?.provider === 'openai_compatible' && providerCanGenerate(provider)) return t('imageConfigured');
   if (providerCanGenerate(provider)) return t('providerStateAvailable');
   if (provider?.authenticated) return t('providerStateUnavailable');
   return t('providerStateNotConnected');
@@ -153,7 +157,7 @@ function restorableJobAttachments(job?: GenerationJobRecord): EditAttachment[] {
 }
 
 function buildInitialMetadata(job: GenerationJobRecord, item?: ItemDetail): GenerationJobAcceptAsNewItemPayload {
-  const prompt = (job.edited_prompt_text || job.prompt_text || '').trim();
+  const prompt = jobPrompt(job);
   const position = generationResultPosition(job);
   const titleSuffix = position ? ` Variant ${position.index}` : ' Variant';
   return {
@@ -170,14 +174,18 @@ function buildInitialMetadata(job: GenerationJobRecord, item?: ItemDetail): Gene
 }
 
 function jobPrompt(job?: GenerationJobRecord) {
-  return job ? (job.edited_prompt_text || job.prompt_text || '').trim() : '';
+  const requested = job?.metadata?.requested as Record<string, unknown> | undefined;
+  return typeof requested?.prompt === 'string' ? requested.prompt : job ? (job.edited_prompt_text ?? job.prompt_text ?? '') : '';
 }
 
 function jobAspectRatio(job?: GenerationJobRecord) {
-  return generationAspectRatio(job?.parameters, job?.provider === 'openai_compatible');
+  const requested = job?.metadata?.requested;
+  const parameters = job?.provider === 'openai_compatible' && requested && typeof requested === 'object' ? { ...job.parameters, ...requested } : job?.parameters;
+  return generationAspectRatio(parameters, job?.provider === 'openai_compatible');
 }
 
 function jobQuality(job?: GenerationJobRecord) {
+  if (job?.provider === 'openai_compatible') return restoreCompatibleRecipe(job).quality;
   const value = job?.parameters?.quality;
   if (value === 'standard') return 'medium';
   return typeof value === 'string' && ['low', 'medium', 'high'].includes(value) ? value : job?.provider === 'xai_grok_oauth' ? 'medium' : 'high';
@@ -204,7 +212,7 @@ function canRetryFailedJob(job?: GenerationJobRecord) {
 }
 
 function isStaleRunningJob(job?: GenerationJobRecord) {
-  if (job?.status !== 'running') return false;
+  if (job?.status !== 'running' || job.provider === 'openai_compatible') return false;
   const started = Date.parse(job.started_at || job.updated_at || job.created_at);
   return Number.isFinite(started) && Date.now() - started > STALE_RUNNING_JOB_MS;
 }
@@ -217,7 +225,7 @@ function reportedModel(job?: GenerationJobRecord): string {
 }
 
 function jobModel(job?: GenerationJobRecord) {
-  if (job?.provider === 'openai_compatible') return job.model || 'Default';
+  if (job?.provider === 'openai_compatible') return restoreCompatibleRecipe(job).model || '—';
   if (job?.metadata?.generation_route === 'images') return job.model || 'gpt-image-2';
   const parameterModel = job?.parameters?.orchestrator_model;
   const metadataModel = job?.metadata?.orchestrator_model;
@@ -302,6 +310,7 @@ export default function GenerationPanel({
   onAccepted,
   t,
   initialJobId,
+  sourceImageId,
   clusters = [],
   tags = [],
   promptVariablesEnabled = false,
@@ -315,6 +324,7 @@ export default function GenerationPanel({
   onAccepted: (item?: ItemDetail, message?: string) => void;
   t: Translator;
   initialJobId?: string;
+  sourceImageId?: string;
   clusters?: ClusterRecord[];
   tags?: TagRecord[];
   promptVariablesEnabled?: boolean;
@@ -330,7 +340,12 @@ export default function GenerationPanel({
   const [provider, setProvider] = useState<string>(defaultAiProvider);
   const [aspectRatio, setAspectRatio] = useState('auto');
   const [quality, setQuality] = useState('high');
-  const [compatibleQuality, setCompatibleQuality] = useState('low');
+  const [compatibleRecipe, setCompatibleRecipe] = useState<CompatibleRecipe>({ model: '', quality: 'low', size: 'auto', background: 'auto', output_format: 'png' });
+  const restoredLibraryRecipeRef = useRef(false);
+  const [compatibleModelSelected, setCompatibleModelSelected] = useState(false);
+  const [customSize, setCustomSize] = useState(false);
+  const compatibleQuality = compatibleRecipe.quality;
+  const setCompatibleQuality = (quality: string) => setCompatibleRecipe(current => ({ ...current, quality }));
   const [grokQuality, setGrokQuality] = useState('medium');
   const [grokResolution, setGrokResolution] = useState('1k');
   const [openControl, setOpenControl] = useState<'provider' | 'aspect' | 'quality' | null>(null);
@@ -473,7 +488,11 @@ export default function GenerationPanel({
     : t('providerUnavailableForGeneration');
   const selectedProviderQueueState = providerQueueStates.find(state => state.provider === provider);
   const selectedProviderPauseSeconds = selectedProviderQueueState ? providerPauseSeconds(selectedProviderQueueState, queueClock) : 0;
-  const selectedModelLabel = selectedProvider?.model || selectedProvider?.default_image_model || (provider === 'xai_grok_oauth' ? 'grok-imagine-image-2.0' : '');
+  const selectedModelLabel = provider === 'openai_compatible' && compatibleModelSelected ? compatibleRecipe.model : selectedProvider?.model || selectedProvider?.default_image_model || (provider === 'xai_grok_oauth' ? 'grok-imagine-image-2.0' : '');
+  const effectiveRecipe = { ...compatibleRecipe, model: selectedModelLabel };
+  const compatibleError = provider === 'openai_compatible' ? compatibleValidation(effectiveRecipe) : undefined;
+  const compatibleSizeInfo = imageSizeInfo(compatibleRecipe.size, aspectRatio);
+  const currentQualityOptions = provider === 'openai_compatible' ? imageQualities(selectedModelLabel).map(value => ({ value, label: value })) : QUALITY_OPTIONS;
   const selectedOutputLabel = provider === 'xai_grok_oauth'
     ? `${optionLabel(GROK_QUALITY_OPTIONS, grokQuality, t)} · ${optionLabel(GROK_RESOLUTION_OPTIONS, grokResolution, t)}`
     : optionLabel(QUALITY_OPTIONS, provider === 'openai_compatible' ? compatibleQuality : quality, t);
@@ -484,7 +503,7 @@ export default function GenerationPanel({
   const [templateValues, setTemplateValues] = useState<Record<string, string>>({});
   const hasTemplateVariables = templateVariables.length > 0;
   const hasMissingTemplateValues = hasTemplateVariables && templateVariables.some(variable => !templateValues[variable.key]?.trim());
-  const resolvedPrompt = hasTemplateVariables ? resolvePromptTemplate(promptText, templateValues).trim() : promptText.trim();
+  const resolvedPrompt = hasTemplateVariables ? resolvePromptTemplate(promptText, templateValues) : promptText;
   const promptChangedFromSource = hasTemplateVariables ? resolvedPrompt !== defaultPrompt.trim() : promptText.trim() !== defaultPrompt.trim();
   const promptTemplateValues = useMemo(() => Object.fromEntries(templateVariables.map(variable => [variable.key, templateValues[variable.key] || ''])), [templateVariables, templateValues]);
   const templateVariableKeySignature = useMemo(() => templateVariables.map(variable => variable.key).join('\u0000'), [templateVariables]);
@@ -666,7 +685,7 @@ export default function GenerationPanel({
         setProviders(automatedProviders);
         const preferredProvider = automatedProviders.find(candidate => candidate.provider === defaultAiProvider);
         const initialProvider = preferredProvider || automatedProviders.find(providerCanGenerate) || automatedProviders[0];
-        if (initialProvider) {
+        if (initialProvider && !restoredLibraryRecipeRef.current) {
           setProvider(initialProvider.provider);
         }
       })
@@ -928,8 +947,9 @@ export default function GenerationPanel({
   };
 
   const createJob = async (count: GenerationSetCount = 1) => {
-    const prompt = promptText.trim();
-    if (!prompt || hasMissingTemplateValues || !resolvedPrompt || !selectedProviderCanGenerateDraft || (provider === 'manual_upload' && count !== 1)) return;
+    const prompt = promptText;
+    if (compatibleError) { setMessage(t(compatibleError)); return; }
+    if (!prompt.trim() || hasMissingTemplateValues || !resolvedPrompt || !selectedProviderCanGenerateDraft || (provider === 'manual_upload' && count !== 1)) return;
     const preservePausedReview = Boolean(batchReviewSession && batchReviewPaused);
     setBusy(true);
     setMessage('');
@@ -941,7 +961,7 @@ export default function GenerationPanel({
     try {
       const attachments = imageAttachmentPayload();
       const sourcePrompt = defaultPrompt || prompt;
-      const jobEditedPromptText = resolvedPrompt === sourcePrompt.trim() ? null : resolvedPrompt;
+      const jobEditedPromptText = resolvedPrompt === sourcePrompt ? null : resolvedPrompt;
       const templateParameters = hasTemplateVariables ? {
         prompt_template: prompt,
         prompt_template_values: promptTemplateValues,
@@ -951,7 +971,7 @@ export default function GenerationPanel({
         source_item_id: item?.id,
         mode: attachments.length > 0 ? 'image_edit' : 'text_to_image',
         provider,
-        model: selectedProvider?.model || selectedProvider?.default_image_model || (provider === 'openai_codex_oauth_native' ? 'gpt-image-2' : null),
+        model: selectedModelLabel || (provider === 'openai_codex_oauth_native' ? 'gpt-image-2' : null),
         prompt_language: defaultPromptLanguage,
         prompt_text: sourcePrompt,
         edited_prompt_text: jobEditedPromptText,
@@ -960,7 +980,7 @@ export default function GenerationPanel({
           requested_aspect_ratio: aspectRatio,
           aspect_ratio_prompt_injection: provider === 'openai_codex_oauth_native' && aspectRatio !== 'auto',
           ...(provider === 'openai_compatible'
-            ? { quality: compatibleQuality, n: 1 }
+            ? compatibleParameters(effectiveRecipe)
             : provider === 'openai_codex_oauth_native'
             ? { quality }
             : provider === 'xai_grok_oauth'
@@ -1587,7 +1607,8 @@ export default function GenerationPanel({
       setPromptText(jobPrompt(retryJob));
       setAspectRatio(jobAspectRatio(retryJob));
       if (retryJob.provider === 'openai_compatible') {
-        setCompatibleQuality(jobQuality(retryJob));
+        setCompatibleRecipe(restoreCompatibleRecipe(retryJob));
+        setCompatibleModelSelected(true);
       } else if (retryJob.provider === 'xai_grok_oauth') {
         setGrokQuality(jobQuality(retryJob) === 'low' ? 'low' : 'medium');
         setGrokResolution(jobResolution(retryJob));
@@ -1673,7 +1694,8 @@ export default function GenerationPanel({
       setPromptText(jobPrompt(retry));
       setAspectRatio(jobAspectRatio(retry));
       if (retryJob.provider === 'openai_compatible') {
-        setCompatibleQuality(jobQuality(retryJob));
+        setCompatibleRecipe(restoreCompatibleRecipe(retryJob));
+        setCompatibleModelSelected(true);
       } else if (retryJob.provider === 'xai_grok_oauth') {
         setGrokQuality(jobQuality(retryJob) === 'low' ? 'low' : 'medium');
         setGrokResolution(jobResolution(retryJob));
@@ -1740,7 +1762,8 @@ export default function GenerationPanel({
     setPromptText(jobPrompt(job));
     setAspectRatio(jobAspectRatio(job));
     if (job.provider === 'openai_compatible') {
-      setCompatibleQuality(jobQuality(job));
+      setCompatibleRecipe(restoreCompatibleRecipe(job));
+      setCompatibleModelSelected(true);
     } else if (job.provider === 'xai_grok_oauth') {
       setGrokQuality(jobQuality(job) === 'low' ? 'low' : 'medium');
       setGrokResolution(jobResolution(job));
@@ -1757,6 +1780,39 @@ export default function GenerationPanel({
       promptInputRef.current?.focus({ preventScroll: true });
     });
   };
+
+  useEffect(() => {
+    if (!item || initialJobId) return;
+    const sourceImage = sourceImageId ? item.images?.find(image => image.id === sourceImageId) : item.images?.find(image => image.generation_provider === 'openai_compatible');
+    if (!sourceImage) return;
+    let cancelled = false;
+    api.generationJobForImage(sourceImage.id).then(job => {
+      if (cancelled || restoredLibraryRecipeRef.current || job.provider !== 'openai_compatible') return;
+      restoredLibraryRecipeRef.current = true;
+      setProvider(job.provider);
+      setCompatibleRecipe(restoreCompatibleRecipe(job));
+      setCompatibleModelSelected(true);
+      setAspectRatio(jobAspectRatio(job));
+      setPromptText(jobPrompt(job));
+    }).catch(() => {
+      if (cancelled || sourceImage.generation_provider !== 'openai_compatible') return;
+      const generatedImages = item.images.filter(image => image.generation_provider === 'openai_compatible');
+      const prompt = generatedImages.length === 1 ? item.prompts.find(prompt => prompt.provenance?.provider === 'openai_compatible') : undefined;
+      const provenance = prompt?.provenance;
+      restoredLibraryRecipeRef.current = true;
+      setProvider('openai_compatible');
+      setCompatibleModelSelected(true);
+      setCompatibleRecipe(restoreCompatibleRecipe({
+        model: typeof provenance?.requested_model === 'string' ? provenance.requested_model : '',
+        parameters: provenance?.parameters as Record<string, unknown> | undefined,
+        metadata: provenance ? { requested: provenance.requested } : undefined,
+      }));
+      const requested = provenance?.requested as Record<string, unknown> | undefined;
+      if (typeof requested?.prompt === 'string') setPromptText(requested.prompt);
+      setMessage(t('imageMissingRecipe'));
+    });
+    return () => { cancelled = true; };
+  }, [item?.id, initialJobId, sourceImageId]);
 
   const copyJobPrompt = async (job: GenerationJobRecord) => {
     const text = jobPrompt(job);
@@ -2102,6 +2158,21 @@ export default function GenerationPanel({
                     </div>
                   </div>
                 )}
+                {provider === 'openai_compatible' && <div className="generation-image-settings">
+                  <label>{t('requestedImageModel')}<input list="compatible-image-models" aria-label={t('requestedImageModel')} value={selectedModelLabel} onChange={e => { setCompatibleModelSelected(true); setCompatibleRecipe(r => ({ ...r, model: e.target.value })); }} /><datalist id="compatible-image-models">{IMAGE25_MODELS.map(model => <option key={model} value={model} />)}</datalist></label>
+                  <small>{t('imageModelHelp')}</small>
+                  <label>{t('requestedImageSize')}<select aria-label={t('requestedImageSize')} value={customSize || !IMAGE_SIZES.includes(compatibleRecipe.size) ? 'custom' : compatibleRecipe.size} onChange={e => { setCustomSize(e.target.value === 'custom'); if(e.target.value !== 'custom') setCompatibleRecipe(r => ({ ...r, size: e.target.value, legacyDerived: false })); }}>{IMAGE_SIZES.map(size => <option key={size}>{size}</option>)}<option value="custom">{t('imageCustomSize')}</option></select></label>
+                  {(customSize || !IMAGE_SIZES.includes(compatibleRecipe.size)) && <div className="generation-image-dimensions">{['width', 'height'].map((label, index) => <label key={label}>{label}<input type="number" min="16" step="16" aria-label={label} value={compatibleRecipe.size.split('x')[index] || ''} onChange={e => setCompatibleRecipe(r => { const dimensions = r.size === 'auto' ? ['', ''] : r.size.split('x'); dimensions[index] = e.target.value; return { ...r, size: dimensions.join('x'), legacyDerived: false }; })} /></label>)}</div>}
+                  <small>{t('requestedImageSize')}: {compatibleRecipe.size} · {t('imageSizeHelp')}</small>
+                  {compatibleRecipe.legacyDerived && <small>{t('imageLegacyDerived')}</small>}
+                  {compatibleSizeInfo.experimental && <strong>{t('imageExperimental')}</strong>}
+                  {compatibleSizeInfo.conflict && <p role="status">{t('imageRatioConflict')}</p>}
+                  <div className="generation-image-dimensions"><label>{t('imageBackground')}<select value={compatibleRecipe.background} onChange={e => setCompatibleRecipe(r => ({ ...r, background: e.target.value }))}>{['auto', 'opaque', 'transparent'].map(value => <option key={value}>{value}</option>)}</select></label><label>{t('imageFormat')}<select value={compatibleRecipe.output_format} onChange={e => setCompatibleRecipe(r => ({ ...r, output_format: e.target.value }))}>{['png', 'jpeg', 'webp'].map(value => <option key={value}>{value}</option>)}</select></label></div>
+                  {compatibleRecipe.output_format !== 'png' && <label>{t('imageCompression')}<input type="number" min="0" max="100" value={compatibleRecipe.output_compression ?? ''} onChange={e => setCompatibleRecipe(r => ({ ...r, output_compression: e.target.value === '' ? undefined : Number(e.target.value) }))} /></label>}
+                  {compatibleError && <p role="alert">{t(compatibleError)}</p>}
+                  <small>{t('imageConfigured')}</small>
+                  <small>{t('imageLocalCancelNote')}</small>
+                </div>}
                 <div className={`generation-compact-controls${selectedProviderCanGenerateDraft ? '' : ' has-provider-attention'}`}>
                   <div className="generation-control-wrap generation-provider-control">
                     <button
@@ -2202,7 +2273,7 @@ export default function GenerationPanel({
                               })}
                             </div>
                           </>
-                        ) : QUALITY_OPTIONS.map(option => {
+                        ) : currentQualityOptions.map(option => {
                             const selected = (provider === 'openai_compatible' ? compatibleQuality : quality) === option.value;
                             return (
                               <button key={option.value} type="button" role="menuitemradio" aria-checked={selected} className={selected ? 'is-selected' : ''} onClick={() => { if (provider === 'openai_compatible') setCompatibleQuality(option.value); else setQuality(option.value); closeGenerationControl('quality'); }}>
@@ -2214,7 +2285,7 @@ export default function GenerationPanel({
                       </div>
                     )}
                   </div>
-                  {['xai_grok_oauth', 'openai_compatible'].includes(provider) && (
+                  {provider === 'xai_grok_oauth' && (
                     <div className="generation-control-wrap generation-model-control">
                       <button className="generation-control-trigger generation-model-trigger generation-has-long-value" type="button" disabled aria-label={`${t('queueModel')}: ${selectedModelLabel}`} title={selectedModelLabel}>
                         <img className="generation-control-icon" src={brainAiIcon} alt="" aria-hidden="true" />
@@ -2251,7 +2322,7 @@ export default function GenerationPanel({
                       className="primary generation-primary-action"
                       type="button"
                       onClick={() => createJob(1)}
-                      disabled={busy || !selectedProviderCanGenerateDraft || !promptText.trim() || hasMissingTemplateValues}
+                      disabled={busy || Boolean(compatibleError) || !selectedProviderCanGenerateDraft || !promptText.trim() || hasMissingTemplateValues}
                        aria-label={`${t('generate')} 1`}
                      >{t('generate')}</button>
                     <button
@@ -2278,7 +2349,7 @@ export default function GenerationPanel({
                           generationCountFocusOnOpenRef.current = true;
                           setGenerationCountMenuOpen(true);
                         }}
-                        disabled={busy || !selectedProviderCanGenerateDraft || !promptText.trim() || hasMissingTemplateValues}
+                        disabled={busy || Boolean(compatibleError) || !selectedProviderCanGenerateDraft || !promptText.trim() || hasMissingTemplateValues}
                       ><ChevronDown size={17} aria-hidden="true" /></button>
                     {generationCountMenuOpen && (
                        <div id="generation-count-menu" className="generation-count-menu" role="menu" aria-label={t('generateVariations')}>
@@ -2336,6 +2407,7 @@ export default function GenerationPanel({
              <button ref={fullscreenTriggerRef} className="modal-icon-button generation-fullscreen-overlay" onClick={toggleStageFullscreen} aria-label={t('viewFullscreen')} title={t('viewFullscreen')}><Maximize2 size={16} /></button>
              {(!selectedStageJob || !jobResultUrl(selectedStageJob)) && renderSiblingNavigation()}
             {renderStage()}
+            {selectedStageJob?.provider === 'openai_compatible' && <details className="generation-image-details"><summary>{t('generationRecord')}</summary><p>{t('imageLocalCancelNote')}</p>{compatibleMismatches(selectedStageJob).map(key => <p role="status" key={key}>{t(key)}</p>)}{[['imageRequestDetails', selectedStageJob.metadata?.requested], ['imageResponseDetails', selectedStageJob.metadata?.response], ['imageDecodedDetails', selectedStageJob.metadata?.decoded_image], ['imageDiagnostics', selectedStageJob.metadata?.error_diagnostics || selectedStageJob.metadata?.request_diagnostics]].map(([label, value]) => <div key={String(label)}><strong>{t(String(label) as Parameters<Translator>[0])}</strong><pre>{value ? JSON.stringify(value, null, 2) : t('notReported')}</pre></div>)}<p>{selectedStageJob.started_at || selectedStageJob.created_at} → {selectedStageJob.completed_at || '—'}</p></details>}
           </section>
         </div> : null}
 
@@ -2477,7 +2549,7 @@ export default function GenerationPanel({
                     <div><dt>{t('providers')}</dt><dd>{providers.find(providerStatus => providerStatus.provider === reviewJob.provider)?.display_name || (reviewJob.provider === 'openai_codex_oauth_native' ? 'ChatGPT / Codex OAuth' : t('providers'))}</dd></div>
                     <div><dt>{reviewJob.provider === 'openai_compatible' ? t('requestedImageModel') : t('queueModel')}</dt><dd>{jobModel(reviewJob)}</dd></div>
                     {reviewJob.provider === 'openai_compatible' && <>
-                      <div><dt>{t('requestedImageSize')}</dt><dd>{String(reviewJob.parameters?.size || '—')}</dd></div>
+                      <div><dt>{t('requestedImageSize')}</dt><dd>{restoreCompatibleRecipe(reviewJob).size}</dd></div>
                       <div><dt>{t('returnedImageModel')}</dt><dd>{reportedModel(reviewJob) || t('notReported')}</dd></div>
                       <div><dt>{t('returnedImageDimensions')}</dt><dd>{reviewJob.result_width && reviewJob.result_height ? `${reviewJob.result_width} × ${reviewJob.result_height}` : '—'}</dd></div>
                     </>}

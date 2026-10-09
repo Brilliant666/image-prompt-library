@@ -317,7 +317,43 @@ class GenerationJobRepository:
         init_db(self.library_path)
         self.items = ItemRepository(self.library_path)
 
+    def _freeze_compatible_request(self, payload: GenerationJobCreate) -> GenerationJobCreate:
+        if payload.provider != "openai_compatible":
+            return payload
+        # Freeze before queueing, so changing provider defaults cannot alter a batch.
+        from .openai_compatible import OpenAICompatibleConfig, normalize_image_parameters
+        parameters = dict(payload.parameters or {})
+        if payload.model:
+            parameters["model"] = payload.model
+        default_model = ""
+        if not parameters.get("model"):
+            default_model = OpenAICompatibleConfig(library_path=self.library_path).read()["model"]
+        parameters = normalize_image_parameters(parameters, default_model=default_model)
+        return payload.model_copy(update={"model": parameters["model"], "parameters": parameters})
+
+    def _restore_compatible_request(self, job: GenerationJobRecord) -> GenerationJobRecord:
+        if job.provider != "openai_compatible":
+            return job
+        parameters = dict(job.parameters or {})
+        requested = job.metadata.get("requested", {})
+        if isinstance(requested, dict):
+            for key in ("model", "quality", "size", "requested_aspect_ratio", "background", "output_format", "output_compression"):
+                if key in requested:
+                    parameters[key] = requested[key]
+        model = parameters.get("model") or job.model
+        if not model:
+            raise GenerationJobConflict("This legacy job has no recorded request model. Use it as a draft and explicitly choose a model before generating.")
+        return job.model_copy(update={"model": model, "parameters": parameters})
+
+    def job_for_image(self, image_id: str) -> GenerationJobRecord:
+        with connect(self.library_path) as conn:
+            row = conn.execute("SELECT * FROM generation_jobs WHERE accepted_image_id=? ORDER BY created_at DESC LIMIT 1", (image_id,)).fetchone()
+        if row is None:
+            raise KeyError(image_id)
+        return self._record_from_row(row)
+
     def create_job(self, payload: GenerationJobCreate) -> GenerationJobRecord:
+        payload = self._freeze_compatible_request(payload)
         if payload.source_item_id:
             self.items.get_item(payload.source_item_id)
         parameters = sanitize_generation_parameters(payload.parameters)
@@ -749,7 +785,7 @@ class GenerationJobRepository:
             raise GenerationJobConflict(f"Generation job must be queued or failed before run; current status is {current.status}")
         return self.get_job(job_id)
 
-    def mark_failed(self, job_id: str, error: str, retry_after_seconds: int | None = None) -> GenerationJobRecord:
+    def mark_failed(self, job_id: str, error: str, retry_after_seconds: int | None = None, *, diagnostics: dict | None = None) -> GenerationJobRecord:
         timestamp = now()
         redacted_error = sanitize_generation_error(error)
         with connect(self.library_path) as conn:
@@ -764,6 +800,8 @@ class GenerationJobRepository:
                 metadata = {}
             metadata = sanitize_generation_parameters(metadata, redact_image_data=True)
             metadata["error_kind"] = _classify_error(str(error or ""))
+            if diagnostics is not None:
+                metadata["error_diagnostics"] = sanitize_generation_parameters(diagnostics, redact_image_data=True)
             if retry_after_seconds is not None:
                 metadata["retry_after_seconds"] = max(0, min(300, int(retry_after_seconds)))
             cursor = conn.execute(
@@ -794,6 +832,8 @@ class GenerationJobRepository:
 
     def mark_stale_running_failed(self, job_id: str) -> GenerationJobRecord:
         job = self.get_job(job_id)
+        if job.provider == "openai_compatible":
+            raise GenerationJobConflict("Elapsed time alone cannot establish failure of a paid image request. Check the service logs before resubmitting; local cancellation does not cancel upstream work or billing.")
         if job.status != "running":
             raise GenerationJobConflict(f"Only running generation jobs can be marked failed; current status is {job.status}")
         started_at = _parse_timestamp(job.started_at or job.updated_at)
@@ -1549,8 +1589,8 @@ class GenerationJobRepository:
         except Exception:
             self._release_acceptance(job_id, claim_token)
             raise
-        prompt_text = (job.edited_prompt_text or job.prompt_text).strip()
-        if not prompt_text:
+        prompt_text = job.edited_prompt_text if job.edited_prompt_text is not None else job.prompt_text
+        if not prompt_text.strip():
             self._release_acceptance(job_id, claim_token)
             raise GenerationJobConflict("Generation job has no prompt text for a new item")
         overrides = overrides or GenerationJobAcceptAsNewItemRequest()
@@ -1569,7 +1609,10 @@ class GenerationJobRepository:
             provenance["requested_model"] = job.model
             provenance["requested"] = sanitize_generation_parameters(job.metadata.get("requested", {}), redact_image_data=True)
             provenance["response"] = sanitize_generation_parameters(job.metadata.get("response", {}), redact_image_data=True)
-            provenance["decoded_image"] = {"width": job.result_width, "height": job.result_height}
+            provenance["decoded_image"] = sanitize_generation_parameters(job.metadata.get("decoded_image", {"width": job.result_width, "height": job.result_height}), redact_image_data=True)
+            for key in ("mismatches", "request_diagnostics"):
+                if key in job.metadata:
+                    provenance[key] = sanitize_generation_parameters({key: job.metadata[key]}, redact_image_data=True)[key]
         try:
             if overrides.prompts:
                 prompts = []
@@ -1989,6 +2032,7 @@ class GenerationJobRepository:
             job = self._record_from_row(row)
             if job.status != "failed":
                 raise GenerationJobConflict(f"Only failed generation jobs can be retried; current status is {job.status}")
+            job = self._restore_compatible_request(job)
             prepared_parameters, reference_image_copies = self._prepare_reference_input_clones(
                 retry_id,
                 sanitize_generation_parameters(job.parameters),
@@ -2067,6 +2111,7 @@ class GenerationJobRepository:
             if isinstance(retry_id, str) and retry_id:
                 return GenerationJobRetryResult(discarded_job=pending, retry_job=self.get_job(retry_id))
         job = self._clear_stale_acceptance_claim(job_id)
+        job = self._restore_compatible_request(job)
         if job.status == "accepted" or job.accepted_image_id:
             raise GenerationJobConflict("Saved generation jobs cannot be retried. Create a variant instead.")
         if job.status != "succeeded" or not job.result_path:
@@ -2177,6 +2222,7 @@ class GenerationJobRepository:
         return self.get_job(job_id)
 
     def create_job_set(self, payload: GenerationJobCreate, count: int) -> GenerationJobSetRecord:
+        payload = self._freeze_compatible_request(payload)
         if count not in {1, 3, 5, 10}:
             raise GenerationJobConflict("Generation set count must be one of 1, 3, 5, or 10")
         if payload.provider == "manual_upload" and count != 1:
