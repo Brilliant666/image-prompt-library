@@ -2187,7 +2187,7 @@ html:lang(zh-Hans) .editor-head h2{
 .generation-result-facts dd { margin:0;overflow-wrap:anywhere; }
 .generation-result-diagnostics summary { cursor:pointer;margin-top:8px; }
 .generation-result-summary pre { white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px; }
-.generation-fullscreen-frame .generation-result-image.generation-result-fade-in { position:static;inset:auto;width:auto;height:auto;max-width:100%;max-height:100%;background:transparent; }
+.generation-fullscreen-frame .generation-result-image.generation-result-fade-in { position:absolute;inset:auto;left:50%;top:50%;translate:-50% -50%;width:auto;height:auto;max-width:100%;max-height:100%;background:transparent; }
 .generation-fullscreen-frame .generation-result-image.has-transparency { background-color:#eee;background-image:conic-gradient(#ddd 25%,transparent 0 50%,#ddd 0 75%,transparent 0);background-size:20px 20px; }
 @media(max-width:760px) { .generation-result-column { overflow:visible; } .generation-result-summary { max-height:none; } }
 
