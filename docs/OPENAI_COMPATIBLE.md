@@ -12,7 +12,7 @@ Select the provider in Config or the generation composer. This provider supports
 
 ## Requests and results
 
-Text-only requests use `POST /v1/images/generations`. Requests with reference images use multipart `POST /v1/images/edits`, retaining reference order. Up to four references are supported to match the existing queue. Each request asks for one image; defaults are `1024x1024` and `low`. The service must actually support the requested model, quality and size.
+Text-only requests use `POST /v1/images/generations`. Requests with reference images use multipart `POST /v1/images/edits`, retaining reference order. Up to four references are supported to match the existing queue. Each request asks for one image; defaults are automatic aspect ratio and `low` quality. The composer reuses the upstream aspect-ratio menu. The adapter translates `auto` to `size=auto`, `1:1` to `1024x1024`, `3:4` to `864x1152`, `9:16` to `720x1280`, `4:3` to `1152x864`, and `16:9` to `1280x720`. These are application defaults, not provider capability limits. The fixed sizes preserve each selected ratio exactly with dimensions divisible by 16. The service must actually support the requested model, quality and size; it may return different dimensions. Selected ratio, transmitted size and decoded dimensions are retained separately. Unchanged retries of older jobs retain their explicit size.
 
 Generation POST requests are never automatically retried or redirected. Failed or interrupted jobs remain failed. A timeout does not establish whether the service charged the request: check the service before manually retrying. Explicit retry is a new request.
 

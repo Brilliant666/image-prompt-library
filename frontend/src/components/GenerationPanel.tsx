@@ -7,6 +7,7 @@ import qualityIcon from '../assets/generation-controls/quality.png';
 import { api, mediaUrl } from '../api/client';
 import type { ClusterRecord, GenerationJobAcceptAsNewItemPayload, GenerationJobCreate, GenerationJobRecord, GenerationJobSetRecord, GenerationProviderQueueState, GenerationProviderStatus, GenerationSetCount, ImageRecord, ItemDetail, ItemSummary, TagRecord, AiProvider } from '../types';
 import type { Translator } from '../utils/i18n';
+import { generationAspectRatio } from '../utils/generationAspectRatio';
 import { providerPauseSeconds } from '../utils/generationSets';
 import { downloadFileName } from '../utils/images';
 import { generationFailure } from '../utils/generationFailures';
@@ -172,8 +173,7 @@ function jobPrompt(job?: GenerationJobRecord) {
 }
 
 function jobAspectRatio(job?: GenerationJobRecord) {
-  const value = job?.parameters?.requested_aspect_ratio;
-  return typeof value === 'string' && value ? value : 'auto';
+  return generationAspectRatio(job?.parameters, job?.provider === 'openai_compatible');
 }
 
 function jobQuality(job?: GenerationJobRecord) {
@@ -330,7 +330,6 @@ export default function GenerationPanel({
   const [aspectRatio, setAspectRatio] = useState('auto');
   const [quality, setQuality] = useState('high');
   const [compatibleQuality, setCompatibleQuality] = useState('low');
-  const [compatibleSize, setCompatibleSize] = useState('1024x1024');
   const [grokQuality, setGrokQuality] = useState('medium');
   const [grokResolution, setGrokResolution] = useState('1k');
   const [openControl, setOpenControl] = useState<'provider' | 'aspect' | 'quality' | null>(null);
@@ -957,10 +956,10 @@ export default function GenerationPanel({
         edited_prompt_text: jobEditedPromptText,
         reference_image_ids: [],
         parameters: {
-          ...(provider === 'openai_compatible' ? {} : { requested_aspect_ratio: aspectRatio }),
+          requested_aspect_ratio: aspectRatio,
           aspect_ratio_prompt_injection: provider === 'openai_codex_oauth_native' && aspectRatio !== 'auto',
           ...(provider === 'openai_compatible'
-            ? { quality: compatibleQuality, size: compatibleSize, n: 1 }
+            ? { quality: compatibleQuality, n: 1 }
             : provider === 'openai_codex_oauth_native'
             ? { quality }
             : provider === 'xai_grok_oauth'
@@ -1588,7 +1587,6 @@ export default function GenerationPanel({
       setAspectRatio(jobAspectRatio(retryJob));
       if (retryJob.provider === 'openai_compatible') {
         setCompatibleQuality(jobQuality(retryJob));
-        setCompatibleSize(typeof retryJob.parameters?.size === 'string' ? retryJob.parameters.size : '1024x1024');
       } else if (retryJob.provider === 'xai_grok_oauth') {
         setGrokQuality(jobQuality(retryJob) === 'low' ? 'low' : 'medium');
         setGrokResolution(jobResolution(retryJob));
@@ -1675,7 +1673,6 @@ export default function GenerationPanel({
       setAspectRatio(jobAspectRatio(retry));
       if (retryJob.provider === 'openai_compatible') {
         setCompatibleQuality(jobQuality(retryJob));
-        setCompatibleSize(typeof retryJob.parameters?.size === 'string' ? retryJob.parameters.size : '1024x1024');
       } else if (retryJob.provider === 'xai_grok_oauth') {
         setGrokQuality(jobQuality(retryJob) === 'low' ? 'low' : 'medium');
         setGrokResolution(jobResolution(retryJob));
@@ -1743,7 +1740,6 @@ export default function GenerationPanel({
     setAspectRatio(jobAspectRatio(job));
     if (job.provider === 'openai_compatible') {
       setCompatibleQuality(jobQuality(job));
-      setCompatibleSize(typeof job.parameters?.size === 'string' ? job.parameters.size : '1024x1024');
     } else if (job.provider === 'xai_grok_oauth') {
       setGrokQuality(jobQuality(job) === 'low' ? 'low' : 'medium');
       setGrokResolution(jobResolution(job));
@@ -2150,16 +2146,16 @@ export default function GenerationPanel({
                     )}
                   </div>
                   <div className="generation-control-wrap">
-                     <button ref={element => { controlTriggerRefs.current.aspect = element; }} className="generation-control-trigger generation-aspect-trigger" type="button" onClick={() => setOpenControl(openControl === 'aspect' ? null : 'aspect')} aria-label={provider === 'openai_compatible' ? `Size: ${compatibleSize}` : `${t('queueAspectRatio')}: ${optionLabel(ASPECT_RATIO_OPTIONS, aspectRatio, t)}`} title={provider === 'openai_compatible' ? `Size: ${compatibleSize}` : `${t('queueAspectRatio')}: ${optionLabel(ASPECT_RATIO_OPTIONS, aspectRatio, t)}`}>
+                     <button ref={element => { controlTriggerRefs.current.aspect = element; }} className="generation-control-trigger generation-aspect-trigger" type="button" onClick={() => setOpenControl(openControl === 'aspect' ? null : 'aspect')} aria-label={`${t('queueAspectRatio')}: ${optionLabel(ASPECT_RATIO_OPTIONS, aspectRatio, t)}`} title={`${t('queueAspectRatio')}: ${optionLabel(ASPECT_RATIO_OPTIONS, aspectRatio, t)}`}>
                       <img className="generation-control-icon" src={aspectRatioIcon} alt="" aria-hidden="true" />
-                      <span className="generation-control-value">{provider === 'openai_compatible' ? compatibleSize : optionLabel(ASPECT_RATIO_OPTIONS, aspectRatio, t)}</span>
+                      <span className="generation-control-value">{optionLabel(ASPECT_RATIO_OPTIONS, aspectRatio, t)}</span>
                     </button>
                     {openControl === 'aspect' && (
                       <div className="generation-control-popover" role="menu">
-                        {(provider === 'openai_compatible' ? [{ value: '1024x1024', label: '1024x1024' }, { value: '1024x1536', label: '1024x1536' }, { value: '1536x1024', label: '1536x1024' }] : ASPECT_RATIO_OPTIONS).map(option => {
-                          const selected = (provider === 'openai_compatible' ? compatibleSize : aspectRatio) === option.value;
+                        {ASPECT_RATIO_OPTIONS.map(option => {
+                          const selected = aspectRatio === option.value;
                           return (
-                            <button key={option.value} type="button" role="menuitemradio" aria-checked={selected} className={selected ? 'is-selected' : ''} onClick={() => { if (provider === 'openai_compatible') setCompatibleSize(option.value); else setAspectRatio(option.value); closeGenerationControl('aspect'); }}>
+                            <button key={option.value} type="button" role="menuitemradio" aria-checked={selected} className={selected ? 'is-selected' : ''} onClick={() => { setAspectRatio(option.value); closeGenerationControl('aspect'); }}>
                               <span className="generation-control-option-label">{optionLabel(ASPECT_RATIO_OPTIONS, option.value, t)}</span>
                               {selected && <Check className="generation-control-option-check" size={15} aria-hidden="true" />}
                             </button>
@@ -2425,7 +2421,7 @@ export default function GenerationPanel({
                   {jobResultUrl(job) ? <img src={jobResultUrl(job)} alt="" /> : <span className="generation-history-placeholder">{statusLabel(job.status, t, isUsedAsGenerationReference(job))}</span>}
                 </span>
                 <span className="generation-history-status-grid" aria-hidden="true">
-                  <span className="generation-history-cell"><b>{job.provider === 'openai_compatible' ? t('requestedImageSize') : t('queueAspectRatio')}</b><em>{job.provider === 'openai_compatible' ? String(job.parameters?.size || '—') : optionLabel(ASPECT_RATIO_OPTIONS, jobAspectRatio(job), t)}</em></span>
+                  <span className="generation-history-cell"><b>{job.provider === 'openai_compatible' && !job.parameters?.requested_aspect_ratio ? t('requestedImageSize') : t('queueAspectRatio')}</b><em>{job.provider === 'openai_compatible' && !job.parameters?.requested_aspect_ratio ? String(job.parameters?.size || '—') : optionLabel(ASPECT_RATIO_OPTIONS, jobAspectRatio(job), t)}</em></span>
                   <span className="generation-history-cell"><b>{t('queueQuality')}</b><em>{optionLabel(QUALITY_OPTIONS, jobQuality(job), t)}</em></span>
                   {job.provider === 'xai_grok_oauth' && <span className="generation-history-cell"><b>{t('generationResolution')}</b><em>{optionLabel(GROK_RESOLUTION_OPTIONS, jobResolution(job), t)}</em></span>}
                   <span className="generation-history-cell"><b>{t('queueModel')}</b><em>{jobModel(job)}</em></span>

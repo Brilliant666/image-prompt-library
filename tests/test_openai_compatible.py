@@ -58,6 +58,30 @@ def test_decodes_image_and_separates_requested_response(config):
     assert metadata["decoded_image"]["width"] == 8
 
 
+@pytest.mark.parametrize("ratio,size", [("auto", "auto"), ("1:1", "1024x1024"), ("3:4", "864x1152"), ("9:16", "720x1280"), ("4:3", "1152x864"), ("16:9", "1280x720")])
+def test_aspect_ratio_translates_only_at_transport(config, ratio, size):
+    def handler(request):
+        payload = json.loads(request.content)
+        assert payload["size"] == size
+        assert "requested_aspect_ratio" not in payload
+        return httpx.Response(200, json={"data": [{"b64_json": base64.b64encode(png()).decode()}]})
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        _, _, metadata = OpenAICompatibleProvider(config, client).generate("Test", {"requested_aspect_ratio": ratio})
+    assert metadata["requested"]["requested_aspect_ratio"] == ratio
+    assert metadata["requested"]["size"] == size
+    assert metadata["response"]["size"] is None
+    assert metadata["decoded_image"]["width"] == 8
+
+
+def test_legacy_size_and_invalid_ratio(config):
+    from backend.services.openai_compatible import requested_image_size
+    assert requested_image_size({"size": "1024x1536"}) == "1024x1536"
+    assert requested_image_size({}) == "auto"
+    with httpx.Client(transport=httpx.MockTransport(lambda request: pytest.fail("Must not submit invalid ratio"))) as client:
+        with pytest.raises(OpenAICompatibleError):
+            OpenAICompatibleProvider(config, client).generate("Test", {"requested_aspect_ratio": "bad"})
+
+
 @pytest.mark.parametrize("status", [302, 401, 429, 500])
 def test_no_retry_or_redirect_and_errors_do_not_leak(config, status):
     calls = []

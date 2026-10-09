@@ -20,11 +20,25 @@ from backend.services.image_store import MAX_IMAGE_PIXELS
 PROVIDER_ID = "openai_compatible"
 AUTH_MODE = "api_key"
 MAX_INPUT_IMAGES = 4
+ASPECT_RATIO_SIZES = {
+    "auto": "auto", "1:1": "1024x1024", "3:4": "864x1152",
+    "9:16": "720x1280", "4:3": "1152x864", "16:9": "1280x720",
+}
 _config_lock = Lock()
 
 
 class OpenAICompatibleError(RuntimeError):
     pass
+
+
+def requested_image_size(parameters):
+    # Older jobs retain their explicit size when retried unchanged.
+    ratio = parameters.get("requested_aspect_ratio")
+    if ratio is None:
+        return str(parameters.get("size") or "auto")
+    if ratio not in ASPECT_RATIO_SIZES:
+        raise OpenAICompatibleError("Unsupported requested aspect ratio")
+    return ASPECT_RATIO_SIZES[ratio]
 
 
 def normalize_base_url(value: str) -> str:
@@ -189,7 +203,7 @@ class OpenAICompatibleProvider:
         if not isinstance(model, str) or not model.strip():
             raise OpenAICompatibleError("Image model is required")
         payload = {"model": model.strip(), "prompt": prompt, "n": 1,
-                   "size": str(parameters.get("size") or "1024x1024"), "quality": str(parameters.get("quality") or "low")}
+                   "size": requested_image_size(parameters), "quality": str(parameters.get("quality") or "low")}
         if parameters.get("output_format"):
             payload["output_format"] = str(parameters["output_format"])
         inputs = input_images or []
@@ -227,6 +241,8 @@ class OpenAICompatibleProvider:
         except Exception:
             raise OpenAICompatibleError("Image API returned no valid decodable base64 image; URL-only responses are not supported") from None
         requested = {k: v for k, v in payload.items() if k != "prompt"}
+        if "requested_aspect_ratio" in parameters:
+            requested["requested_aspect_ratio"] = parameters["requested_aspect_ratio"]
         metadata = {"provider": PROVIDER_ID, "auth_mode": AUTH_MODE, "requested": requested, "response": actual,
                     "model": actual.get("model"), "image_model": actual.get("model"), "decoded_image": {"width": width, "height": height, "format": fmt},
                     "mode": "image_edit" if inputs else "text_to_image", "input_image_count": len(inputs)}

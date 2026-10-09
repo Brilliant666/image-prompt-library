@@ -20,6 +20,7 @@ const { resolveOriginalPrompt, resolvePromptText } = await importTypescript('../
 const { downloadFileName, imageDisplayPath, imageThumbnailPath, selectPrimaryImage } = await importTypescript('../frontend/src/utils/images.ts');
 const { generationFailure } = await importTypescript('../frontend/src/utils/generationFailures.ts');
 const { generationSetProgressText, providerPauseSeconds } = await importTypescript('../frontend/src/utils/generationSets.ts');
+const { generationAspectRatio } = await importTypescript('../frontend/src/utils/generationAspectRatio.ts');
 const { APPEARANCE_STORAGE_KEY, DEFAULT_APPEARANCE, normalizeAppearance } = await importTypescript('../frontend/src/utils/appearance.ts');
 const { DEFAULT_AI_PROVIDER_STORAGE_KEY, resolveDefaultAiProvider } = await importTypescript('../frontend/src/utils/defaultAiProvider.ts');
 const {
@@ -38,6 +39,23 @@ const {
   retainPendingRetryJobIds,
 } = await importTypescript('../frontend/src/utils/generationSiblings.ts');
 const { makeTranslator } = await importTypescript('../frontend/src/utils/i18n.ts');
+
+test('generation aspect restoration preserves intent without relabeling legacy dimensions', () => {
+  for (const ratio of ['auto', '1:1', '3:4', '9:16', '4:3', '16:9']) {
+    assert.equal(generationAspectRatio({ requested_aspect_ratio: ratio, size: '1024x1024' }, true), ratio);
+  }
+  assert.equal(generationAspectRatio({ size: '1024x1024' }, true), '1:1');
+  assert.equal(generationAspectRatio({ size: '768x1024' }, true), '3:4');
+  assert.equal(generationAspectRatio({ size: '576x1024' }, true), '9:16');
+  assert.equal(generationAspectRatio({ size: '1024x768' }, true), '4:3');
+  assert.equal(generationAspectRatio({ size: '1024x576' }, true), '16:9');
+  assert.equal(generationAspectRatio({ size: '1024x1536' }, true), 'auto');
+  assert.equal(generationAspectRatio({ size: '1536x1024' }, true), 'auto');
+  assert.equal(generationAspectRatio({ size: '1024x1024' }), 'auto');
+  for (const size of ['auto', '0x0', '-1x1024', 'invalid']) {
+    assert.equal(generationAspectRatio({ size }, true), 'auto');
+  }
+});
 
 test('search helpers parse sort operators and supported filter chips', () => {
   assert.deepEqual(parseSearchSortQuery('  cats sort:title  tag:poster '), {
