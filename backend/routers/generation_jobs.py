@@ -60,7 +60,9 @@ def _sanitize_generation_job_parameters(parameters: object) -> object:
     return redacted
 
 
-def _sanitize_generation_job_record(job: GenerationJobRecord) -> GenerationJobRecord:
+def _sanitize_generation_job_record(job: GenerationJobRecord, repository: GenerationJobRepository | None = None) -> GenerationJobRecord:
+    if repository is not None:
+        job = repository.prepare_recipe_references(job)
     payload = job.model_dump()
     payload["parameters"] = _sanitize_generation_job_parameters(payload.get("parameters"))
     metadata = payload.get("metadata")
@@ -76,16 +78,16 @@ def _sanitize_generation_job_record(job: GenerationJobRecord) -> GenerationJobRe
     return GenerationJobRecord(**payload)
 
 
-def _sanitize_generation_job_list(jobs: GenerationJobList) -> GenerationJobList:
+def _sanitize_generation_job_list(jobs: GenerationJobList, repository: GenerationJobRepository | None = None) -> GenerationJobList:
     return GenerationJobList(
-        jobs=[_sanitize_generation_job_record(job) for job in jobs.jobs],
+        jobs=[_sanitize_generation_job_record(job, repository) for job in jobs.jobs],
         total=jobs.total,
         limit=jobs.limit,
         offset=jobs.offset,
         status_counts=jobs.status_counts,
         generation_sets=[
             GenerationJobSetRecord(
-                **{**group.model_dump(), "jobs": [_sanitize_generation_job_record(job) for job in group.jobs]}
+                **{**group.model_dump(), "jobs": [_sanitize_generation_job_record(job, repository) for job in group.jobs]}
             )
             for group in jobs.generation_sets
         ],
@@ -143,7 +145,7 @@ def list_generation_jobs(
             source_item_id=source_item_id,
             limit=limit,
             offset=offset,
-        )
+        ), repo(request)
     )
 
 
@@ -174,7 +176,7 @@ def cancel_remaining_generation_job_set(generation_group_id: str, request: Reque
 @router.get("/for-image/{image_id}", response_model=GenerationJobRecord)
 def get_generation_recipe_for_image(image_id: str, request: Request):
     try:
-        return _sanitize_generation_job_record(repo(request).job_for_image(image_id))
+        return _sanitize_generation_job_record(repo(request).job_for_image(image_id), repo(request))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="No saved generation recipe for this image") from exc
 
@@ -182,7 +184,7 @@ def get_generation_recipe_for_image(image_id: str, request: Request):
 @router.get("/{job_id}", response_model=GenerationJobRecord)
 def get_generation_job(job_id: str, request: Request):
     try:
-        return _sanitize_generation_job_record(repo(request).get_job(job_id))
+        return _sanitize_generation_job_record(repo(request).get_job(job_id), repo(request))
     except KeyError as exc:
         raise HTTPException(status_code=404) from exc
 

@@ -1,12 +1,13 @@
 import type { UiLanguage } from '../types';
 export type { UiLanguage } from '../types';
 type TranslationKey =
+  | 'recipeInputsMissing' | 'recipeTextOnly' | 'recipeRestoreLoading'
   | 'generationXhigh' | 'generationMax'
   | 'imageHistoricalSize'
   | 'sub2apiOutputLimit' | 'sub2apiLegacyQuality' | 'imageOutputOptions' | 'imageWidth' | 'imageHeight' | 'imageQualityMismatch'
   | 'imageCompositionHelp' | 'imageResultMismatch' | 'imageResultDecoded' | 'imageResultUnverified' | 'imageRequestedOutput' | 'imageActualOutput' | 'imageActualTransparent' | 'imageActualOpaque' | 'imageMoreDetails' | 'imageRawRecords' | 'imageServiceQuality' | 'imageServiceSize' | 'imageRequestId' | 'imageElapsed' | 'imageHttpStatus'
   | 'imageMissingRecipe' | 'imageBackgroundInvalid' | 'imageFormatInvalid'
-  | 'imageSettings' | 'imageConfigured' | 'imageCustomSize' | 'imageBackground' | 'imageFormat' | 'imageCompression' | 'imageModelHelp' | 'imageSizeHelp' | 'imageExperimental' | 'imageRatioConflict' | 'imageModelRequired' | 'imageQualityUnsupported' | 'imageTransparencyConflict' | 'imageCompressionInvalid' | 'imageSizeInvalid' | 'imageLegacyDerived' | 'imageRequestDetails' | 'imageResponseDetails' | 'imageDecodedDetails' | 'imageSizeMismatch' | 'imageFormatMismatch' | 'imageAlphaMismatch' | 'imageLocalCancelNote' | 'imageDiagnostics'
+  | 'imageSettings' | 'imageConfigured' | 'imageCustomSize' | 'imageBackground' | 'imageFormat' | 'imageCompression' | 'imageModelHelp' | 'imageSizeHelp' | 'imageExperimental' | 'imageRatioConflict' | 'imageModelRequired' | 'imageQualityUnsupported' | 'imageTransparencyConflict' | 'imageCompressionInvalid' | 'imageSizeInvalid' | 'imageLegacyDerived' | 'imageRequestDetails' | 'imageResponseDetails' | 'imageDecodedDetails' | 'imageAspectRatioMismatch' | 'imageSizeMismatch' | 'imageFormatMismatch' | 'imageAlphaMismatch' | 'imageLocalCancelNote' | 'imageDiagnostics'
   | 'filters' | 'searchAria' | 'searchPlaceholder' | 'config' | 'referencesShown' | 'collectionChip'
   | 'sortChip' | 'sortByUpdated' | 'sortByCreated' | 'sortByOldest' | 'sortByTitle' | 'sortByTitleDesc' | 'sortBySource' | 'sortByModel'
   | 'explore' | 'cards' | 'uiLanguage' | 'promptCopyLanguage' | 'promptCopyLanguageHelp' | 'providers'
@@ -79,7 +80,7 @@ const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
     imageQualityMismatch: '服務回報品質與請求不一致。',
 
     imageCompositionHelp: '構圖比例僅作提示；實際請求尺寸以像素設定為準。',
-    imageResultMismatch: '已返回圖片 · 與請求不一致',
+    imageResultMismatch: '已返回圖片 · 請檢查設定或輸出差異',
     imageResultDecoded: '已返回並解碼圖片',
     imageResultUnverified: '尚無已驗證的圖片結果',
     imageRequestedOutput: '請求輸出',
@@ -95,6 +96,9 @@ const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
     imageHttpStatus: 'HTTP 狀態',
     newVariantCreated: '已建立新變體參考', imageAddedToItem: '圖片已加入參考', viewItem: '檢視參考', dismiss: '關閉提示', restartRequired: '需要重新啟動', updateAvailable: '有可用更新',
     suggestTitle: '建議標題', suggestingTitle: '建議中…', suggestedTitle: '建議', titleSuggestionProvider: 'via ChatGPT', useSuggestedTitle: '採用', titleSuggestionLoginRequired: '請先在設定連接 ChatGPT / Codex。', titleSuggestionRateLimited: '暫時太多請求，請稍後再試。', titleSuggestionUnavailable: '暫時無法建議標題。', titleSuggestionFailed: '無法建議標題。',
+    recipeInputsMissing: '参考图未能恢复，请按原顺序补图，或明确转为纯文生图：',
+    recipeTextOnly: '清除参考图并转为纯文生图',
+    recipeRestoreLoading: '正在恢复原始参考图…',
     imageMissingRecipe: '未找到原任务；仅恢复可确认的配方。未知模型请明确选择。',
     imageBackgroundInvalid: '请选择合法背景。', imageFormatInvalid: '请选择 PNG、JPEG 或 WebP。',
     imageSettings: '图片请求设置',
@@ -106,7 +110,7 @@ const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
     imageModelHelp: '可手动输入模型；列出名称不代表当前账号已验证可用。',
     imageSizeHelp: 'Image 2.5：边长≤3840，16倍数，长短边比≤3，像素655360–8294400。',
     imageExperimental: '实验性高分辨率',
-    imageRatioConflict: '比例与请求尺寸不同；将发送明确尺寸，不裁切或缩放。',
+    imageRatioConflict: '请求设置冲突：比例与明确尺寸不同；以明确尺寸为准，不裁切或缩放。',
     imageModelRequired: '请输入图片模型。',
     imageQualityUnsupported: '当前模型不支持所选质量，请明确重新选择。',
     imageTransparencyConflict: '透明背景不能使用 JPEG，请选择 PNG 或 WebP。',
@@ -116,6 +120,7 @@ const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
     imageRequestDetails: '请求设置与原文',
     imageResponseDetails: '服务返回标签（不代表真实上游身份验证）',
     imageDecodedDetails: '实际文件信息',
+    imageAspectRatioMismatch: '返回圖片比例與請求不同（容差 1%），已保留原圖。',
     imageSizeMismatch: '返回尺寸与请求不一致，已保留原图。',
     imageFormatMismatch: '返回格式与请求不一致。',
     imageAlphaMismatch: '请求透明背景，但实际图片没有透明像素。',
@@ -192,7 +197,7 @@ const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
     imageQualityMismatch: '服务回报质量与请求不一致。',
 
     imageCompositionHelp: '构图比例仅作提示；实际请求尺寸以像素设置为准。',
-    imageResultMismatch: '已返回图片 · 与请求不一致',
+    imageResultMismatch: '已返回图片 · 请检查设置或输出差异',
     imageResultDecoded: '已返回并解码图片',
     imageResultUnverified: '尚无已验证的图片结果',
     imageRequestedOutput: '请求输出',
@@ -208,6 +213,9 @@ const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
     imageHttpStatus: 'HTTP 状态',
     newVariantCreated: '已创建新变体参考', imageAddedToItem: '图片已添加到参考', viewItem: '查看参考', dismiss: '关闭提示', restartRequired: '需要重新启动', updateAvailable: '有可用更新',
     suggestTitle: '建议标题', suggestingTitle: '建议中…', suggestedTitle: '建议', titleSuggestionProvider: 'via ChatGPT', useSuggestedTitle: '采用', titleSuggestionLoginRequired: '请先在设置连接 ChatGPT / Codex。', titleSuggestionRateLimited: '暂时请求过多，请稍后再试。', titleSuggestionUnavailable: '暂时无法建议标题。', titleSuggestionFailed: '无法建议标题。',
+    recipeInputsMissing: '参考图未能恢复，请按原顺序补图，或明确转为纯文生图：',
+    recipeTextOnly: '清除参考图并转为纯文生图',
+    recipeRestoreLoading: '正在恢复原始参考图…',
     imageMissingRecipe: '未找到原任务；仅恢复可确认的配方。未知模型请明确选择。',
     imageBackgroundInvalid: '请选择合法背景。', imageFormatInvalid: '请选择 PNG、JPEG 或 WebP。',
     imageSettings: '图片请求设置',
@@ -219,7 +227,7 @@ const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
     imageModelHelp: '可手动输入模型；列出名称不代表当前账号已验证可用。',
     imageSizeHelp: 'Image 2.5：边长≤3840，16倍数，长短边比≤3，像素655360–8294400。',
     imageExperimental: '实验性高分辨率',
-    imageRatioConflict: '比例与请求尺寸不同；将发送明确尺寸，不裁切或缩放。',
+    imageRatioConflict: '请求设置冲突：比例与明确尺寸不同；以明确尺寸为准，不裁切或缩放。',
     imageModelRequired: '请输入图片模型。',
     imageQualityUnsupported: '当前模型不支持所选质量，请明确重新选择。',
     imageTransparencyConflict: '透明背景不能使用 JPEG，请选择 PNG 或 WebP。',
@@ -229,6 +237,7 @@ const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
     imageRequestDetails: '请求设置与原文',
     imageResponseDetails: '服务返回标签（不代表真实上游身份验证）',
     imageDecodedDetails: '实际文件信息',
+    imageAspectRatioMismatch: '返回图片比例与请求不同（容差 1%），已保留原图。',
     imageSizeMismatch: '返回尺寸与请求不一致，已保留原图。',
     imageFormatMismatch: '返回格式与请求不一致。',
     imageAlphaMismatch: '请求透明背景，但实际图片没有透明像素。',
@@ -306,7 +315,7 @@ const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
     imageQualityMismatch: 'The service quality label differs from the request.',
 
     imageCompositionHelp: 'Composition is a hint; pixel settings determine the requested size.',
-    imageResultMismatch: 'Image returned · differs from request',
+    imageResultMismatch: 'Image returned · review settings or output differences',
     imageResultDecoded: 'Image returned and decoded',
     imageResultUnverified: 'No verified image result yet',
     imageRequestedOutput: 'Requested output',
@@ -322,6 +331,9 @@ const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
     imageHttpStatus: 'HTTP status',
     newVariantCreated: 'New variant item created', imageAddedToItem: 'Image added to item', viewItem: 'View item', dismiss: 'Dismiss', restartRequired: 'Restart required', updateAvailable: 'Update available',
     suggestTitle: 'Suggest title', suggestingTitle: 'Suggesting…', suggestedTitle: 'Suggestion', titleSuggestionProvider: 'via ChatGPT', useSuggestedTitle: 'Use title', titleSuggestionLoginRequired: 'Connect ChatGPT / Codex in Config first.', titleSuggestionRateLimited: 'Too many requests. Try again shortly.', titleSuggestionUnavailable: 'Title suggestion is temporarily unavailable.', titleSuggestionFailed: 'Could not suggest a title.',
+    recipeInputsMissing: 'Original inputs unavailable. Add replacements in order or explicitly switch to text-to-image:',
+    recipeTextOnly: 'Clear references and switch to text-to-image',
+    recipeRestoreLoading: 'Restoring original reference images…',
     imageMissingRecipe: 'Original job unavailable; only recorded settings restored. Explicitly select any unknown model.',
     imageBackgroundInvalid: 'Select a valid background.', imageFormatInvalid: 'Select PNG, JPEG or WebP.',
     imageSettings: 'Image request settings',
@@ -333,7 +345,7 @@ const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
     imageModelHelp: 'Enter a model or mapping. Listed models are not verified for this account.',
     imageSizeHelp: 'Image 2.5: sides ≤3840, multiples of 16, ratio ≤3, 655360–8294400 pixels.',
     imageExperimental: 'Experimental high resolution',
-    imageRatioConflict: 'Composition ratio differs from size. Explicit size is sent without cropping or resizing.',
+    imageRatioConflict: 'Request settings conflict: composition ratio differs from explicit size. Explicit size takes priority; no cropping or resizing.',
     imageModelRequired: 'Enter an image model.',
     imageQualityUnsupported: 'Select a supported quality for this model.',
     imageTransparencyConflict: 'Transparent backgrounds require PNG or WebP, not JPEG.',
@@ -343,6 +355,7 @@ const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
     imageRequestDetails: 'Requested settings and prompt',
     imageResponseDetails: 'Service response labels (not verified upstream identity)',
     imageDecodedDetails: 'Decoded file information',
+    imageAspectRatioMismatch: 'Returned aspect ratio differs (1% tolerance); original file retained.',
     imageSizeMismatch: 'Returned dimensions differ; original file retained.',
     imageFormatMismatch: 'Returned format differs from the request.',
     imageAlphaMismatch: 'Transparent background requested but no transparent pixels returned.',

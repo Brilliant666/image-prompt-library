@@ -32,16 +32,36 @@ export function compatibleParameters(recipe: CompatibleRecipe) {
   if (error) throw new Error(error);
   return { model: recipe.model, quality: recipe.quality, size: recipe.size, background: recipe.background, output_format: recipe.output_format, ...(recipe.output_format !== 'png' && recipe.output_compression !== undefined ? { output_compression: recipe.output_compression } : {}), n: 1 };
 }
+// 1% relative ratio error tolerates integer pixel rounding; shared with the backend.
+export const ASPECT_RATIO_RELATIVE_TOLERANCE = 0.01;
+export function explicitAspectRatio(value: unknown): number | undefined {
+  if (typeof value !== 'string' || !/^[1-9][0-9]*:[1-9][0-9]*$/.test(value)) return;
+  const [w, h] = value.split(':').map(Number);
+  if (Number.isSafeInteger(w) && Number.isSafeInteger(h)) return w / h;
+}
+function ratioDiffers(width: number, height: number, target: number) {
+  return Math.abs(width / height / target - 1) > ASPECT_RATIO_RELATIVE_TOLERANCE;
+}
 export function imageSizeInfo(size: string, ratio: string) {
-  const [w, h] = size.split('x').map(Number), [rw, rh] = ratio.split(':').map(Number);
-  return { experimental: w * h > 3686400, conflict: Boolean(w && h && rw && rh && w * rh !== h * rw) };
+  const [w, h] = size.split('x').map(Number), target = explicitAspectRatio(ratio);
+  return { experimental: w * h > 3686400, conflict: Boolean(w > 0 && h > 0 && target && ratioDiffers(w, h, target)) };
 }
 export function compatibleMismatches(job: GenerationJobRecord): Parameters<Translator>[0][] {
   const requested = job.metadata?.requested as Record<string, unknown> | undefined;
   const decoded = job.metadata?.decoded_image as Record<string, unknown> | undefined;
   if (!requested) return [];
   const issues: Parameters<Translator>[0][] = [];
-  if (requested.size && requested.size !== 'auto' && decoded?.width && decoded?.height && requested.size !== `${decoded?.width}x${decoded?.height}`) issues.push('imageSizeMismatch');
+  const explicitSize = typeof requested.size === 'string' && /^[1-9][0-9]*x[1-9][0-9]*$/.test(requested.size);
+  const target = explicitAspectRatio(requested.requested_aspect_ratio);
+  const width = decoded?.width, height = decoded?.height;
+  const decodedDimensions = typeof width === 'number' && Number.isSafeInteger(width) && width > 0 && typeof height === 'number' && Number.isSafeInteger(height) && height > 0;
+  // Explicit pixels win. A contradictory composition hint is a local settings conflict,
+  // not an additional upstream ratio failure.
+  if (explicitSize && imageSizeInfo(String(requested.size), String(requested.requested_aspect_ratio)).conflict) issues.push('imageRatioConflict');
+  if (decodedDimensions) {
+    if (explicitSize && requested.size !== `${width}x${height}`) issues.push('imageSizeMismatch');
+    else if (!explicitSize && target && ratioDiffers(width, height, target)) issues.push('imageAspectRatioMismatch');
+  }
   if (requested.output_format && decoded?.format && String(requested.output_format).toLowerCase().replace('jpg', 'jpeg') !== String(decoded?.format).toLowerCase().replace('jpg', 'jpeg')) issues.push('imageFormatMismatch');
   if (requested.background === 'transparent' && decoded?.has_transparent_pixels === false) issues.push('imageAlphaMismatch');
   const response = job.metadata?.response as Record<string, unknown> | undefined;

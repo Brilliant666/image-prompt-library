@@ -347,7 +347,7 @@ def test_whitespace_json_preserves_service_differences_and_alpha(config):
     assert metadata['response']['top_level']['quality'] == 'high'
     assert metadata['response']['revised_prompt'] == 'Adjusted'
     assert metadata['response']['request_id'] == 'abc'
-    assert metadata['mismatches'] == []
+    assert metadata['mismatches'] == [{'field': 'quality', 'requested': 'low', 'actual': 'max'}]
 
 
 def test_configuration_does_not_claim_live_verification(config):

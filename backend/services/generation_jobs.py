@@ -363,7 +363,7 @@ class GenerationJobRepository:
             raise GenerationJobConflict(f"Generation edit supports up to {input_limit} input images")
         job_id = new_id("gen")
         prepared_parameters, library_reference_ids = self._prepare_library_reference_inputs(job_id, parameters)
-        prepared_parameters, reference_image_copies = self._prepare_reference_input_clones(job_id, prepared_parameters)
+        prepared_parameters, reference_image_copies = self._prepare_reference_input_clones(job_id, prepared_parameters, **({"persist_inline": True} if payload.provider == "openai_compatible" else {}))
         prepared_parameters = sanitize_generation_parameters(prepared_parameters)
         metadata = {"reference_image_copies": reference_image_copies} if reference_image_copies else {}
         timestamp = now()
@@ -514,18 +514,21 @@ class GenerationJobRepository:
         }
         return dest_rel.as_posix(), copy_meta
 
-    def _prepare_reference_input_clones(self, job_id: str, parameters: dict) -> tuple[dict, list[dict]]:
+    def _prepare_reference_input_clones(self, job_id: str, parameters: dict, *, persist_inline: bool = False) -> tuple[dict, list[dict]]:
         prepared = dict(parameters or {})
         raw_images = prepared.get("input_images")
         if not isinstance(raw_images, list):
             return prepared, []
         cloned_specs = []
         copy_metadata = []
-        for raw in raw_images:
+        for index, raw in enumerate(raw_images):
             if not isinstance(raw, dict):
                 cloned_specs.append(raw)
                 continue
             spec = dict(raw)
+            if persist_inline and spec.get("source") != "library" and isinstance(spec.get("data_url"), str):
+                spec["result_path"] = self._persist_inline_reference(job_id, index, spec["data_url"])
+                spec["preview_path"] = spec["result_path"]
             result_path = spec.get("result_path")
             if isinstance(result_path, str) and result_path:
                 clone = self._clone_generation_result_input(job_id=job_id, result_path=result_path, name=str(spec.get("name") or ""))
@@ -543,6 +546,76 @@ class GenerationJobRepository:
             cloned_specs.append(spec)
         prepared["input_images"] = cloned_specs
         return prepared, copy_metadata
+
+    def _persist_inline_reference(self, job_id: str, index: int, data_url: str) -> str:
+        header, separator, encoded = data_url.partition(",")
+        if not separator or not header.startswith("data:image/") or ";base64" not in header:
+            raise GenerationJobConflict("Generation edit input image must be a data URL image")
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise GenerationJobConflict("Generation edit input image contains invalid image data") from exc
+        _validate_storeable_image_bytes(data)
+        with Image.open(BytesIO(data)) as image:
+            suffix = {"PNG": "png", "JPEG": "jpg", "WEBP": "webp", "GIF": "gif"}.get(image.format, "png")
+        digest = hashlib.sha256(data).hexdigest()
+        relative = f"{GENERATION_REFERENCE_ROOT}/{job_id}/input-{index}-{digest}.{suffix}"
+        target = resolve_generation_write_path(self.library_path, relative, allowed_root=GENERATION_REFERENCE_ROOT)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            if hashlib.sha256(target.read_bytes()).hexdigest() != digest:
+                raise GenerationJobConflict("Reference snapshot path collision")
+        else:
+            _atomic_write_bytes(target, data)
+        return relative
+
+    def prepare_recipe_references(self, job: GenerationJobRecord) -> GenerationJobRecord:
+        """Expose durable originals for legacy inline inputs without revealing data URLs.
+
+        Only API recipe presentation uses this lazy repair; ordinary repository reads
+        remain read-only. Missing/broken slots are retained so clients block replay.
+        """
+        parameters = dict(job.parameters or {})
+        inputs = parameters.get("input_images")
+        if not isinstance(inputs, list) or not inputs:
+            copies = (job.metadata or {}).get("reference_image_copies")
+            copies = copies if isinstance(copies, list) else []
+            reference_ids = job.reference_image_ids or []
+            inputs = []
+            for index in range(max(len(copies), len(reference_ids))):
+                copy = copies[index] if index < len(copies) else None
+                # Retain each original slot even when its snapshot has disappeared.
+                # Never use the generated output as a replacement reference.
+                if isinstance(copy, dict) and isinstance(copy.get("copied_path"), str):
+                    inputs.append({"name": f"Reference {index + 1}", "result_path": copy["copied_path"]})
+                elif index < len(reference_ids):
+                    inputs.append({"name": f"Reference {index + 1}", "source": "library", "image_id": reference_ids[index]})
+                else:
+                    inputs.append({"name": f"Reference {index + 1}"})
+            if not inputs:
+                return job
+        repaired = []
+        for index, raw in enumerate(inputs):
+            spec = dict(raw) if isinstance(raw, dict) else raw
+            if isinstance(spec, dict) and not spec.get("result_path") and spec.get("source") == "library" and spec.get("image_id"):
+                try:
+                    resolved, _ = self._prepare_library_reference_inputs(job.id, {"input_images": [spec]})
+                    spec = resolved["input_images"][0]
+                except (GenerationJobConflict, OSError, ValueError):
+                    pass
+            if isinstance(spec, dict) and spec.get("source") != "library" and isinstance(spec.get("data_url"), str):
+                # Inline bytes are the provider's actual source for this shape;
+                # an invalid inline image must not fall back to a different path.
+                spec.pop("result_path", None)
+                spec.pop("preview_path", None)
+                try:
+                    spec["result_path"] = self._persist_inline_reference(job.id, index, spec["data_url"])
+                    spec["preview_path"] = spec["result_path"]
+                except (GenerationJobConflict, OSError, ValueError):
+                    pass
+            repaired.append(spec)
+        parameters["input_images"] = repaired
+        return job.model_copy(update={"parameters": parameters})
 
     def get_job(self, job_id: str) -> GenerationJobRecord:
         with connect(self.library_path) as conn:
@@ -2251,7 +2324,7 @@ class GenerationJobRepository:
                 else:
                     preexisting_reference_paths[job_id] = set()
                 prepared_parameters, library_reference_ids = self._prepare_library_reference_inputs(job_id, parameters)
-                prepared_parameters, reference_image_copies = self._prepare_reference_input_clones(job_id, prepared_parameters)
+                prepared_parameters, reference_image_copies = self._prepare_reference_input_clones(job_id, prepared_parameters, **({"persist_inline": True} if payload.provider == "openai_compatible" else {}))
                 prepared_parameters = sanitize_generation_parameters(prepared_parameters)
                 metadata = {"reference_image_copies": reference_image_copies} if reference_image_copies else {}
                 prepared_rows.append((

@@ -54,6 +54,10 @@ No schema replacement, credential migration or upstream OAuth change is required
 
 ## Diagnostics and free verification
 
+Gallery recipe restoration and history drafts restore the original ordered input images, not the generated output. Inline inputs are snapshotted as durable references; legacy recipes expose recoverable originals without exposing data URLs. Missing or unreadable inputs remain visible and block submission until replaced or explicitly converted to text-only generation. Editing the draft or leaving it invalidates pending restoration responses.
+
+For explicit requested aspect ratios, decoded dimensions are compared with a 1% relative ratio tolerance: `abs(actual_ratio / requested_ratio - 1) <= 0.01`. Automatic size does not disable this check. An explicit pixel size remains authoritative; an incompatible composition ratio is reported as a request-settings conflict, separately from an actual file-size mismatch. Service-reported dimensions are never used in place of decoded pixels. Warnings preserve the original image and do not trigger transformations or retries.
+
 "Configured" means local fields are complete, not that credentials, image permissions or a real generation have been verified. Saving configuration performs no paid call. Inspect a result's Generation Record for requested settings, service-returned labels, top-level/item differences, actual width/height/format/alpha, timestamps, request ID and elapsed time. Missing service fields remain unknown. A small or differently formatted result is preserved and marked as a mismatch, never automatically resized or retried. A returned model is a service label, not proof of the actual upstream route.
 
 Failures retain bounded, redacted structured diagnostics for authentication, group/permissions, route/model, rate limit, upstream failure, network/timeouts, non-JSON gateway pages, missing image, invalid base64 and invalid image data. Neither elapsed time nor local cancellation proves upstream work stopped or was not billed. Check service logs before explicitly submitting again.

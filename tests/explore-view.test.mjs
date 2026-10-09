@@ -1282,7 +1282,7 @@ test('Explore/detail CSS keeps responsive grids, token controls, CJK hierarchy, 
 test('compatible image providers retain the existing batch count menu and queue-set submission', async () => {
   const generation = await readFile(`${ROOT}/frontend/src/components/GenerationPanel.tsx`, 'utf8');
   const countTrigger = generation.slice(generation.indexOf('ref={generationCountTriggerRef}'), generation.indexOf('><ChevronDown size={17}', generation.indexOf('ref={generationCountTriggerRef}')));
-  assert.match(countTrigger, /disabled=\{busy \|\| Boolean\(compatibleError\) \|\| !selectedProviderCanGenerateDraft \|\| !promptText\.trim\(\) \|\| hasMissingTemplateValues\}/);
+  assert.match(countTrigger, /disabled=\{busy \|\| recipeBlocked \|\| Boolean\(compatibleError\) \|\| !selectedProviderCanGenerateDraft \|\| !promptText\.trim\(\) \|\| hasMissingTemplateValues\}/);
   assert.doesNotMatch(countTrigger, /openai_compatible/);
   assert.match(generation, /GENERATION_SET_OPTIONS: Exclude<GenerationSetCount, 1>\[\] = \[3, 5, 10\]/);
   assert.match(generation, /onClick=\{\(\) => createJob\(count\)\}/);

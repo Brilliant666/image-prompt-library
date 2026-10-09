@@ -1,6 +1,6 @@
 # 独立维护说明
 
-维护仓库为 [Brilliant666/image-prompt-library](https://github.com/Brilliant666/image-prompt-library)，日常开发分支为 `codex/sub2api-images`。本项目基于 [EddieTYP/image-prompt-library](https://github.com/EddieTYP/image-prompt-library)，保留原作者声明及 AGPL-3.0-or-later 许可证；不是从零开发的项目。
+维护仓库为 [Brilliant666/image-prompt-library](https://github.com/Brilliant666/image-prompt-library)，集成分支为 `main`，日常修改在功能分支完成后通过 PR 合并。原 `codex/sub2api-images` 分支保留为历史记录。本项目基于 [EddieTYP/image-prompt-library](https://github.com/EddieTYP/image-prompt-library)，保留原作者声明及 AGPL-3.0-or-later 许可证；不是从零开发的项目。
 
 ## 来源与历史
 
@@ -32,7 +32,7 @@ git status
 git add <明确修改的文件>
 git diff --cached
 git commit -m "Describe the change"
-git push origin codex/sub2api-images
+git push -u origin HEAD
 ```
 
 ## 更新与自动化
@@ -40,6 +40,10 @@ git push origin codex/sub2api-images
 当前采用源码维护，尚未建立本仓库 Releases。安装上游发行包的更新入口暂停；不要运行来源仓库的远程一键安装命令。未来更新通过本仓库审查后的源码提交完成，不自动合并上游。上游链接保留用于来源、发布历史和致谢，不代表当前定制版的更新源。
 
 CI 对 `codex/sub2api-images` 和 `main` 的推送及 PR 执行现有测试、应用构建与示例构建。Pages 发布、Release 发布和依赖发行包的安装冒烟工作流保留原定义，但使用 job 级 `if: ${{ false }}` 停用；Pages 也移除了推送触发。没有配置公网部署或自动同步。建立自己的发行策略后再明确启用相关流程。
+
+## 依赖审计（2026-10-10）
+
+旧基线的 Vite → PostCSS → `source-map-js@1.2.1` 存在 [GHSA-68fv-2mgg-jv7q](https://github.com/advisories/GHSA-68fv-2mgg-jv7q)：解析恶意 indexed source map 的偏移量可能阻塞事件循环。这是既有构建工具链依赖问题；图库图片上传和 Python 图片 API 不解析 source map。锁文件已定向更新到修复版 `1.2.2`，未批量升级依赖；使用官方 npm registry 的审计结果为 0 项漏洞。
 
 ## 数据边界
 

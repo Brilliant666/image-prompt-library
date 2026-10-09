@@ -1,3 +1,4 @@
+import { recipeInputs, restoreRecipeInputs, fillRecipeInputs, type RecipeInput } from '../utils/recipeInputs';
 import { GenerationResultSummary } from './GenerationResultSummary';
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { createPortal } from 'react-dom';
@@ -107,17 +108,7 @@ const SAVE_NEW_LANGUAGE_OPTIONS = [
   { value: 'zh_hans', labelKey: 'simplifiedChinesePrompt' },
 ] as const;
 
-type EditAttachment = {
-  id: string;
-  name: string;
-  source: 'uploaded' | 'generated_result' | 'library';
-  previewUrl: string;
-  dataUrl?: string;
-  resultPath?: string;
-  imageId?: string;
-  sourceItemId?: string;
-  role?: string;
-};
+type EditAttachment = RecipeInput;
 
 function libraryAttachment(image: ImageRecord, title: string): EditAttachment {
   return {
@@ -132,25 +123,7 @@ function libraryAttachment(image: ImageRecord, title: string): EditAttachment {
 }
 
 function jobAttachments(job?: GenerationJobRecord): EditAttachment[] {
-  const inputs = job?.parameters?.input_images;
-  if (!Array.isArray(inputs)) return [];
-  return inputs.flatMap((raw, index) => {
-    if (!raw || typeof raw !== 'object') return [];
-    const input = raw as Record<string, unknown>;
-    const source = input.source === 'library' ? 'library' : input.source === 'generated_result' ? 'generated_result' : 'uploaded';
-    const resultPath = typeof input.result_path === 'string' ? input.result_path : undefined;
-    const previewPath = typeof input.preview_path === 'string' ? input.preview_path : undefined;
-    return [{
-      id: typeof input.id === 'string' ? input.id : `job-${job?.id}-${index}`,
-      name: typeof input.name === 'string' ? input.name : `Reference ${index + 1}`,
-      source,
-      previewUrl: previewPath ? mediaUrl(previewPath) : resultPath ? mediaUrl(resultPath) : '',
-      resultPath,
-      imageId: typeof input.image_id === 'string' ? input.image_id : undefined,
-      sourceItemId: typeof input.source_item_id === 'string' ? input.source_item_id : undefined,
-      role: typeof input.role === 'string' ? input.role : undefined,
-    }];
-  });
+  return job ? recipeInputs(job, mediaUrl) : [];
 }
 
 function restorableJobAttachments(job?: GenerationJobRecord): EditAttachment[] {
@@ -344,6 +317,14 @@ export default function GenerationPanel({
   const [quality, setQuality] = useState('high');
   const [compatibleRecipe, setCompatibleRecipe] = useState<CompatibleRecipe>({ model: '', quality: 'auto', size: 'auto', background: 'auto', output_format: 'png' });
   const restoredLibraryRecipeRef = useRef(false);
+  const recipeRequestRef = useRef(0);
+  const [recipeLoading, setRecipeLoading] = useState(false);
+  const invalidateRecipeRestore = () => {
+    recipeRequestRef.current += 1;
+    restoredLibraryRecipeRef.current = true;
+    setRecipeLoading(false);
+  };
+  useEffect(() => () => { recipeRequestRef.current += 1; }, []);
   const [compatibleModelSelected, setCompatibleModelSelected] = useState(false);
   const compatibleQuality = compatibleRecipe.quality;
   const setCompatibleQuality = (quality: string) => setCompatibleRecipe(current => ({ ...current, quality }));
@@ -355,6 +336,8 @@ export default function GenerationPanel({
   const [queueClock, setQueueClock] = useState(() => Date.now());
   const [promptText, setPromptText] = useState(defaultPrompt);
   const [editAttachments, setEditAttachments] = useState<EditAttachment[]>([]);
+  const missingRecipeInputs = editAttachments.filter(input => input.missing);
+  const recipeBlocked = recipeLoading || missingRecipeInputs.length > 0;
   const [referenceMenuOpen, setReferenceMenuOpen] = useState(false);
   const [referencePicker, setReferencePicker] = useState<'library' | 'recent' | null>(null);
   const [libraryItems, setLibraryItems] = useState<ItemSummary[]>([]);
@@ -958,6 +941,7 @@ export default function GenerationPanel({
 
   const createJob = async (count: GenerationSetCount = 1) => {
     const prompt = promptText;
+    if (recipeBlocked) return;
     if (compatibleError) { setMessage(t(compatibleError)); return; }
     if (!prompt.trim() || hasMissingTemplateValues || !resolvedPrompt || !selectedProviderCanGenerateDraft || (provider === 'manual_upload' && count !== 1)) return;
     const preservePausedReview = Boolean(batchReviewSession && batchReviewPaused);
@@ -1360,9 +1344,11 @@ export default function GenerationPanel({
   }));
 
   const addUploadedAttachments = async (files: FileList | null) => {
+    invalidateRecipeRestore();
+    const draftRequestId = recipeRequestRef.current;
     const nextFiles = Array.from(files || []).filter(file => file.type.startsWith('image/'));
     if (nextFiles.length === 0) return;
-    const slots = selectedProviderMaxInputImages - editAttachments.length;
+    const slots = selectedProviderMaxInputImages - editAttachments.filter(input => !input.missing).length;
     const limitedFiles = nextFiles.slice(0, Math.max(0, slots));
     try {
       const loaded = await Promise.all(limitedFiles.map(file => new Promise<EditAttachment>((resolve, reject) => {
@@ -1371,7 +1357,8 @@ export default function GenerationPanel({
         reader.onerror = () => reject(reader.error || new Error(t('attachmentReadFailed')));
         reader.readAsDataURL(file);
       })));
-      setEditAttachments(current => [...current, ...loaded].slice(0, selectedProviderMaxInputImages));
+      if (draftRequestId !== recipeRequestRef.current) return;
+      setEditAttachments(current => fillRecipeInputs(current, loaded, selectedProviderMaxInputImages));
       setMessage(loaded.length < nextFiles.length
         ? t('attachmentsAdded').replace('${count}', String(loaded.length)).replace('${limit}', String(selectedProviderMaxInputImages))
         : t('attachmentAdded'));
@@ -1383,10 +1370,12 @@ export default function GenerationPanel({
   };
 
   const removeAttachment = (id: string) => {
+    invalidateRecipeRestore();
     setEditAttachments(current => current.filter(attachment => attachment.id !== id));
   };
 
   const moveAttachment = (index: number, offset: -1 | 1) => {
+    invalidateRecipeRestore();
     setEditAttachments(current => {
       const nextIndex = index + offset;
       if (nextIndex < 0 || nextIndex >= current.length) return current;
@@ -1397,9 +1386,10 @@ export default function GenerationPanel({
   };
 
   const addLibraryAttachment = (image: ImageRecord, title: string) => {
+    invalidateRecipeRestore();
     setEditAttachments(current => {
-      if (current.length >= selectedProviderMaxInputImages || current.some(attachment => attachment.imageId === image.id)) return current;
-      return [...current, libraryAttachment(image, title)];
+      if (current.filter(input => !input.missing).length >= selectedProviderMaxInputImages || current.some(attachment => !attachment.missing && attachment.imageId === image.id)) return current;
+      return fillRecipeInputs(current, [libraryAttachment(image, title)], selectedProviderMaxInputImages);
     });
   };
 
@@ -1462,10 +1452,11 @@ export default function GenerationPanel({
   };
 
   const addResultAsAttachment = (job: GenerationJobRecord, pauseBatchReview = false) => {
-    if (!job.result_path || editAttachments.length >= selectedProviderMaxInputImages) return;
+    invalidateRecipeRestore();
+    if (!job.result_path || editAttachments.filter(input => !input.missing).length >= selectedProviderMaxInputImages) return;
     const reviewSession = pauseBatchReview ? ensureBatchReviewSession(job) : undefined;
     setEditAttachments(current => {
-      if (current.some(attachment => attachment.resultPath === job.result_path)) return current;
+      if (current.some(attachment => !attachment.missing && attachment.resultPath === job.result_path)) return current;
       const resultAttachment: EditAttachment = {
         id: `result-${job.id}`,
         name: `${job.id}.png`,
@@ -1473,7 +1464,7 @@ export default function GenerationPanel({
         previewUrl: jobResultUrl(job),
         resultPath: job.result_path || undefined,
       };
-      return [...current, resultAttachment].slice(0, selectedProviderMaxInputImages);
+      return fillRecipeInputs(current, [resultAttachment], selectedProviderMaxInputImages);
     });
     setHistoryReviewJobId(undefined);
     if (reviewSession) setBatchReviewPaused(true);
@@ -1765,10 +1756,12 @@ export default function GenerationPanel({
     closeHistoryDrawer();
   };
 
-  const useJobAsDraft = (job: GenerationJobRecord) => {
-    const reviewSession = ensureBatchReviewSession(job);
+  const restoreJobDraft = async (job: GenerationJobRecord, requestId: number) => {
+    if (requestId !== recipeRequestRef.current) return;
+    restoredLibraryRecipeRef.current = true;
     const attachments = jobAttachments(job);
-    const restorableAttachments = restorableJobAttachments(job);
+    setRecipeLoading(attachments.length > 0);
+    setEditAttachments(attachments.map(input => ({ ...input, missing: true })));
     setPromptText(jobPrompt(job));
     setAspectRatio(jobAspectRatio(job));
     if (job.provider === 'openai_compatible') {
@@ -1781,31 +1774,61 @@ export default function GenerationPanel({
       setQuality(jobQuality(job));
     }
     setProvider(job.provider || provider);
-    setEditAttachments(restorableAttachments);
+    const restored = await restoreRecipeInputs(attachments, async input => {
+      let dataUrl = input.dataUrl;
+      // Persisted result_path is the original reference snapshot and takes priority.
+      let url = input.resultPath ? mediaUrl(input.resultPath) : '';
+      if (!url && !dataUrl && input.imageId && input.sourceItemId) {
+        const original = (await api.item(input.sourceItemId)).images.find(image => image.id === input.imageId);
+        if (original) url = mediaUrl(original.original_path);
+      }
+      if (url) {
+        const response = await fetch(url);
+        if (!response.ok) throw new Error('Reference unavailable');
+        const blob = await response.blob();
+        dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result));
+          reader.onerror = () => reject(new Error('Reference unreadable'));
+          reader.readAsDataURL(blob);
+        });
+      }
+      if (!dataUrl) throw new Error('Reference missing');
+      const image = new Image();
+      image.src = dataUrl;
+      await image.decode();
+      return dataUrl;
+    });
+    if (requestId !== recipeRequestRef.current) return;
+    setEditAttachments(restored);
+    setRecipeLoading(false);
+  };
+
+  const useJobAsDraft = (job: GenerationJobRecord) => {
+    const reviewSession = ensureBatchReviewSession(job);
+    const requestId = ++recipeRequestRef.current;
+    void restoreJobDraft(job, requestId);
     setHistoryReviewJobId(undefined);
     if (reviewSession) setBatchReviewPaused(true);
-    setMessage(attachments.length > restorableAttachments.length ? `${t('copyPrompt')}. ${t('uploadImage')}.` : `${t('copyPrompt')}.`);
-    window.requestAnimationFrame(() => {
-      scrollIntoViewRespectingMotion(promptInputRef.current, 'center');
-      promptInputRef.current?.focus({ preventScroll: true });
-    });
+    window.requestAnimationFrame(() => promptInputRef.current?.focus({ preventScroll: true }));
   };
 
   useEffect(() => {
     if (!item || initialJobId) return;
     const sourceImage = sourceImageId ? item.images?.find(image => image.id === sourceImageId) : item.images?.find(image => image.generation_provider === 'openai_compatible');
-    if (!sourceImage) return;
+    if (!sourceImage?.generation_provider) return;
     let cancelled = false;
+    const requestId = ++recipeRequestRef.current;
+    restoredLibraryRecipeRef.current = false;
+    setRecipeLoading(true);
+    setEditAttachments([{ id: 'pending-recipe-input', name: t('imageMissingRecipe'), source: 'uploaded', previewUrl: '', missing: true }]);
     api.generationJobForImage(sourceImage.id).then(job => {
-      if (cancelled || restoredLibraryRecipeRef.current || job.provider !== 'openai_compatible') return;
-      restoredLibraryRecipeRef.current = true;
-      setProvider(job.provider);
-      setCompatibleRecipe(restoreCompatibleRecipe(job));
-      setCompatibleModelSelected(true);
-      setAspectRatio(jobAspectRatio(job));
-      setPromptText(jobPrompt(job));
+      if (cancelled || requestId !== recipeRequestRef.current) return;
+      return restoreJobDraft(job, requestId);
     }).catch(() => {
-      if (cancelled || sourceImage.generation_provider !== 'openai_compatible') return;
+      if (cancelled || requestId !== recipeRequestRef.current) return;
+      setRecipeLoading(false);
+      setEditAttachments([{ id: 'unknown-recipe-input', name: t('imageMissingRecipe'), source: 'uploaded', previewUrl: '', missing: true }]);
       const generatedImages = item.images.filter(image => image.generation_provider === 'openai_compatible');
       const prompt = generatedImages.length === 1 ? item.prompts.find(prompt => prompt.provenance?.provider === 'openai_compatible') : undefined;
       const provenance = prompt?.provenance;
@@ -1821,7 +1844,7 @@ export default function GenerationPanel({
       if (typeof requested?.prompt === 'string') setPromptText(requested.prompt);
       setMessage(t('imageMissingRecipe'));
     });
-    return () => { cancelled = true; };
+    return () => { cancelled = true; recipeRequestRef.current += 1; };
   }, [item?.id, initialJobId, sourceImageId]);
 
   const copyJobPrompt = async (job: GenerationJobRecord) => {
@@ -1856,13 +1879,13 @@ export default function GenerationPanel({
               <span className="generation-reference-actions">
                 <button type="button" onClick={() => moveAttachment(index, -1)} disabled={index === 0} aria-label={`${t('moveReferenceLeft')}: ${attachment.name}`}><ChevronLeft size={13} /></button>
                 <button type="button" onClick={() => moveAttachment(index, 1)} disabled={index === attachments.length - 1} aria-label={`${t('moveReferenceRight')}: ${attachment.name}`}><ChevronRight size={13} /></button>
-                <button type="button" onClick={() => removeAttachment(attachment.id)} aria-label={`${t('removeReference')}: ${attachment.name}`}><X size={13} /></button>
+                <button type="button" disabled={attachment.missing} onClick={() => removeAttachment(attachment.id)} aria-label={`${t('removeReference')}: ${attachment.name}`}><X size={13} /></button>
               </span>
             )}
           </div>
           ))}
         </div>
-        {!readOnly && attachments.length < limit && (
+        {!readOnly && attachments.filter(input => !input.missing).length < limit && (
           <div ref={referenceAddWrapRef} className="generation-reference-add-wrap">
             <button ref={referenceAddTriggerRef} type="button" className="generation-reference-add" onClick={() => setReferenceMenuOpen(current => !current)} aria-label={t('addGenerationReference')} aria-haspopup="menu" aria-expanded={referenceMenuOpen}><Plus size={16} /> {t('add')}</button>
             {referenceMenuOpen && (
@@ -1894,7 +1917,7 @@ export default function GenerationPanel({
       {generationResultActions(job).save && <button ref={saveAsNewTriggerRef} className="stage-action" onClick={() => openSaveAsNewReview(job)} disabled={busy} aria-label={t('saveAsNewItem')} title={t('saveAsNewItem')}>
         <FilePlus2 size={16} aria-hidden="true" />
       </button>}
-      <button className="stage-action" onClick={() => addResultAsAttachment(job, true)} disabled={busy || editAttachments.length >= selectedProviderMaxInputImages || !job.result_path} aria-label={t('useResultAsEditInput')} title={t('useResultAsEditInput')}>
+      <button className="stage-action" onClick={() => addResultAsAttachment(job, true)} disabled={busy || editAttachments.filter(input => !input.missing).length >= selectedProviderMaxInputImages || !job.result_path} aria-label={t('useResultAsEditInput')} title={t('useResultAsEditInput')}>
         <Plus size={16} aria-hidden="true" />
       </button>
       {generationResultActions(job).discardAndRetry && <button className="stage-action" onClick={() => discardAndRetryJob(job)} disabled={busy} aria-label={t('retry')} title={t('retry')}>
@@ -2132,12 +2155,16 @@ export default function GenerationPanel({
           </button>
         </header>
         {!reviewJob || !metadataDraft ? <div className="generation-layout" inert={showHistoryDrawer} aria-hidden={showHistoryDrawer || undefined}>
-          <section className={`generation-compose-card generation-composer-card${provider === 'openai_compatible' ? ' has-image-settings' : ''}`}>
+          <section onChangeCapture={invalidateRecipeRestore} className={`generation-compose-card generation-composer-card${provider === 'openai_compatible' ? ' has-image-settings' : ''}`}>
             {!isHistoryReview ? (
               <>
                 <div className="generation-prompt-area">
                       <textarea ref={promptInputRef} data-modal-initial-focus value={promptText} onChange={event => setPromptText(event.currentTarget.value)} placeholder={t('promptPlaceholder')} aria-label={t('generationPrompt')} />
                   {renderReferenceTray(editAttachments)}
+                  {recipeBlocked && <div role="alert" className="generation-provider-status">
+                    <p>{recipeLoading ? t('recipeRestoreLoading') : `${t('recipeInputsMissing')} ${missingRecipeInputs.map(input => input.name).join(', ')}`}</p>
+                    {!recipeLoading && <button type="button" onClick={() => { invalidateRecipeRestore(); setEditAttachments([]); }}>{t('recipeTextOnly')}</button>}
+                  </div>}
                 </div>
                 {renderBatchReviewResume()}
                 {renderBatchReviewSummary()}
@@ -2202,7 +2229,7 @@ export default function GenerationPanel({
                               aria-checked={selected}
                               className={selected ? 'is-selected' : ''}
                               onClick={() => {
-                                setProvider(option.provider);
+                                invalidateRecipeRestore(); setProvider(option.provider);
                                 closeGenerationControl('provider');
                               }}
                             >
@@ -2232,7 +2259,7 @@ export default function GenerationPanel({
                       <div className="generation-control-popover" role="menu">
                         {ASPECT_RATIO_OPTIONS.map(option => {
                           const selected = aspectRatio === option.value;
-                          return <button key={option.value} type="button" role="menuitemradio" aria-checked={selected} className={selected ? 'is-selected' : ''} onClick={() => { setAspectRatio(option.value); if (provider === 'openai_compatible') setCompatibleRecipe(r => ({ ...r, size: 'auto', legacyDerived: false })); closeGenerationControl('aspect'); }}><span className="generation-control-option-label">{optionLabel(ASPECT_RATIO_OPTIONS, option.value, t)}</span>{selected && <Check className="generation-control-option-check" size={15} aria-hidden="true" />}</button>;
+                          return <button key={option.value} type="button" role="menuitemradio" aria-checked={selected} className={selected ? 'is-selected' : ''} onClick={() => { invalidateRecipeRestore(); setAspectRatio(option.value); if (provider === 'openai_compatible') setCompatibleRecipe(r => ({ ...r, size: 'auto', legacyDerived: false })); closeGenerationControl('aspect'); }}><span className="generation-control-option-label">{optionLabel(ASPECT_RATIO_OPTIONS, option.value, t)}</span>{selected && <Check className="generation-control-option-check" size={15} aria-hidden="true" />}</button>;
                         })}
                       </div>
                     )}
@@ -2251,7 +2278,7 @@ export default function GenerationPanel({
                               {GROK_QUALITY_OPTIONS.map(option => {
                                 const selected = grokQuality === option.value;
                                 return (
-                                  <button key={option.value} type="button" role="menuitemradio" aria-checked={selected} className={selected ? 'is-selected' : ''} onClick={() => { setGrokQuality(option.value); closeGenerationControl('quality'); }}>
+                                  <button key={option.value} type="button" role="menuitemradio" aria-checked={selected} className={selected ? 'is-selected' : ''} onClick={() => { invalidateRecipeRestore(); setGrokQuality(option.value); closeGenerationControl('quality'); }}>
                                     <span className="generation-control-option-label">{optionLabel(GROK_QUALITY_OPTIONS, option.value, t)}</span>
                                     {selected && <Check className="generation-control-option-check" size={15} aria-hidden="true" />}
                                   </button>
@@ -2263,7 +2290,7 @@ export default function GenerationPanel({
                               {GROK_RESOLUTION_OPTIONS.map(option => {
                                 const selected = grokResolution === option.value;
                                 return (
-                                  <button key={option.value} type="button" role="menuitemradio" aria-checked={selected} className={selected ? 'is-selected' : ''} onClick={() => { setGrokResolution(option.value); closeGenerationControl('quality'); }}>
+                                  <button key={option.value} type="button" role="menuitemradio" aria-checked={selected} className={selected ? 'is-selected' : ''} onClick={() => { invalidateRecipeRestore(); setGrokResolution(option.value); closeGenerationControl('quality'); }}>
                                     <span className="generation-control-option-label">{optionLabel(GROK_RESOLUTION_OPTIONS, option.value, t)}</span>
                                     {selected && <Check className="generation-control-option-check" size={15} aria-hidden="true" />}
                                   </button>
@@ -2274,7 +2301,7 @@ export default function GenerationPanel({
                         ) : currentQualityOptions.map(option => {
                             const selected = (provider === 'openai_compatible' ? compatibleQuality : quality) === option.value;
                             return (
-                              <button key={option.value} type="button" role="menuitemradio" aria-checked={selected} className={selected ? 'is-selected' : ''} onClick={() => { if (provider === 'openai_compatible') setCompatibleQuality(option.value); else setQuality(option.value); closeGenerationControl('quality'); }}>
+                              <button key={option.value} type="button" role="menuitemradio" aria-checked={selected} className={selected ? 'is-selected' : ''} onClick={() => { invalidateRecipeRestore(); if (provider === 'openai_compatible') setCompatibleQuality(option.value); else setQuality(option.value); closeGenerationControl('quality'); }}>
                                 <span className="generation-control-option-label">{provider === 'openai_compatible' ? imageQualityLabel(option.value, t) : optionLabel(QUALITY_OPTIONS, option.value, t)}</span>
                                 {selected && <Check className="generation-control-option-check" size={15} aria-hidden="true" />}
                               </button>
@@ -2329,7 +2356,7 @@ export default function GenerationPanel({
                       className="primary generation-primary-action"
                       type="button"
                       onClick={() => createJob(1)}
-                      disabled={busy || Boolean(compatibleError) || !selectedProviderCanGenerateDraft || !promptText.trim() || hasMissingTemplateValues}
+                      disabled={busy || recipeBlocked || Boolean(compatibleError) || !selectedProviderCanGenerateDraft || !promptText.trim() || hasMissingTemplateValues}
                        aria-label={`${t('generate')} 1`}
                      >{t('generate')}</button>
                     <button
@@ -2356,7 +2383,7 @@ export default function GenerationPanel({
                           generationCountFocusOnOpenRef.current = true;
                           setGenerationCountMenuOpen(true);
                         }}
-                        disabled={busy || Boolean(compatibleError) || !selectedProviderCanGenerateDraft || !promptText.trim() || hasMissingTemplateValues}
+                        disabled={busy || recipeBlocked || Boolean(compatibleError) || !selectedProviderCanGenerateDraft || !promptText.trim() || hasMissingTemplateValues}
                       ><ChevronDown size={17} aria-hidden="true" /></button>
                     {generationCountMenuOpen && (
                        <div id="generation-count-menu" className="generation-count-menu" role="menu" aria-label={t('generateVariations')}>
@@ -2455,9 +2482,9 @@ export default function GenerationPanel({
                   <h4>{libraryItem.title}</h4>
                   <div className="generation-reference-picker-grid images">
                     {libraryItem.images.map(image => {
-                      const selected = editAttachments.some(attachment => attachment.imageId === image.id);
+                      const selected = editAttachments.some(attachment => !attachment.missing && attachment.imageId === image.id);
                       return (
-                        <button type="button" className={`generation-reference-picker-card${selected ? ' is-selected' : ''}`} key={image.id} onClick={() => addLibraryAttachment(image, libraryItem.title)} disabled={selected || editAttachments.length >= selectedProviderMaxInputImages}>
+                        <button type="button" className={`generation-reference-picker-card${selected ? ' is-selected' : ''}`} key={image.id} onClick={() => addLibraryAttachment(image, libraryItem.title)} disabled={selected || editAttachments.filter(input => !input.missing).length >= selectedProviderMaxInputImages}>
                           <img src={mediaUrl(image.preview_path || image.thumb_path || image.original_path)} alt="" loading="lazy" />
                           <span><b>{image.role === 'reference_image' ? t('reference') : t('result')}</b><em>{selected ? t('selected') : t('addReference')}</em></span>
                         </button>
@@ -2469,9 +2496,9 @@ export default function GenerationPanel({
               {referencePicker === 'recent' && (
                 <div className="generation-reference-picker-grid">
                   {recentJobs.map(job => {
-                    const selected = editAttachments.some(attachment => attachment.resultPath === job.result_path);
+                    const selected = editAttachments.some(attachment => !attachment.missing && attachment.resultPath === job.result_path);
                     return (
-                      <button type="button" className={`generation-reference-picker-card${selected ? ' is-selected' : ''}`} key={job.id} onClick={() => addResultAsAttachment(job)} disabled={selected || editAttachments.length >= selectedProviderMaxInputImages}>
+                      <button type="button" className={`generation-reference-picker-card${selected ? ' is-selected' : ''}`} key={job.id} onClick={() => addResultAsAttachment(job)} disabled={selected || editAttachments.filter(input => !input.missing).length >= selectedProviderMaxInputImages}>
                         {job.result_path && <img src={jobResultUrl(job)} alt="" loading="lazy" />}
                         <span><b>{jobPrompt(job) || t('generatedResult')}</b><em>{selected ? t('selected') : t('generatedResult')}</em></span>
                       </button>

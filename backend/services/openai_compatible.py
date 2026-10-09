@@ -55,6 +55,33 @@ def requested_image_size(parameters):
     return ASPECT_RATIO_SIZES[ratio]
 
 
+# Keep in sync with compatibleRecipe.ts: 1% relative error allows pixel rounding.
+ASPECT_RATIO_RELATIVE_TOLERANCE = 0.01
+
+
+def image_dimension_mismatches(requested, decoded):
+    ratio = requested.get("requested_aspect_ratio")
+    match = re.fullmatch(r"([1-9][0-9]*):([1-9][0-9]*)", ratio) if isinstance(ratio, str) else None
+    target = int(match[1]) / int(match[2]) if match else None
+    size = requested.get("size")
+    pixels = re.fullmatch(r"([1-9][0-9]*)x([1-9][0-9]*)", size) if isinstance(size, str) else None
+    issues = []
+    differs = lambda w, h: abs(w / h / target - 1) > ASPECT_RATIO_RELATIVE_TOLERANCE
+    if pixels and target and differs(int(pixels[1]), int(pixels[2])):
+        issues.append({"field": "requested_aspect_ratio", "kind": "request_settings_conflict",
+                       "requested": ratio, "explicit_size": size})
+    width, height = (decoded or {}).get("width"), (decoded or {}).get("height")
+    if type(width) is not int or type(height) is not int or width <= 0 or height <= 0:
+        return issues
+    if pixels:
+        if size != f"{width}x{height}":
+            issues.append({"field": "size", "requested": size, "actual": f"{width}x{height}"})
+    elif target and differs(width, height):
+        issues.append({"field": "requested_aspect_ratio", "kind": "output_mismatch", "requested": ratio,
+                       "actual": f"{width}x{height}", "relative_tolerance": ASPECT_RATIO_RELATIVE_TOLERANCE})
+    return issues
+
+
 def normalize_image_parameters(parameters, default_model=""):
     result = dict(parameters or {})
     model = result.get("model") or default_model
@@ -367,13 +394,13 @@ class OpenAICompatibleProvider:
             requested["requested_aspect_ratio"] = parameters["requested_aspect_ratio"]
         if normalized.get("aspect_ratio_prompt_injection") is True:
             requested["aspect_ratio_prompt_injection"] = True
-        mismatches = []
-        if payload["size"] != "auto" and payload["size"] != f"{width}x{height}":
-            mismatches.append({"field": "size", "requested": payload["size"], "actual": f"{width}x{height}"})
+        mismatches = image_dimension_mismatches(requested, decoded)
         if payload["output_format"] != fmt.lower():
             mismatches.append({"field": "output_format", "requested": payload["output_format"], "actual": fmt.lower()})
         if payload["background"] == "transparent" and not decoded["has_transparent_pixels"]:
             mismatches.append({"field": "background", "requested": "transparent", "actual": "no_transparent_pixels"})
+        if payload["quality"] != "auto" and actual.get("quality") and payload["quality"] != actual["quality"]:
+            mismatches.append({"field": "quality", "requested": payload["quality"], "actual": actual["quality"]})
         metadata = {"provider": PROVIDER_ID, "auth_mode": AUTH_MODE, "requested": requested, "response": actual,
                     "model": actual.get("model"), "image_model": actual.get("model"), "decoded_image": decoded, "mismatches": mismatches,
                     "request_diagnostics": {**diagnostics, "elapsed_seconds": round(time.monotonic() - started, 3)},
