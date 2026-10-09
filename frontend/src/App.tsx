@@ -15,9 +15,9 @@ import BatchActionDialog from './components/BatchActionDialog';
 import { useDebouncedValue } from './hooks/useDebouncedValue';
 import { useItemsQuery } from './hooks/useItemsQuery';
 import { useModalFocus } from './hooks/useModalFocus';
-import type { AppearancePreset, AppConfig, AppUpdateStatus, ClusterRecord, GenerationJobRecord, ItemBatchAction, ItemDetail, ItemSortMode, ItemSummary, TagRecord, TitleSuggestionProvider, ViewMode } from './types';
+import type { AppearancePreset, AppConfig, AppUpdateStatus, ClusterRecord, GenerationJobRecord, ItemBatchAction, ItemDetail, ItemSortMode, ItemSummary, TagRecord, AiProvider, ViewMode } from './types';
 import { copyTextToClipboard } from './utils/clipboard';
-import { DEFAULT_AI_PROVIDER_STORAGE_KEY, availableTitleSuggestionProviders, isTitleSuggestionProvider, resolveDefaultAiProvider } from './utils/defaultAiProvider';
+import { DEFAULT_AI_PROVIDER_STORAGE_KEY, availableAiProviders, isAiProvider, resolveDefaultAiProvider } from './utils/defaultAiProvider';
 import { localizedDemoTitle } from './utils/demoTitles';
 import { APPEARANCE_STORAGE_KEY, applyAppearance, loadAppearance } from './utils/appearance';
 import { DEFAULT_UI_LANGUAGE, UI_LANGUAGE_LABELS, makeTranslator, normalizeUiLanguage, type UiLanguage } from './utils/i18n';
@@ -60,7 +60,7 @@ function loadPreferredView(): ViewMode {
   return 'cards';
 }
 
-function loadDefaultAiProvider(): TitleSuggestionProvider {
+function loadDefaultAiProvider(): AiProvider {
   if (typeof window === 'undefined') return 'openai_codex_oauth_native';
   return resolveDefaultAiProvider(window.localStorage.getItem(DEFAULT_AI_PROVIDER_STORAGE_KEY), []);
 }
@@ -109,7 +109,7 @@ export default function App() {
   const [hasChosenUiLanguage, setHasChosenUiLanguage] = useState(loadHasChosenUiLanguage);
   const [preferredLanguage, setPreferredLanguage] = useState<PromptCopyLanguage>(loadPreferredLanguage);
   const [appearance, setAppearance] = useState<AppearancePreset>(loadAppearance);
-  const [defaultAiProvider, setDefaultAiProvider] = useState<TitleSuggestionProvider>(loadDefaultAiProvider);
+  const [defaultAiProvider, setDefaultAiProvider] = useState<AiProvider>(loadDefaultAiProvider);
   const [toast, setToast] = useState<{ title: string; tone: 'success' | 'error'; duration?: number }>();
   const [toastClosing, setToastClosing] = useState(false);
   const toastTimerRef = useRef<number | undefined>(undefined);
@@ -152,12 +152,12 @@ export default function App() {
     applyAppearance(appearance);
   }, [appearance]);
   useEffect(() => {
-    if (typeof window === 'undefined' || isTitleSuggestionProvider(window.localStorage.getItem(DEFAULT_AI_PROVIDER_STORAGE_KEY))) return undefined;
+    if (typeof window === 'undefined' || isAiProvider(window.localStorage.getItem(DEFAULT_AI_PROVIDER_STORAGE_KEY))) return undefined;
     let cancelled = false;
     api.generationProviders()
       .then(providers => {
         if (cancelled) return;
-        const readyProviders = availableTitleSuggestionProviders(providers);
+        const readyProviders = availableAiProviders(providers);
         if (readyProviders.length !== 1) return;
         const selected = readyProviders[0];
         setDefaultAiProvider(selected);
@@ -296,7 +296,7 @@ export default function App() {
     setAppearance(nextAppearance);
     window.localStorage.setItem(APPEARANCE_STORAGE_KEY, nextAppearance);
   };
-  const updateDefaultAiProvider = (provider: TitleSuggestionProvider) => {
+  const updateDefaultAiProvider = (provider: AiProvider) => {
     setDefaultAiProvider(provider);
     window.localStorage.setItem(DEFAULT_AI_PROVIDER_STORAGE_KEY, provider);
   };

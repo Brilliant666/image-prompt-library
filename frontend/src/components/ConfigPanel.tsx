@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import OpenAICompatibleSettings from './OpenAICompatibleSettings';
 import { X } from 'lucide-react';
 import { api, isDemoMode } from '../api/client';
 import { restoreFocusAfterMotion } from '../hooks/useModalFocus';
-import type { AppearancePreset, AppConfig, AppUpdateStatus, CleanupPreview, GenerationProviderStatus, ProviderDeviceAuthStart, TitleSuggestionProvider } from '../types';
+import type { AppearancePreset, AppConfig, AppUpdateStatus, CleanupPreview, GenerationProviderStatus, ProviderDeviceAuthStart, AiProvider } from '../types';
 import { UI_LANGUAGE_LABELS, type Translator, type UiLanguage } from '../utils/i18n';
 import { getPromptCopyLanguageLabel, type PromptCopyLanguage } from '../utils/prompts';
 
@@ -98,8 +99,8 @@ export default function ConfigPanel({
   onPreferredLanguage: (language: PromptCopyLanguage) => void;
   appearance: AppearancePreset;
   onAppearance: (appearance: AppearancePreset) => void;
-  defaultAiProvider: TitleSuggestionProvider;
-  onDefaultAiProvider: (provider: TitleSuggestionProvider) => void;
+  defaultAiProvider: AiProvider;
+  onDefaultAiProvider: (provider: AiProvider) => void;
   updateStatus?: AppUpdateStatus;
   onRefreshUpdateStatus: (refresh?: boolean) => Promise<AppUpdateStatus | undefined>;
   onUpdateInstalled: (targetVersion: string, requiresManualRestart: boolean) => void;
@@ -544,9 +545,10 @@ export default function ConfigPanel({
             {([
               ['openai_codex_oauth_native', 'ChatGPT'],
               ['xai_grok_oauth', 'Grok'],
+              ['openai_compatible', providers.find(p => p.provider === 'openai_compatible')?.display_name || 'OpenAI compatible'],
             ] as const).map(([providerId, label]) => {
               const status = providers.find(candidate => candidate.provider === providerId);
-              const enabled = Boolean(status?.configured && status.authenticated && status.available && status.features.title_suggestion);
+              const enabled = Boolean(status?.configured && status.authenticated && status.available && (status.features.text_to_image || status.features.title_suggestion));
               return (
                 <button type="button" key={providerId} role="radio" aria-checked={defaultAiProvider === providerId} className={defaultAiProvider === providerId ? 'active' : ''} disabled={!enabled} onClick={() => onDefaultAiProvider(providerId)}>{label}</button>
               );
@@ -554,6 +556,7 @@ export default function ConfigPanel({
           </div>
           <p className="muted">{t('defaultAiProviderHelp')}</p>
         </fieldset>
+        {open && !isDemoMode && <OpenAICompatibleSettings onSaved={loadProviders} uiLanguage={uiLanguage} />}
         <div className="provider-list">
           {providers.map(provider => {
             const authStart = authStarts[provider.provider];

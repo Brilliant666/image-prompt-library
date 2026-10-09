@@ -1,10 +1,10 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { api, TitleSuggestionRequestError } from '../api/client';
-import type { TitleSuggestionProvider } from '../types';
+import type { AiProvider } from '../types';
 import type { Translator } from '../utils/i18n';
 
-function providerLabel(provider: TitleSuggestionProvider) {
-  return provider === 'xai_grok_oauth' ? 'Grok' : 'ChatGPT';
+function providerLabel(provider: AiProvider) {
+  return provider === 'openai_compatible' ? 'OpenAI compatible' : provider === 'xai_grok_oauth' ? 'Grok' : 'ChatGPT';
 }
 
 export default function SuggestedTitleField({
@@ -18,14 +18,14 @@ export default function SuggestedTitleField({
 }: {
   value: string;
   promptText: string;
-  provider: TitleSuggestionProvider;
+  provider: AiProvider;
   t: Translator;
   onChange: (value: string) => void;
   autoFocus?: boolean;
   className?: string;
 }) {
   const [suggestion, setSuggestion] = useState('');
-  const [suggestionProvider, setSuggestionProvider] = useState<TitleSuggestionProvider>();
+  const [suggestionProvider, setSuggestionProvider] = useState<AiProvider>();
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [providerAvailable, setProviderAvailable] = useState<boolean | null>(null);
@@ -46,6 +46,7 @@ export default function SuggestedTitleField({
     setSuggestionProvider(undefined);
     setError('');
     setProviderAvailable(null);
+    if (provider === 'openai_compatible') { setProviderAvailable(false); return; }
     let cancelled = false;
     api.generationProviders()
       .then(providers => {
@@ -61,7 +62,7 @@ export default function SuggestedTitleField({
 
   const requestSuggestion = async () => {
     const requestedPrompt = promptText.trim();
-    if (!requestedPrompt || busy || providerAvailable !== true) return;
+    if (provider === 'openai_compatible' || !requestedPrompt || busy || providerAvailable !== true) return;
     const requestedProvider = provider;
     setBusy(true);
     setError('');
@@ -93,7 +94,7 @@ export default function SuggestedTitleField({
     <div className={`suggested-title-field ${className}`.trim()}>
       <div className="suggested-title-label-row">
         <label htmlFor={inputId}>{t('title')}</label>
-        <button type="button" className="suggest-title-button" onClick={requestSuggestion} disabled={busy || !promptText.trim() || providerAvailable !== true} title={providerAvailable === false ? t('titleSuggestionProviderLoginRequired').replace('${provider}', providerLabel(provider)) : undefined}>
+        <button type="button" className="suggest-title-button" onClick={requestSuggestion} disabled={busy || !promptText.trim() || providerAvailable !== true} title={providerAvailable === false ? (provider === 'openai_compatible' ? t('titleSuggestionUnavailable') : t('titleSuggestionProviderLoginRequired').replace('${provider}', providerLabel(provider))) : undefined}>
           {busy ? t('suggestingTitle') : t('suggestTitle')}
         </button>
       </div>
@@ -107,7 +108,7 @@ export default function SuggestedTitleField({
           <button type="button" onClick={() => { onChange(suggestion); setSuggestion(''); }}>{t('useSuggestedTitle')}</button>
         </div>
       )}
-      {(error || providerAvailable === false) && <p className="title-suggestion-error" role="alert">{error || t('titleSuggestionProviderLoginRequired').replace('${provider}', providerLabel(provider))}</p>}
+      {(error || providerAvailable === false) && <p className="title-suggestion-error" role="alert">{error || (provider === 'openai_compatible' ? t('titleSuggestionUnavailable') : t('titleSuggestionProviderLoginRequired').replace('${provider}', providerLabel(provider)))}</p>}
     </div>
   );
 }

@@ -406,3 +406,13 @@ test('frontend shell declares a mobile viewport and root mount point', async () 
   assert.match(html, /name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/);
   assert.match(html, /<div id="root"><\/div>/);
 });
+
+test('image-only compatible provider is selectable independently of title suggestions', () => {
+  const compatible = {
+    provider: 'openai_compatible', configured: true, authenticated: true, available: true,
+    features: { text_to_image: true, image_edit: true, title_suggestion: false },
+  };
+  assert.equal(resolveDefaultAiProvider(null, [compatible]), 'openai_compatible');
+  assert.equal(resolveDefaultAiProvider('openai_compatible', []), 'openai_compatible');
+  assert.equal(resolveDefaultAiProvider(null, [{ ...compatible, configured: false }]), 'openai_codex_oauth_native');
+});

@@ -2697,6 +2697,7 @@ def test_app_startup_marks_interrupted_running_jobs_failed_and_drains_queued(tmp
     assert set(enqueue_calls) == {
         (library, "openai_codex_oauth_native"),
         (library, "xai_grok_oauth"),
+        (library, "openai_compatible"),
     }
 
 
@@ -3031,6 +3032,7 @@ def test_queue_worker_does_not_record_same_rate_limit_twice(tmp_path, monkeypatc
             (provider,),
         ).fetchone()[0] == 1
     assert continued == [
+        (library, "openai_compatible"),
         (library, "xai_grok_oauth"),
         (library, provider),
     ]

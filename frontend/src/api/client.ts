@@ -1,4 +1,4 @@
-import type { AppConfig, AppUpdateRequest, AppUpdateResult, AppUpdateStatus, CleanupApplyRequest, CleanupApplyResult, CleanupPreview, ClusterRecord, CodexNativeAuthPollRequest, CodexNativeAuthPollResponse, CodexNativeAuthStart, GenerationJobAcceptAsNewItemPayload, GenerationJobAcceptResult, GenerationJobCreate, GenerationJobList, GenerationJobRecord, GenerationJobRetryResult, GenerationJobSetCreate, GenerationJobSetRecord, GenerationProviderStatus, GrokOAuthPollRequest, ItemBatchRequest, ItemBatchResult, ItemCreate, ItemDetail, ItemImageUpdate, ItemList, ItemSortMode, ItemSummary, ProviderDeviceAuthStart, TagRecord, TitleSuggestionProvider, TitleSuggestionRequest, TitleSuggestionResponse, UploadImageRole } from '../types';
+import type { TitleSuggestionProvider, OpenAICompatibleConfig, AppConfig, AppUpdateRequest, AppUpdateResult, AppUpdateStatus, CleanupApplyRequest, CleanupApplyResult, CleanupPreview, ClusterRecord, CodexNativeAuthPollRequest, CodexNativeAuthPollResponse, CodexNativeAuthStart, GenerationJobAcceptAsNewItemPayload, GenerationJobAcceptResult, GenerationJobCreate, GenerationJobList, GenerationJobRecord, GenerationJobRetryResult, GenerationJobSetCreate, GenerationJobSetRecord, GenerationProviderStatus, GrokOAuthPollRequest, ItemBatchRequest, ItemBatchResult, ItemCreate, ItemDetail, ItemImageUpdate, ItemList, ItemSortMode, ItemSummary, ProviderDeviceAuthStart, TagRecord, TitleSuggestionRequest, TitleSuggestionResponse, UploadImageRole } from '../types';
 import { DEFAULT_ITEM_SORT } from '../utils/searchSort';
 
 const API = '';
@@ -214,6 +214,8 @@ export const api = isDemoMode ? {
       token_present: false,
     },
   ]),
+  openAICompatibleConfig: async (): Promise<OpenAICompatibleConfig> => ({ display_name: 'OpenAI compatible', base_url: '', model: '', timeout: 300, api_key_present: false }),
+  saveOpenAICompatibleConfig: (_payload: Omit<OpenAICompatibleConfig, 'api_key_present'> & { api_key?: string }) => demoReadOnly(),
   codexNativeAuthStart: () => demoReadOnly(),
   codexNativeAuthPoll: (_payload: CodexNativeAuthPollRequest) => demoReadOnly(),
   codexNativeAuthDisconnect: () => demoReadOnly(),
@@ -264,6 +266,8 @@ export const api = isDemoMode ? {
   uploadImage: (id: string, file: File, role: UploadImageRole = 'result_image') => { const fd = new FormData(); fd.set('file', file); fd.set('role', role); return json(`/api/items/${id}/images`, { method: 'POST', body: fd }); },
   updateImages: (id: string, images: ItemImageUpdate[]) => json<ItemDetail>(`/api/items/${id}/images`, { method: 'PUT', body: JSON.stringify({ images }) }),
   generationProviders: () => json<GenerationProviderStatus[]>('/api/generation-providers'),
+  openAICompatibleConfig: () => json<OpenAICompatibleConfig>('/api/generation-providers/openai-compatible/config'),
+  saveOpenAICompatibleConfig: (payload: Omit<OpenAICompatibleConfig, 'api_key_present'> & { api_key?: string }) => json<OpenAICompatibleConfig>('/api/generation-providers/openai-compatible/config', { method: 'PUT', body: JSON.stringify(payload) }),
   codexNativeAuthStart: () => json<CodexNativeAuthStart>('/api/generation-providers/openai-codex-native/auth/start', { method: 'POST' }),
   codexNativeAuthPoll: (payload: CodexNativeAuthPollRequest) => json<CodexNativeAuthPollResponse>('/api/generation-providers/openai-codex-native/auth/poll', { method: 'POST', body: JSON.stringify(payload) }),
   codexNativeAuthDisconnect: () => json<GenerationProviderStatus>('/api/generation-providers/openai-codex-native/auth/disconnect', { method: 'POST' }),

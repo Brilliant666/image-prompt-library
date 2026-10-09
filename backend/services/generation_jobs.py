@@ -38,6 +38,15 @@ class GenerationJobConflict(ValueError):
     pass
 
 
+def result_generation_model(job: GenerationJobRecord) -> str | None:
+    """Keep the compatible service's reported model separate from the request."""
+    if job.provider != "openai_compatible":
+        return job.model
+    response = job.metadata.get("response", {})
+    model = response.get("model") if isinstance(response, dict) else None
+    return model if isinstance(model, str) and model.strip() else None
+
+
 MAX_GENERATION_INPUT_IMAGES = 4
 GENERATION_INPUT_LIMITS = {"xai_grok_oauth": 3}
 PreparedReferenceImage = tuple[bytes, str, str | None, str | None, str | None]
@@ -923,13 +932,17 @@ class GenerationJobRepository:
             return None, None
         with connect(self.library_path) as conn:
             row = conn.execute(
-                "SELECT provider, model FROM generation_jobs WHERE id=?",
+                "SELECT provider, model, metadata FROM generation_jobs WHERE id=?",
                 (source_job_id,),
             ).fetchone()
         if row is None:
             return None, None
         provider = str(row["provider"]).strip() if row["provider"] else None
         model = str(row["model"]).strip() if row["model"] else None
+        if provider == "openai_compatible":
+            response = _from_json(row["metadata"], {}).get("response", {})
+            model = response.get("model") if isinstance(response, dict) else None
+            model = model if isinstance(model, str) else None
         return provider or None, model or None
 
     def _prepare_input_reference_images(
@@ -1461,7 +1474,7 @@ class GenerationJobRepository:
                 height=result_stored.height,
                 file_sha256=result_stored.file_sha256,
                 generation_provider=job.provider,
-                generation_model=job.model,
+                generation_model=result_generation_model(job),
                 role="result_image",
             )
             image = None
@@ -1551,6 +1564,12 @@ class GenerationJobRepository:
             "mode": job.mode,
             "parameters": _generation_provenance_parameters(job.parameters),
         }
+        if job.provider == "openai_compatible":
+            provenance["model"] = result_generation_model(job)
+            provenance["requested_model"] = job.model
+            provenance["requested"] = sanitize_generation_parameters(job.metadata.get("requested", {}), redact_image_data=True)
+            provenance["response"] = sanitize_generation_parameters(job.metadata.get("response", {}), redact_image_data=True)
+            provenance["decoded_image"] = {"width": job.result_width, "height": job.result_height}
         try:
             if overrides.prompts:
                 prompts = []
@@ -1590,7 +1609,7 @@ class GenerationJobRepository:
                 self._require_acceptance_claim(job.id, claim_token)
                 new_item = self.items.create_item(ItemCreate(
                     title=(overrides.title or default_title).strip() or default_title,
-                    model=overrides.model or job.model or (source_item.model if source_item else "ChatGPT Image2"),
+                    model=overrides.model or ((result_generation_model(job) or "Unreported") if job.provider == "openai_compatible" else (job.model or (source_item.model if source_item else "ChatGPT Image2"))),
                     source_name=overrides.source_name if overrides.source_name is not None else "Generation variant",
                     source_url=overrides.source_url if overrides.source_url is not None else (source_item.source_url if source_item else None),
                     author=overrides.author if overrides.author is not None else "User",
@@ -1629,7 +1648,7 @@ class GenerationJobRepository:
                 height=result_stored.height,
                 file_sha256=result_stored.file_sha256,
                 generation_provider=job.provider,
-                generation_model=job.model,
+                generation_model=result_generation_model(job),
                 role="result_image",
             )
             image = None

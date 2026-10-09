@@ -5,7 +5,7 @@ import aspectRatioIcon from '../assets/generation-controls/aspect-ratio.png';
 import brainAiIcon from '../assets/generation-controls/model.png';
 import qualityIcon from '../assets/generation-controls/quality.png';
 import { api, mediaUrl } from '../api/client';
-import type { ClusterRecord, GenerationJobAcceptAsNewItemPayload, GenerationJobCreate, GenerationJobRecord, GenerationJobSetRecord, GenerationProviderQueueState, GenerationProviderStatus, GenerationSetCount, ImageRecord, ItemDetail, ItemSummary, TagRecord, TitleSuggestionProvider } from '../types';
+import type { ClusterRecord, GenerationJobAcceptAsNewItemPayload, GenerationJobCreate, GenerationJobRecord, GenerationJobSetRecord, GenerationProviderQueueState, GenerationProviderStatus, GenerationSetCount, ImageRecord, ItemDetail, ItemSummary, TagRecord, AiProvider } from '../types';
 import type { Translator } from '../utils/i18n';
 import { providerPauseSeconds } from '../utils/generationSets';
 import { downloadFileName } from '../utils/images';
@@ -158,7 +158,7 @@ function buildInitialMetadata(job: GenerationJobRecord, item?: ItemDetail): Gene
     title: item ? `${item.title}${titleSuffix}` : `Generated image${position ? titleSuffix : ''}`,
     cluster_name: item?.cluster?.name || '',
     tags: item?.tags.map(tag => tag.name) || [],
-    model: job.model || item?.model || 'ChatGPT Image2',
+    model: job.provider === 'openai_compatible' ? reportedModel(job) : job.model || item?.model || 'ChatGPT Image2',
     source_name: 'Generation variant',
     source_url: item?.source_url || '',
     author: 'User',
@@ -208,7 +208,15 @@ function isStaleRunningJob(job?: GenerationJobRecord) {
   return Number.isFinite(started) && Date.now() - started > STALE_RUNNING_JOB_MS;
 }
 
+function reportedModel(job?: GenerationJobRecord): string {
+  const response = job?.metadata?.response;
+  if (!response || typeof response !== 'object') return '';
+  const model = (response as Record<string, unknown>).model;
+  return typeof model === 'string' ? model : '';
+}
+
 function jobModel(job?: GenerationJobRecord) {
+  if (job?.provider === 'openai_compatible') return job.model || 'Default';
   if (job?.metadata?.generation_route === 'images') return job.model || 'gpt-image-2';
   const parameterModel = job?.parameters?.orchestrator_model;
   const metadataModel = job?.metadata?.orchestrator_model;
@@ -280,8 +288,8 @@ function mergeGenerationJobs(current: GenerationJobRecord[], incoming: Generatio
 
 const GENERATION_SET_OPTIONS: Exclude<GenerationSetCount, 1>[] = [3, 5, 10];
 
-function isTitleSuggestionProvider(value: string | undefined): value is TitleSuggestionProvider {
-  return value === 'openai_codex_oauth_native' || value === 'xai_grok_oauth';
+function isAiProvider(value: string | undefined): value is AiProvider {
+  return value === 'openai_codex_oauth_native' || value === 'xai_grok_oauth' || value === 'openai_compatible';
 }
 
 export default function GenerationPanel({
@@ -309,7 +317,7 @@ export default function GenerationPanel({
   clusters?: ClusterRecord[];
   tags?: TagRecord[];
   promptVariablesEnabled?: boolean;
-  defaultAiProvider: TitleSuggestionProvider;
+  defaultAiProvider: AiProvider;
 }) {
   const originalPrompt = resolveOriginalPrompt(item?.prompts);
   const defaultPromptLanguage = preferredLanguage === 'origin' ? (originalPrompt?.language || 'en') : preferredLanguage;
@@ -321,6 +329,8 @@ export default function GenerationPanel({
   const [provider, setProvider] = useState<string>(defaultAiProvider);
   const [aspectRatio, setAspectRatio] = useState('auto');
   const [quality, setQuality] = useState('high');
+  const [compatibleQuality, setCompatibleQuality] = useState('low');
+  const [compatibleSize, setCompatibleSize] = useState('1024x1024');
   const [grokQuality, setGrokQuality] = useState('medium');
   const [grokResolution, setGrokResolution] = useState('1k');
   const [openControl, setOpenControl] = useState<'provider' | 'aspect' | 'quality' | null>(null);
@@ -463,10 +473,10 @@ export default function GenerationPanel({
     : t('providerUnavailableForGeneration');
   const selectedProviderQueueState = providerQueueStates.find(state => state.provider === provider);
   const selectedProviderPauseSeconds = selectedProviderQueueState ? providerPauseSeconds(selectedProviderQueueState, queueClock) : 0;
-  const selectedModelLabel = selectedProvider?.default_image_model || 'grok-imagine-image-2.0';
+  const selectedModelLabel = selectedProvider?.model || selectedProvider?.default_image_model || (provider === 'xai_grok_oauth' ? 'grok-imagine-image-2.0' : '');
   const selectedOutputLabel = provider === 'xai_grok_oauth'
     ? `${optionLabel(GROK_QUALITY_OPTIONS, grokQuality, t)} · ${optionLabel(GROK_RESOLUTION_OPTIONS, grokResolution, t)}`
-    : optionLabel(QUALITY_OPTIONS, quality, t);
+    : optionLabel(QUALITY_OPTIONS, provider === 'openai_compatible' ? compatibleQuality : quality, t);
   const selectedOutputAriaLabel = provider === 'xai_grok_oauth'
     ? `${t('queueQuality')}: ${optionLabel(GROK_QUALITY_OPTIONS, grokQuality, t)}, ${t('generationResolution')}: ${optionLabel(GROK_RESOLUTION_OPTIONS, grokResolution, t)}`
     : `${t('queueQuality')}: ${selectedOutputLabel}`;
@@ -919,7 +929,7 @@ export default function GenerationPanel({
 
   const createJob = async (count: GenerationSetCount = 1) => {
     const prompt = promptText.trim();
-    if (!prompt || hasMissingTemplateValues || !resolvedPrompt || !selectedProviderCanGenerateDraft || (provider === 'manual_upload' && count !== 1)) return;
+    if (!prompt || hasMissingTemplateValues || !resolvedPrompt || !selectedProviderCanGenerateDraft || (['manual_upload', 'openai_compatible'].includes(provider) && count !== 1)) return;
     const preservePausedReview = Boolean(batchReviewSession && batchReviewPaused);
     setBusy(true);
     setMessage('');
@@ -941,15 +951,17 @@ export default function GenerationPanel({
         source_item_id: item?.id,
         mode: attachments.length > 0 ? 'image_edit' : 'text_to_image',
         provider,
-        model: selectedProvider?.default_image_model || (provider === 'openai_codex_oauth_native' ? 'gpt-image-2' : null),
+        model: selectedProvider?.model || selectedProvider?.default_image_model || (provider === 'openai_codex_oauth_native' ? 'gpt-image-2' : null),
         prompt_language: defaultPromptLanguage,
         prompt_text: sourcePrompt,
         edited_prompt_text: jobEditedPromptText,
         reference_image_ids: [],
         parameters: {
-          requested_aspect_ratio: aspectRatio,
+          ...(provider === 'openai_compatible' ? {} : { requested_aspect_ratio: aspectRatio }),
           aspect_ratio_prompt_injection: provider === 'openai_codex_oauth_native' && aspectRatio !== 'auto',
-          ...(provider === 'openai_codex_oauth_native'
+          ...(provider === 'openai_compatible'
+            ? { quality: compatibleQuality, size: compatibleSize, n: 1 }
+            : provider === 'openai_codex_oauth_native'
             ? { quality }
             : provider === 'xai_grok_oauth'
               ? { quality: grokQuality, resolution: grokResolution }
@@ -1574,7 +1586,10 @@ export default function GenerationPanel({
       ]);
       setPromptText(jobPrompt(retryJob));
       setAspectRatio(jobAspectRatio(retryJob));
-      if (retryJob.provider === 'xai_grok_oauth') {
+      if (retryJob.provider === 'openai_compatible') {
+        setCompatibleQuality(jobQuality(retryJob));
+        setCompatibleSize(typeof retryJob.parameters?.size === 'string' ? retryJob.parameters.size : '1024x1024');
+      } else if (retryJob.provider === 'xai_grok_oauth') {
         setGrokQuality(jobQuality(retryJob) === 'low' ? 'low' : 'medium');
         setGrokResolution(jobResolution(retryJob));
       } else {
@@ -1658,7 +1673,10 @@ export default function GenerationPanel({
       const nextJobs = updateGenerationJobs(current => [retryJob, ...current.filter(candidate => candidate.id !== retryJob.id)]);
       setPromptText(jobPrompt(retry));
       setAspectRatio(jobAspectRatio(retry));
-      if (retryJob.provider === 'xai_grok_oauth') {
+      if (retryJob.provider === 'openai_compatible') {
+        setCompatibleQuality(jobQuality(retryJob));
+        setCompatibleSize(typeof retryJob.parameters?.size === 'string' ? retryJob.parameters.size : '1024x1024');
+      } else if (retryJob.provider === 'xai_grok_oauth') {
         setGrokQuality(jobQuality(retryJob) === 'low' ? 'low' : 'medium');
         setGrokResolution(jobResolution(retryJob));
       } else {
@@ -1723,7 +1741,10 @@ export default function GenerationPanel({
     const restorableAttachments = restorableJobAttachments(job);
     setPromptText(jobPrompt(job));
     setAspectRatio(jobAspectRatio(job));
-    if (job.provider === 'xai_grok_oauth') {
+    if (job.provider === 'openai_compatible') {
+      setCompatibleQuality(jobQuality(job));
+      setCompatibleSize(typeof job.parameters?.size === 'string' ? job.parameters.size : '1024x1024');
+    } else if (job.provider === 'xai_grok_oauth') {
       setGrokQuality(jobQuality(job) === 'low' ? 'low' : 'medium');
       setGrokResolution(jobResolution(job));
     } else {
@@ -2129,16 +2150,16 @@ export default function GenerationPanel({
                     )}
                   </div>
                   <div className="generation-control-wrap">
-                     <button ref={element => { controlTriggerRefs.current.aspect = element; }} className="generation-control-trigger generation-aspect-trigger" type="button" onClick={() => setOpenControl(openControl === 'aspect' ? null : 'aspect')} aria-label={`${t('queueAspectRatio')}: ${optionLabel(ASPECT_RATIO_OPTIONS, aspectRatio, t)}`} title={`${t('queueAspectRatio')}: ${optionLabel(ASPECT_RATIO_OPTIONS, aspectRatio, t)}`}>
+                     <button ref={element => { controlTriggerRefs.current.aspect = element; }} className="generation-control-trigger generation-aspect-trigger" type="button" onClick={() => setOpenControl(openControl === 'aspect' ? null : 'aspect')} aria-label={provider === 'openai_compatible' ? `Size: ${compatibleSize}` : `${t('queueAspectRatio')}: ${optionLabel(ASPECT_RATIO_OPTIONS, aspectRatio, t)}`} title={provider === 'openai_compatible' ? `Size: ${compatibleSize}` : `${t('queueAspectRatio')}: ${optionLabel(ASPECT_RATIO_OPTIONS, aspectRatio, t)}`}>
                       <img className="generation-control-icon" src={aspectRatioIcon} alt="" aria-hidden="true" />
-                      <span className="generation-control-value">{optionLabel(ASPECT_RATIO_OPTIONS, aspectRatio, t)}</span>
+                      <span className="generation-control-value">{provider === 'openai_compatible' ? compatibleSize : optionLabel(ASPECT_RATIO_OPTIONS, aspectRatio, t)}</span>
                     </button>
                     {openControl === 'aspect' && (
                       <div className="generation-control-popover" role="menu">
-                        {ASPECT_RATIO_OPTIONS.map(option => {
-                          const selected = aspectRatio === option.value;
+                        {(provider === 'openai_compatible' ? [{ value: '1024x1024', label: '1024x1024' }, { value: '1024x1536', label: '1024x1536' }, { value: '1536x1024', label: '1536x1024' }] : ASPECT_RATIO_OPTIONS).map(option => {
+                          const selected = (provider === 'openai_compatible' ? compatibleSize : aspectRatio) === option.value;
                           return (
-                            <button key={option.value} type="button" role="menuitemradio" aria-checked={selected} className={selected ? 'is-selected' : ''} onClick={() => { setAspectRatio(option.value); closeGenerationControl('aspect'); }}>
+                            <button key={option.value} type="button" role="menuitemradio" aria-checked={selected} className={selected ? 'is-selected' : ''} onClick={() => { if (provider === 'openai_compatible') setCompatibleSize(option.value); else setAspectRatio(option.value); closeGenerationControl('aspect'); }}>
                               <span className="generation-control-option-label">{optionLabel(ASPECT_RATIO_OPTIONS, option.value, t)}</span>
                               {selected && <Check className="generation-control-option-check" size={15} aria-hidden="true" />}
                             </button>
@@ -2182,9 +2203,9 @@ export default function GenerationPanel({
                             </div>
                           </>
                         ) : QUALITY_OPTIONS.map(option => {
-                            const selected = quality === option.value;
+                            const selected = (provider === 'openai_compatible' ? compatibleQuality : quality) === option.value;
                             return (
-                              <button key={option.value} type="button" role="menuitemradio" aria-checked={selected} className={selected ? 'is-selected' : ''} onClick={() => { setQuality(option.value); closeGenerationControl('quality'); }}>
+                              <button key={option.value} type="button" role="menuitemradio" aria-checked={selected} className={selected ? 'is-selected' : ''} onClick={() => { if (provider === 'openai_compatible') setCompatibleQuality(option.value); else setQuality(option.value); closeGenerationControl('quality'); }}>
                                 <span className="generation-control-option-label">{optionLabel(QUALITY_OPTIONS, option.value, t)}</span>
                                 {selected && <Check className="generation-control-option-check" size={15} aria-hidden="true" />}
                               </button>
@@ -2193,7 +2214,7 @@ export default function GenerationPanel({
                       </div>
                     )}
                   </div>
-                  {provider === 'xai_grok_oauth' && (
+                  {['xai_grok_oauth', 'openai_compatible'].includes(provider) && (
                     <div className="generation-control-wrap generation-model-control">
                       <button className="generation-control-trigger generation-model-trigger generation-has-long-value" type="button" disabled aria-label={`${t('queueModel')}: ${selectedModelLabel}`} title={selectedModelLabel}>
                         <img className="generation-control-icon" src={brainAiIcon} alt="" aria-hidden="true" />
@@ -2218,7 +2239,7 @@ export default function GenerationPanel({
                      onMouseEnter={() => {
                        clearGenerationCountCloseTimer();
                        generationCountFocusOnOpenRef.current = false;
-                       if (window.matchMedia('(hover: hover)').matches) setGenerationCountMenuOpen(true);
+                       if (provider !== 'openai_compatible' && window.matchMedia('(hover: hover)').matches) setGenerationCountMenuOpen(true);
                      }}
                      onMouseLeave={scheduleGenerationCountClose}
                     onKeyDown={handleGenerationCountMenuKeyDown}
@@ -2235,6 +2256,7 @@ export default function GenerationPanel({
                      >{t('generate')}</button>
                     <button
                         ref={generationCountTriggerRef}
+                        hidden={provider === 'openai_compatible'}
                         className="primary generation-count-trigger"
                         type="button"
                          aria-label={t('chooseGenerationCount')}
@@ -2259,7 +2281,7 @@ export default function GenerationPanel({
                         }}
                         disabled={busy || !selectedProviderCanGenerateDraft || !promptText.trim() || hasMissingTemplateValues}
                       ><ChevronDown size={17} aria-hidden="true" /></button>
-                    {generationCountMenuOpen && (
+                    {generationCountMenuOpen && provider !== 'openai_compatible' && (
                        <div id="generation-count-menu" className="generation-count-menu" role="menu" aria-label={t('generateVariations')}>
                         {GENERATION_SET_OPTIONS.map(count => (
                           <button key={count} type="button" role="menuitem" onClick={() => createJob(count)}>
@@ -2403,7 +2425,7 @@ export default function GenerationPanel({
                   {jobResultUrl(job) ? <img src={jobResultUrl(job)} alt="" /> : <span className="generation-history-placeholder">{statusLabel(job.status, t, isUsedAsGenerationReference(job))}</span>}
                 </span>
                 <span className="generation-history-status-grid" aria-hidden="true">
-                  <span className="generation-history-cell"><b>{t('queueAspectRatio')}</b><em>{optionLabel(ASPECT_RATIO_OPTIONS, jobAspectRatio(job), t)}</em></span>
+                  <span className="generation-history-cell"><b>{job.provider === 'openai_compatible' ? t('requestedImageSize') : t('queueAspectRatio')}</b><em>{job.provider === 'openai_compatible' ? String(job.parameters?.size || '—') : optionLabel(ASPECT_RATIO_OPTIONS, jobAspectRatio(job), t)}</em></span>
                   <span className="generation-history-cell"><b>{t('queueQuality')}</b><em>{optionLabel(QUALITY_OPTIONS, jobQuality(job), t)}</em></span>
                   {job.provider === 'xai_grok_oauth' && <span className="generation-history-cell"><b>{t('generationResolution')}</b><em>{optionLabel(GROK_RESOLUTION_OPTIONS, jobResolution(job), t)}</em></span>}
                   <span className="generation-history-cell"><b>{t('queueModel')}</b><em>{jobModel(job)}</em></span>
@@ -2435,7 +2457,7 @@ export default function GenerationPanel({
               {jobResultUrl(reviewJob) && <img src={jobResultUrl(reviewJob)} alt={t('saveGeneratedResultPreview')} />}
               <div className="save-new-fields">
                 {renderReferenceTray(jobAttachments(reviewJob), true, jobInputLimit(reviewJob))}
-                <SuggestedTitleField value={metadataDraft.title || ''} promptText={metadataDraft.prompts?.[0]?.text || ''} provider={isTitleSuggestionProvider(reviewJob.provider) ? reviewJob.provider : defaultAiProvider} t={t} onChange={title => updateMetadataDraft({ title })} autoFocus />
+                <SuggestedTitleField value={metadataDraft.title || ''} promptText={metadataDraft.prompts?.[0]?.text || ''} provider={isAiProvider(reviewJob.provider) ? reviewJob.provider : defaultAiProvider} t={t} onChange={title => updateMetadataDraft({ title })} autoFocus />
                 <label><span>{t('collection')}</span><input list="save-new-collection-suggestions" value={metadataDraft.cluster_name || ''} onChange={event => updateMetadataDraft({ cluster_name: event.currentTarget.value })} /></label>
                 <datalist id="save-new-collection-suggestions">
                   {filteredMetadataClusters.map(collection => <option key={collection.id} value={collection.name} />)}
@@ -2454,7 +2476,12 @@ export default function GenerationPanel({
                   <strong>{t('generationRecord')}</strong>
                   <dl>
                     <div><dt>{t('providers')}</dt><dd>{providers.find(providerStatus => providerStatus.provider === reviewJob.provider)?.display_name || (reviewJob.provider === 'openai_codex_oauth_native' ? 'ChatGPT / Codex OAuth' : t('providers'))}</dd></div>
-                    <div><dt>{t('queueModel')}</dt><dd>{jobModel(reviewJob)}</dd></div>
+                    <div><dt>{reviewJob.provider === 'openai_compatible' ? t('requestedImageModel') : t('queueModel')}</dt><dd>{jobModel(reviewJob)}</dd></div>
+                    {reviewJob.provider === 'openai_compatible' && <>
+                      <div><dt>{t('requestedImageSize')}</dt><dd>{String(reviewJob.parameters?.size || '—')}</dd></div>
+                      <div><dt>{t('returnedImageModel')}</dt><dd>{reportedModel(reviewJob) || t('notReported')}</dd></div>
+                      <div><dt>{t('returnedImageDimensions')}</dt><dd>{reviewJob.result_width && reviewJob.result_height ? `${reviewJob.result_width} × ${reviewJob.result_height}` : '—'}</dd></div>
+                    </>}
                     {reviewJob.source_item_id && <div><dt>{t('originalItem')}</dt><dd>{reviewJob.source_item_id === item?.id ? item.title : t('localReference')}</dd></div>}
                     {generationResultPosition(reviewJob) && <div><dt>{t('batchPosition')}</dt><dd>{generationResultPosition(reviewJob)?.index} / {generationResultPosition(reviewJob)?.total}</dd></div>}
                   </dl>

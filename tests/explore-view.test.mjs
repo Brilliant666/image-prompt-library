@@ -1292,6 +1292,8 @@ test('title suggestions are explicit, provider-aware, prompt-only, and shared by
   ]);
 
   assert.match(field, /api\.generationProviders\(\)/);
+  assert.match(field, /if \(provider === 'openai_compatible'\) \{ setProviderAvailable\(false\); return; \}/);
+  assert.match(field, /if \(provider === 'openai_compatible' \|\| !requestedPrompt \|\| busy \|\| providerAvailable !== true\) return;/);
   assert.match(field, /selected\?\.configured && selected\.authenticated && selected\.available && selected\.features\.title_suggestion/);
   assert.match(field, /disabled=\{busy \|\| !promptText\.trim\(\) \|\| providerAvailable !== true\}/);
   assert.match(field, /api\.suggestTitle\(requestedProvider, \{ prompt_text: requestedPrompt \}\)/);
@@ -1303,7 +1305,7 @@ test('title suggestions are explicit, provider-aware, prompt-only, and shared by
   assert.match(client, /suggestTitle: \(_provider: TitleSuggestionProvider, _payload: TitleSuggestionRequest\) => demoReadOnly\(\)/);
   assert.match(client, /generation-providers\/\$\{encodeURIComponent\(provider\)\}\/suggest-title/);
   assert.match(editor, /<SuggestedTitleField[^>]*promptText=\{titleSuggestionPrompt\}[^>]*provider=\{defaultAiProvider\}/);
-  assert.match(generation, /<SuggestedTitleField[^>]*promptText=\{metadataDraft\.prompts\?\.\[0\]\?\.text \|\| ''\}[^>]*provider=\{isTitleSuggestionProvider\(reviewJob\.provider\) \? reviewJob\.provider : defaultAiProvider\}/);
+  assert.match(generation, /<SuggestedTitleField[^>]*promptText=\{metadataDraft\.prompts\?\.\[0\]\?\.text \|\| ''\}[^>]*provider=\{isAiProvider\(reviewJob\.provider\) \? reviewJob\.provider : defaultAiProvider\}/);
   assert.match(defaultProvider, /image-prompt-library\.default_ai_provider/);
   assert.match(app, /readyProviders\.length !== 1/);
   assert.match(app, /window\.localStorage\.setItem\(DEFAULT_AI_PROVIDER_STORAGE_KEY, provider\)/);

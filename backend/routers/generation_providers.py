@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
+from backend.services.openai_compatible import OpenAICompatibleConfig, OpenAICompatibleError
 
 from backend.services.openai_codex_native import (
     CodexDeviceCodeFlow,
@@ -46,7 +47,6 @@ class TitleSuggestionResponse(LegacyTitleSuggestionResponse):
 
 @router.get("")
 def list_generation_providers(request: Request):
-    del request
     return [
         {
             "provider": "manual_upload",
@@ -70,7 +70,30 @@ def list_generation_providers(request: Request):
         },
         CodexNativeAuthStore().status(),
         GrokOAuthAuthStore().status(),
+        OpenAICompatibleConfig(library_path=request.app.state.library_path).status(),
     ]
+
+
+@router.get("/openai-compatible/config")
+def openai_compatible_config(request: Request):
+    try:
+        return OpenAICompatibleConfig(library_path=request.app.state.library_path).public()
+    except (ValueError, OSError, OpenAICompatibleError):
+        raise HTTPException(status_code=409, detail="Could not read compatible image provider configuration.") from None
+
+
+@router.put("/openai-compatible/config")
+async def save_openai_compatible_config(request: Request):
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid configuration")
+        store = OpenAICompatibleConfig(library_path=request.app.state.library_path)
+        store.save(payload)
+        return store.public()
+    except (ValueError, TypeError, OSError, OpenAICompatibleError):
+        # Never echo submitted credentials or exceptions containing a request body.
+        raise HTTPException(status_code=400, detail="Invalid compatible image provider configuration. Check the URL, model and timeout.") from None
 
 
 @router.get("/openai-codex-native/status")

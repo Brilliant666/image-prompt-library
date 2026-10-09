@@ -11,8 +11,9 @@ from backend.services.openai_codex_native import (
     OpenAICodexNativeProvider,
 )
 from backend.services.xai_grok_oauth import PROVIDER_ID as GROK_PROVIDER_ID, XaiGrokOAuthProvider
+from backend.services.openai_compatible import PROVIDER_ID as COMPATIBLE_PROVIDER_ID, OpenAICompatibleProvider
 
-AUTOMATED_PROVIDER_IDS = frozenset({CODEX_PROVIDER_ID, GROK_PROVIDER_ID})
+AUTOMATED_PROVIDER_IDS = frozenset({CODEX_PROVIDER_ID, GROK_PROVIDER_ID, COMPATIBLE_PROVIDER_ID})
 
 MAX_CONCURRENT_GENERATION_JOBS = 5
 QUEUE_RESUME_RETRY_SECONDS = 5
@@ -101,6 +102,8 @@ def run_generation_job_now(library_path: Path | str, job_id: str):
 
 
 def _provider_for(provider: str):
+    if provider == COMPATIBLE_PROVIDER_ID:
+        return OpenAICompatibleProvider()
     if provider == CODEX_PROVIDER_ID:
         return OpenAICodexNativeProvider()
     if provider == GROK_PROVIDER_ID:

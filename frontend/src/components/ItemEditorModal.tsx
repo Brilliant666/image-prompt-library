@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { ChevronLeft, ChevronRight, ImagePlus, Star, Trash2, X } from 'lucide-react';
 import { api, mediaUrl } from '../api/client';
 import { useModalFocus } from '../hooks/useModalFocus';
-import type { ClusterRecord, ImageRecord, ItemDetail, TagRecord, TitleSuggestionProvider, UploadImageRole } from '../types';
+import type { ClusterRecord, ImageRecord, ItemDetail, TagRecord, AiProvider, UploadImageRole } from '../types';
 import { imageThumbnailPath } from '../utils/images';
 import type { Translator } from '../utils/i18n';
 import SuggestedTitleField from './SuggestedTitleField';
@@ -41,7 +41,7 @@ export default function ItemEditorModal({
   t: Translator;
   clusters: ClusterRecord[];
   tags: TagRecord[];
-  defaultAiProvider: TitleSuggestionProvider;
+  defaultAiProvider: AiProvider;
   onClose: () => void;
   onSaved: () => void;
   onDeleted: () => void;
