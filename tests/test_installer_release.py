@@ -1368,9 +1368,7 @@ def test_posix_rollback_migrates_pristine_v080_management_plane_and_records_prov
         runtime.mkdir(parents=True)
         (runtime / "python").symlink_to(Path(sys.executable))
     legacy_management = {
-        relative: subprocess.check_output(
-            ["git", "cat-file", "blob", f"v0.8.0:{relative}"], cwd=ROOT
-        )
+        relative: (ROOT / "tests" / "fixtures" / "upstream-v0.8.0" / relative).read_bytes()
         for relative in ("scripts/install.sh", "scripts/install-sample-data.sh", "scripts/appctl.sh")
     }
     for relative, payload in legacy_management.items():
@@ -2565,3 +2563,12 @@ def test_installed_sample_data_script_imports_into_installer_library_by_default(
     assert "Imported 1 items" in result.stdout
     assert git_bash_arg(library) in result.stdout
     assert ItemRepository(library).list_items(limit=5).total == 1
+
+
+def test_legacy_v080_fixture_hashes_match_runtime_guard():
+    fixture = ROOT / "tests" / "fixtures" / "upstream-v0.8.0"
+    manifest = json.loads((fixture / "SOURCE.json").read_text(encoding="utf-8"))
+    controller = read("scripts/appctl.sh")
+    for name, digest in manifest["sha256"].items():
+        assert hashlib.sha256((fixture / "scripts" / name).read_bytes()).hexdigest() == digest
+        assert f'"scripts/{name}": "{digest}"' in controller

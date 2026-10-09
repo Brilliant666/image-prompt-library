@@ -34,12 +34,12 @@ jobs:
           python -m pip install -e '.[dev]'
       - name: Install frontend dependencies
         run: npm install
+      - name: Build local app
+        run: npm run build
       - name: Run tests
         run: python -m pytest -q
       - name: Run frontend behavior tests
         run: npm run test:frontend
-      - name: Build local app
-        run: npm run build
       - name: Build read-only demo
         run: npm run build:demo
 

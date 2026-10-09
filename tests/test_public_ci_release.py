@@ -34,6 +34,7 @@ def test_ci_workflow_runs_full_public_alpha_checks():
     assert "python -m pytest -q" in workflow
     assert "npm run build" in workflow
     assert "npm run build:demo" in workflow
+    assert workflow.index("run: npm run build\n") < workflow.index("run: python -m pytest -q")
 
 
 def test_alpha_release_notes_are_public_safe_and_actionable():

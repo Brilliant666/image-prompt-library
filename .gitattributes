@@ -1,0 +1,2 @@
+# Preserve verified historical fixture bytes on every platform.
+tests/fixtures/upstream-v0.8.0/scripts/*.sh -text

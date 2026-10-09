@@ -16,6 +16,9 @@ def legacy_release_source(tmp_path_factory):
     from pathlib import Path
     import shutil
     source = Path(__file__).resolve().parents[1]
+    index = source / "frontend" / "dist" / "index.html"
+    if not index.is_file() or "/image-prompt-library/assets/" in index.read_text(encoding="utf-8"):
+        pytest.fail("Legacy installer fixtures require local app assets; run npm run build before pytest.")
     target = tmp_path_factory.mktemp("legacy-release-source")
     for name in ("backend", "scripts", "docs", "tests", "sample-data", ".github", "frontend"):
         shutil.copytree(source / name, target / name, ignore=shutil.ignore_patterns("__pycache__", "node_modules", ".pytest_cache"))

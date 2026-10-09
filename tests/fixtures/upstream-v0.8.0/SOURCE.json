@@ -1,0 +1,11 @@
+{
+  "upstream": "https://github.com/EddieTYP/image-prompt-library",
+  "tag": "v0.8.0",
+  "purpose": "Immutable fixtures for legacy rollback verification, never application update sources.",
+  "sha256": {
+    "install.sh": "baa71e8f21eb314ad56fd7d70d43ccd5965168020c0ef9c26216c76342ad8bae",
+    "install-sample-data.sh": "476b44b8ae677420407d25325e6fd9a73f6571f1c07cdc31220fac317633f662",
+    "appctl.sh": "df7db6025605e503696134dc26f2915db813793ffa4b502e3bcb147d4a46e76b"
+  },
+  "license": "AGPL-3.0-or-later; original copyright and license remain in repository LICENSE and NOTICE."
+}

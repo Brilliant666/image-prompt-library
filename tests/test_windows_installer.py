@@ -4374,11 +4374,17 @@ def test_public_docs_explain_windows_python_prerequisite_and_installation():
     roadmap = read("ROADMAP.md")
     release = read("docs/releases/v0.8.0.md")
     for document in readmes:
-        assert "scripts/install.ps1" in document
         assert "Python 3.10+" in document
-        assert "https://github.com/EddieTYP/image-prompt-library/releases/latest" in document
-        assert "docs/INSTALLATION.md" in document
+        assert "Node.js 24" in document
+        assert "docs/INDEPENDENT_MAINTENANCE.md" in document
+        assert "No release installer is offered" in document
+        assert "raw.githubusercontent.com/EddieTYP" not in document
         assert "releases/tag/v0.7.10" not in document
+    maintenance = read("docs/INDEPENDENT_MAINTENANCE.md")
+    assert "Windows PowerShell" in maintenance
+    assert "python -m venv .venv" in maintenance
+    assert "npm ci" in maintenance
+    assert "uvicorn backend.main:app --host 127.0.0.1" in maintenance
     assert "The installer does not install Python" in installation
     assert "image-prompt-library stop" in installation
     assert "app.previous.err.log" in troubleshooting
@@ -4407,12 +4413,13 @@ def test_windows_docs_match_restricted_policy_command_and_recovery_contracts():
     assert "image-prompt-library-delegate.ps1" not in troubleshooting
     assert "image-prompt-library.cmd" in troubleshooting
 
-    for path, heading in (
-        ("README_zh-TW.md", "### macOS、Linux 與 WSL 2"),
-        ("README_zh-CN.md", "### macOS、Linux 和 WSL 2"),
-    ):
+    for path in ("README_zh-TW.md", "README_zh-CN.md"):
         document = read(path)
-        windows_index = document.index("### Windows")
-        unix_index = document.index(heading)
-        curl_prerequisite = document.index("`curl`")
-        assert windows_index < unix_index < curl_prerequisite
+        assert "docs/INDEPENDENT_MAINTENANCE.md" in document
+        assert "Node.js 24" in document
+        assert "irm https://raw.githubusercontent.com/" not in document
+        assert "curl -fsSL" not in document
+    maintenance = read("docs/INDEPENDENT_MAINTENANCE.md")
+    assert "Windows PowerShell" in maintenance
+    assert "scripts/setup.sh" in maintenance
+    assert "scripts/start.sh" in maintenance
