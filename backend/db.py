@@ -1,0 +1,41 @@
+import sqlite3
+from pathlib import Path
+from .config import resolve_library_path
+
+MIGRATIONS = ["001_initial.sql", "002_image_roles.sql", "003_image_role_check.sql", "004_prompt_provenance.sql", "005_cluster_names.sql", "006_import_drafts.sql", "007_generation_jobs.sql", "008_generation_job_cancelled_at.sql", "009_generation_sets.sql", "010_generation_jobs_source_created.sql", "011_image_generation_provenance.sql"]
+
+def get_db_path(library_path=None) -> Path:
+    return resolve_library_path(library_path) / "db.sqlite"
+
+def connect(library_path=None) -> sqlite3.Connection:
+    conn = sqlite3.connect(get_db_path(library_path))
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+def init_db(library_path=None) -> Path:
+    library = resolve_library_path(library_path)
+    db_path = library / "db.sqlite"
+    with connect(library) as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)")
+        done = {r[0] for r in conn.execute("SELECT version FROM schema_migrations")}
+        for migration in MIGRATIONS:
+            if migration not in done:
+                sql = (Path(__file__).parent / "migrations" / migration).read_text(encoding="utf-8")
+                migration_literal = conn.execute("SELECT quote(?)", (migration,)).fetchone()[0]
+                # Keep the migration and its ledger row in the same explicit
+                # transaction. sqlite quote() makes the controlled filename a
+                # safe SQL literal without maintaining a custom script parser.
+                try:
+                    conn.executescript(
+                        "BEGIN;\n"
+                        f"{sql}\n"
+                        "INSERT INTO schema_migrations(version, applied_at) VALUES ("
+                        f"{migration_literal}, datetime('now'));\n"
+                        "COMMIT;"
+                    )
+                except Exception:
+                    conn.rollback()
+                    raise
+        conn.commit()
+    return db_path

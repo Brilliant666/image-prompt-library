@@ -1,0 +1,1000 @@
+from __future__ import annotations
+
+import base64
+import binascii
+import errno
+import hashlib
+import json
+import math
+import os
+import time
+import tempfile
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from io import BytesIO
+from pathlib import Path
+from typing import Any
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
+
+import httpx
+from PIL import Image, UnidentifiedImageError
+
+from backend.config import resolve_auth_path, resolve_config_path, validate_app_owned_paths
+from backend.services.generation_jobs import GenerationJobConflict, GenerationJobRepository, resolve_generation_input_image_path, sanitize_generation_error
+from backend.services.image_store import MAX_IMAGE_PIXELS
+
+PROVIDER_ID = "openai_codex_oauth_native"
+AUTH_MODE = "codex_oauth_native"
+DISPLAY_NAME = "ChatGPT / Codex OAuth"
+# Public native Codex OAuth client id used by the upstream openai/codex CLI.
+# Users may still override this with IMAGE_PROMPT_LIBRARY_CODEX_CLIENT_ID or local config.
+DEFAULT_CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
+CODEX_AUTH_ISSUER = "https://auth.openai.com"
+CODEX_TOKEN_URL = f"{CODEX_AUTH_ISSUER}/oauth/token"
+CODEX_CHAT_MODEL = "gpt-5.6-terra"
+IMAGE_MODEL = "gpt-image-2"
+DEFAULT_QUALITY = "high"
+QUALITY_ALIASES = {"standard": "medium", "medium": "medium", "high": "high", "low": "low", "auto": "auto"}
+MAX_INPUT_IMAGES = 4
+AUTH_REFRESH_LOCK_POLL_SECONDS = 0.1
+AUTH_REFRESH_LOCK_WAIT_SECONDS = 20.0
+
+
+def _data_url_from_bytes(data: bytes, *, mime_type: str = "image/png") -> str:
+    return f"data:{mime_type};base64,{base64.b64encode(data).decode('ascii')}"
+
+
+def _decode_data_url(data_url: str) -> tuple[bytes, str]:
+    header, _, encoded = data_url.partition(",")
+    if not header.startswith("data:image/") or not encoded:
+        raise CodexNativeAuthError("Generation edit input image must be a data URL image")
+    mime_type = header.removeprefix("data:").split(";", 1)[0] or "image/png"
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise CodexNativeAuthError("Generation edit input image contains invalid image data") from exc
+    _validate_input_image_bytes(data)
+    return data, mime_type
+
+
+def _validate_input_image_bytes(data: bytes) -> None:
+    try:
+        with Image.open(BytesIO(data)) as image:
+            width, height = image.size
+            if width * height > MAX_IMAGE_PIXELS:
+                raise CodexNativeAuthError(f"Generation edit input image is too large: {width}x{height}")
+            image.verify()
+    except CodexNativeAuthError:
+        raise
+    except (UnidentifiedImageError, OSError, ValueError) as exc:
+        raise CodexNativeAuthError("Generation edit input image contains invalid image data") from exc
+
+
+def _comma_list(value: str) -> list[str]:
+    seen: set[str] = set()
+    items: list[str] = []
+    for raw in value.split(","):
+        item = raw.strip()
+        if item and item not in seen:
+            seen.add(item)
+            items.append(item)
+    return items
+
+
+def codex_image_models() -> list[str]:
+    configured = _comma_list(os.environ.get("IMAGE_PROMPT_LIBRARY_CODEX_IMAGE_MODELS", ""))
+    if IMAGE_MODEL not in configured:
+        configured.insert(0, IMAGE_MODEL)
+    return configured
+
+
+def normalize_codex_image_model(value: Any) -> str:
+    requested = str(value or "").strip()
+    allowed = codex_image_models()
+    return requested if requested in allowed else allowed[0]
+
+
+def normalize_codex_quality(value: Any) -> str:
+    requested = str(value or DEFAULT_QUALITY).strip().lower()
+    return QUALITY_ALIASES.get(requested, DEFAULT_QUALITY)
+
+
+def _codex_response_error_message(response: httpx.Response, *, api: str = "Responses") -> str:
+    detail = ""
+    try:
+        data = response.json()
+        if isinstance(data, dict):
+            error = data.get("error")
+            if isinstance(error, dict):
+                error_code = str(error.get("code") or "").strip()
+                error_message = str(error.get("message") or "").strip()
+                detail = f"{error_code}: {error_message}" if error_code and error_message else error_code or error_message
+            elif isinstance(error, str):
+                detail = error.strip()
+    except Exception:
+        try:
+            detail = response.text.strip()
+        except Exception:
+            detail = ""
+    detail = sanitize_generation_error(detail) if detail else ""
+    prefix = f"Codex {api} API returned status {response.status_code}"
+    return f"{prefix}: {detail[:500]}" if detail else prefix
+
+
+def normalize_title_suggestion(value: str) -> str:
+    title = " ".join(str(value or "").strip().splitlines()).strip()
+    for prefix in ("Title:", "Suggested title:", "標題：", "标题："):
+        if title.lower().startswith(prefix.lower()):
+            title = title[len(prefix):].strip()
+            break
+    title = title.removeprefix("- ").removeprefix("* ").strip().strip("`\"'“”‘’")
+    title = " ".join(title.split())
+    if not title:
+        raise CodexNativeTemporaryError("Codex response contained no title suggestion")
+    return title[:160].rstrip()
+
+
+def parse_retry_after_seconds(value: str | None, *, now: datetime | None = None) -> int | None:
+    """Parse a safe Retry-After value and clamp it to the provider pause limit."""
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    seconds: float | None = None
+    try:
+        seconds = float(raw)
+        if not math.isfinite(seconds) or seconds < 0:
+            return None
+    except ValueError:
+        try:
+            parsed = parsedate_to_datetime(raw)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        reference = now or datetime.now(timezone.utc)
+        seconds = max(0.0, (parsed.astimezone(timezone.utc) - reference.astimezone(timezone.utc)).total_seconds())
+    return min(300, int(math.ceil(seconds)))
+
+
+_parse_retry_after_seconds = parse_retry_after_seconds
+
+SIZES = {
+    "square": "1024x1024",
+    "1:1": "1024x1024",
+    "3:4": "1024x1536",
+    "portrait": "1024x1536",
+    "9:16": "1024x1536",
+    "4:3": "1536x1024",
+    "landscape": "1536x1024",
+    "16:9": "1536x1024",
+}
+CHATGPT_ASPECT_RATIO_OPTIONS = {"1:1", "3:4", "9:16", "4:3", "16:9"}
+ASPECT_RATIO_ALIASES = {
+    "square": "1:1",
+    "portrait": "3:4",
+    "landscape": "4:3",
+}
+
+
+def _normalize_requested_aspect_ratio(value: Any) -> str:
+    aspect = str(value or "auto").strip().lower()
+    if aspect == "auto":
+        return "auto"
+    return ASPECT_RATIO_ALIASES.get(aspect, aspect if aspect in CHATGPT_ASPECT_RATIO_OPTIONS else "1:1")
+
+
+def _aspect_ratio_instruction(aspect_ratio: str) -> str:
+    return f"Make the aspect ratio {aspect_ratio}."
+
+
+def _prompt_with_aspect_ratio_instruction(prompt: str, aspect_ratio: str, enabled: bool) -> tuple[str, str | None]:
+    if not enabled:
+        return prompt, None
+    instruction = _aspect_ratio_instruction(aspect_ratio)
+    if prompt.rstrip().endswith(instruction):
+        return prompt, instruction
+    return f"{prompt.rstrip()}\n\n{instruction}", instruction
+
+
+class CodexNativeAuthError(RuntimeError):
+    pass
+
+
+class CodexNativeTemporaryError(CodexNativeAuthError):
+    pass
+
+
+class CodexNativeRequestError(RuntimeError):
+    pass
+
+
+class CodexNativeRateLimitError(CodexNativeAuthError):
+    def __init__(self, message: str, *, retry_after_seconds: int | None = None):
+        super().__init__(message)
+        self.retry_after_seconds = retry_after_seconds
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _refresh_lock_path(auth_path: Path) -> Path:
+    return auth_path.with_name(f"{auth_path.name}.refresh.lock")
+
+
+def _try_lock_file(handle) -> bool:
+    try:
+        if os.name == "nt":
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+            return False
+        raise
+    return True
+
+
+def _unlock_file(handle) -> None:
+    if os.name == "nt":
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _client_id_from_config() -> str | None:
+    path = resolve_config_path()
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    providers = payload.get("providers") if isinstance(payload, dict) else None
+    provider_config = providers.get(PROVIDER_ID) if isinstance(providers, dict) else None
+    if not isinstance(provider_config, dict):
+        return None
+    client_id = str(provider_config.get("client_id", "") or "").strip()
+    return client_id or None
+
+
+def configured_client_id() -> str | None:
+    client_id = os.environ.get("IMAGE_PROMPT_LIBRARY_CODEX_CLIENT_ID", "").strip()
+    if client_id:
+        return client_id
+    config_client_id = _client_id_from_config()
+    if config_client_id:
+        return config_client_id
+    return DEFAULT_CODEX_CLIENT_ID
+
+
+def _codex_client_id() -> str:
+    client_id = configured_client_id()
+    if client_id:
+        return client_id
+    raise CodexNativeAuthError(
+        "IMAGE_PROMPT_LIBRARY_CODEX_CLIENT_ID or local config client_id is required to start native Codex OAuth"
+    )
+
+
+def _decode_jwt_payload(token: str) -> dict[str, Any]:
+    try:
+        parts = token.split(".")
+        if len(parts) < 2:
+            return {}
+        payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
+        payload = base64.urlsafe_b64decode(payload_b64.encode())
+        parsed = json.loads(payload)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def account_id_from_access_token(token: str) -> str | None:
+    claims = _decode_jwt_payload(token)
+    auth_claim = claims.get("https://api.openai.com/auth")
+    if isinstance(auth_claim, dict):
+        account_id = auth_claim.get("chatgpt_account_id")
+        if isinstance(account_id, str) and account_id.strip():
+            return account_id.strip()
+    return None
+
+
+def _token_expires_soon(token: str, skew_seconds: int = 300) -> bool:
+    claims = _decode_jwt_payload(token)
+    exp = claims.get("exp")
+    if not isinstance(exp, (int, float)):
+        return False
+    now_ts = datetime.now(timezone.utc).timestamp()
+    return float(exp) <= now_ts + skew_seconds
+
+
+def codex_cloudflare_headers(access_token: str) -> dict[str, str]:
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "User-Agent": "codex_cli_rs/0.0.0 (Image Prompt Library)",
+        "originator": "codex_cli_rs",
+        "Accept": "application/json",
+    }
+    account_id = account_id_from_access_token(access_token)
+    if account_id:
+        headers["ChatGPT-Account-ID"] = account_id
+    return headers
+
+
+def _response_json(response: httpx.Response, context: str) -> dict[str, Any]:
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise CodexNativeAuthError(f"{context} returned invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise CodexNativeAuthError(f"{context} returned an invalid response shape")
+    return payload
+
+
+def _response_int(payload: dict[str, Any], key: str, default: int, context: str) -> int:
+    try:
+        return int(payload.get(key, default) or default)
+    except (TypeError, ValueError) as exc:
+        raise CodexNativeAuthError(f"{context} returned invalid {key}") from exc
+
+
+def _generation_readiness(
+    configured: bool,
+    token_present: bool,
+    state: str,
+    credentials_present_but_unusable: bool = False,
+) -> dict[str, Any]:
+    if configured and token_present:
+        return {"status": "ready", "message": None, "can_generate": True}
+    if configured and credentials_present_but_unusable:
+        return {
+            "status": "auth_error",
+            "message": "ChatGPT / Codex OAuth needs attention before generating.",
+            "can_generate": False,
+        }
+    if configured and state == "not_connected":
+        return {
+            "status": "login_required",
+            "message": "Connect ChatGPT / Codex OAuth before generating.",
+            "can_generate": False,
+        }
+    if not configured:
+        return {
+            "status": "unavailable",
+            "message": "ChatGPT / Codex OAuth is not configured.",
+            "can_generate": False,
+        }
+    return {
+        "status": "unavailable",
+        "message": "ChatGPT / Codex OAuth is not configured.",
+        "can_generate": False,
+    }
+
+
+class CodexNativeAuthStore:
+
+    """App-owned Codex OAuth token store.
+
+    Tokens are intentionally kept outside the image library folder by default
+    and status output is redacted so API responses never include secrets.
+    """
+
+    def __init__(self, path: Path | str | None = None):
+        self.path = Path(path).expanduser() if path is not None else resolve_auth_path()
+
+    def save_tokens(self, tokens: dict[str, str]) -> None:
+        access_token = str(tokens.get("access_token", "") or "").strip()
+        refresh_token = str(tokens.get("refresh_token", "") or "").strip()
+        if not access_token or not refresh_token:
+            raise CodexNativeAuthError("Codex native auth requires access_token and refresh_token")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.path.parent.chmod(0o700)
+        except OSError:
+            pass
+        payload = {
+            "provider": PROVIDER_ID,
+            "auth_mode": AUTH_MODE,
+            "tokens": {"access_token": access_token, "refresh_token": refresh_token},
+            "base_url": CODEX_BASE_URL,
+            "last_refresh": _utc_now(),
+        }
+        serialized = json.dumps(payload, indent=2)
+        fd, temp_name = tempfile.mkstemp(prefix="auth-", suffix=".tmp", dir=self.path.parent)
+        temp_path = Path(temp_name)
+        handle = None
+        try:
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, 0o600)
+            handle = os.fdopen(fd, "w", encoding="utf-8")
+            handle.write(serialized)
+            handle.close()
+            handle = None
+            os.replace(temp_path, self.path)
+            self.path.chmod(0o600)
+        except Exception:
+            try:
+                if handle is not None:
+                    handle.close()
+                temp_path.unlink(missing_ok=True)
+            finally:
+                raise
+
+    def _read_raw_tokens(self) -> dict[str, str]:
+        if not self.path.is_file():
+            raise CodexNativeAuthError("No native Codex OAuth credentials saved")
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise CodexNativeAuthError("Native Codex auth store contains invalid JSON") from exc
+        tokens = payload.get("tokens") if isinstance(payload, dict) else None
+        if not isinstance(tokens, dict):
+            raise CodexNativeAuthError("Native Codex auth store is missing tokens")
+        raw_access_token = tokens.get("access_token")
+        raw_refresh_token = tokens.get("refresh_token")
+        if not isinstance(raw_access_token, str) or not isinstance(raw_refresh_token, str):
+            raise CodexNativeAuthError("Native Codex auth store has invalid token values")
+        access_token = raw_access_token.strip()
+        refresh_token = raw_refresh_token.strip()
+        if not access_token or not refresh_token:
+            raise CodexNativeAuthError("Native Codex auth store has incomplete tokens")
+        return {"access_token": access_token, "refresh_token": refresh_token}
+
+    @contextmanager
+    def _refresh_lock(self) -> Iterator[None]:
+        lock_path = _refresh_lock_path(self.path)
+        deadline = time.monotonic() + AUTH_REFRESH_LOCK_WAIT_SECONDS
+        try:
+            lock_file = lock_path.open("a+b")
+        except OSError as exc:
+            raise CodexNativeTemporaryError("Token refresh is temporarily unavailable") from exc
+        with lock_file:
+            if lock_path.stat().st_size == 0:
+                lock_file.write(b"\0")
+                lock_file.flush()
+            acquired = False
+            try:
+                while not acquired:
+                    if time.monotonic() >= deadline:
+                        raise CodexNativeTemporaryError("Token refresh is temporarily unavailable")
+                    acquired = _try_lock_file(lock_file)
+                    if acquired:
+                        break
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise CodexNativeTemporaryError("Token refresh is temporarily unavailable")
+                    time.sleep(min(AUTH_REFRESH_LOCK_POLL_SECONDS, remaining))
+                yield
+            finally:
+                if acquired:
+                    _unlock_file(lock_file)
+
+    def read_tokens(self, http_client: httpx.Client | None = None) -> dict[str, str]:
+        tokens = self._read_raw_tokens()
+        if not _token_expires_soon(tokens["access_token"]):
+            return tokens
+        try:
+            with self._refresh_lock():
+                tokens = self._read_raw_tokens()
+                if _token_expires_soon(tokens["access_token"]):
+                    return self.refresh_tokens(tokens["refresh_token"], http_client=http_client)
+                return tokens
+        except CodexNativeTemporaryError as error:
+            try:
+                tokens = self._read_raw_tokens()
+            except Exception:
+                raise error
+            if not _token_expires_soon(tokens["access_token"]):
+                return tokens
+            raise error
+
+    def refresh_tokens(self, refresh_token: str, http_client: httpx.Client | None = None) -> dict[str, str]:
+        client_id = _codex_client_id()
+        close_client = http_client is None
+        client = http_client or httpx.Client(timeout=httpx.Timeout(15.0))
+        try:
+            try:
+                response = client.post(
+                    CODEX_TOKEN_URL,
+                    data={
+                        "grant_type": "refresh_token",
+                        "refresh_token": refresh_token,
+                        "client_id": client_id,
+                    },
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                )
+            except httpx.HTTPError as exc:
+                raise CodexNativeTemporaryError("Token refresh is temporarily unavailable") from exc
+        finally:
+            if close_client:
+                client.close()
+        if response.status_code == 408 or response.status_code >= 500:
+            raise CodexNativeTemporaryError("Token refresh is temporarily unavailable")
+        if response.status_code != 200:
+            raise CodexNativeAuthError(f"Token refresh returned status {response.status_code}")
+        payload = _response_json(response, "Token refresh")
+        access_token = str(payload.get("access_token", "") or "").strip()
+        next_refresh_token = str(payload.get("refresh_token", "") or refresh_token).strip()
+        self.save_tokens({"access_token": access_token, "refresh_token": next_refresh_token})
+        return {"access_token": access_token, "refresh_token": next_refresh_token}
+
+    def delete_tokens(self) -> None:
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
+
+    def status(self) -> dict[str, Any]:
+        configured = bool(configured_client_id())
+        token_present = False
+        account_id = None
+        saved_credentials_broken = False
+        temporary_unavailable = False
+        try:
+            raw_tokens = self._read_raw_tokens()
+            token_present = True
+            account_id = account_id_from_access_token(raw_tokens["access_token"])
+        except Exception:
+            token_present = False
+            account_id = None
+            saved_credentials_broken = self.path.is_file()
+        else:
+            try:
+                tokens = self.read_tokens()
+                account_id = account_id_from_access_token(tokens["access_token"])
+            except CodexNativeTemporaryError:
+                temporary_unavailable = True
+            except Exception:
+                token_present = False
+                account_id = None
+                saved_credentials_broken = self.path.is_file()
+        available = configured and token_present and not temporary_unavailable
+        if not configured:
+            state = "not_configured"
+            reason = "missing_client_id"
+        elif not token_present:
+            state = "not_connected"
+            reason = "not_authenticated"
+        else:
+            state = "connected"
+            reason = None
+        if temporary_unavailable:
+            readiness = {
+                "status": "unavailable",
+                "message": "ChatGPT / Codex OAuth is temporarily unavailable. Try again shortly.",
+                "can_generate": False,
+            }
+        else:
+            readiness = _generation_readiness(
+                configured,
+                token_present,
+                state,
+                credentials_present_but_unusable=saved_credentials_broken,
+            )
+        return {
+            "provider": PROVIDER_ID,
+            "display_name": DISPLAY_NAME,
+            "auth_mode": AUTH_MODE,
+            "optional": True,
+            "configured": configured,
+            "authenticated": token_present,
+            "available": available,
+            "state": state,
+            "reason": reason,
+            **readiness,
+            "features": {
+                "text_to_image": available,
+                "text_reference_to_image": available,
+                "image_edit": available,
+                "title_suggestion": available,
+            },
+            "max_input_images": MAX_INPUT_IMAGES,
+            "image_models": codex_image_models(),
+            "default_image_model": codex_image_models()[0],
+            "token_present": token_present,
+            "account_id": account_id,
+            "auth_store_path": str(self.path),
+        }
+
+
+class CodexDeviceCodeFlow:
+    def __init__(self, auth_store: CodexNativeAuthStore | None = None, http_client: httpx.Client | None = None):
+        self.auth_store = auth_store or CodexNativeAuthStore()
+        self.http_client = http_client
+
+    def _client(self) -> httpx.Client:
+        return self.http_client or httpx.Client(timeout=httpx.Timeout(15.0))
+
+    def start(self) -> dict[str, Any]:
+        client_id = _codex_client_id()
+        close_client = self.http_client is None
+        client = self._client()
+        try:
+            try:
+                response = client.post(
+                    f"{CODEX_AUTH_ISSUER}/api/accounts/deviceauth/usercode",
+                    json={"client_id": client_id},
+                    headers={"Content-Type": "application/json"},
+                )
+            except httpx.HTTPError as exc:
+                raise CodexNativeAuthError("Device code request failed") from exc
+        finally:
+            if close_client:
+                client.close()
+        if response.status_code != 200:
+            raise CodexNativeAuthError(f"Device code request returned status {response.status_code}")
+        payload = _response_json(response, "Device code request")
+        user_code = str(payload.get("user_code", "") or "").strip()
+        device_auth_id = str(payload.get("device_auth_id", "") or "").strip()
+        interval = max(3, _response_int(payload, "interval", 5, "Device code request"))
+        if not user_code or not device_auth_id:
+            raise CodexNativeAuthError("Device code response missing user_code or device_auth_id")
+        return {
+            "provider": PROVIDER_ID,
+            "auth_mode": AUTH_MODE,
+            "user_code": user_code,
+            "device_auth_id": device_auth_id,
+            "verification_url": f"{CODEX_AUTH_ISSUER}/codex/device",
+            "interval": interval,
+            "expires_in": 15 * 60,
+        }
+
+    def poll_device_authorization(self, device_auth_id: str, user_code: str) -> dict[str, Any]:
+        device_auth_id = str(device_auth_id or "").strip()
+        user_code = str(user_code or "").strip()
+        if not device_auth_id or not user_code:
+            raise CodexNativeAuthError("device_auth_id and user_code are required")
+        close_client = self.http_client is None
+        client = self._client()
+        try:
+            try:
+                response = client.post(
+                    f"{CODEX_AUTH_ISSUER}/api/accounts/deviceauth/token",
+                    json={"device_auth_id": device_auth_id, "user_code": user_code},
+                    headers={"Content-Type": "application/json"},
+                )
+            except httpx.HTTPError as exc:
+                raise CodexNativeAuthError("Device auth polling failed") from exc
+        finally:
+            if close_client:
+                client.close()
+        if response.status_code in {403, 404}:
+            return {"provider": PROVIDER_ID, "auth_mode": AUTH_MODE, "status": "pending"}
+        if response.status_code != 200:
+            raise CodexNativeAuthError(f"Device auth polling returned status {response.status_code}")
+        payload = _response_json(response, "Device auth polling")
+        authorization_code = str(payload.get("authorization_code", "") or "").strip()
+        code_verifier = str(payload.get("code_verifier", "") or "").strip()
+        status = self.exchange_authorization_code(authorization_code, code_verifier)
+        status["status"] = "approved"
+        return status
+
+    def exchange_authorization_code(self, authorization_code: str, code_verifier: str) -> dict[str, Any]:
+        client_id = _codex_client_id()
+        code = str(authorization_code or "").strip()
+        verifier = str(code_verifier or "").strip()
+        if not code or not verifier:
+            raise CodexNativeAuthError("authorization_code and code_verifier are required")
+        close_client = self.http_client is None
+        client = self._client()
+        try:
+            try:
+                response = client.post(
+                    CODEX_TOKEN_URL,
+                    data={
+                        "grant_type": "authorization_code",
+                        "code": code,
+                        "redirect_uri": f"{CODEX_AUTH_ISSUER}/deviceauth/callback",
+                        "client_id": client_id,
+                        "code_verifier": verifier,
+                    },
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                )
+            except httpx.HTTPError as exc:
+                raise CodexNativeAuthError("Token exchange failed") from exc
+        finally:
+            if close_client:
+                client.close()
+        if response.status_code != 200:
+            raise CodexNativeAuthError(f"Token exchange returned status {response.status_code}")
+        payload = _response_json(response, "Token exchange")
+        access_token = str(payload.get("access_token", "") or "").strip()
+        refresh_token = str(payload.get("refresh_token", "") or "").strip()
+        self.auth_store.save_tokens({"access_token": access_token, "refresh_token": refresh_token})
+        return self.auth_store.status()
+
+
+class OpenAICodexNativeProvider:
+    def __init__(self, auth_store: CodexNativeAuthStore | None = None, timeout: float = 300.0):
+        self.auth_store = auth_store or CodexNativeAuthStore()
+        self.timeout = timeout
+
+    def run_job(self, library_path: Path | str, job_id: str):
+        try:
+            validate_app_owned_paths(library_path)
+        except ValueError as exc:
+            safe_error = "Provider credentials or library storage paths are unsafe. Move app-owned credentials outside the active library and restart."
+            if (Path(library_path).expanduser() / "db.sqlite").is_file():
+                try:
+                    repo = GenerationJobRepository(library_path)
+                    job = repo.get_job(job_id)
+                    if job.provider == PROVIDER_ID and job.status in {"queued", "failed"}:
+                        try:
+                            job = repo.mark_running(job_id)
+                        except GenerationJobConflict:
+                            job = repo.get_job(job_id)
+                    if job.provider == PROVIDER_ID and job.status not in {"succeeded", "accepted", "discarded", "cancelled"}:
+                        repo.mark_failed(job_id, safe_error)
+                except (GenerationJobConflict, KeyError, OSError):
+                    pass
+            raise CodexNativeAuthError(safe_error) from exc
+        repo = GenerationJobRepository(library_path)
+        job = repo.get_job(job_id)
+        if job.provider != PROVIDER_ID:
+            raise GenerationJobConflict(f"Generation job provider must be {PROVIDER_ID}")
+        if job.status == "succeeded":
+            return job
+        if job.status == "running":
+            deadline = time.time() + min(self.timeout, 30.0)
+            while time.time() < deadline:
+                current = repo.get_job(job_id)
+                if current.status != "running":
+                    if current.status == "succeeded":
+                        return current
+                    if current.status == "cancelled":
+                        raise GenerationJobConflict("Generation job is cancelled")
+                    if current.status == "failed":
+                        raise CodexNativeAuthError(sanitize_generation_error(current.error or "Generation job failed"))
+                    job = current
+                    break
+                time.sleep(0.05)
+            else:
+                return repo.get_job(job_id)
+        if job.status == "cancelled":
+            raise GenerationJobConflict("Generation job is cancelled")
+        if job.status not in {"queued", "failed"}:
+            raise GenerationJobConflict("Generation job must be queued or failed before run")
+        prompt = (job.edited_prompt_text or job.prompt_text or "").strip()
+        if not prompt:
+            raise GenerationJobConflict("Generation prompt is required")
+        repo.mark_running(job_id)
+        try:
+            parameters = job.parameters or {}
+            requested_aspect_ratio = _normalize_requested_aspect_ratio(
+                parameters.get("requested_aspect_ratio") or parameters.get("aspect_ratio")
+            )
+            injection_enabled = bool(parameters.get("aspect_ratio_prompt_injection", True)) and requested_aspect_ratio != "auto"
+            size = None if requested_aspect_ratio == "auto" or injection_enabled else SIZES.get(requested_aspect_ratio, SIZES["1:1"])
+            effective_prompt, aspect_ratio_instruction = _prompt_with_aspect_ratio_instruction(
+                prompt,
+                requested_aspect_ratio,
+                injection_enabled,
+            )
+            quality = normalize_codex_quality(parameters.get("quality"))
+            image_model = normalize_codex_image_model(job.model or parameters.get("image_model"))
+            input_images = self._input_image_data_urls(job, Path(library_path))
+            image_b64, reported = self._collect_image(
+                effective_prompt,
+                size=size,
+                quality=quality,
+                image_model=image_model,
+                input_images=input_images,
+            )
+            try:
+                image_bytes = base64.b64decode(image_b64, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise CodexNativeAuthError("Codex response contained invalid image data") from exc
+            with Image.open(BytesIO(image_bytes)) as image:
+                pixel_size = f"{image.width}x{image.height}"
+            metadata = {
+                **reported,
+                "generation_route": "images",
+                "pixel_size": pixel_size,
+                "provider": PROVIDER_ID,
+                "auth_mode": AUTH_MODE,
+                "model": image_model,
+                "image_model": image_model,
+                "size": size or "auto",
+                "quality": quality,
+                "requested_aspect_ratio": requested_aspect_ratio,
+                "aspect_ratio_prompt_injection": aspect_ratio_instruction,
+                "effective_prompt": effective_prompt,
+                "native_size_parameter": size,
+                "source_job_id": job_id,
+                "mode": "image_edit" if input_images else "text_to_image",
+                "input_image_count": len(input_images),
+            }
+            return repo.stage_result(job_id, image_bytes, "openai-codex-native.png", metadata)
+        except GenerationJobConflict as exc:
+            repo.mark_failed(job_id, str(exc))
+            raise
+        except CodexNativeRateLimitError as exc:
+            failed = repo.mark_failed(job_id, str(exc), exc.retry_after_seconds)
+            repo.record_provider_rate_limit(PROVIDER_ID, exc.retry_after_seconds)
+            raise CodexNativeRateLimitError(
+                failed.error or "Generation is temporarily rate limited",
+                retry_after_seconds=exc.retry_after_seconds,
+            ) from exc
+        except Exception as exc:
+            failed = repo.mark_failed(job_id, str(exc))
+            raise CodexNativeAuthError(failed.error or "Codex native generation failed") from exc
+
+    def _input_image_data_urls(self, job, library_path: Path) -> list[dict[str, Any]]:
+        raw_images = job.parameters.get("input_images") if isinstance(job.parameters, dict) else None
+        if not isinstance(raw_images, list):
+            return []
+        if len(raw_images) > MAX_INPUT_IMAGES:
+            raise CodexNativeAuthError(f"Generation edit supports up to {MAX_INPUT_IMAGES} input images")
+        input_images: list[dict[str, Any]] = []
+        repo = GenerationJobRepository(library_path)
+        for index, raw in enumerate(raw_images):
+            if not isinstance(raw, dict):
+                continue
+            name = str(raw.get("name") or f"input-{index + 1}.png")
+            source = str(raw.get("source") or "uploaded")
+            image_id = raw.get("image_id")
+            if source == "library" and isinstance(image_id, str) and image_id:
+                try:
+                    result_path = raw.get("result_path")
+                    if isinstance(result_path, str) and result_path:
+                        image_path, mime_type = resolve_generation_input_image_path(
+                            library_path,
+                            result_path,
+                            allowed_roots={"generation-references"},
+                        )
+                    else:
+                        _, image_path, mime_type = repo.resolve_library_reference(image_id)
+                except GenerationJobConflict as exc:
+                    raise CodexNativeAuthError(str(exc)) from exc
+                input_images.append({"type": "input_image", "image_url": _data_url_from_bytes(image_path.read_bytes(), mime_type=mime_type), "name": name, "source": source, "image_id": image_id})
+                continue
+            data_url = raw.get("data_url")
+            if isinstance(data_url, str) and data_url:
+                try:
+                    data, mime_type = _decode_data_url(data_url)
+                except CodexNativeAuthError:
+                    raise
+                input_images.append({"type": "input_image", "image_url": _data_url_from_bytes(data, mime_type=mime_type), "name": name, "source": source})
+                continue
+            result_path = raw.get("result_path")
+            if isinstance(result_path, str) and result_path:
+                try:
+                    image_path, mime_type = resolve_generation_input_image_path(library_path, result_path)
+                except GenerationJobConflict as exc:
+                    raise CodexNativeAuthError(str(exc)) from exc
+                input_images.append({"type": "input_image", "image_url": _data_url_from_bytes(image_path.read_bytes(), mime_type=mime_type), "name": name, "source": source, "result_path": result_path})
+        return input_images
+
+    def suggest_title(self, library_path: Path | str, prompt_text: str) -> str:
+        try:
+            validate_app_owned_paths(library_path)
+        except ValueError as exc:
+            raise CodexNativeAuthError(
+                "Provider credentials or library storage paths are unsafe. Move app-owned credentials outside the active library and restart."
+            ) from exc
+        prompt = str(prompt_text or "").strip()
+        if not prompt:
+            raise CodexNativeAuthError("Prompt text is required")
+        return normalize_title_suggestion(self._collect_title_text(prompt))
+
+    def _collect_title_text(self, prompt_text: str) -> str:
+        tokens = self.auth_store.read_tokens()
+        access_token = tokens["access_token"]
+        payload = {
+            "model": CODEX_CHAT_MODEL,
+            "store": False,
+            "instructions": (
+                "Suggest one concise library title for the image prompt. "
+                "Use the same language as the prompt. Return only the title, without quotes, labels, markdown, or commentary."
+            ),
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": prompt_text}],
+            }],
+            "stream": True,
+        }
+        deltas: list[str] = []
+        completed_text = ""
+        url = f"{CODEX_BASE_URL}/responses"
+        try:
+            with httpx.Client(timeout=httpx.Timeout(min(self.timeout, 30.0))) as client:
+                with client.stream("POST", url, headers=codex_cloudflare_headers(access_token), json=payload) as response:
+                    if response.status_code != 200:
+                        response.read()
+                        message = _codex_response_error_message(response)
+                        if response.status_code == 429:
+                            raise CodexNativeRateLimitError(
+                                message,
+                                retry_after_seconds=parse_retry_after_seconds(response.headers.get("Retry-After")),
+                            )
+                        if response.status_code == 408 or response.status_code >= 500:
+                            raise CodexNativeTemporaryError(message)
+                        if response.status_code in {401, 403}:
+                            raise CodexNativeAuthError(message)
+                        raise CodexNativeRequestError(message)
+                    for line in response.iter_lines():
+                        if not line or not line.startswith("data:"):
+                            continue
+                        raw = line.removeprefix("data:").strip()
+                        if raw == "[DONE]":
+                            break
+                        try:
+                            event = json.loads(raw)
+                        except json.JSONDecodeError:
+                            continue
+                        if event.get("type") == "response.output_text.delta":
+                            delta = event.get("delta")
+                            if isinstance(delta, str):
+                                deltas.append(delta)
+                        elif event.get("type") == "response.output_item.done":
+                            item = event.get("item")
+                            if isinstance(item, dict) and item.get("type") == "message":
+                                for content in item.get("content") or []:
+                                    if isinstance(content, dict) and content.get("type") == "output_text" and isinstance(content.get("text"), str):
+                                        completed_text += content["text"]
+        except CodexNativeAuthError:
+            raise
+        except httpx.HTTPError as exc:
+            raise CodexNativeTemporaryError("Title suggestion is temporarily unavailable") from exc
+        return "".join(deltas) or completed_text
+
+    def _collect_image(self, prompt: str, *, size: str | None, quality: str, image_model: str, input_images: list[dict[str, Any]] | None = None) -> tuple[str, dict[str, Any]]:
+        access_token = self.auth_store.read_tokens()["access_token"]
+        payload: dict[str, Any] = {
+            "prompt": prompt,
+            "model": image_model,
+            "quality": quality,
+            "size": size or "auto",
+            "background": "opaque",
+            "n": 1,
+        }
+        endpoint = "images/generations"
+        if input_images:
+            endpoint = "images/edits"
+            payload["images"] = [{"image_url": image["image_url"]} for image in input_images]
+        headers = {
+            **codex_cloudflare_headers(access_token),
+            "x-codex-image-turn-id": str(uuid.uuid4()),
+        }
+        # Never fall back to Responses or retry a possibly billed image request here.
+        # Direct Images returns the final result without streaming progress.
+        # Give generation more read time without extending connect/write waits.
+        with httpx.Client(timeout=httpx.Timeout(min(self.timeout, 120.0), read=self.timeout)) as client:
+            response = client.post(f"{CODEX_BASE_URL}/{endpoint}", headers=headers, json=payload)
+        if response.status_code != 200:
+            message = _codex_response_error_message(response, api="Images")
+            if response.status_code == 429:
+                raise CodexNativeRateLimitError(
+                    message,
+                    retry_after_seconds=parse_retry_after_seconds(response.headers.get("Retry-After")),
+                )
+            raise CodexNativeAuthError(message)
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise CodexNativeAuthError("Codex Images API returned invalid JSON") from exc
+        data = body.get("data") if isinstance(body, dict) else None
+        if not isinstance(data, list) or len(data) != 1 or not isinstance(data[0], dict):
+            raise CodexNativeAuthError("Codex Images API response contained no single image result")
+        result = data[0].get("b64_json")
+        if not isinstance(result, str) or not result:
+            raise CodexNativeAuthError("Codex Images API response contained no image data")
+        # Keep a small diagnostic allowlist, never the raw response or headers.
+        reported: dict[str, Any] = {}
+        for source, target in (("quality", "reported_quality"), ("size", "reported_size"), ("model", "reported_model")):
+            value = body.get(source)
+            if isinstance(value, str) and value:
+                reported[target] = sanitize_generation_error(value)[:200]
+        return result, reported

@@ -1,0 +1,415 @@
+name: Release candidate install update rollback smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Exact prerelease tag under test (for example, v0.10.0)'
+        required: true
+        type: string
+      baseline_version:
+        description: 'Current stable release used for update and rollback'
+        required: true
+        default: 'v0.9.0'
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-publication
+  cancel-in-progress: false
+
+jobs:
+  release-contract:
+    runs-on: ubuntu-latest
+    env:
+      CANDIDATE_VERSION: ${{ inputs.version }}
+      BASELINE_VERSION: ${{ inputs.baseline_version }}
+    steps:
+      - name: Checkout exact candidate tag
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.version }}
+          fetch-depth: 0
+          token: ${{ github.token }}
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Verify prerelease identity and public assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - "$CANDIDATE_VERSION" "$BASELINE_VERSION" <<'PY'
+          import re
+          import sys
+
+          pattern = re.compile(r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?")
+          matches = []
+          for value in sys.argv[1:]:
+              match = pattern.fullmatch(value)
+              if not match or any(part.isdigit() and len(part) > 1 and part.startswith("0") for part in (match.group(4) or "").split(".") if part):
+                  raise SystemExit(f"Release tag is not strict SemVer: {value}")
+              matches.append(match)
+          if matches[0].group(4):
+              raise SystemExit("The promotable candidate must use a bare SemVer tag.")
+          if matches[1].group(4):
+              raise SystemExit("The rollback baseline must be a stable bare SemVer tag.")
+          if sys.argv[1] == sys.argv[2]:
+              raise SystemExit("Candidate and baseline versions must differ.")
+          PY
+          TAG_SHA="$(git rev-parse "refs/tags/$CANDIDATE_VERSION^{commit}")"
+          test "$(git rev-parse HEAD)" = "$TAG_SHA"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$CANDIDATE_VERSION" > "$RUNNER_TEMP/candidate-release.json"
+          gh api "repos/$GITHUB_REPOSITORY/releases/latest" > "$RUNNER_TEMP/latest-stable-release.json"
+          python - "$RUNNER_TEMP/candidate-release.json" "$RUNNER_TEMP/latest-stable-release.json" "$CANDIDATE_VERSION" "$BASELINE_VERSION" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          release = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          latest = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+          version = sys.argv[3]
+          baseline = sys.argv[4]
+          expected = {
+              f"image-prompt-library-{version}.tar.gz",
+              f"image-prompt-library-{version}.tar.gz.sha256",
+              f"image-prompt-library-{version}.manifest.json",
+          }
+          names = [asset.get("name") for asset in release.get("assets") or []]
+          if release.get("tag_name") != version or release.get("draft") or not release.get("prerelease"):
+              raise SystemExit("Candidate is not the requested published prerelease.")
+          if len(names) != 3 or set(names) != expected or len(names) != len(set(names)):
+              raise SystemExit(f"Candidate assets are not the exact expected set: {names}")
+          if latest.get("tag_name") != baseline or latest.get("draft") or latest.get("prerelease"):
+              raise SystemExit("Latest release no longer points to the stable rollback baseline.")
+          PY
+          mkdir "$RUNNER_TEMP/candidate-assets"
+          gh release download "$CANDIDATE_VERSION" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/candidate-assets" \
+            --pattern "image-prompt-library-$CANDIDATE_VERSION.tar.gz" \
+            --pattern "image-prompt-library-$CANDIDATE_VERSION.tar.gz.sha256" \
+            --pattern "image-prompt-library-$CANDIDATE_VERSION.manifest.json"
+          unset GH_TOKEN
+          python scripts/verify-release-assets.py "$RUNNER_TEMP/candidate-assets" "$CANDIDATE_VERSION" \
+            --source-sha "$TAG_SHA" --capability portable-backup-v1
+
+  posix-default-paths:
+    needs: release-contract
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      CANDIDATE_VERSION: ${{ inputs.version }}
+      BASELINE_VERSION: ${{ inputs.baseline_version }}
+    steps:
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install update and rollback at default paths
+        run: |
+          set -euo pipefail
+          test ! -e "$HOME/.image-prompt-library"
+          test ! -e "$HOME/ImagePromptLibrary"
+          installer="$RUNNER_TEMP/install-$BASELINE_VERSION.sh"
+          curl -fsSL "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$BASELINE_VERSION/scripts/install.sh" -o "$installer"
+          bash "$installer" --version "$BASELINE_VERSION"
+          app="$HOME/.local/bin/image-prompt-library"
+          test -x "$app"
+          test "$("$app" version)" = "$BASELINE_VERSION"
+          mkdir -p "$HOME/ImagePromptLibrary/originals"
+          printf 'release-smoke\n' > "$HOME/ImagePromptLibrary/originals/release-smoke-sentinel.txt"
+          printf '### %s default-path release smoke\n\n- install `%s`: PASS\n' "${{ runner.os }}" "$BASELINE_VERSION" >> "$GITHUB_STEP_SUMMARY"
+
+          "$app" update --version "$CANDIDATE_VERSION"
+          test "$("$app" version)" = "$CANDIDATE_VERSION"
+          "$app" status
+          "$app" doctor
+          test "$(cat "$HOME/ImagePromptLibrary/originals/release-smoke-sentinel.txt")" = "release-smoke"
+          printf '%s\n' "- update to \`$CANDIDATE_VERSION\`: PASS" >> "$GITHUB_STEP_SUMMARY"
+
+          candidate_root="$HOME/.image-prompt-library/app/current"
+          (
+            cd "$candidate_root"
+            .venv/bin/python - <<'PY'
+          from pathlib import Path
+          from backend.db import init_db
+
+          library = Path.home() / "ImagePromptLibrary"
+          init_db(library)
+          for root in ("originals", "thumbs", "previews", "generation-results", "generation-references"):
+              path = library / root
+              path.mkdir(parents=True, exist_ok=True)
+              (path / f"{root}-roundtrip.txt").write_text(f"{root}-before\n", encoding="utf-8")
+          PY
+          )
+          backup="$RUNNER_TEMP/image-prompt-library-$CANDIDATE_VERSION-smoke.tar.gz"
+          "$app" backup --output "$backup"
+          "$app" verify-backup "$backup"
+          corrupt="$RUNNER_TEMP/image-prompt-library-$CANDIDATE_VERSION-corrupt.tar.gz"
+          python - "$backup" "$corrupt" <<'PY'
+          import io
+          import sys
+          import tarfile
+
+          source, destination = sys.argv[1:]
+          target = "library/originals/release-smoke-sentinel.txt"
+          mutated = False
+          with tarfile.open(source, "r:gz") as input_archive, tarfile.open(destination, "w:gz") as output_archive:
+              for member in input_archive:
+                  if not member.isfile():
+                      raise SystemExit(f"Unexpected non-file backup member: {member.name}")
+                  extracted = input_archive.extractfile(member)
+                  if extracted is None:
+                      raise SystemExit(f"Could not read backup member: {member.name}")
+                  payload = extracted.read()
+                  if member.name == target:
+                      if not payload:
+                          raise SystemExit("Release smoke sentinel is empty.")
+                      payload = bytes([payload[0] ^ 0x01]) + payload[1:]
+                      mutated = True
+                  output_archive.addfile(member, io.BytesIO(payload))
+          if not mutated:
+              raise SystemExit(f"Release smoke sentinel is missing: {target}")
+          PY
+          if "$app" verify-backup "$corrupt"; then
+            echo "Corrupted backup unexpectedly passed verification." >&2
+            exit 1
+          fi
+          printf 'mutated\n' > "$HOME/ImagePromptLibrary/originals/release-smoke-sentinel.txt"
+          "$app" restore "$backup" --yes
+          test "$(cat "$HOME/ImagePromptLibrary/originals/release-smoke-sentinel.txt")" = "release-smoke"
+          find "$HOME" -maxdepth 1 -type d -name '.ImagePromptLibrary.pre-restore-*' | grep -q .
+          printf '%s\n' "- portable backup, corruption rejection, and restore: PASS" >> "$GITHUB_STEP_SUMMARY"
+
+          if "$app" rollback; then
+            test "$("$app" version)" = "$BASELINE_VERSION"
+            test "$(cat "$HOME/.image-prompt-library/app/previous/VERSION")" = "$CANDIDATE_VERSION"
+            if [ "$BASELINE_VERSION" = "v0.8.0" ]; then
+              for script in scripts/install.sh scripts/load-env.sh scripts/install-sample-data.sh scripts/appctl.sh; do
+                cmp "$HOME/.image-prompt-library/app/current/$script" "$HOME/.image-prompt-library/app/previous/$script"
+              done
+              test -f "$HOME/.image-prompt-library/app/current/scripts/load-env.sh"
+              python - "$HOME/.image-prompt-library/app/current/.rollback-migration.json" "$CANDIDATE_VERSION" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+
+          marker_path = pathlib.Path(sys.argv[1])
+          marker = json.loads(marker_path.read_text(encoding="utf-8"))
+          if marker.get("schema") != 1 or marker.get("target_version") != "v0.8.0":
+              raise SystemExit("v0.8.0 rollback migration marker is invalid.")
+          if marker.get("state") != "complete":
+              raise SystemExit("v0.8.0 rollback migration did not complete.")
+          if marker.get("source_controller_version") != sys.argv[2]:
+              raise SystemExit("v0.8.0 rollback migration source version is invalid.")
+          expected = {
+              "scripts/install.sh", "scripts/load-env.sh",
+              "scripts/install-sample-data.sh", "scripts/appctl.sh",
+          }
+          if set(marker.get("files", {})) != expected:
+              raise SystemExit("v0.8.0 rollback migration marker files are invalid.")
+          for relative, digest in marker["files"].items():
+              path = marker_path.parent / relative
+              if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+                  raise SystemExit(f"v0.8.0 rollback migration hash mismatch: {relative}")
+          PY
+            fi
+            "$app" status
+            "$app" doctor
+            test "$(cat "$HOME/ImagePromptLibrary/originals/release-smoke-sentinel.txt")" = "release-smoke"
+            printf '%s\n' "- rollback to \`$BASELINE_VERSION\`: PASS" >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf '%s\n' "- rollback to \`$BASELINE_VERSION\`: FAIL" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          "$app" uninstall
+          test ! -e "$HOME/.image-prompt-library"
+          test "$(cat "$HOME/ImagePromptLibrary/originals/release-smoke-sentinel.txt")" = "release-smoke"
+
+          candidate_installer="$RUNNER_TEMP/install-$CANDIDATE_VERSION.sh"
+          curl -fsSL "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$CANDIDATE_VERSION/scripts/install.sh" -o "$candidate_installer"
+          bash "$candidate_installer" --version "$CANDIDATE_VERSION"
+          app="$HOME/.local/bin/image-prompt-library"
+          test -x "$app"
+          test "$("$app" version)" = "$CANDIDATE_VERSION"
+          "$app" status
+          "$app" doctor
+          test "$(cat "$HOME/ImagePromptLibrary/originals/release-smoke-sentinel.txt")" = "release-smoke"
+          "$app" uninstall
+          test ! -e "$HOME/.image-prompt-library"
+          test "$(cat "$HOME/ImagePromptLibrary/originals/release-smoke-sentinel.txt")" = "release-smoke"
+          printf '%s\n' "- clean install and uninstall \`$CANDIDATE_VERSION\`: PASS" >> "$GITHUB_STEP_SUMMARY"
+
+  windows-default-paths:
+    needs: release-contract
+    runs-on: windows-latest
+    env:
+      CANDIDATE_VERSION: ${{ inputs.version }}
+      BASELINE_VERSION: ${{ inputs.baseline_version }}
+    steps:
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install update and rollback at default paths
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $prefix = Join-Path $env:LOCALAPPDATA "ImagePromptLibrary"
+          $library = Join-Path $env:USERPROFILE "ImagePromptLibrary"
+          if ((Test-Path -LiteralPath $prefix) -or (Test-Path -LiteralPath $library)) {
+              throw "Default Image Prompt Library paths were not clean."
+          }
+          $installer = Join-Path $env:RUNNER_TEMP "install-$env:BASELINE_VERSION.ps1"
+          Invoke-WebRequest "https://raw.githubusercontent.com/$env:GITHUB_REPOSITORY/$env:BASELINE_VERSION/scripts/install.ps1" -OutFile $installer
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -Version $env:BASELINE_VERSION -NoStart -NoBrowser
+          if ($LASTEXITCODE -ne 0) { throw "Baseline install failed with exit code $LASTEXITCODE." }
+
+          $app = Join-Path $prefix "bin\image-prompt-library.cmd"
+          if (-not (Test-Path -LiteralPath $app -PathType Leaf)) { throw "Installed command shim is missing." }
+          function Invoke-App {
+              param([string[]]$Arguments)
+              $output = @(& $app @Arguments 2>&1)
+              if ($LASTEXITCODE -ne 0) { throw (($output | Out-String) + "Exit code: $LASTEXITCODE") }
+              $output | Write-Host
+              return $output
+          }
+          $installed = [string]((Invoke-App -Arguments @("version")) | Select-Object -Last 1)
+          if ($installed.Trim() -ne $env:BASELINE_VERSION) { throw "Baseline version mismatch: $installed" }
+          $originals = Join-Path $library "originals"
+          New-Item -ItemType Directory -Path $originals -Force | Out-Null
+          [IO.File]::WriteAllText((Join-Path $originals "release-smoke-sentinel.txt"), "release-smoke`n", [Text.Encoding]::UTF8)
+          "### Windows default-path release smoke`n`n- install ``$env:BASELINE_VERSION``: PASS" | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+
+          Invoke-App -Arguments @("update", "--version", $env:CANDIDATE_VERSION) | Out-Null
+          $updated = [string]((Invoke-App -Arguments @("version")) | Select-Object -Last 1)
+          if ($updated.Trim() -ne $env:CANDIDATE_VERSION) { throw "Updated version mismatch: $updated" }
+          Invoke-App -Arguments @("status") | Out-Null
+          Invoke-App -Arguments @("doctor") | Out-Null
+          if ((Get-Content -LiteralPath (Join-Path $originals "release-smoke-sentinel.txt") -Raw).Trim() -ne "release-smoke") {
+              throw "Private-library sentinel changed during update."
+          }
+          "- update to ``$env:CANDIDATE_VERSION``: PASS" | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+
+          $candidateRoot = Join-Path $prefix ("app\versions\" + $env:CANDIDATE_VERSION)
+          $candidatePython = Join-Path $candidateRoot ".venv\Scripts\python.exe"
+          $fixtureScript = Join-Path $env:RUNNER_TEMP "prepare-backup-smoke.py"
+          @'
+          import sys
+          from pathlib import Path
+
+          app_root = Path(sys.argv[1]).resolve()
+          sys.path.insert(0, str(app_root))
+          from backend.db import init_db
+
+          library = Path(sys.argv[2])
+          init_db(library)
+          for root in ("originals", "thumbs", "previews", "generation-results", "generation-references"):
+              path = library / root
+              path.mkdir(parents=True, exist_ok=True)
+              (path / f"{root}-roundtrip.txt").write_text(f"{root}-before\n", encoding="utf-8")
+          '@ | Set-Content -LiteralPath $fixtureScript -Encoding UTF8
+          Push-Location -LiteralPath $candidateRoot
+          try { & $candidatePython $fixtureScript $candidateRoot $library } finally { Pop-Location }
+          if ($LASTEXITCODE -ne 0) { throw "Could not prepare the backup smoke fixture." }
+          $backup = Join-Path $env:RUNNER_TEMP "image-prompt-library-$env:CANDIDATE_VERSION-smoke.tar.gz"
+          Invoke-App -Arguments @("backup", "--output", $backup) | Out-Null
+          Invoke-App -Arguments @("verify-backup", $backup) | Out-Null
+          $corrupt = Join-Path $env:RUNNER_TEMP "image-prompt-library-$env:CANDIDATE_VERSION-corrupt.tar.gz"
+          $corruptScript = Join-Path $env:RUNNER_TEMP "corrupt-backup-smoke.py"
+          @'
+          import io
+          import sys
+          import tarfile
+
+          source, destination = sys.argv[1:]
+          target = "library/originals/release-smoke-sentinel.txt"
+          mutated = False
+          with tarfile.open(source, "r:gz") as input_archive, tarfile.open(destination, "w:gz") as output_archive:
+              for member in input_archive:
+                  if not member.isfile():
+                      raise SystemExit(f"Unexpected non-file backup member: {member.name}")
+                  extracted = input_archive.extractfile(member)
+                  if extracted is None:
+                      raise SystemExit(f"Could not read backup member: {member.name}")
+                  payload = extracted.read()
+                  if member.name == target:
+                      if not payload:
+                          raise SystemExit("Release smoke sentinel is empty.")
+                      payload = bytes([payload[0] ^ 0x01]) + payload[1:]
+                      mutated = True
+                  output_archive.addfile(member, io.BytesIO(payload))
+          if not mutated:
+              raise SystemExit(f"Release smoke sentinel is missing: {target}")
+          '@ | Set-Content -LiteralPath $corruptScript -Encoding UTF8
+          & python $corruptScript $backup $corrupt
+          if ($LASTEXITCODE -ne 0) { throw "Could not create a deterministically corrupted backup fixture." }
+          & $app verify-backup $corrupt 2>$null
+          if ($LASTEXITCODE -eq 0) { throw "Corrupted backup unexpectedly passed verification." }
+          [IO.File]::WriteAllText((Join-Path $originals "release-smoke-sentinel.txt"), "mutated`n", [Text.Encoding]::UTF8)
+          Invoke-App -Arguments @("restore", $backup, "--yes") | Out-Null
+          if ((Get-Content -LiteralPath (Join-Path $originals "release-smoke-sentinel.txt") -Raw).Trim() -ne "release-smoke") {
+              throw "Portable restore did not recover the original library."
+          }
+          $preserved = @(Get-ChildItem -LiteralPath (Split-Path -Parent $library) -Directory -Force | Where-Object { $_.Name -like ".ImagePromptLibrary.pre-restore-*" })
+          if (-not $preserved.Count) { throw "Portable restore did not preserve the pre-restore library." }
+          "- portable backup, corruption rejection, and restore: PASS" | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+
+          try {
+              Invoke-App -Arguments @("rollback") | Out-Null
+              $rolledBack = [string]((Invoke-App -Arguments @("version")) | Select-Object -Last 1)
+              if ($rolledBack.Trim() -ne $env:BASELINE_VERSION) { throw "Rollback version mismatch: $rolledBack" }
+              Invoke-App -Arguments @("status") | Out-Null
+              Invoke-App -Arguments @("doctor") | Out-Null
+              if ((Get-Content -LiteralPath (Join-Path $library "originals\release-smoke-sentinel.txt") -Raw).Trim() -ne "release-smoke") {
+                  throw "Private-library sentinel changed during rollback."
+              }
+              "- rollback to ``$env:BASELINE_VERSION``: PASS" | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+          } catch {
+              "- rollback to ``$env:BASELINE_VERSION``: FAIL" | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+              throw
+          }
+
+          Invoke-App -Arguments @("uninstall") | Out-Null
+          $deadline = [DateTime]::UtcNow.AddSeconds(30)
+          while ((Test-Path -LiteralPath $prefix) -and [DateTime]::UtcNow -lt $deadline) {
+              Start-Sleep -Milliseconds 200
+          }
+          if (Test-Path -LiteralPath $prefix) { throw "Baseline uninstall did not remove the app prefix." }
+          if ((Get-Content -LiteralPath (Join-Path $library "originals\release-smoke-sentinel.txt") -Raw).Trim() -ne "release-smoke") {
+              throw "Private library changed during baseline uninstall."
+          }
+
+          $candidateInstaller = Join-Path $env:RUNNER_TEMP "install-$env:CANDIDATE_VERSION.ps1"
+          Invoke-WebRequest "https://raw.githubusercontent.com/$env:GITHUB_REPOSITORY/$env:CANDIDATE_VERSION/scripts/install.ps1" -OutFile $candidateInstaller
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $candidateInstaller -Version $env:CANDIDATE_VERSION -NoStart -NoBrowser
+          if ($LASTEXITCODE -ne 0) { throw "Candidate clean install failed with exit code $LASTEXITCODE." }
+          $app = Join-Path $prefix "bin\image-prompt-library.cmd"
+          $installedCandidate = [string]((Invoke-App -Arguments @("version")) | Select-Object -Last 1)
+          if ($installedCandidate.Trim() -ne $env:CANDIDATE_VERSION) { throw "Candidate clean-install version mismatch: $installedCandidate" }
+          Invoke-App -Arguments @("status") | Out-Null
+          Invoke-App -Arguments @("doctor") | Out-Null
+          if ((Get-Content -LiteralPath (Join-Path $library "originals\release-smoke-sentinel.txt") -Raw).Trim() -ne "release-smoke") {
+              throw "Private library changed during candidate clean install."
+          }
+          Invoke-App -Arguments @("uninstall") | Out-Null
+          $deadline = [DateTime]::UtcNow.AddSeconds(30)
+          while ((Test-Path -LiteralPath $prefix) -and [DateTime]::UtcNow -lt $deadline) {
+              Start-Sleep -Milliseconds 200
+          }
+          if (Test-Path -LiteralPath $prefix) { throw "Candidate uninstall did not remove the app prefix." }
+          if ((Get-Content -LiteralPath (Join-Path $library "originals\release-smoke-sentinel.txt") -Raw).Trim() -ne "release-smoke") {
+              throw "Private library changed during candidate uninstall."
+          }
+          "- clean install and uninstall ``$env:CANDIDATE_VERSION``: PASS" | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
