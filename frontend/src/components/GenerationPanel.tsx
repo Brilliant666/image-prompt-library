@@ -2171,7 +2171,7 @@ export default function GenerationPanel({
                 {provider === 'openai_compatible' && <div className="generation-compatible-header">
                   <label>{t('requestedImageModel')}<select aria-label={t('requestedImageModel')} value={selectedModelLabel} onChange={e => { setCompatibleModelSelected(true); setCompatibleRecipe(r => ({ ...r, model: e.target.value })); }}>
                     {!selectedModelLabel && <option value="">—</option>}
-                    {compatibleModels.map(model => <option key={model} value={model}>{model === 'gpt-image-2.5-sunburst' ? 'Sunburst' : model === 'gpt-image-2.5-flare' ? 'Flare' : model}</option>)}
+                    {compatibleModels.map(model => <option key={model} value={model}>{model}</option>)}
                   </select></label>
                   {compatibleRecipe.size !== 'auto' && <small>{t('imageHistoricalSize')}: {sizeLabel(compatibleRecipe.size)}</small>}
                   {compatibleError && <p role="alert">{t(compatibleError)}</p>}
@@ -2243,7 +2243,7 @@ export default function GenerationPanel({
                       <span className="generation-control-value">{provider === 'openai_compatible' ? compatibleQuality : selectedOutputLabel}</span>
                     </button>
                     {openControl === 'quality' && (
-                      <div className={`generation-control-popover${provider === 'xai_grok_oauth' ? ' generation-output-popover' : ''}`} role="menu">
+                      <div className={`generation-control-popover generation-quality-popover${provider === 'xai_grok_oauth' ? ' generation-output-popover' : ''}`} role="menu">
                         {provider === 'xai_grok_oauth' ? (
                           <>
                             <div className="generation-control-option-group" role="group" aria-label={t('queueQuality')}>

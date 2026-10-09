@@ -33,15 +33,16 @@ export default function OpenAICompatibleSettings({ onSaved, uiLanguage }: { onSa
       setBusy(false);
     }
   };
-  return <form className="provider-card" onSubmit={save} autoComplete="off">
-    <h4>OpenAI compatible API</h4>
+  return <form className="provider-card compatible-provider-settings" onSubmit={save} autoComplete="off">
+    <header><h4>{chinese ? '第三方 API' : 'Third-party API'}</h4>
+      <p className="muted">{chinese ? '通过 Base URL 与 API Key 连接第三方图片服务，支持 OpenAI 兼容接口。' : 'Connect an OpenAI-compatible image service with a Base URL and API key.'}</p></header>
     {config && <>
       <label>{chinese ? '显示名称' : 'Display name'}<input required value={config.display_name} onChange={e => setConfig({ ...config, display_name: e.target.value })} /></label>
       <label>Base URL<input required type="url" value={config.base_url} onChange={e => setConfig({ ...config, base_url: e.target.value })} placeholder="https://api.example.com/v1" /></label>
       <label>API Key<input type="password" autoComplete="new-password" value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder={config.api_key_present ? (chinese ? '已保存；留空保持不变' : 'Saved; leave blank to keep') : (chinese ? '输入 API Key' : 'Enter API key')} /></label>
       <label>{chinese ? '图片模型' : 'Image model'}<input required value={config.model} onChange={e => setConfig({ ...config, model: e.target.value })} /></label>
       <label>{chinese ? '请求超时（秒）' : 'Request timeout (seconds)'}<input required type="number" min="1" max="1800" value={config.timeout} onChange={e => setConfig({ ...config, timeout: Number(e.target.value) })} /></label>
-      <p className="muted">{chinese ? '凭据仅保存到服务端的独立配置中，不进入图库备份。此供应商仅用于图片生成，标题可手动填写。' : 'Credentials are saved in separate server configuration outside library backups. This provider generates images; enter titles manually.'}</p>
+      <p className="muted compatible-provider-note">{chinese ? '密钥仅存于服务端，不进入图库备份。保存配置不代表接口已验证，也不会发起生图。标题可手动填写。' : 'Keys stay on the server, outside library backups. Saving does not verify the service or generate an image. Enter titles manually.'}</p>
       <button type="submit" className="secondary" disabled={busy}>{chinese ? (busy ? '保存中…' : '保存供应商') : (busy ? 'Saving…' : 'Save provider')}</button>
     </>}
     {message && <p role="status" className="provider-message">{message}</p>}

@@ -234,7 +234,17 @@ button{color:inherit}
 .generation-control-popover button.is-selected{background:rgb(var(--studio-accent-rgb) / .1);color:var(--studio-ink);font-weight:750;box-shadow:none}
 .generation-control-popover button.is-selected:hover{background:rgb(var(--studio-accent-rgb) / .13)}
 .generation-control-option-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.compatible-provider-settings{display:grid;gap:14px;margin:16px 0;min-width:0}
+.compatible-provider-settings h4{margin:0 0 6px;font-size:15px}
+.compatible-provider-settings header .muted{margin:0;line-height:1.6}
+.compatible-provider-settings>label{display:grid;gap:7px;min-width:0;font-size:13px;font-weight:650}
+.compatible-provider-settings input{box-sizing:border-box;display:block;width:100%;min-width:0;max-width:100%;padding:10px 11px;border:1px solid var(--studio-hairline);border-radius:10px;background:var(--studio-surface);color:var(--studio-ink);font:inherit;font-weight:400;line-height:1.4}
+.compatible-provider-settings input:focus-visible{outline:2px solid rgb(var(--studio-accent-rgb) / .35);outline-offset:2px}
+.compatible-provider-settings .compatible-provider-note{margin:0;padding-top:12px;border-top:1px solid var(--studio-hairline);line-height:1.6;font-size:12px}
+.compatible-provider-settings>button{width:100%;justify-content:center}
+.default-ai-provider-control .segmented-control button{white-space:normal;overflow-wrap:anywhere;font-size:13px;padding:8px 6px}
 .generation-output-popover{min-width:156px}
+.generation-compact-controls.is-compatible .generation-quality-popover{left:auto;right:0}
 .generation-control-option-group{display:grid;gap:2px}
 .generation-control-option-group+.generation-control-option-group{margin-top:5px;padding-top:6px;border-top:1px solid var(--studio-hairline)}
 .generation-control-group-label{padding:2px 10px 3px;color:var(--studio-muted);font-size:10px;font-weight:750;letter-spacing:.08em;text-transform:uppercase}

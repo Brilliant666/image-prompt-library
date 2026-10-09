@@ -12,13 +12,13 @@ Select the provider in Config or the generation composer. This provider supports
 
 ## Requests and results
 
-Text-only requests use synchronous `POST /v1/images/generations`; references use multipart `POST /v1/images/edits`. Each queue task sends `n=1`, with up to four references. Explicit pixel size, including `auto`, wins over composition ratio. The composer displays the transmitted size and warns on ratio conflicts. Ratio-only legacy tasks retain their old derived size (for example 9:16 → 720x1280); saved request snapshots take precedence. They never silently become 4K.
+Text-only requests use synchronous `POST /v1/images/generations`; references use multipart `POST /v1/images/edits`. Each queue task sends `n=1`, with up to four references. New composer requests use ratio-only controls and `size=auto`; a chosen ratio is appended to the outgoing prompt while the original prompt is retained separately. Actual dimensions are determined by the service, not guaranteed by quality. Historical explicit sizes remain unchanged until a new ratio is selected. Saved request snapshots take precedence.
 
 ## GPT Image 2.5 controls (2026-10-09)
 
-Choose Flare or Sunburst, their `2026-09-08` snapshots, or enter a service-specific model name for this request. Provider defaults are not modified. The four recognized Image 2.5 names support `auto`, `low`, `medium`, `high`, `xhigh`, and `max`; other providers retain their own options. An unknown legacy request model requires an explicit choice before another request.
+Choose `gpt-image-2.5-flare` or `gpt-image-2.5-sunburst` by full name. Configured and historical model names remain available; configure other service-specific models in provider settings. Per-request choices do not change provider defaults. The recognized Image 2.5 names (including their `2026-09-08` snapshots) support `auto`, `low`, `medium`, `high`, `xhigh`, and `max`. Quality choices depend on the model, not the provider display name. An unknown legacy request model requires an explicit choice before another request.
 
-Select automatic sizing, a preset, or custom width/height. For Image 2.5 both dimensions must be positive multiples of 16, neither above 3840, longest/shortest ratio ≤3, and total pixels 655360–8294400 inclusive. More than 3686400 pixels is experimental. `2160x3840` is legal; `2880x3840` is not.
+The composer defaults to automatic ratio, quality and background, with PNG output. Explicit pixel sizes remain supported by the API and historical recipes. For Image 2.5 both dimensions must be positive multiples of 16, neither above 3840, longest/shortest ratio ≤3, and total pixels 655360–8294400 inclusive. `2160x3840` passes this validation; `2880x3840` does not. Local validation does not guarantee gateway support.
 
 Background supports `auto`, `opaque`, `transparent`; output supports PNG, JPEG and WebP. Transparent + JPEG is blocked without erasing the background choice. JPEG/WebP compression supports integers 0–100; PNG omits compression. Originals are saved byte-for-byte. Newly created transparent previews and thumbnails preserve alpha, with checkerboard only in CSS; existing assets are not rebuilt. Downloads use the original file.
 
