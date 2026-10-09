@@ -1279,6 +1279,17 @@ test('Explore/detail CSS keeps responsive grids, token controls, CJK hierarchy, 
   assert.doesNotMatch(styles, /html:lang\(zh-Hant\) \.metadata-inline-edit/);
 });
 
+test('compatible image providers retain the existing batch count menu and queue-set submission', async () => {
+  const generation = await readFile(`${ROOT}/frontend/src/components/GenerationPanel.tsx`, 'utf8');
+  const countTrigger = generation.slice(generation.indexOf('ref={generationCountTriggerRef}'), generation.indexOf('><ChevronDown size={17}', generation.indexOf('ref={generationCountTriggerRef}')));
+  assert.match(countTrigger, /disabled=\{busy \|\| !selectedProviderCanGenerateDraft \|\| !promptText\.trim\(\) \|\| hasMissingTemplateValues\}/);
+  assert.doesNotMatch(countTrigger, /openai_compatible/);
+  assert.match(generation, /GENERATION_SET_OPTIONS: Exclude<GenerationSetCount, 1>\[\] = \[3, 5, 10\]/);
+  assert.match(generation, /onClick=\{\(\) => createJob\(count\)\}/);
+  assert.match(generation, /api\.createGenerationSet\(\{ job: jobPayload, count \}\)/);
+  assert.doesNotMatch(generation, /provider === 'openai_compatible'[^\n]*count !== 1/);
+});
+
 test('title suggestions are explicit, provider-aware, prompt-only, and shared by both save flows', async () => {
   const [field, client, editor, generation, app, config, defaultProvider, styles] = await Promise.all([
     readFile(`${ROOT}/frontend/src/components/SuggestedTitleField.tsx`, 'utf8'),

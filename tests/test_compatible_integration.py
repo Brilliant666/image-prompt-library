@@ -1,7 +1,10 @@
 import json
+import base64
+from collections import deque
 from io import BytesIO
 
 import pytest
+import httpx
 from fastapi.testclient import TestClient
 from PIL import Image
 
@@ -64,3 +67,61 @@ def test_real_repository_preview_save_preserves_requested_and_actual(tmp_path, r
     assert provenance['model'] == reported_model
     assert provenance['response']['size'] == '18x12'
     assert provenance['requested']['size'] == '1024x1024'
+
+
+@pytest.mark.parametrize('count', [3, 5, 10])
+def test_compatible_generation_set_uses_single_image_jobs_without_retry(tmp_path, monkeypatch, count):
+    from backend.services import generation_queue
+    from backend.services.openai_compatible import OpenAICompatibleConfig, OpenAICompatibleProvider
+
+    library = tmp_path / 'library'
+    config = OpenAICompatibleConfig(tmp_path / 'private.json', library)
+    config.save({'base_url': 'https://images.example', 'api_key': 'test-only-key', 'model': 'test-model'})
+    image = BytesIO()
+    Image.new('RGB', (8, 6), 'blue').save(image, 'PNG')
+    requests = []
+
+    def respond(request):
+        payload = json.loads(request.content)
+        requests.append(payload)
+        assert request.url.path == '/v1/images/generations'
+        assert payload['n'] == 1
+        # A paid-request failure must not retry or prevent sibling jobs completing.
+        if len(requests) == 2:
+            return httpx.Response(429, json={'error': {'message': 'Rate limited'}})
+        return httpx.Response(200, json={'data': [{'b64_json': base64.b64encode(image.getvalue()).decode()}]})
+
+    pending = deque()
+
+    class ControlledExecutor:
+        def submit(self, function, *args):
+            pending.append((function, args))
+
+    monkeypatch.setattr(generation_queue, '_executor', ControlledExecutor())
+    monkeypatch.setattr(generation_queue, '_active', set())
+    monkeypatch.setattr(generation_queue, '_active_providers', {})
+    with httpx.Client(transport=httpx.MockTransport(respond)) as transport:
+        provider = OpenAICompatibleProvider(config, transport)
+        monkeypatch.setattr(generation_queue, 'OpenAICompatibleProvider', lambda: provider)
+        client = TestClient(create_app(library_path=library))
+        created = client.post('/api/generation-jobs/sets', json={
+            'count': count,
+            'job': {'provider': 'openai_compatible', 'model': 'test-model',
+                    'prompt_text': 'A blue cup', 'parameters': {'quality': 'low'}},
+        })
+        assert created.status_code == 200
+        group = created.json()
+        assert len(group['jobs']) == count
+        assert len(pending) == min(count, generation_queue.MAX_CONCURRENT_GENERATION_JOBS)
+        while pending:
+            function, args = pending.popleft()
+            function(*args)
+        completed = client.get('/api/generation-jobs/sets/' + group['generation_group_id']).json()
+        assert completed['succeeded'] == count - 1
+        assert completed['failed'] == 1
+        assert completed['queued'] == completed['running'] == 0
+        assert len(requests) == count
+        assert len({job['id'] for job in completed['jobs']}) == count
+        generation_queue.enqueue_generation_jobs(library, provider='openai_compatible')
+        assert not pending
+        assert len(requests) == count

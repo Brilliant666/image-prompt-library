@@ -21,6 +21,7 @@ const { downloadFileName, imageDisplayPath, imageThumbnailPath, selectPrimaryIma
 const { generationFailure } = await importTypescript('../frontend/src/utils/generationFailures.ts');
 const { generationSetProgressText, providerPauseSeconds } = await importTypescript('../frontend/src/utils/generationSets.ts');
 const { generationAspectRatio } = await importTypescript('../frontend/src/utils/generationAspectRatio.ts');
+const { generationResultActions } = await importTypescript('../frontend/src/utils/generationResultActions.ts');
 const { APPEARANCE_STORAGE_KEY, DEFAULT_APPEARANCE, normalizeAppearance } = await importTypescript('../frontend/src/utils/appearance.ts');
 const { DEFAULT_AI_PROVIDER_STORAGE_KEY, resolveDefaultAiProvider } = await importTypescript('../frontend/src/utils/defaultAiProvider.ts');
 const {
@@ -39,6 +40,25 @@ const {
   retainPendingRetryJobIds,
 } = await importTypescript('../frontend/src/utils/generationSiblings.ts');
 const { makeTranslator } = await importTypescript('../frontend/src/utils/i18n.ts');
+
+test('saved history remains reusable without repeating acceptance or discarding library images', () => {
+  const pending = { id: 'job-1', status: 'succeeded', result_path: 'generation-results/job-1/result.png' };
+  assert.deepEqual(generationResultActions(pending), { reusable: true, save: true, discardAndRetry: true, discard: true, restoreDraft: false });
+  for (const saved of [
+    { ...pending, status: 'accepted', accepted_image_id: 'image-1' },
+    { ...pending, status: 'accepted', result_path: 'items/item-1/image.png' },
+    { ...pending, accepted_image_id: 'image-1' },
+  ]) {
+    assert.deepEqual(generationResultActions(saved), { reusable: true, save: false, discardAndRetry: false, discard: false, restoreDraft: true });
+  }
+  for (const status of ['discarded', 'failed', 'cancelled', 'running', 'queued']) {
+    assert.equal(generationResultActions({ ...pending, status }).reusable, false);
+    assert.equal(generationResultActions({ ...pending, status }).discard, false);
+  }
+  assert.equal(generationResultActions({ ...pending, result_path: null }).reusable, false);
+  assert.equal(generationResultActions().reusable, false);
+  assert.equal(generationResultActions({ ...pending, result_path: 'items/item-1/image.png' }).discard, false);
+});
 
 test('generation aspect restoration preserves intent without relabeling legacy dimensions', () => {
   for (const ratio of ['auto', '1:1', '3:4', '9:16', '4:3', '16:9']) {

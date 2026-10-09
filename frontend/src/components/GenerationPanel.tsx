@@ -8,6 +8,7 @@ import { api, mediaUrl } from '../api/client';
 import type { ClusterRecord, GenerationJobAcceptAsNewItemPayload, GenerationJobCreate, GenerationJobRecord, GenerationJobSetRecord, GenerationProviderQueueState, GenerationProviderStatus, GenerationSetCount, ImageRecord, ItemDetail, ItemSummary, TagRecord, AiProvider } from '../types';
 import type { Translator } from '../utils/i18n';
 import { generationAspectRatio } from '../utils/generationAspectRatio';
+import { generationResultActions } from '../utils/generationResultActions';
 import { providerPauseSeconds } from '../utils/generationSets';
 import { downloadFileName } from '../utils/images';
 import { generationFailure } from '../utils/generationFailures';
@@ -489,8 +490,8 @@ export default function GenerationPanel({
   const templateVariableKeySignature = useMemo(() => templateVariables.map(variable => variable.key).join('\u0000'), [templateVariables]);
   const canAttachToSourceItem = (job?: GenerationJobRecord) => Boolean(item && job?.source_item_id === item.id && !promptChangedFromSource);
   const isHistoryReview = Boolean(historyReviewJob);
-  const canUseResultActions = (job?: GenerationJobRecord) => Boolean(job && job.status === 'succeeded' && !job.accepted_image_id && job.result_path);
-  const canDiscardTransientResult = (job?: GenerationJobRecord) => canUseResultActions(job) && Boolean(job?.result_path?.startsWith(`generation-results/${job.id}/`));
+  const canUseResultActions = (job?: GenerationJobRecord) => generationResultActions(job).reusable;
+  const canDiscardTransientResult = (job?: GenerationJobRecord) => generationResultActions(job).discard;
   const ensureBatchReviewSession = (job?: GenerationJobRecord) => {
     if (!job?.generation_group_id || (job.generation_group_size || 1) <= 1) return undefined;
     batchReviewCursorJobIdRef.current = job.id;
@@ -928,7 +929,7 @@ export default function GenerationPanel({
 
   const createJob = async (count: GenerationSetCount = 1) => {
     const prompt = promptText.trim();
-    if (!prompt || hasMissingTemplateValues || !resolvedPrompt || !selectedProviderCanGenerateDraft || (['manual_upload', 'openai_compatible'].includes(provider) && count !== 1)) return;
+    if (!prompt || hasMissingTemplateValues || !resolvedPrompt || !selectedProviderCanGenerateDraft || (provider === 'manual_upload' && count !== 1)) return;
     const preservePausedReview = Boolean(batchReviewSession && batchReviewPaused);
     setBusy(true);
     setMessage('');
@@ -1814,25 +1815,28 @@ export default function GenerationPanel({
 
   const renderStageActions = (job: GenerationJobRecord) => (
     <div className="generation-stage-actions" aria-label={t('resultActions')}>
-      {groupedBatchTarget && (
+      {generationResultActions(job).save && groupedBatchTarget && (
         <button className="stage-action" onClick={() => acceptIntoGroupedItem(job)} disabled={busy} aria-label={t('addToGroupedItem').replace('${item}', groupedBatchTarget.title || t('viewItem'))} title={t('addToGroupedItem').replace('${item}', groupedBatchTarget.title || t('viewItem'))}>
           <Images size={16} aria-hidden="true" />
         </button>
       )}
-      {canAttachToSourceItem(job) && (
+      {generationResultActions(job).save && canAttachToSourceItem(job) && (
         <button className="stage-action" onClick={() => acceptAttach(job)} disabled={busy} aria-label={t('attachToCurrentItem')} title={t('attachToCurrentItem')}>
           <Paperclip size={16} aria-hidden="true" />
         </button>
       )}
-      <button ref={saveAsNewTriggerRef} className="stage-action" onClick={() => openSaveAsNewReview(job)} disabled={busy} aria-label={t('saveAsNewItem')} title={t('saveAsNewItem')}>
+      {generationResultActions(job).save && <button ref={saveAsNewTriggerRef} className="stage-action" onClick={() => openSaveAsNewReview(job)} disabled={busy} aria-label={t('saveAsNewItem')} title={t('saveAsNewItem')}>
         <FilePlus2 size={16} aria-hidden="true" />
-      </button>
+      </button>}
       <button className="stage-action" onClick={() => addResultAsAttachment(job, true)} disabled={busy || editAttachments.length >= selectedProviderMaxInputImages || !job.result_path} aria-label={t('useResultAsEditInput')} title={t('useResultAsEditInput')}>
         <Plus size={16} aria-hidden="true" />
       </button>
-      <button className="stage-action" onClick={() => discardAndRetryJob(job)} disabled={busy} aria-label={t('retry')} title={t('retry')}>
+      {generationResultActions(job).discardAndRetry && <button className="stage-action" onClick={() => discardAndRetryJob(job)} disabled={busy} aria-label={t('retry')} title={t('retry')}>
         <RotateCcw size={16} aria-hidden="true" />
-      </button>
+      </button>}
+      {generationResultActions(job).restoreDraft && <button className="stage-action" onClick={() => useJobAsDraft(job)} disabled={busy} aria-label={t('useAsDraft')} title={t('useAsDraft')}>
+        <RotateCcw size={16} aria-hidden="true" />
+      </button>}
       {canDiscardTransientResult(job) && (
         <button className="stage-action danger" onClick={() => discardJob(job)} disabled={busy} aria-label={t('discard')} title={t('discard')}>
           <Trash2 size={16} aria-hidden="true" />
@@ -2235,7 +2239,7 @@ export default function GenerationPanel({
                      onMouseEnter={() => {
                        clearGenerationCountCloseTimer();
                        generationCountFocusOnOpenRef.current = false;
-                       if (provider !== 'openai_compatible' && window.matchMedia('(hover: hover)').matches) setGenerationCountMenuOpen(true);
+                       if (window.matchMedia('(hover: hover)').matches) setGenerationCountMenuOpen(true);
                      }}
                      onMouseLeave={scheduleGenerationCountClose}
                     onKeyDown={handleGenerationCountMenuKeyDown}
@@ -2252,7 +2256,6 @@ export default function GenerationPanel({
                      >{t('generate')}</button>
                     <button
                         ref={generationCountTriggerRef}
-                        hidden={provider === 'openai_compatible'}
                         className="primary generation-count-trigger"
                         type="button"
                          aria-label={t('chooseGenerationCount')}
@@ -2277,7 +2280,7 @@ export default function GenerationPanel({
                         }}
                         disabled={busy || !selectedProviderCanGenerateDraft || !promptText.trim() || hasMissingTemplateValues}
                       ><ChevronDown size={17} aria-hidden="true" /></button>
-                    {generationCountMenuOpen && provider !== 'openai_compatible' && (
+                    {generationCountMenuOpen && (
                        <div id="generation-count-menu" className="generation-count-menu" role="menu" aria-label={t('generateVariations')}>
                         {GENERATION_SET_OPTIONS.map(count => (
                           <button key={count} type="button" role="menuitem" onClick={() => createJob(count)}>

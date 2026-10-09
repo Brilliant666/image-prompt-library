@@ -16,6 +16,10 @@ Text-only requests use `POST /v1/images/generations`. Requests with reference im
 
 Generation POST requests are never automatically retried or redirected. Failed or interrupted jobs remain failed. A timeout does not establish whether the service charged the request: check the service before manually retrying. Explicit retry is a new request.
 
+The existing generation-count menu supports batches of 3, 5, or 10 images. Each batch uses the original queue with a separate single-image request per job, rather than a multi-image API response. Selecting a batch submits that many potentially billable requests. A failed job does not automatically retry.
+
+History actions follow result state, not recency. Unsaved successful results retain the original save, reference, retry and discard actions. Saved results can still be reused as references or restored as a draft for another explicit generation. Saving or discarding an already accepted result is not repeated through the transient-result API.
+
 The implemented response contract is one `data` entry containing `b64_json`. Image bytes must pass decoding before the result is accepted. URL-only responses are deliberately rejected until that service's response contract is verified. HTTP 200 or a model listing alone is not generation success.
 
 Result metadata retains requested parameters separately from service-reported fields and decoded image dimensions. A returned model label is a service claim, not an independent model-identity verification. Missing model data is left unknown. Images saved into the Library use the returned model, never the requested model as a substitute. User-entered card metadata remains editable.
