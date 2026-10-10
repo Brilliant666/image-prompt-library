@@ -5,7 +5,7 @@
     "dev": "vite --host 127.0.0.1 --port 5177",
     "build": "tsc && vite build",
     "build:demo": "tsc && vite build --mode demo --base /image-prompt-library/",
-    "test:frontend": "node --test tests/frontend-utils.test.mjs tests/explore-view.test.mjs tests/frontend-recipe-inputs.test.mjs tests/frontend-ratio-mismatch.test.mjs",
+    "test:frontend": "node --test tests/frontend-utils.test.mjs tests/explore-view.test.mjs tests/frontend-recipe-inputs.test.mjs tests/frontend-ratio-mismatch.test.mjs tests/frontend-compatible-profiles.test.mjs",
     "preview": "vite preview --host 127.0.0.1 --port 5177"
   },
   "dependencies": {

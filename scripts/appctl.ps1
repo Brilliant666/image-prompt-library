@@ -33,7 +33,7 @@ function Read-AppEnvironment {
         foreach ($line in Get-Content -LiteralPath $Context.EnvFile -Encoding UTF8) {
             if (-not $line -or $line.TrimStart().StartsWith("#") -or -not $line.Contains("=")) { continue }
             $parts = $line.Split(@("="), 2, [StringSplitOptions]::None)
-            if ($parts[0] -in @("IMAGE_PROMPT_LIBRARY_PATH", "IMAGE_PROMPT_LIBRARY_AUTH_PATH", "IMAGE_PROMPT_LIBRARY_CONFIG_PATH", "IMAGE_PROMPT_LIBRARY_ALLOWED_HOSTS", "BACKEND_HOST", "BACKEND_PORT", "BACKUP_DIR")) {
+            if ($parts[0] -in @("IMAGE_PROMPT_LIBRARY_PATH", "IMAGE_PROMPT_LIBRARY_AUTH_PATH", "IMAGE_PROMPT_LIBRARY_CONFIG_PATH", "IMAGE_PROMPT_LIBRARY_ALLOWED_HOSTS", "IMAGE_PROMPT_LIBRARY_IMAGE_FAKE_IP_CIDRS", "BACKEND_HOST", "BACKEND_PORT", "BACKUP_DIR")) {
                 $values[$parts[0]] = $parts[1]
             }
         }
@@ -42,10 +42,11 @@ function Read-AppEnvironment {
     $authPath = if ($env:IMAGE_PROMPT_LIBRARY_AUTH_PATH) { $env:IMAGE_PROMPT_LIBRARY_AUTH_PATH } elseif ($values["IMAGE_PROMPT_LIBRARY_AUTH_PATH"]) { $values["IMAGE_PROMPT_LIBRARY_AUTH_PATH"] } else { $null }
     $configPath = if ($env:IMAGE_PROMPT_LIBRARY_CONFIG_PATH) { $env:IMAGE_PROMPT_LIBRARY_CONFIG_PATH } elseif ($values["IMAGE_PROMPT_LIBRARY_CONFIG_PATH"]) { $values["IMAGE_PROMPT_LIBRARY_CONFIG_PATH"] } else { $null }
     $allowedHosts = if ($env:IMAGE_PROMPT_LIBRARY_ALLOWED_HOSTS) { $env:IMAGE_PROMPT_LIBRARY_ALLOWED_HOSTS } elseif ($values["IMAGE_PROMPT_LIBRARY_ALLOWED_HOSTS"]) { $values["IMAGE_PROMPT_LIBRARY_ALLOWED_HOSTS"] } else { $null }
+    $fakeIpCidrs = if ($env:IMAGE_PROMPT_LIBRARY_IMAGE_FAKE_IP_CIDRS) { $env:IMAGE_PROMPT_LIBRARY_IMAGE_FAKE_IP_CIDRS } elseif ($values["IMAGE_PROMPT_LIBRARY_IMAGE_FAKE_IP_CIDRS"]) { $values["IMAGE_PROMPT_LIBRARY_IMAGE_FAKE_IP_CIDRS"] } else { $null }
     $hostName = if ($env:BACKEND_HOST) { $env:BACKEND_HOST } elseif ($values["BACKEND_HOST"]) { $values["BACKEND_HOST"] } else { "127.0.0.1" }
     $portText = if ($env:BACKEND_PORT) { $env:BACKEND_PORT } elseif ($values["BACKEND_PORT"]) { $values["BACKEND_PORT"] } else { "8000" }
     $backupDir = if ($env:BACKUP_DIR) { $env:BACKUP_DIR } elseif ($values["BACKUP_DIR"]) { $values["BACKUP_DIR"] } else { Join-Path $Context.Prefix "backups" }
-    [pscustomobject]@{ LibraryPath = $libraryPath; AuthPath = $authPath; ConfigPath = $configPath; AllowedHosts = $allowedHosts; Host = $hostName; Port = [int]$portText; BackupDir = $backupDir }
+    [pscustomobject]@{ LibraryPath = $libraryPath; AuthPath = $authPath; ConfigPath = $configPath; AllowedHosts = $allowedHosts; ImageFakeIpCidrs = $fakeIpCidrs; Host = $hostName; Port = [int]$portText; BackupDir = $backupDir }
 }
 
 function Get-CurrentVersion {
@@ -739,6 +740,7 @@ function Start-AppInternal {
         if ($settings.AuthPath) { $env:IMAGE_PROMPT_LIBRARY_AUTH_PATH = $settings.AuthPath }
         if ($settings.ConfigPath) { $env:IMAGE_PROMPT_LIBRARY_CONFIG_PATH = $settings.ConfigPath }
         $env:IMAGE_PROMPT_LIBRARY_ALLOWED_HOSTS = $settings.AllowedHosts
+        $env:IMAGE_PROMPT_LIBRARY_IMAGE_FAKE_IP_CIDRS = $settings.ImageFakeIpCidrs
         $env:BACKEND_HOST = $hostName
         $env:BACKEND_PORT = [string]$port
         New-Item -ItemType Directory -Force -Path $Context.RunDir | Out-Null

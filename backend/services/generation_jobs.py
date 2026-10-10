@@ -325,10 +325,10 @@ class GenerationJobRepository:
         parameters = dict(payload.parameters or {})
         if payload.model:
             parameters["model"] = payload.model
-        default_model = ""
-        if not parameters.get("model"):
-            default_model = OpenAICompatibleConfig(library_path=self.library_path).read()["model"]
-        parameters = normalize_image_parameters(parameters, default_model=default_model)
+        config = OpenAICompatibleConfig(library_path=self.library_path).read(parameters.get("compatible_profile_id"))
+        parameters["compatible_profile_id"] = config["id"]
+        parameters["compatible_profile_name"] = config["display_name"]
+        parameters = normalize_image_parameters(parameters, default_model=config["model"])
         return payload.model_copy(update={"model": parameters["model"], "parameters": parameters})
 
     def _restore_compatible_request(self, job: GenerationJobRecord) -> GenerationJobRecord:
@@ -337,9 +337,15 @@ class GenerationJobRepository:
         parameters = dict(job.parameters or {})
         requested = job.metadata.get("requested", {})
         if isinstance(requested, dict):
-            for key in ("model", "quality", "size", "requested_aspect_ratio", "aspect_ratio_prompt_injection", "background", "output_format", "output_compression"):
+            for key in ("model", "quality", "size", "requested_aspect_ratio", "aspect_ratio_prompt_injection", "background", "output_format", "output_compression", "compatible_profile_id", "compatible_profile_name"):
                 if key in requested:
                     parameters[key] = requested[key]
+        parameters.setdefault("compatible_profile_id", "legacy")
+        from .openai_compatible import OpenAICompatibleConfig, OpenAICompatibleError
+        try:
+            OpenAICompatibleConfig(library_path=self.library_path).read(parameters["compatible_profile_id"])
+        except OpenAICompatibleError as exc:
+            raise GenerationJobConflict(str(exc)) from None
         model = parameters.get("model") or job.model
         if not model:
             raise GenerationJobConflict("This legacy job has no recorded request model. Use it as a draft and explicitly choose a model before generating.")

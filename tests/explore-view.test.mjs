@@ -717,7 +717,7 @@ test('generation composer keeps output controls without a ChatGPT orchestrator s
 
   assert.doesNotMatch(generation, /setOrchestratorModel|orchestratorModels/);
   assert.match(generation, /provider === 'xai_grok_oauth' && \([\s\S]*?generation-model-control/);
-  assert.equal((generation.match(/generation-control-option-check/g) || []).length, 5);
+  assert.match(generation, /generation-compatible-model-popover[\s\S]*?compatibleModels\.map\(model[\s\S]*?role="menuitemradio"[\s\S]*?generation-control-option-label">\{model\}/);
   assert.match(generation, /role="menuitemradio" aria-checked=\{selected\}[\s\S]*?generation-control-option-label/);
 
   assert.match(generation, /GROK_QUALITY_OPTIONS[\s\S]*?generationResolution[\s\S]*?GROK_RESOLUTION_OPTIONS/);
@@ -1290,6 +1290,27 @@ test('compatible image providers retain the existing batch count menu and queue-
   assert.doesNotMatch(generation, /provider === 'openai_compatible'[^\n]*count !== 1/);
 });
 
+test('pending recipe references lock every composer edit until restoration finishes', async () => {
+  const generation = await readFile(`${ROOT}/frontend/src/components/GenerationPanel.tsx`, 'utf8');
+  const start = generation.indexOf('<fieldset disabled={recipeLoading}');
+  assert.ok(start >= 0, 'native fieldset must guard edits while asynchronous references load');
+  const end = generation.indexOf('</fieldset>', start);
+  assert.ok(end > start);
+  const guarded = generation.slice(start, end);
+  // Guard the whole edit surface: guarding only selectors still lets prompt changes
+  // and attachment edits cancel restoration via onChangeCapture.
+  for (const control of [
+    'ref={promptInputRef}', 'renderReferenceTray(editAttachments)',
+    'generation-template-variable-fields', 'generation-provider-control',
+    'generation-compatible-model-popover', 'generation-size-control',
+    'generation-quality-popover', 'generation-output-options-popover',
+    'ref={attachmentInputRef}', 'ref={generationCountTriggerRef}',
+  ]) assert.ok(guarded.includes(control), `${control} must stay within the pending-restore guard`);
+  assert.doesNotMatch(guarded, /<legend[\s>]/, 'legend controls bypass fieldset disabled semantics');
+  assert.match(guarded, /aria-busy=\{recipeLoading\}/);
+  assert.match(guarded, /recipeLoading \? t\('recipeRestoreLoading'\)/);
+});
+
 test('title suggestions are explicit, provider-aware, prompt-only, and shared by both save flows', async () => {
   const [field, client, editor, generation, app, config, defaultProvider, styles] = await Promise.all([
     readFile(`${ROOT}/frontend/src/components/SuggestedTitleField.tsx`, 'utf8'),
@@ -1324,4 +1345,21 @@ test('title suggestions are explicit, provider-aware, prompt-only, and shared by
   assert.match(config, /disabled=\{!enabled\}/);
   assert.match(config, /defaultAiProvider === providerId/);
   assert.match(styles, /\.title-suggestion-meta\{[^}]*display:flex;[^}]*gap:6px/);
+});
+
+
+test('new references default to simplified Chinese while editing preserves original languages and prompt text', async () => {
+  const { default: ItemEditorModal } = await vite.ssrLoadModule('/src/components/ItemEditorModal.tsx');
+  const renderEditor = record => renderToStaticMarkup(React.createElement(ItemEditorModal, {
+    item: record, t, clusters: [], tags: [], defaultAiProvider: 'openai_compatible',
+    onClose() {}, onSaved() {}, onDeleted() {},
+  }));
+  const originalField = html => html.match(/<span class="prompt-field-title">([^<]+) <button type="button" class="origin-marker active"/)[1];
+  assert.equal(originalField(renderEditor(undefined)), 'simplifiedChinesePrompt');
+  for (const [language, label] of [['en', 'englishPrompt'], ['zh_hant', 'traditionalChinesePrompt'], ['zh_hans', 'simplifiedChinesePrompt']]) {
+    const text = 'Unchanged original prompt — 保留原文';
+    const html = renderEditor({ ...item(0), images: [], prompts: [{ language, text, is_original: true, is_primary: true }] });
+    assert.equal(originalField(html), label);
+    assert.ok(html.includes(text));
+  }
 });

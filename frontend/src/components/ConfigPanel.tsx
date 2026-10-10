@@ -546,7 +546,7 @@ export default function ConfigPanel({
             {([
               ['openai_codex_oauth_native', 'ChatGPT'],
               ['xai_grok_oauth', 'Grok'],
-              ['openai_compatible', providers.find(p => p.provider === 'openai_compatible')?.display_name || 'OpenAI compatible'],
+              ['openai_compatible', uiLanguage === 'en' ? 'Third-party API' : '第三方 API'],
             ] as const).map(([providerId, label]) => {
               const status = providers.find(candidate => candidate.provider === providerId);
               const enabled = Boolean(status?.configured && status.authenticated && status.available && (status.features.text_to_image || status.features.title_suggestion));
@@ -559,7 +559,7 @@ export default function ConfigPanel({
         </fieldset>
         {open && !isDemoMode && <OpenAICompatibleSettings onSaved={loadProviders} uiLanguage={uiLanguage} />}
         <div className="provider-list">
-          {providers.map(provider => {
+          {providers.filter(provider => provider.provider !== 'openai_compatible').map(provider => {
             const authStart = authStarts[provider.provider];
             return (
             <article className={`provider-card state-${provider.state}`} key={provider.provider}>

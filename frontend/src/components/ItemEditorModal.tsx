@@ -16,6 +16,7 @@ function initialTraditionalPrompt(item: ItemDetail | undefined) {
 }
 
 function initialOriginalLanguage(item: ItemDetail | undefined) {
+  if (!item) return 'zh_hans';
   const original = item?.prompts.find(prompt => prompt.is_original);
   if (original?.language === 'en' || original?.language === 'zh_hant' || original?.language === 'zh_hans') return original.language;
   return 'en';

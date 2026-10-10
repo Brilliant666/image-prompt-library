@@ -19,8 +19,9 @@ def png(color="blue"):
 
 
 @pytest.fixture
-def config(tmp_path):
+def config(tmp_path, monkeypatch):
     cfg = OpenAICompatibleConfig(tmp_path / "private" / "config.json", tmp_path / "library")
+    monkeypatch.setenv("IMAGE_PROMPT_LIBRARY_OPENAI_COMPATIBLE_CONFIG_PATH", str(cfg.path))
     cfg.save({"base_url": "https://images.example/v1/v1/", "api_key": "test-only-secret", "model": "requested-model"})
     return cfg
 
@@ -270,9 +271,9 @@ def test_reference_specs_support_clones_and_legacy_ids(config, tmp_path):
         assert len(provider._input_images(job, tmp_path)) == 1
         repository.return_value.resolve_library_reference.assert_called_once_with("id-1")
 
-@pytest.mark.parametrize('model', ['gpt-image-2.5-flare', 'gpt-image-2.5-sunburst', 'gpt-image-2.5-flare-2026-09-08', 'gpt-image-2.5-sunburst-2026-09-08'])
+@pytest.mark.parametrize('model', ['gpt-image-2.5-flare', 'gpt-image-2.5-sunburst', 'gpt-image-2.5-flare-2026-09-08', 'gpt-image-2.5-sunburst-2026-09-08', 'gpt-image-2', 'custom-mapping'])
 @pytest.mark.parametrize('quality', ['auto', 'low', 'medium', 'high', 'xhigh', 'max'])
-def test_image25_settings_reach_transport_unchanged(config, model, quality):
+def test_compatible_settings_reach_transport_unchanged(config, model, quality):
     prompt = '  Complete prompt\nwith trailing whitespace  '
     def handler(request):
         payload = json.loads(request.content)
@@ -367,23 +368,25 @@ def test_network_failures_are_safe_and_not_retried(config, exception, category):
     assert len(calls) == 1
     assert 'secret' not in str(caught.value)
 
-@pytest.mark.parametrize('settings', [{'model':'gpt-image-2','quality':'max'}, {'model':'gpt-image-2.5-flare','quality':'unknown'}, {'model':'gpt-image-2.5-flare','output_format':'jpeg','output_compression':101}, {'model':'gpt-image-2.5-flare','output_format':'webp','output_compression':True}])
+@pytest.mark.parametrize('settings', [{'model':'custom-mapping','quality':'unknown'}, {'model':'gpt-image-2.5-flare','quality':'unknown'}, {'model':'gpt-image-2.5-flare','output_format':'jpeg','output_compression':101}, {'model':'gpt-image-2.5-flare','output_format':'webp','output_compression':True}])
 def test_model_scoped_and_typed_validation(settings):
     from backend.services.openai_compatible import normalize_image_parameters
     with pytest.raises(OpenAICompatibleError):
         normalize_image_parameters(settings)
 
 
-def test_edits_include_full_settings_and_compression_zero(config):
+@pytest.mark.parametrize('model', ['gpt-image-2.5-sunburst', 'custom-mapping'])
+@pytest.mark.parametrize('quality', ['xhigh', 'max'])
+def test_edits_include_full_settings_and_compression_zero(config, model, quality):
     calls = []
     def handler(request):
         calls.append(request)
         assert request.url.path == '/v1/images/edits'
-        for name, value in [('model','gpt-image-2.5-sunburst'),('quality','xhigh'),('background','transparent'),('size','2048x2048'),('output_format','webp'),('output_compression','0')]:
+        for name, value in [('model',model),('quality',quality),('background','transparent'),('size','2048x2048'),('output_format','webp'),('output_compression','0')]:
             assert f'name="{name}"\r\n\r\n{value}\r\n'.encode() in request.content
         return httpx.Response(200, json={'data':[{'b64_json':base64.b64encode(png()).decode()}]})
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        OpenAICompatibleProvider(config,client).generate(' Test ', {'model':'gpt-image-2.5-sunburst','quality':'xhigh','size':'2048x2048','background':'transparent','output_format':'webp','output_compression':0}, [('input.png',png(),'image/png')])
+        OpenAICompatibleProvider(config,client).generate(' Test ', {'model':model,'quality':quality,'size':'2048x2048','background':'transparent','output_format':'webp','output_compression':0}, [('input.png',png(),'image/png')])
     assert len(calls) == 1
 
 
@@ -454,3 +457,49 @@ def test_json_embedded_error_credentials_are_redacted(config):
         with pytest.raises(OpenAICompatibleError) as caught:
             OpenAICompatibleProvider(config,client).generate('Test',{})
     assert not any(secret in str(caught.value) for secret in ['privatepass','privateclient','privateaccess'])
+
+
+@pytest.mark.parametrize("use_edits", [False, True])
+def test_url_result_uses_existing_decode_and_metadata(config, monkeypatch, use_edits):
+    calls = []
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, json={"data": [{"url": "https://cdn.example/image?signature=private", "size": "8x6"}]})
+    downloads = []
+    def download(url, timeout, client):
+        downloads.append(url)
+        return png()
+    monkeypatch.setattr("backend.services.openai_compatible.download_image", download)
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        data, name, metadata = OpenAICompatibleProvider(config, client).generate("Test", {}, [("ref.png", png(), "image/png")] if use_edits else None)
+    assert data == png() and name.endswith(".png")
+    assert len(calls) == len(downloads) == 1
+    assert calls[0].url.path.endswith("/edits" if use_edits else "/generations")
+    assert metadata["decoded_image"]["width"] == 8
+    assert metadata["request_diagnostics"]["image_response"]["transport"] == "url"
+    assert "signature" not in json.dumps(metadata)
+
+
+def test_url_download_failure_never_resubmits_post(config, monkeypatch):
+    from backend.services.image_download import ImageDownloadError
+    calls = []
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, json={"data": [{"url": "https://cdn.example/image?secret=value"}]})
+    def download(*args):
+        raise ImageDownloadError("image_download_http", "Image download returned HTTP 410")
+    monkeypatch.setattr("backend.services.openai_compatible.download_image", download)
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(OpenAICompatibleError) as caught:
+            OpenAICompatibleProvider(config, client).generate("Test", {})
+    assert len(calls) == 1
+    assert caught.value.diagnostics["category"] == "image_download_http"
+    assert "secret=value" not in str(caught.value)
+
+
+def test_empty_image_fields_diagnostic(config):
+    with httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"data": [{}]}))) as client:
+        with pytest.raises(OpenAICompatibleError) as caught:
+            OpenAICompatibleProvider(config, client).generate("Test", {})
+    assert caught.value.diagnostics["image_response"] == {"base64_present": False, "url_present": False}
+    assert "URL-only" not in str(caught.value)

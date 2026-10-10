@@ -96,6 +96,43 @@ async def save_openai_compatible_config(request: Request):
         raise HTTPException(status_code=400, detail="Invalid compatible image provider configuration. Check the URL, model and timeout.") from None
 
 
+@router.get("/openai-compatible/profiles")
+def openai_compatible_profiles(request: Request):
+    try:
+        return OpenAICompatibleConfig(library_path=request.app.state.library_path).public_profiles()
+    except (ValueError, OSError, OpenAICompatibleError):
+        raise HTTPException(status_code=409, detail="Could not read third-party API profiles.") from None
+
+
+@router.put("/openai-compatible/profiles/{profile_id}")
+async def save_openai_compatible_profile(profile_id: str, request: Request):
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise ValueError()
+        store = OpenAICompatibleConfig(library_path=request.app.state.library_path)
+        store.save(payload, profile_id=profile_id)
+        return store.public_profiles()
+    except (ValueError, TypeError, OSError, OpenAICompatibleError):
+        raise HTTPException(status_code=400, detail="Invalid third-party API profile. Check the name, URL and timeout.") from None
+
+
+@router.delete("/openai-compatible/profiles/{profile_id}")
+def delete_openai_compatible_profile(profile_id: str, request: Request):
+    try:
+        return OpenAICompatibleConfig(library_path=request.app.state.library_path).delete(profile_id)
+    except (ValueError, OSError, OpenAICompatibleError):
+        raise HTTPException(status_code=400, detail="Could not delete third-party API profile.") from None
+
+
+@router.put("/openai-compatible/profiles/{profile_id}/default")
+def default_openai_compatible_profile(profile_id: str, request: Request):
+    try:
+        return OpenAICompatibleConfig(library_path=request.app.state.library_path).set_default(profile_id)
+    except (ValueError, OSError, OpenAICompatibleError):
+        raise HTTPException(status_code=400, detail="Could not select default third-party API profile.") from None
+
+
 @router.get("/openai-codex-native/status")
 def openai_codex_native_status(request: Request):
     del request

@@ -29,7 +29,9 @@ def test_config_api_never_returns_key_and_keeps_oauth(tmp_path, monkeypatch):
     assert 'private-test-key' not in response.text
     assert response.json()['base_url'] == 'https://images.example/v1'
     assert client.put('/api/generation-providers/openai-compatible/config', json={'api_key': ''}).status_code == 200
-    assert json.loads(private.read_text())['api_key'] == 'private-test-key'
+    stored = json.loads(private.read_text())
+    assert stored['default_profile_id'] == 'legacy'
+    assert stored['profiles']['legacy']['api_key'] == 'private-test-key'
     providers = client.get('/api/generation-providers').json()
     assert {p['provider'] for p in providers} >= {'openai_compatible', 'openai_codex_oauth_native', 'xai_grok_oauth'}
     compatible = next(p for p in providers if p['provider'] == 'openai_compatible')

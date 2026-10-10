@@ -2178,14 +2178,14 @@ html:lang(zh-Hans) .editor-head h2{
 .generation-compatible-header small { font-size:11px;color:var(--studio-muted);line-height:1.45; }
 .generation-compatible-header p { margin:0;font-size:12px;color:var(--studio-accent-strong); }
 .generation-image-dimensions { display:grid;grid-template-columns:1fr 1fr;gap:8px; }
-.generation-compact-controls.is-compatible { grid-template-columns:80px minmax(112px,1fr) 74px 44px;gap:6px; }
-.generation-compact-controls.is-compatible .generation-provider-control,.generation-compact-controls.is-compatible .generation-provider-trigger { width:80px;min-width:0; }
-.generation-compact-controls.is-compatible .generation-generate-split { grid-column:1/4;grid-row:2; }
-.generation-compact-controls.is-compatible .generation-history-control { grid-column:4;grid-row:2; }
+.generation-compact-controls.is-compatible { grid-template-columns:minmax(44px,1fr) 44px 74px 80px 44px;gap:6px; }
+.generation-compact-controls.is-compatible .generation-provider-control,.generation-compact-controls.is-compatible .generation-provider-trigger { width:100%;min-width:0; }
+.generation-compact-controls.is-compatible .generation-generate-split { grid-column:1/5;grid-row:2; }
+.generation-compact-controls.is-compatible .generation-history-control { grid-column:5;grid-row:2; }
 .generation-compact-controls.is-compatible .generation-provider-status { grid-row:3; }
 .generation-aspect-trigger.show-value { width:100%;min-width:0;display:flex;gap:5px;padding:5px 16px 5px 7px; }
 .generation-aspect-trigger.show-value .generation-control-icon { width:17px;flex:0 0 17px; }
-.generation-aspect-trigger.show-value .generation-control-value { position:static;width:auto;height:auto;margin:0;clip:auto;overflow:visible;font-size:11px;line-height:1.2;white-space:normal; }
+.generation-aspect-trigger.show-value .generation-control-value { position:static;width:auto;height:auto;margin:0;clip:auto;overflow:visible;font-size:11px;line-height:1.2;white-space:nowrap; }
 .generation-parameter-popover { width:min(280px,calc(100vw - 64px));max-height:min(520px,65dvh);overflow:auto;padding:12px;gap:10px; }
 .generation-size-popover { left:-65px; }
 .generation-output-options-popover { left:auto;right:0; }
@@ -2194,9 +2194,9 @@ html:lang(zh-Hans) .editor-head h2{
 .generation-parameter-popover small,.generation-parameter-popover p { margin:0;font-size:11px;line-height:1.4; }
 .generation-parameter-popover [role="group"] > button { width:100%; }
 .generation-compose-card.has-image-settings { grid-template-rows:minmax(150px,1fr);grid-auto-rows:max-content; }
-.generation-quality-trigger.show-value { width:auto;min-width:74px;gap:5px; }
+.generation-quality-trigger.show-value { width:100%;min-width:0;display:flex;flex-wrap:nowrap;align-items:center;justify-content:center;gap:5px;padding:5px 13px 5px 7px; }
 .generation-quality-trigger.show-value .generation-control-value { position:static;width:auto;height:auto;margin:0;clip:auto;overflow:visible;font-size:12px; }
-.generation-quality-trigger.show-value .generation-control-icon { width:18px; }
+.generation-quality-trigger.show-value .generation-control-icon { width:18px;flex:0 0 18px; }
 .generation-result-column { display:flex;flex-direction:column;min-height:0;min-width:0;gap:10px; }
 .generation-result-column > .generation-stage-card { flex:1;min-height:220px; }
 .generation-result-summary { flex:0 0 auto;max-height:38%;overflow:auto;padding:12px;border:1px solid var(--studio-line);border-radius:12px;font-size:12px;background:var(--studio-surface); }
@@ -2221,9 +2221,33 @@ html:lang(zh-Hans) .editor-head h2{
 .generation-compact-controls.is-compatible > .generation-control-wrap { width:auto;min-width:0; }
 
 @media(max-width:440px) {
-  .generation-compact-controls.is-compatible { grid-template-columns:64px minmax(90px,1fr) 64px 40px;gap:4px; }
-  .generation-compact-controls.is-compatible .generation-provider-control,.generation-compact-controls.is-compatible .generation-provider-trigger { width:64px; }
-  .generation-compact-controls.is-compatible .generation-quality-trigger.show-value { min-width:64px; }
-  .generation-aspect-trigger.show-value .generation-control-icon { display:none; }
+  .generation-compact-controls.is-compatible { grid-template-columns:minmax(44px,1fr) 40px 74px 80px 40px;gap:4px; }
   .generation-size-popover { left:-64px; }
 }
+
+.generation-model-control .generation-compatible-model-popover { left:-48px;width:max-content;min-width:224px;max-width:min(340px,calc(100vw - 64px)); }
+.generation-compatible-model-popover .generation-control-option-label { white-space:normal;overflow-wrap:anywhere;line-height:1.4; }
+
+.generation-custom-model { display:grid;gap:6px;margin:8px 4px 2px;font-size:12px; }
+.generation-custom-model input { width:100%;min-width:0;box-sizing:border-box;border:1px solid var(--studio-line);border-radius:8px;padding:8px;background:var(--studio-surface);color:inherit; }
+
+.generation-compact-controls.is-compatible .generation-history-control { width:100%;min-width:0; }
+.generation-compact-controls.is-compatible .generation-quality-popover { width:190px;max-width:calc(100vw - 32px); }
+
+@media(max-width:360px) {
+  .generation-compact-controls.is-compatible { grid-template-columns:minmax(36px,1fr) 36px 68px 76px 36px; }
+  .generation-compact-controls.is-compatible .generation-control-trigger { width:100%;min-width:0; }
+  .generation-compact-controls.is-compatible .generation-quality-trigger.show-value { min-width:0; }
+}
+
+/* A single pixel-size control; keep long dimensions inside its popover. */
+.generation-size-control .generation-size-popover { width:248px;max-width:calc(100vw - 64px);max-height:min(540px,65vh);overflow-y:auto;overflow-x:hidden; }
+.generation-size-popover .generation-control-option-label { white-space:normal;overflow-wrap:anywhere; }
+.generation-custom-size { display:flex;flex-direction:column;gap:6px;padding:10px;font-size:12px; }
+.generation-custom-size input { width:100%;min-width:0;box-sizing:border-box;padding:8px;border:1px solid var(--border);border-radius:8px; }
+.generation-size-popover p { padding:0 10px;font-size:12px; }
+
+/* Keep the selected size visible without widening the compact toolbar. */
+.generation-size-trigger { width:100%;min-width:0;display:flex;flex-wrap:nowrap;align-items:center;justify-content:center;gap:4px;padding:5px 12px 5px 5px; }
+.generation-size-trigger .generation-control-icon { width:17px;flex:0 0 17px; }
+.generation-size-trigger .generation-control-value { position:static;width:auto;height:auto;margin:0;clip:auto;overflow:visible;font-size:12px;line-height:1.2;white-space:nowrap; }

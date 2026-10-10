@@ -51,7 +51,8 @@ def test_http_batch_freezes_complete_recipe_and_preserves_prompt(setup, quality)
     for job in jobs:
         stored = GenerationJobRepository(library).get_job(job["id"])
         assert stored.model == "gpt-image-2.5-flare"
-        assert stored.parameters == {**settings, "model": stored.model}
+        assert stored.parameters == {**settings, "model": stored.model,
+                                     "compatible_profile_id": "legacy", "compatible_profile_name": "Third-party API"}
         provider.run_job(library, stored.id)
     assert len(sent) == 3
     assert all(p == {"model": "gpt-image-2.5-flare", "prompt": prompt, "n": 1,
