@@ -2,10 +2,13 @@ import type { Translator } from './i18n';
 import type { GenerationJobRecord } from '../types';
 export const IMAGE25_MODELS = ['gpt-image-2.5-flare', 'gpt-image-2.5-sunburst', 'gpt-image-2.5-flare-2026-09-08', 'gpt-image-2.5-sunburst-2026-09-08'];
 export const IMAGE25_QUALITIES = ['auto', 'low', 'medium', 'high', 'xhigh', 'max'];
-export const IMAGE_SIZES = ['auto', '1024x1024', '1536x1024', '1024x1536', '2048x2048', '2048x1152', '3840x2160', '2160x3840'];
+export const COMPATIBLE_SIZE_OPTIONS = ['auto', '1024x1024', '1536x1024', '1024x1536', '2048x2048', '2048x1152', '1152x2048', '3840x2160', '2160x3840'];
+export const IMAGE_SIZES = COMPATIBLE_SIZE_OPTIONS;
 export const LEGACY_RATIO_SIZES: Record<string, string> = { auto: 'auto', '1:1': '1024x1024', '3:4': '864x1152', '9:16': '720x1280', '4:3': '1152x864', '16:9': '1280x720' };
 export interface CompatibleRecipe { model: string; quality: string; size: string; background: string; output_format: string; output_compression?: number; legacyDerived?: boolean }
-export function imageQualities(model: string) { return IMAGE25_MODELS.includes(model) ? IMAGE25_QUALITIES : ['auto', 'low', 'medium', 'high']; }
+// Compatible gateways may expose model aliases; names do not establish capabilities.
+// Keep all supported request values available and let the service validate them.
+export function imageQualities(_model: string) { return IMAGE25_QUALITIES; }
 export function restoreCompatibleRecipe(job: Pick<GenerationJobRecord, 'parameters' | 'metadata' | 'model'>): CompatibleRecipe {
   const requested = job.metadata?.requested;
   const values = { ...job.parameters, ...(requested && typeof requested === 'object' ? requested as Record<string, unknown> : {}) };
@@ -78,6 +81,18 @@ export function imageSizeLabel(size: string): string {
   const gcd = (a: number, b: number): number => b ? gcd(b, a % b) : a;
   const divisor = gcd(width, height);
   return `${size} (${width / divisor}:${height / divisor})`;
+}
+/** Compact preset names only; not a provider billing tier or a quality setting. */
+export function imageSizeBadge(size: string): string {
+  if (size === 'auto') return 'auto';
+  const presets: Record<string, string> = {
+    '1024x1024': '1K',
+    '1536x1024': '1K', '1024x1536': '1K',
+    '2048x2048': '2K', '2048x1152': '2K', '1152x2048': '2K',
+    '3840x2160': '4K', '2160x3840': '4K',
+  };
+  // Custom dimensions remain exact in the tooltip; do not guess a K tier.
+  return presets[size] || 'px';
 }
 export function imageQualityLabel(value: string, t: Translator): string {
   const keys: Record<string, Parameters<Translator>[0]> = { auto: 'generationAuto', low: 'generationLow', medium: 'generationMedium', high: 'generationHigh', xhigh: 'generationXhigh', max: 'generationMax' };

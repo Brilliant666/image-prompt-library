@@ -19,6 +19,7 @@ from PIL import Image
 from backend.config import resolve_openai_compatible_config_path
 from backend.services.generation_jobs import GenerationJobConflict, GenerationJobRepository, resolve_generation_input_image_path
 from backend.services.image_store import MAX_IMAGE_PIXELS
+from backend.services.image_download import download_image, ImageDownloadError, MAX_IMAGE_BYTES
 
 PROVIDER_ID = "openai_compatible"
 AUTH_MODE = "api_key"
@@ -92,9 +93,9 @@ def normalize_image_parameters(parameters, default_model=""):
     result["quality"] = result.get("quality", "low")
     if result["size"] != "auto" and not re.fullmatch(r"([1-9][0-9]*)x([1-9][0-9]*)", result["size"]):
         raise OpenAICompatibleError("Size must be auto or WIDTHxHEIGHT positive integers")
-    qualities = {"auto", "low", "medium", "high"}
+    # Gateways can map arbitrary model aliases; do not infer quality support from names.
+    qualities = {"auto", "low", "medium", "high", "xhigh", "max"}
     if result["model"] in IMAGE_25_MODELS:
-        qualities |= {"xhigh", "max"}
         if result["size"] != "auto":
             match = re.fullmatch(r"([1-9][0-9]*)x([1-9][0-9]*)", result["size"])
             if not match:
@@ -338,7 +339,8 @@ def _inspect_image(data, details=False):
 
 
 class OpenAICompatibleProvider:
-    def __init__(self, config=None, http_client=None):
+    def __init__(self, config=None, http_client=None, download_client=None):
+        self.download_client = download_client
         self.config = config or OpenAICompatibleConfig()
         self.http_client = http_client
 
@@ -439,16 +441,31 @@ class OpenAICompatibleProvider:
             fail("missing_image", "Image API must return exactly one image")
         first = body["data"][0]
         encoded = first.get("b64_json")
-        if not isinstance(encoded, str) or not encoded:
-            fail("missing_image", "Image API returned no base64 image; URL-only responses are not supported")
-        try:
-            data = base64.b64decode(encoded, validate=True)
-        except (ValueError, TypeError):
-            fail("base64_decode", "Image API returned invalid Base64")
+        image_url = first.get("url")
+        diagnostics["image_response"] = {
+            "base64_present": isinstance(encoded, str) and bool(encoded),
+            "url_present": isinstance(image_url, str) and bool(image_url),
+        }
+        if isinstance(encoded, str) and encoded:
+            diagnostics["image_response"]["transport"] = "base64"
+            if len(encoded) > ((MAX_IMAGE_BYTES + 2) // 3) * 4:
+                fail("image_too_large", "Image Base64 exceeds the 32 MiB limit")
+            try:
+                data = base64.b64decode(encoded, validate=True)
+            except (ValueError, TypeError):
+                fail("base64_decode", "Image API returned invalid Base64")
+        elif isinstance(image_url, str) and image_url:
+            diagnostics["image_response"]["transport"] = "url"
+            try:
+                data = download_image(image_url, settings["timeout"], self.download_client)
+            except ImageDownloadError as error:
+                fail(error.category, str(error))
+        else:
+            fail("missing_image", "Image API returned neither a non-empty b64_json nor an image URL")
         try:
             decoded = _inspect_image(data, details=True)
         except OpenAICompatibleError:
-            fail("image_decode", "Image API Base64 did not decode to a supported safe image")
+            fail("image_decode", "Image API result did not decode to a supported safe image")
         fmt, width, height = decoded["format"], decoded["width"], decoded["height"]
         fields = ("model", "size", "generation_id", "quality", "background", "output_format", "output_compression", "usage", "revised_prompt", "request_id", "created")
         top = {key: _safe_value(body[key], settings["api_key"]) for key in fields if key in body}

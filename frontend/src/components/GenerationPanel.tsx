@@ -2,14 +2,15 @@ import { recipeInputs, restoreRecipeInputs, fillRecipeInputs, type RecipeInput }
 import { GenerationResultSummary } from './GenerationResultSummary';
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { createPortal } from 'react-dom';
-import { ArrowLeft, Check, ChevronDown, ChevronLeft, ChevronRight, Clipboard, Clock3, Download, FilePlus2, Images, Info, Maximize2, Paperclip, Plus, Settings2, RotateCcw, Trash2, Upload, X } from 'lucide-react';
+import { ArrowLeft, Check, ChevronDown, ChevronLeft, ChevronRight, Clipboard, Clock3, Cpu, Download, FilePlus2, Images, Info, Maximize2, Paperclip, Plus, Settings2, RotateCcw, Trash2, Upload, X } from 'lucide-react';
 import aspectRatioIcon from '../assets/generation-controls/aspect-ratio.png';
 import brainAiIcon from '../assets/generation-controls/model.png';
 import qualityIcon from '../assets/generation-controls/quality.png';
 import { api, mediaUrl } from '../api/client';
 import type { ClusterRecord, GenerationJobAcceptAsNewItemPayload, GenerationJobCreate, GenerationJobRecord, GenerationJobSetRecord, GenerationProviderQueueState, GenerationProviderStatus, GenerationSetCount, ImageRecord, ItemDetail, ItemSummary, TagRecord, AiProvider, OpenAICompatibleProfile } from '../types';
 import type { Translator } from '../utils/i18n';
-import { IMAGE25_MODELS, imageQualities, restoreCompatibleRecipe, compatibleParameters, compatibleValidation, imageSizeLabel, imageQualityLabel, type CompatibleRecipe } from '../utils/compatibleRecipe';
+import { COMPATIBLE_SIZE_OPTIONS, IMAGE25_MODELS, imageQualities, restoreCompatibleRecipe, compatibleParameters, compatibleValidation, imageSizeLabel, imageSizeBadge, imageQualityLabel, type CompatibleRecipe } from '../utils/compatibleRecipe';
+import { readGenerationPreference, writeGenerationPreference, lastGenerationProfile } from '../utils/generationPreferences';
 import { generationProviderChoices, recipeProfileId } from '../utils/compatibleProfiles';
 import { generationAspectRatio } from '../utils/generationAspectRatio';
 import { generationResultActions } from '../utils/generationResultActions';
@@ -331,7 +332,7 @@ export default function GenerationPanel({
   useEffect(() => () => { recipeRequestRef.current += 1; }, []);
   const [compatibleModelSelected, setCompatibleModelSelected] = useState(false);
   const compatibleQuality = compatibleRecipe.quality;
-  const setCompatibleQuality = (quality: string) => setCompatibleRecipe(current => ({ ...current, quality }));
+  const setCompatibleQuality = (quality: string) => updateCompatibleRecipe(current => ({ ...current, quality }));
   const [grokQuality, setGrokQuality] = useState('medium');
   const [grokResolution, setGrokResolution] = useState('1k');
   const [openControl, setOpenControl] = useState<'provider' | 'model' | 'aspect' | 'quality' | 'output' | null>(null);
@@ -486,6 +487,28 @@ export default function GenerationPanel({
   const selectedProviderPauseSeconds = selectedProviderQueueState ? providerPauseSeconds(selectedProviderQueueState, queueClock) : 0;
   const selectedModelLabel = provider === 'openai_compatible' && compatibleModelSelected ? compatibleRecipe.model : selectedProvider?.model || selectedProvider?.default_image_model || (provider === 'xai_grok_oauth' ? 'grok-imagine-image-2.0' : '');
   const effectiveRecipe = { ...compatibleRecipe, model: selectedModelLabel };
+  const updateCompatibleRecipe = (update: (recipe: CompatibleRecipe) => CompatibleRecipe) => {
+    invalidateRecipeRestore();
+    const next = update(effectiveRecipe);
+    setCompatibleModelSelected(true);
+    setCompatibleRecipe(next);
+    if (compatibleProfileId) {
+      try { writeGenerationPreference(window.localStorage, compatibleProfileId, next); } catch { /* Optional browser storage. */ }
+    }
+  };
+  const selectCompatibleProfile = (id: string | undefined, model: string) => {
+    let next: CompatibleRecipe = { model, quality: 'auto', size: 'auto', background: 'auto', output_format: 'png' };
+    try {
+      if (id) {
+        next = readGenerationPreference(window.localStorage, id, model);
+        writeGenerationPreference(window.localStorage, id, next);
+      }
+    } catch { /* Optional browser storage. */ }
+    setCompatibleProfileId(id);
+    setCompatibleModelSelected(true);
+    setCompatibleRecipe(next);
+    setAspectRatio('auto');
+  };
   const compatibleError = provider === 'openai_compatible' ? compatibleValidation(effectiveRecipe) : undefined;
   const currentQualityOptions = provider === 'openai_compatible' ? imageQualities(selectedModelLabel).map(value => ({ value, label: value })) : QUALITY_OPTIONS;
   const sizeLabel = (size: string) => size === 'auto' ? optionLabel(ASPECT_RATIO_OPTIONS, 'auto', t) : imageSizeLabel(size);
@@ -681,7 +704,13 @@ export default function GenerationPanel({
         const automatedProviders = nextProviders.filter(nextProvider => nextProvider.provider !== 'manual_upload');
         setProviders(automatedProviders);
         setCompatibleProfiles(profileStore?.profiles || []);
-        setCompatibleProfileId(current => current ?? profileStore?.default_profile_id ?? undefined);
+        if (!restoredLibraryRecipeRef.current) {
+          let remembered: string | null = null;
+          try { remembered = lastGenerationProfile(window.localStorage); } catch { /* Optional browser storage. */ }
+          const profile = profileStore?.profiles.find(p => p.id === remembered)
+            || profileStore?.profiles.find(p => p.id === profileStore.default_profile_id);
+          selectCompatibleProfile(profile?.id, profile?.model || '');
+        }
         const preferredProvider = automatedProviders.find(candidate => candidate.provider === defaultAiProvider);
         const initialProvider = preferredProvider || automatedProviders.find(providerCanGenerate) || automatedProviders[0];
         if (initialProvider && !restoredLibraryRecipeRef.current) {
@@ -977,8 +1006,8 @@ export default function GenerationPanel({
         edited_prompt_text: jobEditedPromptText,
         reference_image_ids: [],
         parameters: {
-          requested_aspect_ratio: aspectRatio,
-          aspect_ratio_prompt_injection: ['openai_codex_oauth_native', 'openai_compatible'].includes(provider) && aspectRatio !== 'auto' && (provider !== 'openai_compatible' || compatibleRecipe.size === 'auto'),
+          ...(provider !== 'openai_compatible' || aspectRatio !== 'auto' ? { requested_aspect_ratio: aspectRatio } : {}),
+          ...(provider !== 'openai_compatible' || aspectRatio !== 'auto' ? { aspect_ratio_prompt_injection: ['openai_codex_oauth_native', 'openai_compatible'].includes(provider) && aspectRatio !== 'auto' && (provider !== 'openai_compatible' || compatibleRecipe.size === 'auto') } : {}),
           ...(provider === 'openai_compatible'
             ? { ...compatibleParameters(effectiveRecipe), compatible_profile_id: compatibleProfileId }
             : provider === 'openai_codex_oauth_native'
@@ -2167,7 +2196,8 @@ export default function GenerationPanel({
           </button>
         </header>
         {!reviewJob || !metadataDraft ? <div className="generation-layout" inert={showHistoryDrawer} aria-hidden={showHistoryDrawer || undefined}>
-          <section onChangeCapture={invalidateRecipeRestore} className={`generation-compose-card generation-composer-card${provider === 'openai_compatible' ? ' has-image-settings' : ''}`}>
+          {/* Keep edits from invalidating a recipe while its reference files are loading. */}
+          <fieldset disabled={recipeLoading} aria-busy={recipeLoading} style={{ margin: 0, minWidth: 0 }} onChangeCapture={invalidateRecipeRestore} className={`generation-compose-card generation-composer-card${provider === 'openai_compatible' ? ' has-image-settings' : ''}`}>
             {!isHistoryReview ? (
               <>
                 <div className="generation-prompt-area">
@@ -2207,8 +2237,8 @@ export default function GenerationPanel({
                     </div>
                   </div>
                 )}
-                {provider === 'openai_compatible' && (compatibleRecipe.size !== 'auto' || compatibleError || !selectedProvider) && <div className="generation-compatible-header">
-                  {compatibleRecipe.size !== 'auto' && <small>{t('imageHistoricalSize')}: {sizeLabel(compatibleRecipe.size)}</small>}
+                {provider === 'openai_compatible' && (aspectRatio !== 'auto' || compatibleError || !selectedProvider) && <div className="generation-compatible-header">
+                  {aspectRatio !== 'auto' && <small>{t('imageLegacyRatio')}: {aspectRatio}</small>}
                   {compatibleError && <p role="alert">{t(compatibleError)}</p>}
                   {!selectedProvider && <p role="alert">{t('compatibleProfileUnavailable')}</p>}
                 </div>}
@@ -2240,9 +2270,8 @@ export default function GenerationPanel({
                               onClick={() => {
                                 invalidateRecipeRestore(); setProvider(option.provider);
                                 if (option.provider === 'openai_compatible') {
-                                  setCompatibleProfileId(option.profile_id);
-                                  setCompatibleModelSelected(false);
-                                  setCompatibleRecipe(r => ({ ...r, model: option.model || '', quality: imageQualities(option.model || '').includes(r.quality) ? r.quality : 'auto' }));
+                                  setAspectRatio('auto');
+                                  selectCompatibleProfile(option.profile_id, option.model || '');
                                 }
                                 closeGenerationControl('provider');
                               }}
@@ -2266,18 +2295,36 @@ export default function GenerationPanel({
                   </div>
                   {provider === 'openai_compatible' && <div className="generation-control-wrap generation-model-control">
                     <button ref={element => { controlTriggerRefs.current.model = element; }} className="generation-control-trigger generation-model-trigger" type="button" onClick={() => setOpenControl(openControl === 'model' ? null : 'model')} aria-haspopup="dialog" aria-expanded={openControl === 'model'} aria-label={`${t('requestedImageModel')}: ${selectedModelLabel || '—'}`} title={`${t('requestedImageModel')}: ${selectedModelLabel || '—'}`}>
-                      <img className="generation-control-icon" src={brainAiIcon} alt="" aria-hidden="true" />
+                      <Cpu size={21} strokeWidth={1.5} aria-hidden="true" />
                     </button>
                     {openControl === 'model' && <div className="generation-control-popover generation-compatible-model-popover" role="dialog" aria-label={t('requestedImageModel')}>
                       <div role="menu" aria-label={t('requestedImageModel')}>
-                      {compatibleModels.map(model => <button key={model} type="button" role="menuitemradio" aria-checked={selectedModelLabel === model} className={selectedModelLabel === model ? 'is-selected' : ''} onClick={() => { invalidateRecipeRestore(); setCompatibleModelSelected(true); setCompatibleRecipe(r => ({ ...r, model, quality: imageQualities(model).includes(r.quality) ? r.quality : 'auto' })); closeGenerationControl('model'); }}>
+                      {compatibleModels.map(model => <button key={model} type="button" role="menuitemradio" aria-checked={selectedModelLabel === model} className={selectedModelLabel === model ? 'is-selected' : ''} onClick={() => { invalidateRecipeRestore(); setCompatibleModelSelected(true); updateCompatibleRecipe(r => ({ ...r, model, quality: imageQualities(model).includes(r.quality) ? r.quality : 'auto' })); closeGenerationControl('model'); }}>
                         <span className="generation-control-option-label">{model}</span>
                         {selectedModelLabel === model && <Check className="generation-control-option-check" size={15} aria-hidden="true" />}
                       </button>)}
                       </div>
-                      <label className="generation-custom-model">{t('compatibleCustomModel')}<input aria-label={t('compatibleCustomModel')} value={selectedModelLabel} placeholder="model-id" onChange={event => { invalidateRecipeRestore(); const model = event.target.value; setCompatibleModelSelected(true); setCompatibleRecipe(r => ({ ...r, model, quality: imageQualities(model).includes(r.quality) ? r.quality : 'auto' })); }} /></label>
+                      <label className="generation-custom-model">{t('compatibleCustomModel')}<input aria-label={t('compatibleCustomModel')} value={selectedModelLabel} placeholder="model-id" onChange={event => { invalidateRecipeRestore(); const model = event.target.value; setCompatibleModelSelected(true); updateCompatibleRecipe(r => ({ ...r, model, quality: imageQualities(model).includes(r.quality) ? r.quality : 'auto' })); }} /></label>
                     </div>}
                   </div>}
+                  {provider === 'openai_compatible' ? <div className="generation-control-wrap generation-size-control">
+                    <button ref={element => { controlTriggerRefs.current.aspect = element; }} className="generation-control-trigger generation-size-trigger" type="button" onClick={() => setOpenControl(openControl === 'aspect' ? null : 'aspect')} aria-haspopup="dialog" aria-expanded={openControl === 'aspect'} aria-label={`${t('requestedImageSize')}: ${sizeLabel(compatibleRecipe.size)}`} title={`${t('requestedImageSize')}: ${sizeLabel(compatibleRecipe.size)}`}>
+                      <img className="generation-control-icon" src={aspectRatioIcon} alt="" aria-hidden="true" />
+                      <span className="generation-control-value">{imageSizeBadge(compatibleRecipe.size)}</span>
+                    </button>
+                    {openControl === 'aspect' && <div className="generation-control-popover generation-size-popover" role="dialog" aria-label={t('requestedImageSize')}>
+                      <div role="menu" aria-label={t('requestedImageSize')}>
+                        {COMPATIBLE_SIZE_OPTIONS.map(size => <button key={size} type="button" role="menuitemradio" aria-checked={compatibleRecipe.size === size} className={compatibleRecipe.size === size ? 'is-selected' : ''} onClick={() => { invalidateRecipeRestore(); setAspectRatio('auto'); updateCompatibleRecipe(r => ({ ...r, size, legacyDerived: false })); closeGenerationControl('aspect'); }}>
+                          <span className="generation-control-option-label">{sizeLabel(size)}</span>
+                          {compatibleRecipe.size === size && <Check size={15} aria-hidden="true" />}
+                        </button>)}
+                      </div>
+                      <label className="generation-custom-size">{t('imageCustomSize')}
+                        <input aria-label={t('imageCustomSize')} placeholder="WIDTHxHEIGHT" value={compatibleRecipe.size === 'auto' ? '' : compatibleRecipe.size} onChange={event => { invalidateRecipeRestore(); setAspectRatio('auto'); updateCompatibleRecipe(r => ({ ...r, size: event.target.value.trim(), legacyDerived: false })); }} />
+                      </label>
+                      {compatibleError === 'imageSizeInvalid' && <p role="alert">{t(compatibleError)}</p>}
+                    </div>}
+                  </div> : <>
                   <div className="generation-control-wrap">
                     <button ref={element => { controlTriggerRefs.current.aspect = element; }} className={`generation-control-trigger generation-aspect-trigger${provider === 'openai_compatible' ? ' show-value' : ''}`} type="button" onClick={() => setOpenControl(openControl === 'aspect' ? null : 'aspect')} aria-haspopup="menu" aria-expanded={openControl === 'aspect'} aria-label={`${t('queueAspectRatio')}: ${optionLabel(ASPECT_RATIO_OPTIONS, aspectRatio, t)}`} title={`${t('queueAspectRatio')}: ${optionLabel(ASPECT_RATIO_OPTIONS, aspectRatio, t)}`}>
                       <img className="generation-control-icon" src={aspectRatioIcon} alt="" aria-hidden="true" />
@@ -2287,11 +2334,12 @@ export default function GenerationPanel({
                       <div className="generation-control-popover" role="menu">
                         {ASPECT_RATIO_OPTIONS.map(option => {
                           const selected = aspectRatio === option.value;
-                          return <button key={option.value} type="button" role="menuitemradio" aria-checked={selected} className={selected ? 'is-selected' : ''} onClick={() => { invalidateRecipeRestore(); setAspectRatio(option.value); if (provider === 'openai_compatible') setCompatibleRecipe(r => ({ ...r, size: 'auto', legacyDerived: false })); closeGenerationControl('aspect'); }}><span className="generation-control-option-label">{optionLabel(ASPECT_RATIO_OPTIONS, option.value, t)}</span>{selected && <Check className="generation-control-option-check" size={15} aria-hidden="true" />}</button>;
+                          return <button key={option.value} type="button" role="menuitemradio" aria-checked={selected} className={selected ? 'is-selected' : ''} onClick={() => { invalidateRecipeRestore(); setAspectRatio(option.value); closeGenerationControl('aspect'); }}><span className="generation-control-option-label">{optionLabel(ASPECT_RATIO_OPTIONS, option.value, t)}</span>{selected && <Check className="generation-control-option-check" size={15} aria-hidden="true" />}</button>;
                         })}
                       </div>
                     )}
                   </div>
+                  </>}
                   <div className="generation-control-wrap">
                      <button ref={element => { controlTriggerRefs.current.quality = element; }} className={`generation-control-trigger generation-quality-trigger${provider === 'openai_compatible' ? ' show-value' : ''}`} type="button" onClick={() => setOpenControl(openControl === 'quality' ? null : 'quality')} aria-haspopup="menu" aria-expanded={openControl === 'quality'} aria-label={selectedOutputAriaLabel} title={selectedOutputAriaLabel}>
                       <img className="generation-control-icon" src={qualityIcon} alt="" aria-hidden="true" />
@@ -2341,9 +2389,9 @@ export default function GenerationPanel({
                         {provider === 'openai_compatible' && <div className="generation-control-wrap generation-output-options-control">
                     <button ref={element => { controlTriggerRefs.current.output = element; }} className="generation-control-trigger" type="button" aria-haspopup="dialog" aria-expanded={openControl === 'output'} aria-label={`${t('imageOutputOptions')}: ${compatibleRecipe.background}, ${compatibleRecipe.output_format}`} title={`${t('imageOutputOptions')}: ${compatibleRecipe.background}, ${compatibleRecipe.output_format}`} onClick={() => setOpenControl(openControl === 'output' ? null : 'output')}><Settings2 size={20} aria-hidden="true" /></button>
                     {openControl === 'output' && <div className="generation-control-popover generation-parameter-popover generation-output-options-popover" role="dialog" aria-label={t('imageOutputOptions')}>
-                      <label>{t('imageBackground')}<select aria-label={t('imageBackground')} value={compatibleRecipe.background} onChange={e => setCompatibleRecipe(r => ({ ...r, background: e.target.value }))}>{['auto', 'opaque', 'transparent'].map(value => <option key={value}>{value}</option>)}</select></label>
-                      <label>{t('imageFormat')}<select aria-label={t('imageFormat')} value={compatibleRecipe.output_format} onChange={e => setCompatibleRecipe(r => ({ ...r, output_format: e.target.value }))}>{['png', 'jpeg', 'webp'].map(value => <option key={value}>{value}</option>)}</select></label>
-                      {compatibleRecipe.output_format !== 'png' && <label>{t('imageCompression')}<input type="number" min="0" max="100" aria-label={t('imageCompression')} value={compatibleRecipe.output_compression ?? ''} onChange={e => setCompatibleRecipe(r => ({ ...r, output_compression: e.target.value === '' ? undefined : Number(e.target.value) }))} /></label>}
+                      <label>{t('imageBackground')}<select aria-label={t('imageBackground')} value={compatibleRecipe.background} onChange={e => updateCompatibleRecipe(r => ({ ...r, background: e.target.value }))}>{['auto', 'opaque', 'transparent'].map(value => <option key={value}>{value}</option>)}</select></label>
+                      <label>{t('imageFormat')}<select aria-label={t('imageFormat')} value={compatibleRecipe.output_format} onChange={e => updateCompatibleRecipe(r => ({ ...r, output_format: e.target.value }))}>{['png', 'jpeg', 'webp'].map(value => <option key={value}>{value}</option>)}</select></label>
+                      {compatibleRecipe.output_format !== 'png' && <label>{t('imageCompression')}<input type="number" min="0" max="100" aria-label={t('imageCompression')} value={compatibleRecipe.output_compression ?? ''} onChange={e => updateCompatibleRecipe(r => ({ ...r, output_compression: e.target.value === '' ? undefined : Number(e.target.value) }))} /></label>}
                       {compatibleError && <p role="alert">{t(compatibleError)}</p>}
                   {!selectedProvider && <p role="alert">{t('compatibleProfileUnavailable')}</p>}
                     </div>}
@@ -2463,7 +2511,7 @@ export default function GenerationPanel({
                 </div>
               </div>
             )}
-          </section>
+          </fieldset>
 
           <div className="generation-result-column"><section ref={stageRef} className="generation-stage-card">
              {selectedStageJob?.result_path && !['discarded', 'cancelled', 'failed'].includes(selectedStageJob.status) && <a className="modal-icon-button generation-download-overlay" href={jobResultUrl(selectedStageJob)} download={downloadFileName('generation-result', selectedStageJob.result_path)} aria-label={t('download')} title={t('download')}><Download size={16} /></a>}

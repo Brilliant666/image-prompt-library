@@ -1290,6 +1290,27 @@ test('compatible image providers retain the existing batch count menu and queue-
   assert.doesNotMatch(generation, /provider === 'openai_compatible'[^\n]*count !== 1/);
 });
 
+test('pending recipe references lock every composer edit until restoration finishes', async () => {
+  const generation = await readFile(`${ROOT}/frontend/src/components/GenerationPanel.tsx`, 'utf8');
+  const start = generation.indexOf('<fieldset disabled={recipeLoading}');
+  assert.ok(start >= 0, 'native fieldset must guard edits while asynchronous references load');
+  const end = generation.indexOf('</fieldset>', start);
+  assert.ok(end > start);
+  const guarded = generation.slice(start, end);
+  // Guard the whole edit surface: guarding only selectors still lets prompt changes
+  // and attachment edits cancel restoration via onChangeCapture.
+  for (const control of [
+    'ref={promptInputRef}', 'renderReferenceTray(editAttachments)',
+    'generation-template-variable-fields', 'generation-provider-control',
+    'generation-compatible-model-popover', 'generation-size-control',
+    'generation-quality-popover', 'generation-output-options-popover',
+    'ref={attachmentInputRef}', 'ref={generationCountTriggerRef}',
+  ]) assert.ok(guarded.includes(control), `${control} must stay within the pending-restore guard`);
+  assert.doesNotMatch(guarded, /<legend[\s>]/, 'legend controls bypass fieldset disabled semantics');
+  assert.match(guarded, /aria-busy=\{recipeLoading\}/);
+  assert.match(guarded, /recipeLoading \? t\('recipeRestoreLoading'\)/);
+});
+
 test('title suggestions are explicit, provider-aware, prompt-only, and shared by both save flows', async () => {
   const [field, client, editor, generation, app, config, defaultProvider, styles] = await Promise.all([
     readFile(`${ROOT}/frontend/src/components/SuggestedTitleField.tsx`, 'utf8'),

@@ -30,3 +30,29 @@ test('each endpoint has independent readiness and default model; OAuth remains u
   assert.equal(choices[3].features.image_edit, false);
   assert.equal(generationProviderChoices([base], [])[0].can_generate, false);
 });
+const preferenceSource = await readFile(new URL('../frontend/src/utils/generationPreferences.ts', import.meta.url), 'utf8');
+const preferenceJs = ts.transpileModule(preferenceSource, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
+const { readGenerationPreference, writeGenerationPreference, lastGenerationProfile } = await import(`data:text/javascript;base64,${Buffer.from(preferenceJs).toString('base64')}`);
+test('generation choices survive reopening and stay isolated by endpoint', () => {
+  const values = new Map();
+  const storage = { getItem: key => values.get(key), setItem: (key, value) => values.set(key, value) };
+  const a = { model: 'alias-a', size: '2160x3840', quality: 'max', background: 'auto', output_format: 'png' };
+  const b = { ...a, model: 'alias-b', size: '1024x1024', quality: 'xhigh' };
+  writeGenerationPreference(storage, 'a', { ...a, api_key: 'not-to-be-saved', prompt: 'private' });
+  writeGenerationPreference(storage, 'b', b);
+  assert.deepEqual(readGenerationPreference(storage, 'a', 'new-default'), a);
+  assert.deepEqual(readGenerationPreference(storage, 'b'), b);
+  assert.equal(lastGenerationProfile(storage), 'b');
+  assert.equal(readGenerationPreference(storage, 'new', 'default').quality, 'auto');
+  assert.equal(readGenerationPreference(storage, 'new', 'default').model, 'default');
+  assert.ok(!JSON.stringify([...values.values()]).includes('not-to-be-saved'));
+  assert.ok(!JSON.stringify([...values.values()]).includes('private'));
+});
+test('invalid or disabled preference storage falls back safely', () => {
+  for (const value of ['{', 'null', '{"size":"oops","quality":"bogus"}']) {
+    assert.equal(readGenerationPreference({ getItem: () => value }, 'a').size, 'auto');
+  }
+  const denied = { getItem: () => { throw Error('disabled'); }, setItem: () => { throw Error('full'); } };
+  assert.equal(readGenerationPreference(denied, 'a').quality, 'auto');
+  assert.doesNotThrow(() => writeGenerationPreference(denied, 'a', {}));
+});

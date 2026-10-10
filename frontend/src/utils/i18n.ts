@@ -3,7 +3,7 @@ export type { UiLanguage } from '../types';
 type TranslationKey =
   | 'recipeInputsMissing' | 'recipeTextOnly' | 'recipeRestoreLoading'
   | 'generationXhigh' | 'generationMax'
-  | 'imageHistoricalSize'
+  | 'imageLegacyRatio' | 'imageHistoricalSize'
   | 'sub2apiOutputLimit' | 'sub2apiLegacyQuality' | 'imageOutputOptions' | 'imageWidth' | 'imageHeight' | 'imageQualityMismatch'
   | 'imageCompositionHelp' | 'imageResultMismatch' | 'imageResultDecoded' | 'imageResultUnverified' | 'imageRequestedOutput' | 'imageActualOutput' | 'imageActualTransparent' | 'imageActualOpaque' | 'imageMoreDetails' | 'imageRawRecords' | 'imageServiceQuality' | 'imageServiceSize' | 'imageRequestId' | 'imageElapsed' | 'imageHttpStatus'
   | 'imageMissingRecipe' | 'imageBackgroundInvalid' | 'imageFormatInvalid'
@@ -71,6 +71,7 @@ export function normalizeUiLanguage(value?: string | null): UiLanguage {
 const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
   zh_hant: {
     generationXhigh: '超高', generationMax: '最高',
+    imageLegacyRatio: '歷史構圖比例（選擇尺寸後清除）',
     imageHistoricalSize: '歷史固定尺寸（重新選擇比例後改為自動尺寸）',
     sub2apiOutputLimit: '目前 sub2api 渠道暫按最高 medium、約 2K 檔位使用；以實際回覆為準。',
     sub2apiLegacyQuality: '歷史請求值，超出目前渠道預期能力',
@@ -190,6 +191,7 @@ const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
   },
   zh_hans: {
     generationXhigh: '超高', generationMax: '最高',
+    imageLegacyRatio: '历史构图比例（选择尺寸后清除）',
     imageHistoricalSize: '历史固定尺寸（重新选择比例后改为自动尺寸）',
     sub2apiOutputLimit: '当前 sub2api 渠道暂按最高 medium、约 2K 档位使用；以实际返回为准。',
     sub2apiLegacyQuality: '历史请求值，超出当前渠道预期能力',
@@ -310,6 +312,7 @@ const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
   },
   en: {
     generationXhigh: 'Extra high', generationMax: 'Maximum',
+    imageLegacyRatio: 'Historical composition ratio (cleared when selecting a size)',
     imageHistoricalSize: 'Historical fixed size (select a ratio to use automatic sizing)',
     sub2apiOutputLimit: 'This sub2api channel is currently treated as up to medium, approximately the 2K tier; actual output may differ.',
     sub2apiLegacyQuality: 'Historical request exceeds the current channel expectation',

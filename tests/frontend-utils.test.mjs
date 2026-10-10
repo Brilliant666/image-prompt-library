@@ -455,9 +455,42 @@ test('image-only compatible provider is selectable independently of title sugges
   assert.equal(resolveDefaultAiProvider(null, [{ ...compatible, configured: false }]), 'openai_codex_oauth_native');
 });
 
-const { IMAGE25_MODELS, IMAGE25_QUALITIES, compatibleParameters, compatibleValidation, restoreCompatibleRecipe, imageSizeInfo, compatibleMismatches, imageQualities } = await importTypescript('../frontend/src/utils/compatibleRecipe.ts');
+const { IMAGE25_MODELS, IMAGE25_QUALITIES, COMPATIBLE_SIZE_OPTIONS, LEGACY_RATIO_SIZES, compatibleParameters, compatibleValidation, restoreCompatibleRecipe, imageSizeInfo, compatibleMismatches, imageQualities } = await importTypescript('../frontend/src/utils/compatibleRecipe.ts');
 
-test('Image 2.5 recipes retain all model snapshots and six qualities without changing other model capabilities', () => {
+test('size presets and custom dimensions remain independent of every quality setting', () => {
+  const recipe = { model: IMAGE25_MODELS[0], quality: 'auto', size: 'auto', background: 'auto', output_format: 'png' };
+  assert.ok(COMPATIBLE_SIZE_OPTIONS.includes('1152x2048'));
+  for (const size of [...COMPATIBLE_SIZE_OPTIONS, '800x832']) {
+    for (const quality of IMAGE25_QUALITIES) {
+      const parameters = compatibleParameters({ ...recipe, size, quality });
+      assert.equal(parameters.size, size);
+      assert.equal(parameters.quality, quality);
+      assert.equal('requested_aspect_ratio' in parameters, false);
+      const restored = restoreCompatibleRecipe({ parameters });
+      assert.equal(restored.size, size);
+      assert.equal(restored.quality, quality);
+      assert.equal(restored.legacyDerived, false);
+    }
+  }
+});
+
+test('legacy ratio history keeps stored auto or explicit pixels and only derives absent sizes', () => {
+  for (const [requested_aspect_ratio, legacySize] of Object.entries(LEGACY_RATIO_SIZES)) {
+    const parameters = { model: IMAGE25_MODELS[0], quality: 'xhigh', requested_aspect_ratio };
+    const legacy = restoreCompatibleRecipe({ parameters });
+    assert.equal(legacy.size, legacySize);
+    assert.equal(legacy.legacyDerived, true);
+    for (const size of ['auto', '800x832', '2160x3840']) {
+      const restored = restoreCompatibleRecipe({ parameters: { ...parameters, size } });
+      assert.equal(restored.size, size);
+      assert.equal(restored.quality, 'xhigh');
+      assert.equal(restored.legacyDerived, false);
+    }
+    assert.equal(parameters.requested_aspect_ratio, requested_aspect_ratio);
+  }
+});
+
+test('compatible recipes retain six qualities for snapshots and gateway model aliases', () => {
   for (const model of IMAGE25_MODELS) for (const quality of IMAGE25_QUALITIES) {
     const recipe = { model, quality, size: '2160x3840', background: 'opaque', output_format: 'png' };
     assert.equal(compatibleValidation(recipe), undefined);
@@ -465,8 +498,13 @@ test('Image 2.5 recipes retain all model snapshots and six qualities without cha
     assert.deepEqual(restoreCompatibleRecipe({ model: 'old-default', parameters: { quality: 'low' }, metadata: { requested: recipe } }), { ...recipe, legacyDerived: false });
   }
   assert.equal(compatibleValidation(restoreCompatibleRecipe({ parameters: {} })), 'imageModelRequired');
-  assert.equal(imageQualities('gpt-image-2').includes('max'), false);
-  assert.equal(imageQualities('custom-mapping').includes('xhigh'), false);
+  for (const model of ['gpt-image-2', 'custom-mapping']) for (const quality of IMAGE25_QUALITIES) {
+    assert.deepEqual(imageQualities(model), IMAGE25_QUALITIES);
+    const recipe = { model, quality, size: '2160x3840', background: 'auto', output_format: 'png' };
+    assert.equal(compatibleValidation(recipe), undefined);
+    assert.equal(compatibleParameters(recipe).quality, quality);
+    assert.equal(restoreCompatibleRecipe({ parameters: recipe }).quality, quality);
+  }
 });
 
 test('explicit image dimensions are validated independently of legacy composition ratio', () => {
@@ -581,7 +619,7 @@ test('transparency requested but absent is visible without opening records', () 
   assert.equal(renderResultSummary(summaryJob({ provider: 'codex' })), '');
 });
 
-const { imageSizeLabel, imageQualityLabel } = await importTypescript('../frontend/src/utils/compatibleRecipe.ts');
+const { imageSizeLabel, imageSizeBadge, imageQualityLabel } = await importTypescript('../frontend/src/utils/compatibleRecipe.ts');
 test('size labels retain exact pixels and reduce aspect ratios', () => {
   assert.equal(imageSizeLabel('1024x1024'), '1024x1024 (1:1)');
   assert.equal(imageSizeLabel('720x1280'), '720x1280 (9:16)');
@@ -589,7 +627,7 @@ test('size labels retain exact pixels and reduce aspect ratios', () => {
   assert.equal(imageSizeLabel('auto'), 'auto');
   assert.equal(imageSizeLabel('0x0'), '0x0');
 });
-test('compatible quality choices depend on model, not provider display name', () => {
+test('compatible quality labels and historical max stay available', () => {
   for (const model of ['gpt-image-2.5-flare', 'gpt-image-2.5-sunburst']) assert.deepEqual(imageQualities(model), ['auto','low','medium','high','xhigh','max']);
   assert.equal(imageQualityLabel('high', makeTranslator('zh_hans')), '高 (high)');
   assert.equal(imageQualityLabel('xhigh', makeTranslator('zh_hans')), '超高 (xhigh)');
@@ -602,4 +640,14 @@ test('quality mismatch is detected from service labels even without decoded meta
   assert.deepEqual(compatibleMismatches({metadata:{requested:{quality:'max'},response:{quality:'medium'}}}), ['imageQualityMismatch']);
   assert.deepEqual(compatibleMismatches({metadata:{requested:{quality:'auto'},response:{quality:'medium'}}}), []);
   assert.deepEqual(compatibleMismatches({metadata:{requested:{quality:'max'}}}), []);
+});
+
+test('size badge preserves exact custom pixels and does not infer a billing tier', () => {
+  for (const [size, badge] of Object.entries({auto: 'auto', '1024x1024': '1K', '1536x1024': '1K', '1024x1536': '1K', '2048x2048': '2K', '2048x1152': '2K', '1152x2048': '2K', '3840x2160': '4K', '2160x3840': '4K'})) {
+    assert.equal(imageSizeBadge(size), badge);
+  }
+  assert.equal(imageSizeBadge('1728x2304'), 'px');
+  assert.equal(imageSizeLabel('1728x2304'), '1728x2304 (3:4)');
+  assert.equal(imageSizeBadge('4096x4096'), 'px');
+  assert.equal(imageSizeBadge('invalid'), 'px');
 });

@@ -2239,3 +2239,15 @@ html:lang(zh-Hans) .editor-head h2{
   .generation-compact-controls.is-compatible .generation-control-trigger { width:100%;min-width:0; }
   .generation-compact-controls.is-compatible .generation-quality-trigger.show-value { min-width:0; }
 }
+
+/* A single pixel-size control; keep long dimensions inside its popover. */
+.generation-size-control .generation-size-popover { width:248px;max-width:calc(100vw - 64px);max-height:min(540px,65vh);overflow-y:auto;overflow-x:hidden; }
+.generation-size-popover .generation-control-option-label { white-space:normal;overflow-wrap:anywhere; }
+.generation-custom-size { display:flex;flex-direction:column;gap:6px;padding:10px;font-size:12px; }
+.generation-custom-size input { width:100%;min-width:0;box-sizing:border-box;padding:8px;border:1px solid var(--border);border-radius:8px; }
+.generation-size-popover p { padding:0 10px;font-size:12px; }
+
+/* Keep the selected size visible without widening the compact toolbar. */
+.generation-size-trigger { width:100%;min-width:0;display:flex;flex-wrap:nowrap;align-items:center;justify-content:center;gap:4px;padding:5px 12px 5px 5px; }
+.generation-size-trigger .generation-control-icon { width:17px;flex:0 0 17px; }
+.generation-size-trigger .generation-control-value { position:static;width:auto;height:auto;margin:0;clip:auto;overflow:visible;font-size:12px;line-height:1.2;white-space:nowrap; }
