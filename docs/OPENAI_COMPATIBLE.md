@@ -32,7 +32,7 @@ The existing generation-count menu supports batches of 3, 5, or 10 images. Each 
 
 History actions follow result state, not recency. Unsaved successful results retain the original save, reference, retry and discard actions. Saved results can still be reused as references or restored as a draft for another explicit generation. Saving or discarding an already accepted result is not repeated through the transient-result API.
 
-The implemented response contract is one `data` entry containing `b64_json`. Image bytes must pass decoding before the result is accepted. URL-only responses are deliberately rejected until that service's response contract is verified. HTTP 200 or a model listing alone is not generation success.
+Each task requests `n=1` and expects one `data` entry containing a non-empty `b64_json` or an HTTP(S) image `url`. When both are present, Base64 takes precedence; invalid Base64 reports an error rather than silently falling back to the URL. URL results undergo restricted downloading, then the same real-image decoding as Base64 results before acceptance. HTTP 200 or a returned URL alone does not mean an image has been successfully saved. A download failure never automatically resubmits the paid generation request.
 
 Result metadata retains requested parameters separately from service-reported fields and decoded image dimensions. A returned model label is a service claim, not an independent model-identity verification. Missing model data is left unknown. Images saved into the Library use the returned model, never the requested model as a substitute. User-entered card metadata remains editable.
 
