@@ -19,8 +19,9 @@ def png(color="blue"):
 
 
 @pytest.fixture
-def config(tmp_path):
+def config(tmp_path, monkeypatch):
     cfg = OpenAICompatibleConfig(tmp_path / "private" / "config.json", tmp_path / "library")
+    monkeypatch.setenv("IMAGE_PROMPT_LIBRARY_OPENAI_COMPATIBLE_CONFIG_PATH", str(cfg.path))
     cfg.save({"base_url": "https://images.example/v1/v1/", "api_key": "test-only-secret", "model": "requested-model"})
     return cfg
 

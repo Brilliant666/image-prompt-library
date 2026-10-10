@@ -6,6 +6,16 @@ def allow_test_client_hostname(monkeypatch):
     monkeypatch.setenv("IMAGE_PROMPT_LIBRARY_ALLOWED_HOSTS", "testserver")
 
 
+@pytest.fixture(autouse=True)
+def isolate_compatible_provider_config(tmp_path, monkeypatch):
+    """Repository/queue tests must never read a developer's real API credentials.
+
+    Individual tests can override this path with their own isolated configuration.
+    Leave the default path absent so first-run behavior is still exercised.
+    """
+    monkeypatch.setenv("IMAGE_PROMPT_LIBRARY_OPENAI_COMPATIBLE_CONFIG_PATH", str(tmp_path / "isolated-compatible-config.json"))
+
+
 @pytest.fixture(scope="session")
 def legacy_release_source(tmp_path_factory):
     """Exercise retained release mechanics in an unmarked, isolated fixture.
