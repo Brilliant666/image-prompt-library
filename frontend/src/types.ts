@@ -4,6 +4,8 @@ export type UploadImageRole = 'result_image' | 'reference_image';
 export type UiLanguage = 'zh_hant' | 'zh_hans' | 'en';
 export type AiProvider = TitleSuggestionProvider | 'openai_compatible';
 export interface OpenAICompatibleConfig { display_name: string; base_url: string; model: string; timeout: number; api_key_present: boolean }
+export interface OpenAICompatibleProfile extends OpenAICompatibleConfig { id: string; configured: boolean }
+export interface OpenAICompatibleProfiles { profiles: OpenAICompatibleProfile[]; default_profile_id: string | null }
 export type TitleSuggestionProvider = 'openai_codex_oauth_native' | 'xai_grok_oauth';
 export interface PromptRecord { id: string; item_id: string; language: string; text: string; is_primary: boolean; is_original?: boolean; provenance?: Record<string, unknown> }
 export interface ImageRecord { id: string; item_id: string; original_path: string; thumb_path?: string; preview_path?: string; width?: number; height?: number; generation_provider?: string | null; generation_model?: string | null; role?: UploadImageRole; sort_order?: number }
@@ -20,7 +22,7 @@ export interface CleanupPreview { broken_image_records: CleanupImageRecord[]; un
 export interface CleanupApplyRequest { preview_token: string; remove_broken_image_records: boolean; remove_unreferenced_files: boolean }
 export interface CleanupApplyResult extends CleanupPreview { removed_broken_image_records: number; removed_unreferenced_files: number }
 export interface GenerationProviderFeatures { text_to_image?: boolean; text_reference_to_image?: boolean; image_edit?: boolean; manual_result_upload?: boolean; title_suggestion?: boolean }
-export interface GenerationProviderStatus { provider: string; display_name: string; auth_mode?: string; optional: boolean; configured: boolean; authenticated: boolean; available: boolean; state: string; status?: 'ready' | 'unavailable' | 'login_required' | 'auth_error'; message?: string | null; can_generate?: boolean; reason?: string | null; features: GenerationProviderFeatures; max_input_images?: number; token_present?: boolean; account_id?: string | null; auth_store_path?: string; image_models?: string[]; default_image_model?: string; model?: string }
+export interface GenerationProviderStatus { provider: string; display_name: string; auth_mode?: string; optional: boolean; configured: boolean; authenticated: boolean; available: boolean; state: string; status?: 'ready' | 'unavailable' | 'login_required' | 'auth_error'; message?: string | null; can_generate?: boolean; reason?: string | null; features: GenerationProviderFeatures; max_input_images?: number; token_present?: boolean; account_id?: string | null; auth_store_path?: string; image_models?: string[]; default_image_model?: string; model?: string; profiles?: OpenAICompatibleProfile[]; default_profile_id?: string | null }
 export interface ProviderDeviceAuthStart { device_auth_id?: string; device_code?: string; user_code: string; verification_url: string; verification_uri?: string; verification_uri_complete?: string; expires_in?: number; interval?: number }
 export type CodexNativeAuthStart = ProviderDeviceAuthStart
 export interface CodexNativeAuthPending { provider: string; auth_mode?: string; status: 'pending' }

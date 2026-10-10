@@ -4,11 +4,11 @@ This local extension adds `openai_compatible` alongside the upstream ChatGPT / C
 
 ## Configure
 
-Open Config and enter a display name, Base URL, API key, image model and timeout (1–1800 seconds). The Base URL may include `/v1`; trailing duplicate `/v1` segments are normalized. Use HTTPS for remote providers. Saving settings does not send a generation request. An empty API key field preserves the stored key. The key is never returned by the settings API and is not saved in browser storage.
+Open Config → Third-party API and add an endpoint with its own name, Base URL, API key, optional default image model and timeout (1–1800 seconds). Register multiple endpoints, edit them independently, and choose a default for new drafts. The endpoint name appears in the generation provider menu; “Third-party API” identifies the connection type. The Base URL may include `/v1`; trailing duplicate `/v1` segments are normalized. Use HTTPS for remote providers. Saving settings does not send a generation request. An empty API key field preserves only the selected endpoint’s stored key; a new endpoint never inherits another key. The key is never returned by the settings API and is not saved in browser storage.
 
 Settings live in `~/.image-prompt-library/openai-compatible.json`, outside the Library. `IMAGE_PROMPT_LIBRARY_OPENAI_COMPATIBLE_CONFIG_PATH` can override this location in the process environment. The application rejects paths inside the active Library. Library backups and exports do not include this file; protect it separately as a credential file.
 
-Select the provider in Config or the generation composer. This provider supports images only. Title suggestions remain unavailable when it is selected and never silently fall back to another account. Existing OAuth settings and endpoint addresses are unchanged.
+Choose the connection type in Config and the named endpoint in the generation composer. A model remains required for each request: the optional profile default preselects it, while the model icon menu also accepts a custom full model ID. This provider supports images only. Title suggestions remain unavailable when it is selected and never silently fall back to another account. Existing OAuth settings and endpoint addresses are unchanged.
 
 ## Requests and results
 
@@ -16,13 +16,13 @@ Text-only requests use synchronous `POST /v1/images/generations`; references use
 
 ## GPT Image 2.5 controls (2026-10-09)
 
-Choose `gpt-image-2.5-flare` or `gpt-image-2.5-sunburst` by full name. Configured and historical model names remain available; configure other service-specific models in provider settings. Per-request choices do not change provider defaults. The recognized Image 2.5 names (including their `2026-09-08` snapshots) support `auto`, `low`, `medium`, `high`, `xhigh`, and `max`. Quality choices depend on the model, not the provider display name. An unknown legacy request model requires an explicit choice before another request.
+Choose `gpt-image-2.5-flare` or `gpt-image-2.5-sunburst` by full name. Configured and historical model names remain available; enter other service-specific models in the model menu or as a profile default in settings. Per-request choices do not change provider defaults. The recognized Image 2.5 names (including their `2026-09-08` snapshots) support `auto`, `low`, `medium`, `high`, `xhigh`, and `max`. Quality choices depend on the model, not the provider display name. An unknown legacy request model requires an explicit choice before another request.
 
 The composer defaults to automatic ratio, quality and background, with PNG output. Explicit pixel sizes remain supported by the API and historical recipes. For Image 2.5 both dimensions must be positive multiples of 16, neither above 3840, longest/shortest ratio ≤3, and total pixels 655360–8294400 inclusive. `2160x3840` passes this validation; `2880x3840` does not. Local validation does not guarantee gateway support.
 
 Background supports `auto`, `opaque`, `transparent`; output supports PNG, JPEG and WebP. Transparent + JPEG is blocked without erasing the background choice. JPEG/WebP compression supports integers 0–100; PNG omits compression. Originals are saved byte-for-byte. Newly created transparent previews and thumbnails preserve alpha, with checkerboard only in CSS; existing assets are not rebuilt. Downloads use the original file.
 
-Settings follow single, batch, edit, history/draft and saved-image reuse. A queued batch freezes each request model/settings before execution, so changing the provider default does not change queued jobs. Prompt text is preserved, including whitespace; variable expansion only applies when using an actual template.
+Settings follow single, batch, edit, history/draft and saved-image reuse. A queued batch freezes each request model/settings and endpoint ID before execution, so changing the default endpoint does not reroute queued jobs. History and saved-image drafts restore that endpoint; a deleted endpoint blocks execution and requires an explicit choice in a new draft. Credentials are resolved from that endpoint’s current configuration at execution time, so edit an existing endpoint’s URL only after its queue has finished, or add a new endpoint instead. Prompt text is preserved, including whitespace; variable expansion only applies when using an actual template.
 
 Sources: [official image generation guide](https://developers.openai.com/api/docs/guides/image-generation), [Images API reference](https://developers.openai.com/api/reference/resources/images/methods/generate). Documented model names do not establish access for a particular gateway/key.
 
@@ -67,3 +67,9 @@ Run `python -m pytest tests/test_openai_compatible.py tests/test_compatible_reci
 After separate authorization and a stated budget, manually submit one Flare/low/1024x1024/opaque/PNG image through the UI. Check decoded pixels, request ID and usage before any additional call; no automatic retry. Sunburst comparisons, xhigh/max, 4K and transparency are separate cost-bearing tests. Use the gateway's actual bill, not an OpenAI price estimate.
 
 The reviewed sub2api source baseline is `3a6fd1c9db07203ca308aaba69e502bc1f35b307`; this is not evidence of the deployed service version. Gateway version, key group/image permission, account availability, model mapping, actual upstream model/endpoint, balance and limits need authorized server-side evidence. Do not change server settings or omit requested parameters to bypass routing restrictions. Synchronous image endpoints remain in use. Async requires separately verified object storage, task polling, safe original downloads and restart recovery; do not automatically resubmit a timed-out synchronous request through async.
+
+## Existing installations and reference defaults (2026-10-10)
+
+Existing single-endpoint configuration is read as the stable `legacy` profile without rewriting the file on startup. Saving settings upgrades the same credential file to a multi-profile structure. Historical jobs without a profile ID remain associated with `legacy`, never with a subsequently selected default. Keep a separate secure copy of the credential file before downgrading to a version that only understands the old format.
+
+The composer uses compact model, ratio, quality and output controls. Full model IDs and current values remain available in menus and tooltips. New reference forms, including “Save as new reference”, default the original prompt language to Simplified Chinese. This only sets the language marker; it does not translate the prompt or change existing references.

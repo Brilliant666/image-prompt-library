@@ -170,40 +170,97 @@ class OpenAICompatibleConfig:
         if self.path.resolve().is_relative_to(Path(library_path).expanduser().resolve()):
             raise OpenAICompatibleError("Provider credentials must be outside the asset library")
 
-    def read(self):
-        defaults = {"display_name": "OpenAI compatible images", "base_url": "", "api_key": "", "model": "", "timeout": 300}
+    @staticmethod
+    def _defaults():
+        return {"display_name": "Third-party API", "base_url": "", "api_key": "", "model": "", "timeout": 300}
+
+    def _document(self):
         try:
-            if self.path.exists():
-                value = json.loads(self.path.read_text(encoding="utf-8"))
-                if not isinstance(value, dict):
+            raw = json.loads(self.path.read_text(encoding="utf-8")) if self.path.exists() else {"profiles": {}, "default_profile_id": None}
+            if not isinstance(raw, dict):
+                raise ValueError()
+            if "profiles" not in raw:
+                raw = {"profiles": {"legacy": raw}, "default_profile_id": "legacy"}
+            if not isinstance(raw["profiles"], dict):
+                raise ValueError()
+            profiles = {}
+            for profile_id, source in raw["profiles"].items():
+                self._validate_id(profile_id)
+                if not isinstance(source, dict):
                     raise ValueError()
-                defaults.update({k: value[k] for k in defaults if k in value})
-            if any(not isinstance(defaults[k], str) for k in ("display_name", "base_url", "api_key", "model")):
+                value = self._defaults()
+                value.update({key: source[key] for key in value if key in source})
+                if any(not isinstance(value[key], str) for key in ("display_name", "base_url", "api_key", "model")):
+                    raise ValueError()
+                if type(value["timeout"]) is not int or not 1 <= value["timeout"] <= 1800:
+                    raise ValueError()
+                profiles[profile_id] = value
+            default_id = raw.get("default_profile_id")
+            if default_id is not None and default_id not in profiles:
                 raise ValueError()
-            if not isinstance(defaults["timeout"], int) or not 1 <= defaults["timeout"] <= 1800:
-                raise ValueError()
-            return defaults
+            return {"profiles": profiles, "default_profile_id": default_id}
         except Exception:
             raise OpenAICompatibleError("Provider configuration could not be read") from None
 
-    def public(self):
-        value = self.read()
-        present = bool(value.pop("api_key", ""))
-        return {**value, "api_key_present": present}
+    @staticmethod
+    def _validate_id(profile_id):
+        if not isinstance(profile_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", profile_id):
+            raise OpenAICompatibleError("Invalid provider profile ID")
 
-    def save(self, payload, library_path=None):
+    def read(self, profile_id=None):
+        document = self._document()
+        selected = profile_id if profile_id is not None else document["default_profile_id"]
+        if selected is None and profile_id is None:
+            return {**self._defaults(), "id": "legacy"}
+        self._validate_id(selected)
+        if selected not in document["profiles"]:
+            raise OpenAICompatibleError("Selected third-party API profile no longer exists; choose a profile before generating")
+        return {**document["profiles"][selected], "id": selected}
+
+    @staticmethod
+    def _public(value):
+        value = dict(value)
+        present = bool(value.pop("api_key", ""))
+        return {**value, "api_key_present": present, "configured": bool(value["base_url"] and present)}
+
+    def public(self, profile_id=None):
+        return self._public(self.read(profile_id))
+
+    def public_profiles(self):
+        document = self._document()
+        return {"profiles": [self._public({**value, "id": key}) for key, value in document["profiles"].items()],
+                "default_profile_id": document["default_profile_id"]}
+
+    def _write(self, document, library_path=None):
         library = library_path if library_path is not None else self.library_path
         if library is None:
             raise OpenAICompatibleError("Active library path is required to save credentials")
         self.validate_path(library)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fd, name = tempfile.mkstemp(prefix="compatible-", suffix=".tmp", dir=self.path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(document, stream, ensure_ascii=False, indent=2)
+                stream.flush()
+                os.fsync(stream.fileno())
+            Path(name).chmod(0o600)
+            os.replace(name, self.path)
+        except Exception:
+            Path(name).unlink(missing_ok=True)
+            raise OpenAICompatibleError("Provider configuration could not be saved") from None
+
+    def save(self, payload, library_path=None, profile_id=None):
         with _config_lock:
-            value = self.read()
+            document = self._document()
+            profile_id = profile_id or document["default_profile_id"] or "legacy"
+            self._validate_id(profile_id)
+            value = dict(document["profiles"].get(profile_id, self._defaults()))
             for field in ("display_name", "base_url", "model"):
                 if field in payload:
                     value[field] = str(payload[field] or "").strip()
             value["base_url"] = normalize_base_url(value["base_url"])
-            if not value["display_name"] or not value["model"]:
-                raise OpenAICompatibleError("Display name and image model are required")
+            if not value["display_name"]:
+                raise OpenAICompatibleError("Display name is required")
             try:
                 value["timeout"] = int(payload.get("timeout", value["timeout"]))
                 if not 1 <= value["timeout"] <= 1800:
@@ -214,19 +271,31 @@ class OpenAICompatibleConfig:
                 value["api_key"] = ""
             elif str(payload.get("api_key") or "").strip():
                 value["api_key"] = str(payload["api_key"]).strip()
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            fd, name = tempfile.mkstemp(prefix="compatible-", suffix=".tmp", dir=self.path.parent)
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                    json.dump(value, stream, ensure_ascii=False, indent=2)
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                Path(name).chmod(0o600)
-                os.replace(name, self.path)
-            except Exception:
-                Path(name).unlink(missing_ok=True)
-                raise OpenAICompatibleError("Provider configuration could not be saved") from None
-        return self.public()
+            document["profiles"][profile_id] = value
+            if document["default_profile_id"] is None or payload.get("make_default") is True:
+                document["default_profile_id"] = profile_id
+            self._write(document, library_path)
+        return self.public(profile_id)
+
+    def delete(self, profile_id):
+        with _config_lock:
+            document = self._document()
+            if profile_id not in document["profiles"]:
+                raise OpenAICompatibleError("Selected third-party API profile no longer exists")
+            del document["profiles"][profile_id]
+            if document["default_profile_id"] == profile_id:
+                document["default_profile_id"] = next(iter(document["profiles"]), None)
+            self._write(document)
+        return self.public_profiles()
+
+    def set_default(self, profile_id):
+        with _config_lock:
+            document = self._document()
+            if profile_id not in document["profiles"]:
+                raise OpenAICompatibleError("Selected third-party API profile no longer exists")
+            document["default_profile_id"] = profile_id
+            self._write(document)
+        return self.public_profiles()
 
     def status(self):
         broken = False
@@ -237,7 +306,7 @@ class OpenAICompatibleConfig:
         except OpenAICompatibleError:
             broken = True
             value = {"display_name": "OpenAI compatible images", "api_key_present": False, "base_url": "", "model": ""}
-        ready = bool(value["api_key_present"] and value["base_url"] and value["model"])
+        ready = bool(value["api_key_present"] and value["base_url"])
         return {"provider": PROVIDER_ID, "display_name": value["display_name"], "auth_mode": AUTH_MODE,
                 "optional": True, "configured": bool(value["base_url"]), "authenticated": value["api_key_present"],
                 "available": ready, "state": "connected" if ready else "not_connected", "reason": None if ready else "not_configured",
@@ -245,7 +314,8 @@ class OpenAICompatibleConfig:
                 "verification": {"configuration_complete": ready, "connectivity_verified": False, "image_generation_verified": False},
                 "can_generate": ready, "features": {"text_to_image": ready, "text_reference_to_image": ready, "image_edit": ready, "title_suggestion": False},
                 "max_input_images": MAX_INPUT_IMAGES, "image_models": list(dict.fromkeys(([value["model"]] if value["model"] else []) + list(IMAGE_25_MODELS))),
-                "default_image_model": value["model"], "model": value["model"], "api_key_present": value["api_key_present"]}
+                "default_image_model": value["model"], "model": value["model"], "api_key_present": value["api_key_present"],
+                **(self.public_profiles() if not broken else {"profiles": [], "default_profile_id": None})}
 
 
 def _inspect_image(data, details=False):
@@ -307,7 +377,7 @@ class OpenAICompatibleProvider:
         return images
 
     def generate(self, prompt, parameters, input_images=None):
-        settings = self.config.read()
+        settings = self.config.read(parameters.get("compatible_profile_id"))
         if not settings["api_key"]:
             raise OpenAICompatibleError("Image API key is missing")
         normalized = normalize_image_parameters(parameters, settings["model"])
@@ -390,6 +460,8 @@ class OpenAICompatibleProvider:
         actual["request_id"] = actual.get("request_id") or diagnostics["request_id"]
         actual.update(top_level=top, data_item=item, model_label_kind="service_returned_label")
         requested = dict(payload)
+        requested["compatible_profile_id"] = settings["id"]
+        requested["compatible_profile_name"] = parameters.get("compatible_profile_name") or settings["display_name"]
         if "requested_aspect_ratio" in parameters:
             requested["requested_aspect_ratio"] = parameters["requested_aspect_ratio"]
         if normalized.get("aspect_ratio_prompt_injection") is True:
@@ -429,6 +501,8 @@ class OpenAICompatibleProvider:
             if getattr(job, "mode", "text_to_image") in {"image_edit", "text_reference_to_image"} and not inputs:
                 raise OpenAICompatibleError("This generation mode requires a reference image")
             parameters = dict(job.parameters or {})
+            # Old jobs belonged to the original single provider, never a later default.
+            parameters.setdefault("compatible_profile_id", "legacy")
             if getattr(job, "model", None):
                 parameters["model"] = job.model
             if not parameters.get("model"):

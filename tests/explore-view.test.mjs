@@ -717,7 +717,7 @@ test('generation composer keeps output controls without a ChatGPT orchestrator s
 
   assert.doesNotMatch(generation, /setOrchestratorModel|orchestratorModels/);
   assert.match(generation, /provider === 'xai_grok_oauth' && \([\s\S]*?generation-model-control/);
-  assert.equal((generation.match(/generation-control-option-check/g) || []).length, 5);
+  assert.match(generation, /generation-compatible-model-popover[\s\S]*?compatibleModels\.map\(model[\s\S]*?role="menuitemradio"[\s\S]*?generation-control-option-label">\{model\}/);
   assert.match(generation, /role="menuitemradio" aria-checked=\{selected\}[\s\S]*?generation-control-option-label/);
 
   assert.match(generation, /GROK_QUALITY_OPTIONS[\s\S]*?generationResolution[\s\S]*?GROK_RESOLUTION_OPTIONS/);
@@ -1324,4 +1324,21 @@ test('title suggestions are explicit, provider-aware, prompt-only, and shared by
   assert.match(config, /disabled=\{!enabled\}/);
   assert.match(config, /defaultAiProvider === providerId/);
   assert.match(styles, /\.title-suggestion-meta\{[^}]*display:flex;[^}]*gap:6px/);
+});
+
+
+test('new references default to simplified Chinese while editing preserves original languages and prompt text', async () => {
+  const { default: ItemEditorModal } = await vite.ssrLoadModule('/src/components/ItemEditorModal.tsx');
+  const renderEditor = record => renderToStaticMarkup(React.createElement(ItemEditorModal, {
+    item: record, t, clusters: [], tags: [], defaultAiProvider: 'openai_compatible',
+    onClose() {}, onSaved() {}, onDeleted() {},
+  }));
+  const originalField = html => html.match(/<span class="prompt-field-title">([^<]+) <button type="button" class="origin-marker active"/)[1];
+  assert.equal(originalField(renderEditor(undefined)), 'simplifiedChinesePrompt');
+  for (const [language, label] of [['en', 'englishPrompt'], ['zh_hant', 'traditionalChinesePrompt'], ['zh_hans', 'simplifiedChinesePrompt']]) {
+    const text = 'Unchanged original prompt — 保留原文';
+    const html = renderEditor({ ...item(0), images: [], prompts: [{ language, text, is_original: true, is_primary: true }] });
+    assert.equal(originalField(html), label);
+    assert.ok(html.includes(text));
+  }
 });
