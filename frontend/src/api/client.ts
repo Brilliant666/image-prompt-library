@@ -1,4 +1,5 @@
 import type { TitleSuggestionProvider, OpenAICompatibleConfig, OpenAICompatibleProfiles, AppConfig, AppUpdateRequest, AppUpdateResult, AppUpdateStatus, CleanupApplyRequest, CleanupApplyResult, CleanupPreview, ClusterRecord, CodexNativeAuthPollRequest, CodexNativeAuthPollResponse, CodexNativeAuthStart, GenerationJobAcceptAsNewItemPayload, GenerationJobAcceptResult, GenerationJobCreate, GenerationJobList, GenerationJobRecord, GenerationJobRetryResult, GenerationJobSetCreate, GenerationJobSetRecord, GenerationProviderStatus, GrokOAuthPollRequest, ItemBatchRequest, ItemBatchResult, ItemCreate, ItemDetail, ItemImageUpdate, ItemList, ItemSortMode, ItemSummary, ProviderDeviceAuthStart, TagRecord, TitleSuggestionRequest, TitleSuggestionResponse, UploadImageRole } from '../types';
+import { readJson } from './readJson';
 import { DEFAULT_ITEM_SORT } from '../utils/searchSort';
 
 const API = '';
@@ -270,8 +271,8 @@ export const api = isDemoMode ? {
   favorite: (id: string) => json<ItemDetail>(`/api/items/${id}/favorite`, { method: 'POST' }),
   uploadImage: (id: string, file: File, role: UploadImageRole = 'result_image') => { const fd = new FormData(); fd.set('file', file); fd.set('role', role); return json(`/api/items/${id}/images`, { method: 'POST', body: fd }); },
   updateImages: (id: string, images: ItemImageUpdate[]) => json<ItemDetail>(`/api/items/${id}/images`, { method: 'PUT', body: JSON.stringify({ images }) }),
-  generationProviders: () => json<GenerationProviderStatus[]>('/api/generation-providers'),
-  openAICompatibleProfiles: () => json<OpenAICompatibleProfiles>('/api/generation-providers/openai-compatible/profiles'),
+  generationProviders: () => readJson<GenerationProviderStatus[]>('/api/generation-providers'),
+  openAICompatibleProfiles: () => readJson<OpenAICompatibleProfiles>('/api/generation-providers/openai-compatible/profiles'),
   saveOpenAICompatibleProfile: (id: string, payload: Omit<OpenAICompatibleConfig, 'api_key_present'> & { api_key?: string; make_default?: boolean }) => json<OpenAICompatibleProfiles>(`/api/generation-providers/openai-compatible/profiles/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(payload) }),
   deleteOpenAICompatibleProfile: (id: string) => json<OpenAICompatibleProfiles>(`/api/generation-providers/openai-compatible/profiles/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   defaultOpenAICompatibleProfile: (id: string) => json<OpenAICompatibleProfiles>(`/api/generation-providers/openai-compatible/profiles/${encodeURIComponent(id)}/default`, { method: 'PUT' }),
@@ -284,12 +285,12 @@ export const api = isDemoMode ? {
   grokOAuthAuthPoll: (payload: GrokOAuthPollRequest) => json<CodexNativeAuthPollResponse>('/api/generation-providers/xai-grok-oauth/auth/poll', { method: 'POST', body: JSON.stringify(payload) }),
   grokOAuthAuthDisconnect: () => json<GenerationProviderStatus>('/api/generation-providers/xai-grok-oauth/auth/disconnect', { method: 'POST' }),
   suggestTitle: suggestTitleRequest,
-  generationJobs: (params: Record<string, string | number | boolean | undefined> = {}) => { const qs = new URLSearchParams(); Object.entries(params).forEach(([k,v]) => { if (v !== undefined && v !== '') qs.set(k, String(v)); }); return json<GenerationJobList>(`/api/generation-jobs?${qs}`); },
+  generationJobs: (params: Record<string, string | number | boolean | undefined> = {}) => { const qs = new URLSearchParams(); Object.entries(params).forEach(([k,v]) => { if (v !== undefined && v !== '') qs.set(k, String(v)); }); return readJson<GenerationJobList>(`/api/generation-jobs?${qs}`); },
   generationJobForImage: (id: string) => json<GenerationJobRecord>(`/api/generation-jobs/for-image/${encodeURIComponent(id)}`),
-  generationJob: (id: string) => json<GenerationJobRecord>(`/api/generation-jobs/${id}`),
+  generationJob: (id: string) => readJson<GenerationJobRecord>(`/api/generation-jobs/${id}`),
   createGenerationJob: (payload: GenerationJobCreate) => json<GenerationJobRecord>('/api/generation-jobs', { method: 'POST', body: JSON.stringify(payload) }),
   createGenerationSet: (payload: GenerationJobSetCreate) => json<GenerationJobSetRecord>('/api/generation-jobs/sets', { method: 'POST', body: JSON.stringify(payload) }),
-  generationSet: (id: string) => json<GenerationJobSetRecord>(`/api/generation-jobs/sets/${id}`),
+  generationSet: (id: string) => readJson<GenerationJobSetRecord>(`/api/generation-jobs/sets/${id}`),
   cancelRemainingGenerationSet: (id: string) => json<GenerationJobSetRecord>(`/api/generation-jobs/sets/${id}/cancel-remaining`, { method: 'POST' }),
   runGenerationJob: (id: string) => json<GenerationJobRecord>(`/api/generation-jobs/${id}/run`, { method: 'POST' }),
   uploadGenerationResult: (id: string, file: File) => { const fd = new FormData(); fd.set('file', file); return json<GenerationJobRecord>(`/api/generation-jobs/${id}/result`, { method: 'POST', body: fd }); },

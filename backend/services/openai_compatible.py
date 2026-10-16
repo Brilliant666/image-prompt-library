@@ -32,6 +32,25 @@ _config_lock = Lock()
 IMAGE_25_MODELS = tuple(f"gpt-image-2.5-{variant}{snapshot}" for variant in ("flare", "sunburst") for snapshot in ("", "-2026-09-08"))
 
 
+# Preserve only public moderation enums, never provider prompts, credentials or raw payloads.
+MODERATION_CATEGORIES = frozenset({
+    "sexual", "sexual/minors", "violence", "violence/graphic", "hate", "hate/threatening",
+    "harassment", "harassment/threatening", "self-harm", "self-harm/intent",
+    "self-harm/instructions", "illicit", "illicit/violent",
+})
+
+
+def _safe_moderation_details(value):
+    if not isinstance(value, dict):
+        return None
+    stage = value.get("moderation_stage")
+    result = {"moderation_stage": stage if isinstance(stage, str) and stage in {"input", "output"} else "unknown"}
+    categories = value.get("categories")
+    if isinstance(categories, list):
+        result["categories"] = sorted({entry for entry in categories if isinstance(entry, str) and entry in MODERATION_CATEGORIES})
+    return result
+
+
 class OpenAICompatibleError(RuntimeError):
     def __init__(self, message, diagnostics=None):
         super().__init__(message)
@@ -403,6 +422,9 @@ class OpenAICompatibleProvider:
             diagnostics.update(category=category, elapsed_seconds=round(time.monotonic() - started, 3))
             if isinstance(error, dict):
                 diagnostics["error"] = {key: _safe_value(error[key], settings["api_key"]) for key in ("type", "code", "param", "message") if key in error}
+                moderation = _safe_moderation_details(error.get("moderation_details"))
+                if moderation is not None:
+                    diagnostics["error"]["moderation_details"] = moderation
             summary = json.dumps({k: v for k, v in diagnostics.items() if k != "endpoint"}, ensure_ascii=False)
             raise OpenAICompatibleError(message + "; no automatic retry was attempted. " + summary, dict(diagnostics)) from None
 

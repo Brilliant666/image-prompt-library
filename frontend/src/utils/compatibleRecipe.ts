@@ -1,11 +1,13 @@
 import type { Translator } from './i18n';
 import type { GenerationJobRecord } from '../types';
 export const IMAGE25_MODELS = ['gpt-image-2.5-flare', 'gpt-image-2.5-sunburst', 'gpt-image-2.5-flare-2026-09-08', 'gpt-image-2.5-sunburst-2026-09-08'];
+// Third-party model aliases: forward verbatim without asserting official capabilities.
+export const COMPATIBLE_ENTERPRISE_MODELS = ['gpt-image-2.5-flare-enterprise', 'gpt-image-2.5-sunburst-enterprise'];
 export const IMAGE25_QUALITIES = ['auto', 'low', 'medium', 'high', 'xhigh', 'max'];
 export const COMPATIBLE_SIZE_OPTIONS = ['auto', '1024x1024', '1536x1024', '1024x1536', '2048x2048', '2048x1152', '1152x2048', '3840x2160', '2160x3840'];
 export const IMAGE_SIZES = COMPATIBLE_SIZE_OPTIONS;
 export const LEGACY_RATIO_SIZES: Record<string, string> = { auto: 'auto', '1:1': '1024x1024', '3:4': '864x1152', '9:16': '720x1280', '4:3': '1152x864', '16:9': '1280x720' };
-export interface CompatibleRecipe { model: string; quality: string; size: string; background: string; output_format: string; output_compression?: number; legacyDerived?: boolean }
+export interface CompatibleRecipe { model: string; quality: string; size: string; background: string; output_format: string; output_compression?: number; size_mode?: 'auto4k'; legacyDerived?: boolean }
 // Compatible gateways may expose model aliases; names do not establish capabilities.
 // Keep all supported request values available and let the service validate them.
 export function imageQualities(_model: string) { return IMAGE25_QUALITIES; }
@@ -13,7 +15,7 @@ export function restoreCompatibleRecipe(job: Pick<GenerationJobRecord, 'paramete
   const requested = job.metadata?.requested;
   const values = { ...job.parameters, ...(requested && typeof requested === 'object' ? requested as Record<string, unknown> : {}) };
   const text = (key: string, fallback: string) => typeof values[key] === 'string' ? values[key] as string : fallback;
-  return { model: text('model', job.model || ''), quality: text('quality', 'low'), size: text('size', LEGACY_RATIO_SIZES[String(values.requested_aspect_ratio || 'auto')] || 'auto'), background: text('background', 'auto'), output_format: text('output_format', 'png'), ...(typeof values.output_compression === 'number' ? { output_compression: values.output_compression } : {}), legacyDerived: !values.size };
+  return { ...(values.size_mode === 'auto4k' ? { size_mode: 'auto4k' as const } : {}), model: text('model', job.model || ''), quality: text('quality', 'low'), size: text('size', LEGACY_RATIO_SIZES[String(values.requested_aspect_ratio || 'auto')] || 'auto'), background: text('background', 'auto'), output_format: text('output_format', 'png'), ...(typeof values.output_compression === 'number' ? { output_compression: values.output_compression } : {}), legacyDerived: !values.size };
 }
 export function compatibleValidation(recipe: CompatibleRecipe): Parameters<Translator>[0] | undefined {
   if (!recipe.model.trim()) return 'imageModelRequired';
@@ -99,4 +101,40 @@ export function imageQualityLabel(value: string, t: Translator): string {
   if (!keys[value]) return value;
   const label = t(keys[value]);
   return label.toLowerCase() === value ? label : `${label} (${value})`;
+}
+
+/** Local size policy only. The provider always receives concrete pixels, never auto4k. */
+export function resolveAuto4k(prompt: string, reference?: { width: number; height: number }) {
+  const gcd = (a: number, b: number): number => b ? gcd(b, a % b) : a;
+  const ratios = new Map<string, [number, number]>();
+  const normalized = prompt.normalize('NFKC');
+  for (const match of normalized.matchAll(/(?<![\w:])(\d{1,5})\s*[:：]\s*(\d{1,5})(?![\w:])/g)) {
+    const before = normalized.slice(Math.max(0, match.index! - 30), match.index);
+    const explicitLabel = /(?:宽高比|比例|aspect\s*ratio|ratio)\s*[:=]?\s*$/i.test(before);
+    if (!explicitLabel && !['9:16', '16:9', '4:3', '3:4', '2:3', '3:2', '1:1', '16:10', '10:16', '21:9', '9:21'].includes(`${Number(match[1])}:${Number(match[2])}`) && match[2].length === 2 && Number(match[1]) <= 23 && Number(match[2]) <= 59) continue;
+    const w = Number(match[1]), h = Number(match[2]);
+    if (!w || !h) continue;
+    const d = gcd(w, h);
+    ratios.set(`${w / d}:${h / d}`, [w / d, h / d]);
+  }
+  if (ratios.size > 1) return { error: 'imageAuto4kConflict' as const };
+  const pair = [...ratios.values()][0];
+  const source = pair ? 'prompt' : reference ? 'reference' : 'default';
+  const [w, h] = pair || (reference ? [reference.width, reference.height] : [1, 1]);
+  const target = w / h;
+  if (!Number.isFinite(target) || target < 1 / 3 || target > 3) return { error: 'imageSizeInvalid' as const };
+  const d = gcd(w, h), a = w / d, b = h / d;
+  const k = Math.floor(Math.min(3840 / (a * 16), 3840 / (b * 16), Math.sqrt(8294400 / (a * b)) / 16));
+  let width = a * k * 16, height = b * k * 16;
+  // Prefer exact ratios near the target; awkward ratios must not collapse to a small image.
+  const targetArea = Math.min(8294400, 3840 * 3840 / Math.max(target, 1 / target));
+  if (width * height < targetArea * 0.95) {
+    for (let x = 16; x <= 3840; x += 16) {
+      const y = Math.round(x / target / 16) * 16;
+      if (y < 16 || y > 3840 || x * y > 8294400 || x * y < 655360 || Math.max(x, y) / Math.min(x, y) > 3) continue;
+      if (Math.abs(x / y / target - 1) <= 0.003 && x * y > width * height) { width = x; height = y; }
+    }
+  }
+  if (!width || !height) return { error: 'imageSizeInvalid' as const };
+  return { size: `${width}x${height}`, source, ratio: `${w / d}:${h / d}` };
 }

@@ -503,3 +503,71 @@ def test_empty_image_fields_diagnostic(config):
             OpenAICompatibleProvider(config, client).generate("Test", {})
     assert caught.value.diagnostics["image_response"] == {"base64_present": False, "url_present": False}
     assert "URL-only" not in str(caught.value)
+
+
+def test_auto4k_resolved_size_is_sent_without_resizing_returned_image(config):
+    calls = []
+    original = png()
+    def handler(request):
+        calls.append(request)
+        payload = json.loads(request.content)
+        assert payload["size"] == "2336x3504"
+        assert payload["quality"] == "auto"
+        assert payload["prompt"] == "Landscape photograph, aspect ratio 2:3"
+        assert "size_mode" not in payload
+        return httpx.Response(200, json={"data": [{"b64_json": base64.b64encode(original).decode()}]})
+    parameters = {"model": "gpt-image-2.5-sunburst", "size": "2336x3504", "size_mode": "auto4k", "quality": "auto"}
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        data, _, metadata = OpenAICompatibleProvider(config, client).generate("Landscape photograph, aspect ratio 2:3", parameters)
+    assert len(calls) == 1
+    assert data == original
+    assert metadata["requested"]["size"] == "2336x3504"
+    assert (metadata["decoded_image"]["width"], metadata["decoded_image"]["height"]) == (8, 6)
+    assert any(issue["field"] == "size" for issue in metadata["mismatches"])
+
+
+@pytest.mark.parametrize("stage", ["input", "output", "unknown", "test-only-secret", None, {"secret": "test-only-secret"}])
+def test_moderation_details_are_allowlisted_persisted_and_never_retried(config, tmp_path, stage):
+    from backend.schemas import GenerationJobCreate
+    from backend.services.generation_jobs import GenerationJobRepository
+    calls = []
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(400, json={"error": {"code": "moderation_blocked", "moderation_details": {
+            "moderation_stage": stage, "categories": ["sexual", "sexual", "test-only-secret", {"api_key": "private"}],
+            "prompt": "private prompt", "api_key": "test-only-secret", "nested": {"token": "private"},
+        }}})
+    with httpx.Client(transport=httpx.MockTransport(handler)) as transport:
+        with pytest.raises(OpenAICompatibleError) as caught:
+            OpenAICompatibleProvider(config, transport).generate("test prompt", {})
+    assert len(calls) == 1
+    expected = {"moderation_stage": stage if isinstance(stage, str) and stage in {"input", "output"} else "unknown", "categories": ["sexual"]}
+    assert caught.value.diagnostics["error"]["moderation_details"] == expected
+    assert "test-only-secret" not in str(caught.value)
+    assert "private prompt" not in str(caught.value)
+    repo = GenerationJobRepository(tmp_path / "library")
+    job = repo.create_job(GenerationJobCreate(provider="manual_upload", prompt_text="test prompt"))
+    repo.mark_failed(job.id, str(caught.value), diagnostics=caught.value.diagnostics)
+    loaded = GenerationJobRepository(tmp_path / "library").get_job(job.id)
+    assert loaded.metadata["error_diagnostics"]["error"]["moderation_details"] == expected
+    assert "private" not in json.dumps(loaded.metadata)
+    from fastapi.testclient import TestClient
+    from backend.main import create_app
+    with TestClient(create_app(library_path=tmp_path / "library")) as api:
+        response = api.get(f"/api/generation-jobs/{job.id}")
+    assert response.status_code == 200
+    assert response.json()["metadata"]["error_diagnostics"]["error"]["moderation_details"] == expected
+    assert "test-only-secret" not in response.text
+
+
+@pytest.mark.parametrize("details", [None, "input", ["input"]])
+def test_missing_or_invalid_moderation_details_do_not_infer_stage(config, details):
+    calls = []
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(400, json={"error": {"code": "moderation_blocked", "moderation_details": details}})
+    with httpx.Client(transport=httpx.MockTransport(handler)) as transport:
+        with pytest.raises(OpenAICompatibleError) as caught:
+            OpenAICompatibleProvider(config, transport).generate("test", {})
+    assert len(calls) == 1
+    assert "moderation_details" not in caught.value.diagnostics["error"]

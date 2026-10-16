@@ -14,6 +14,12 @@ Choose the connection type in Config and the named endpoint in the generation co
 
 Text-only requests use synchronous `POST /v1/images/generations`; references use multipart `POST /v1/images/edits`. Each queue task sends `n=1`, with up to four references. New composer requests send the selected pixel dimensions or `size=auto`. Quality is independent of size and does not guarantee the returned dimensions. Historical explicit sizes remain unchanged until a new size is selected. Saved request snapshots take precedence.
 
+### 4K target with automatic aspect ratio
+
+The single size menu also offers **4K · Auto aspect ratio**. This is a local size resolver, not the API value `size=auto`: it prefers an explicit ratio in the prompt, then the first reference image, and otherwise visibly defaults to 1:1. Conflicting explicit ratios block submission. The resolved pixel dimensions are shown before submission and sent as `size`; quality remains independent.
+
+The target is approximately 8 megapixels within the current Image 2.5 limits, rather than a guaranteed 3840-pixel long edge for every ratio. For example, an exact 2:3 ratio uses `2336x3504`; `2560x3840` exceeds the pixel limit. Reference ratios may require rounding to legal pixel multiples. Gateway support and actual returned dimensions can differ; originals are never stretched, upscaled or cropped to make them match the request. Inspect the recorded requested and decoded dimensions separately.
+
 ## GPT Image 2.5 controls (2026-10-09)
 
 Choose `gpt-image-2.5-flare` or `gpt-image-2.5-sunburst` by full name. Configured and historical model names remain available; enter other service-specific models in the model menu or as a profile default in settings. Per-request choices do not change provider defaults. All compatible model names, including gateway aliases, expose `auto`, `low`, `medium`, `high`, `xhigh`, and `max`. Actual support is determined by the service, not inferred from the model name. An unknown legacy request model requires an explicit choice before another request.
@@ -104,3 +110,10 @@ The compact size badge describes application presets (1K/2K/4K), not a supplier'
 ## Remembered generation settings
 
 Explicit model, size, quality and output choices are remembered per endpoint in this browser. Reopening or refreshing restores them; clearing browser storage resets them. No keys, prompts or images are stored in these preferences. Historical recipe restoration takes precedence. The size control sends explicit pixels (or auto) independently of quality.
+
+
+## Moderation diagnostics
+
+When the provider returns `error.moderation_details`, the application retains only the public moderation stage (`input`, `output`, or `unknown`) and recognized category labels. Extra fields, classifier scores, credentials and arbitrary nested payloads are discarded. The failure view distinguishes input moderation from output moderation; absent or invalid stage information is shown as unavailable rather than inferred from error wording, elapsed time or category.
+
+Some gateways retain these details in their administrative upstream logs but omit them from the client response. The application cannot recover fields it did not receive. Existing failures are not rewritten, and an unknown stage does not prove which system applied the rejection. This diagnostic change does not relax moderation or automatically retry a paid request.

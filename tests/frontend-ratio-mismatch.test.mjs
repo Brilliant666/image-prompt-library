@@ -57,3 +57,40 @@ test('format, transparency and quality warnings coexist with ratio warning', () 
   result.metadata.response = {quality:'medium'};
   assert.deepEqual(compatibleMismatches(result),['imageAspectRatioMismatch','imageFormatMismatch','imageAlphaMismatch','imageQualityMismatch']);
 });
+
+const { resolveAuto4k, restoreCompatibleRecipe, compatibleParameters } = await import(recipeModule);
+test('4K auto ratio preserves explicit ratios within the supported pixel budget', () => {
+  for (const [prompt, size] of [['portrait 2:3', '2336x3504'], ['宽高比２：３', '2336x3504'], ['3:2 landscape', '3504x2336'], ['16:9', '3840x2160'], ['9:16', '2160x3840'], ['', '2880x2880']]) {
+    assert.equal(resolveAuto4k(prompt).size, size);
+  }
+  assert.equal(resolveAuto4k('time 12:30, aspect ratio 2:3').size, '2336x3504');
+  assert.equal(resolveAuto4k('2:3 and 4:6').size, '2336x3504');
+  assert.equal(resolveAuto4k('2:3 and 9:16').error, 'imageAuto4kConflict');
+  assert.equal(resolveAuto4k('9:1').error, 'imageSizeInvalid');
+});
+test('4K auto ratio uses prompt first, then reference, then visible square default', () => {
+  assert.equal(resolveAuto4k('2:3', { width: 1920, height: 1080 }).source, 'prompt');
+  assert.equal(resolveAuto4k('', { width: 1920, height: 1080 }).size, '3840x2160');
+  assert.equal(resolveAuto4k('').source, 'default');
+  const rounded = resolveAuto4k('585:793');
+  const [w, h] = rounded.size.split('x').map(Number);
+  assert.ok(w % 16 === 0 && h % 16 === 0 && w * h <= 8294400 && Math.abs(w / h / (585 / 793) - 1) <= 0.003);
+});
+test('auto ratio restores mode without replacing recorded actual size or sending mode upstream', () => {
+  const recipe = restoreCompatibleRecipe({ model: 'gpt-image-2.5-sunburst', parameters: { size_mode: 'auto4k', size: '2336x3504', quality: 'max' }, metadata: { requested: { size: '2336x3504' } } });
+  assert.equal(recipe.size_mode, 'auto4k');
+  assert.equal(recipe.size, '2336x3504');
+  assert.equal(compatibleParameters(recipe).size, '2336x3504');
+  assert.ok(!('size_mode' in compatibleParameters(recipe)));
+});
+
+
+test('4K automatic sizing keeps awkward prompt and reference ratios near the pixel target', () => {
+  for (const [prompt, reference, ratio] of [['宽高比 100:101', undefined, 100 / 101], ['', { width: 4032, height: 3008 }, 63 / 47]]) {
+    const result = resolveAuto4k(prompt, reference);
+    const [width, height] = result.size.split('x').map(Number);
+    assert.ok(width * height >= 8_000_000 && width * height <= 8_294_400);
+    assert.ok(width <= 3840 && height <= 3840 && width % 16 === 0 && height % 16 === 0);
+    assert.ok(Math.abs(width / height / ratio - 1) <= 0.003);
+  }
+});

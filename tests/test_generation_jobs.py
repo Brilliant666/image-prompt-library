@@ -215,6 +215,37 @@ def test_generation_job_can_stage_result_and_accept_into_source_item(tmp_path):
     assert c.post(f"/api/generation-jobs/{job['id']}/accept").status_code == 409
 
 
+def test_history_redacts_inline_bytes_before_credential_scanning(monkeypatch):
+    from backend.routers.generation_jobs import _sanitize_generation_job_parameters
+    from backend.services import credential_safety
+
+    original_scan = credential_safety.contains_embedded_credential
+    scanned = []
+
+    def inspect_scan(value):
+        assert not value.startswith("data:image/"), "Discarded image bytes must not be credential-scanned"
+        scanned.append(value)
+        return original_scan(value)
+
+    monkeypatch.setattr(credential_safety, "contains_embedded_credential", inspect_scan)
+    result = _sanitize_generation_job_parameters({
+        "quality": "max",
+        "input_images": [{
+            "data_url": "data:image/png;base64," + "A" * 1_000_000,
+            "name": "reference.png",
+            "api_key": "private-value",
+            "note": "Bearer abcdefghijklmnopqrstuvwxyz",
+        }],
+    })
+    image = result["input_images"][0]
+    assert image["has_data_url"] is True
+    assert image["data_url_redacted"] is True
+    assert "data_url" not in image and "api_key" not in image
+    assert image["note"] == "[redacted credential data]"
+    assert result["quality"] == "max"
+    assert "reference.png" in scanned
+
+
 def test_generation_job_list_and_detail_redact_input_image_data_urls(tmp_path):
     c = client(tmp_path)
     payload_data = png_bytes("red", (4, 4))
@@ -3397,3 +3428,16 @@ def test_generation_job_api_filters_by_source_item_with_status_and_pagination(tm
         "discarded": 0,
         "cancelled": 0,
     }
+
+
+def test_history_redacts_malformed_reference_entries():
+    from backend.routers.generation_jobs import _sanitize_generation_job_parameters
+
+    result = _sanitize_generation_job_parameters({"input_images": [
+        "Bearer abcdefghijklmnopqrstuvwxyz",
+        ["data:image/png;base64,AAAA", {"api_key": "test-only-private-key"}],
+    ]})
+    encoded = json.dumps(result)
+    assert "abcdefghijklmnopqrstuvwxyz" not in encoded
+    assert "data:image/" not in encoded
+    assert "test-only-private-key" not in encoded

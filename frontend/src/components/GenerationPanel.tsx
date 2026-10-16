@@ -9,14 +9,14 @@ import qualityIcon from '../assets/generation-controls/quality.png';
 import { api, mediaUrl } from '../api/client';
 import type { ClusterRecord, GenerationJobAcceptAsNewItemPayload, GenerationJobCreate, GenerationJobRecord, GenerationJobSetRecord, GenerationProviderQueueState, GenerationProviderStatus, GenerationSetCount, ImageRecord, ItemDetail, ItemSummary, TagRecord, AiProvider, OpenAICompatibleProfile } from '../types';
 import type { Translator } from '../utils/i18n';
-import { COMPATIBLE_SIZE_OPTIONS, IMAGE25_MODELS, imageQualities, restoreCompatibleRecipe, compatibleParameters, compatibleValidation, imageSizeLabel, imageSizeBadge, imageQualityLabel, type CompatibleRecipe } from '../utils/compatibleRecipe';
+import { resolveAuto4k, COMPATIBLE_SIZE_OPTIONS, COMPATIBLE_ENTERPRISE_MODELS, IMAGE25_MODELS, imageQualities, restoreCompatibleRecipe, compatibleParameters, compatibleValidation, imageSizeLabel, imageSizeBadge, imageQualityLabel, type CompatibleRecipe } from '../utils/compatibleRecipe';
 import { readGenerationPreference, writeGenerationPreference, lastGenerationProfile } from '../utils/generationPreferences';
 import { generationProviderChoices, recipeProfileId } from '../utils/compatibleProfiles';
 import { generationAspectRatio } from '../utils/generationAspectRatio';
 import { generationResultActions } from '../utils/generationResultActions';
 import { providerPauseSeconds } from '../utils/generationSets';
 import { downloadFileName } from '../utils/images';
-import { generationFailure } from '../utils/generationFailures';
+import { generationFailure, generationModerationGuidance } from '../utils/generationFailures';
 import { resolveOriginalPrompt, resolvePromptText, type PromptCopyLanguage } from '../utils/prompts';
 import { extractPromptTemplateVariableRecords, resolvePromptTemplate } from '../utils/promptTemplateVariables';
 import { createGenerationReviewSession, generationResultPosition, generationReviewNext, generationReviewOpenContext, generationReviewSlotNavigation, generationReviewSummary, generationSiblingNavigation, isActionableGenerationResult, mapGenerationRetryJobs, mapGenerationRetryToReviewSlot, reconcileGenerationReviewSession, resolveGenerationReviewSlot, retainPendingRetryJobIds, type GenerationReviewSession } from '../utils/generationSiblings';
@@ -310,6 +310,9 @@ export default function GenerationPanel({
   const originalPrompt = resolveOriginalPrompt(item?.prompts);
   const defaultPromptLanguage = preferredLanguage === 'origin' ? (originalPrompt?.language || 'en') : preferredLanguage;
   const defaultPrompt = item ? resolvePromptText(item.prompts, preferredLanguage, item.title) : '';
+  const [providersState, setProvidersState] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [providerReload, setProviderReload] = useState(0);
+  const [jobsState, setJobsState] = useState<'loading' | 'ready' | 'error'>('loading');
   const [providers, setProviders] = useState<GenerationProviderStatus[]>([]);
   const [compatibleProfiles, setCompatibleProfiles] = useState<OpenAICompatibleProfile[]>([]);
   const [compatibleProfileId, setCompatibleProfileId] = useState<string>();
@@ -471,7 +474,7 @@ export default function GenerationPanel({
   }, [batchReviewSession]);
   const batchReviewActive = Boolean(batchReviewSession);
   const selectedProvider = useMemo(() => providerChoices.find(candidate => candidate.provider === provider && (provider !== 'openai_compatible' || candidate.profile_id === compatibleProfileId)), [providerChoices, provider, compatibleProfileId]);
-  const selectedProviderCanGenerate = providerCanGenerate(selectedProvider);
+  const selectedProviderCanGenerate = providersState === 'ready' && providerCanGenerate(selectedProvider);
   const selectedProviderMaxInputImages = selectedProvider?.max_input_images || MAX_EDIT_ATTACHMENTS;
   const selectedProviderSupportsEdit = editAttachments.length === 0 || Boolean(selectedProvider?.features.image_edit);
   const selectedProviderWithinInputLimit = editAttachments.length <= selectedProviderMaxInputImages;
@@ -509,10 +512,10 @@ export default function GenerationPanel({
     setCompatibleRecipe(next);
     setAspectRatio('auto');
   };
-  const compatibleError = provider === 'openai_compatible' ? compatibleValidation(effectiveRecipe) : undefined;
+
   const currentQualityOptions = provider === 'openai_compatible' ? imageQualities(selectedModelLabel).map(value => ({ value, label: value })) : QUALITY_OPTIONS;
-  const sizeLabel = (size: string) => size === 'auto' ? optionLabel(ASPECT_RATIO_OPTIONS, 'auto', t) : imageSizeLabel(size);
-  const compatibleModels = [...new Set([IMAGE25_MODELS[1], IMAGE25_MODELS[0], ...(selectedProvider?.default_image_model ? [selectedProvider.default_image_model] : []), ...(selectedModelLabel ? [selectedModelLabel] : [])])];
+  const sizeLabel = (size: string) => size === 'auto4k' ? t('imageAuto4k') : size === 'auto' ? optionLabel(ASPECT_RATIO_OPTIONS, 'auto', t) : imageSizeLabel(size);
+  const compatibleModels = [...new Set([IMAGE25_MODELS[1], IMAGE25_MODELS[0], ...COMPATIBLE_ENTERPRISE_MODELS, ...(selectedProvider?.default_image_model ? [selectedProvider.default_image_model] : []), ...(selectedModelLabel ? [selectedModelLabel] : [])])];
   const selectedOutputLabel = provider === 'xai_grok_oauth'
     ? `${optionLabel(GROK_QUALITY_OPTIONS, grokQuality, t)} · ${optionLabel(GROK_RESOLUTION_OPTIONS, grokResolution, t)}`
     : provider === 'openai_compatible' ? imageQualityLabel(compatibleQuality, t) : optionLabel(QUALITY_OPTIONS, quality, t);
@@ -524,6 +527,29 @@ export default function GenerationPanel({
   const hasTemplateVariables = templateVariables.length > 0;
   const hasMissingTemplateValues = hasTemplateVariables && templateVariables.some(variable => !templateValues[variable.key]?.trim());
   const resolvedPrompt = hasTemplateVariables ? resolvePromptTemplate(promptText, templateValues) : promptText;
+  const referenceUrl = editAttachments.find(input => !input.missing)?.previewUrl || '';
+  const [referenceDimensions, setReferenceDimensions] = useState<{ url: string; width: number; height: number }>();
+  const [referenceSizeFailed, setReferenceSizeFailed] = useState('');
+  useEffect(() => {
+    if (!referenceUrl || compatibleRecipe.size_mode !== 'auto4k') return;
+    let stale = false;
+    setReferenceSizeFailed('');
+    const image = new Image();
+    const timer = window.setTimeout(() => { if (!stale) setReferenceSizeFailed(referenceUrl); }, 15000);
+    image.onload = () => { window.clearTimeout(timer); if (!stale) setReferenceDimensions({ url: referenceUrl, width: image.naturalWidth, height: image.naturalHeight }); };
+    image.onerror = () => { window.clearTimeout(timer); if (!stale) setReferenceSizeFailed(referenceUrl); };
+    image.src = referenceUrl;
+    return () => { stale = true; window.clearTimeout(timer); };
+  }, [referenceUrl, compatibleRecipe.size_mode]);
+  const auto4k = resolveAuto4k(resolvedPrompt, referenceDimensions?.url === referenceUrl ? referenceDimensions : undefined);
+  const auto4kWaiting = compatibleRecipe.size_mode === 'auto4k' && auto4k.source === 'default' && Boolean(referenceUrl) && referenceDimensions?.url !== referenceUrl;
+  const requestRecipe = compatibleRecipe.size_mode === 'auto4k' && auto4k.size ? { ...effectiveRecipe, size: auto4k.size } : effectiveRecipe;
+  const compatibleError = provider === 'openai_compatible' ? (
+    compatibleRecipe.size_mode === 'auto4k' ? auto4k.error || (auto4kWaiting ? (referenceSizeFailed === referenceUrl ? 'imageSizeInvalid' : 'loading') : compatibleValidation(requestRecipe)) : compatibleValidation(effectiveRecipe)
+  ) : undefined;
+  const currentSizeChoice = compatibleRecipe.size_mode === 'auto4k' ? 'auto4k' : compatibleRecipe.size;
+  const auto4kSummary = auto4k.size ? `${t(auto4k.source === 'prompt' ? 'imageAuto4kPrompt' : auto4k.source === 'reference' ? 'imageAuto4kReference' : 'imageAuto4kDefault')} · ${imageSizeLabel(auto4k.size)}` : '';
+
   const promptChangedFromSource = hasTemplateVariables ? resolvedPrompt !== defaultPrompt.trim() : promptText.trim() !== defaultPrompt.trim();
   const promptTemplateValues = useMemo(() => Object.fromEntries(templateVariables.map(variable => [variable.key, templateValues[variable.key] || ''])), [templateVariables, templateValues]);
   const templateVariableKeySignature = useMemo(() => templateVariables.map(variable => variable.key).join('\u0000'), [templateVariables]);
@@ -595,9 +621,12 @@ export default function GenerationPanel({
     return clusters.filter(cluster => cluster.name.toLowerCase().includes(query)).slice(0, 8);
   }, [metadataDraft?.cluster_name, clusters]);
 
+  const activeRefreshInFlightRef = useRef(false);
+
   const refreshJobs = async (options: { preserveActive?: boolean } = {}) => {
     const requestId = jobsRequestRef.current + 1;
     jobsRequestRef.current = requestId;
+    try {
     const generationSetRequestId = generationSetRequestRef.current + 1;
     generationSetRequestRef.current = generationSetRequestId;
     const openContext = generationReviewOpenContext(initialJobId);
@@ -668,6 +697,7 @@ export default function GenerationPanel({
       const preservedJobs = jobsRef.current.filter(job => preservedIds.has(job.id) && !contextHydrationFailedIds.has(job.id));
       nextJobs = mergeGenerationJobs(preservedJobs, nextJobs);
     }
+    if (jobsRequestRef.current !== requestId) return undefined;
     replaceGenerationJobs(nextJobs);
     setProviderQueueStates(result.provider_queue_states || []);
     const trackedSetId = activeGenerationSet?.generation_group_id
@@ -683,7 +713,17 @@ export default function GenerationPanel({
       setFocusedJobHighlightId(focusedJob.id);
       if (!historyReviewJobId) setHistoryReviewJobId(focusedJob.id);
     }
+    setJobsState('ready');
     return nextJobs;
+    } catch (error) {
+      if (jobsRequestRef.current === requestId) setJobsState('error');
+      throw error;
+    }
+  };
+
+  const retryJobs = () => {
+    setJobsState('loading');
+    void refreshJobs({ preserveActive: true }).catch(() => undefined);
   };
 
   const refreshGenerationSet = async (generationGroupId: string) => {
@@ -698,11 +738,13 @@ export default function GenerationPanel({
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([api.generationProviders(), api.openAICompatibleProfiles().catch(() => null)])
+    setProvidersState('loading');
+    Promise.all([api.generationProviders(), api.openAICompatibleProfiles()])
       .then(([nextProviders, profileStore]) => {
         if (cancelled) return;
         const automatedProviders = nextProviders.filter(nextProvider => nextProvider.provider !== 'manual_upload');
         setProviders(automatedProviders);
+        setProvidersState('ready');
         setCompatibleProfiles(profileStore?.profiles || []);
         if (!restoredLibraryRecipeRef.current) {
           let remembered: string | null = null;
@@ -719,22 +761,16 @@ export default function GenerationPanel({
       })
       .catch(() => {
         if (cancelled) return;
-        setProviders([{
-          provider: 'openai_codex_oauth_native',
-          display_name: 'ChatGPT / Codex OAuth',
-          optional: true,
-          configured: false,
-          authenticated: false,
-          available: false,
-          state: 'not_configured',
-          reason: 'provider_status_unavailable',
-          features: { text_to_image: false, text_reference_to_image: false, image_edit: false, title_suggestion: false },
-          max_input_images: 4,
-        }]);
+        setProvidersState('error');
       });
-    refreshJobs().catch(() => undefined);
-    return () => { cancelled = true; jobsRequestRef.current += 1; };
-  }, [item?.id, initialJobId, defaultAiProvider]);
+    return () => { cancelled = true; };
+  }, [item?.id, initialJobId, defaultAiProvider, providerReload]);
+
+  useEffect(() => {
+    setJobsState('loading');
+    void refreshJobs().catch(() => undefined);
+    return () => { jobsRequestRef.current += 1; };
+  }, [item?.id, initialJobId]);
 
   useEffect(() => {
     setTemplateValues(current => {
@@ -765,14 +801,24 @@ export default function GenerationPanel({
 
   useEffect(() => {
     if (!activeGenerationSet?.remaining && !jobs.some(job => ['queued', 'running'].includes(job.status))) return undefined;
+    let cancelled = false;
+    let timer: number | undefined;
     const refreshActiveWork = async () => {
-      await refreshJobs({ preserveActive: true });
-      if (activeGenerationSet?.generation_group_id) {
-        await refreshGenerationSet(activeGenerationSet.generation_group_id);
+      if (cancelled) return;
+      if (!activeRefreshInFlightRef.current) {
+        activeRefreshInFlightRef.current = true;
+        try {
+          await refreshJobs({ preserveActive: true });
+          if (!cancelled && activeGenerationSet?.generation_group_id) {
+            await refreshGenerationSet(activeGenerationSet.generation_group_id);
+          }
+        } catch { /* Read failures are shown by the history state. */ }
+        finally { activeRefreshInFlightRef.current = false; }
       }
+      if (!cancelled) timer = window.setTimeout(refreshActiveWork, 2500);
     };
-    const timer = window.setInterval(() => refreshActiveWork().catch(() => undefined), 2500);
-    return () => window.clearInterval(timer);
+    timer = window.setTimeout(refreshActiveWork, 2500);
+    return () => { cancelled = true; window.clearTimeout(timer); };
   }, [jobs, item?.id, initialJobId, activeGenerationSet?.generation_group_id, activeGenerationSet?.remaining]);
 
   useEffect(() => {
@@ -1007,9 +1053,9 @@ export default function GenerationPanel({
         reference_image_ids: [],
         parameters: {
           ...(provider !== 'openai_compatible' || aspectRatio !== 'auto' ? { requested_aspect_ratio: aspectRatio } : {}),
-          ...(provider !== 'openai_compatible' || aspectRatio !== 'auto' ? { aspect_ratio_prompt_injection: ['openai_codex_oauth_native', 'openai_compatible'].includes(provider) && aspectRatio !== 'auto' && (provider !== 'openai_compatible' || compatibleRecipe.size === 'auto') } : {}),
+          ...(provider !== 'openai_compatible' || aspectRatio !== 'auto' ? { aspect_ratio_prompt_injection: ['openai_codex_oauth_native', 'openai_compatible'].includes(provider) && aspectRatio !== 'auto' && (provider !== 'openai_compatible' || compatibleRecipe.size === 'auto' && compatibleRecipe.size_mode !== 'auto4k') } : {}),
           ...(provider === 'openai_compatible'
-            ? { ...compatibleParameters(effectiveRecipe), compatible_profile_id: compatibleProfileId }
+            ? { ...compatibleParameters(requestRecipe), ...(compatibleRecipe.size_mode === 'auto4k' ? { size_mode: 'auto4k' } : {}), compatible_profile_id: compatibleProfileId }
             : provider === 'openai_codex_oauth_native'
             ? { quality }
             : provider === 'xai_grok_oauth'
@@ -2089,6 +2135,7 @@ export default function GenerationPanel({
     if (selectedStageJob.status === 'failed') {
       const retryId = retriedByJobId(selectedStageJob);
        const failure = generationFailure(selectedStageJob, t);
+       const moderationGuidance = generationModerationGuidance(selectedStageJob, t);
       const retryButton = canRetryFailedJob(selectedStageJob) ? (
         <button className={`stage-action${failure.kind === 'policy_violation' || failure.kind === 'auth_required' ? '' : ' primary'}`} onClick={() => retryFailedJob(selectedStageJob)} disabled={busy}>
           {t('retry')}
@@ -2105,6 +2152,7 @@ export default function GenerationPanel({
             <div className="generation-failure-announcement" role="alert">
               <strong>{retryId ? t('retried') : failure.title}</strong>
               <p>{failure.guidance}</p>
+              {moderationGuidance && <p>{moderationGuidance}</p>}
               {message && <p className="provider-message generation-failure-message">{message}</p>}
             </div>
             {selectedStageJob.error && (
@@ -2190,6 +2238,10 @@ export default function GenerationPanel({
           <div>
             <p className="modal-kicker">{t('generate')}</p>
             <h2 id="generation-workspace-title">{reviewJob ? t('saveGeneratedImageAsNew') : isHistoryReview ? t('reviewGeneration') : t('createImage')}</h2>
+        {providersState !== 'ready' && <div className="generation-provider-status" role={providersState === 'error' ? 'alert' : 'status'}>
+                  <p>{t('providers')}: {providersState === 'loading' ? t('loading') : t('loadFailed')}</p>
+                  {providersState === 'error' && <button type="button" onClick={() => setProviderReload(value => value + 1)}>{t('retry')}</button>}
+        </div>}
           </div>
           <button className="modal-icon-button generation-workspace-close" onClick={reviewJob ? closeSaveAsNewReview : () => handleClose()} disabled={busy || isClosing || isSavePanelClosing} aria-label={t('close')}>
             <X size={20} strokeWidth={2.25} />
@@ -2197,7 +2249,7 @@ export default function GenerationPanel({
         </header>
         {!reviewJob || !metadataDraft ? <div className="generation-layout" inert={showHistoryDrawer} aria-hidden={showHistoryDrawer || undefined}>
           {/* Keep edits from invalidating a recipe while its reference files are loading. */}
-          <fieldset disabled={recipeLoading} aria-busy={recipeLoading} style={{ margin: 0, minWidth: 0 }} onChangeCapture={invalidateRecipeRestore} className={`generation-compose-card generation-composer-card${provider === 'openai_compatible' ? ' has-image-settings' : ''}`}>
+          <fieldset disabled={recipeLoading || providersState !== 'ready'} aria-busy={recipeLoading || providersState === 'loading'} style={{ margin: 0, minWidth: 0 }} onChangeCapture={invalidateRecipeRestore} className={`generation-compose-card generation-composer-card${provider === 'openai_compatible' ? ' has-image-settings' : ''}`}>
             {!isHistoryReview ? (
               <>
                 <div className="generation-prompt-area">
@@ -2237,8 +2289,10 @@ export default function GenerationPanel({
                     </div>
                   </div>
                 )}
-                {provider === 'openai_compatible' && (aspectRatio !== 'auto' || compatibleError || !selectedProvider) && <div className="generation-compatible-header">
+                {providersState === 'ready' && <>
+                {provider === 'openai_compatible' && (aspectRatio !== 'auto' || compatibleRecipe.size_mode === 'auto4k' || compatibleError || !selectedProvider) && <div className="generation-compatible-header">
                   {aspectRatio !== 'auto' && <small>{t('imageLegacyRatio')}: {aspectRatio}</small>}
+                  {compatibleRecipe.size_mode === 'auto4k' && !compatibleError && <p>{t('imageAuto4k')} · {auto4kSummary}</p>}
                   {compatibleError && <p role="alert">{t(compatibleError)}</p>}
                   {!selectedProvider && <p role="alert">{t('compatibleProfileUnavailable')}</p>}
                 </div>}
@@ -2308,20 +2362,21 @@ export default function GenerationPanel({
                     </div>}
                   </div>}
                   {provider === 'openai_compatible' ? <div className="generation-control-wrap generation-size-control">
-                    <button ref={element => { controlTriggerRefs.current.aspect = element; }} className="generation-control-trigger generation-size-trigger" type="button" onClick={() => setOpenControl(openControl === 'aspect' ? null : 'aspect')} aria-haspopup="dialog" aria-expanded={openControl === 'aspect'} aria-label={`${t('requestedImageSize')}: ${sizeLabel(compatibleRecipe.size)}`} title={`${t('requestedImageSize')}: ${sizeLabel(compatibleRecipe.size)}`}>
+                    <button ref={element => { controlTriggerRefs.current.aspect = element; }} className="generation-control-trigger generation-size-trigger" type="button" onClick={() => setOpenControl(openControl === 'aspect' ? null : 'aspect')} aria-haspopup="dialog" aria-expanded={openControl === 'aspect'} aria-label={`${t('requestedImageSize')}: ${`${sizeLabel(currentSizeChoice)}${currentSizeChoice === 'auto4k' && auto4kSummary ? ' · ' + auto4kSummary : ''}`}`} title={`${t('requestedImageSize')}: ${`${sizeLabel(currentSizeChoice)}${currentSizeChoice === 'auto4k' && auto4kSummary ? ' · ' + auto4kSummary : ''}`}`}>
                       <img className="generation-control-icon" src={aspectRatioIcon} alt="" aria-hidden="true" />
-                      <span className="generation-control-value">{imageSizeBadge(compatibleRecipe.size)}</span>
+                      <span className="generation-control-value">{currentSizeChoice === 'auto4k' ? '4K auto' : imageSizeBadge(compatibleRecipe.size)}</span>
                     </button>
                     {openControl === 'aspect' && <div className="generation-control-popover generation-size-popover" role="dialog" aria-label={t('requestedImageSize')}>
                       <div role="menu" aria-label={t('requestedImageSize')}>
-                        {COMPATIBLE_SIZE_OPTIONS.map(size => <button key={size} type="button" role="menuitemradio" aria-checked={compatibleRecipe.size === size} className={compatibleRecipe.size === size ? 'is-selected' : ''} onClick={() => { invalidateRecipeRestore(); setAspectRatio('auto'); updateCompatibleRecipe(r => ({ ...r, size, legacyDerived: false })); closeGenerationControl('aspect'); }}>
+                        {['auto4k', ...COMPATIBLE_SIZE_OPTIONS].map(size => <button key={size} type="button" role="menuitemradio" aria-checked={currentSizeChoice === size} className={currentSizeChoice === size ? 'is-selected' : ''} onClick={() => { invalidateRecipeRestore(); setAspectRatio('auto'); updateCompatibleRecipe(r => ({ ...r, size: size === 'auto4k' ? 'auto' : size, size_mode: size === 'auto4k' ? 'auto4k' : undefined, legacyDerived: false })); closeGenerationControl('aspect'); }}>
                           <span className="generation-control-option-label">{sizeLabel(size)}</span>
-                          {compatibleRecipe.size === size && <Check size={15} aria-hidden="true" />}
+                          {currentSizeChoice === size && <Check size={15} aria-hidden="true" />}
                         </button>)}
                       </div>
                       <label className="generation-custom-size">{t('imageCustomSize')}
-                        <input aria-label={t('imageCustomSize')} placeholder="WIDTHxHEIGHT" value={compatibleRecipe.size === 'auto' ? '' : compatibleRecipe.size} onChange={event => { invalidateRecipeRestore(); setAspectRatio('auto'); updateCompatibleRecipe(r => ({ ...r, size: event.target.value.trim(), legacyDerived: false })); }} />
+                        <input aria-label={t('imageCustomSize')} placeholder="WIDTHxHEIGHT" value={currentSizeChoice === 'auto4k' || compatibleRecipe.size === 'auto' ? '' : compatibleRecipe.size} onChange={event => { invalidateRecipeRestore(); setAspectRatio('auto'); updateCompatibleRecipe(r => ({ ...r, size: event.target.value.trim(), size_mode: undefined, legacyDerived: false })); }} />
                       </label>
+                      {currentSizeChoice === 'auto4k' && <p>{t('imageAuto4kHelp')} {auto4kSummary}</p>}
                       {compatibleError === 'imageSizeInvalid' && <p role="alert">{t(compatibleError)}</p>}
                     </div>}
                   </div> : <>
@@ -2475,6 +2530,7 @@ export default function GenerationPanel({
                   </div>
                     <button ref={historyTriggerRef} className="generation-history-control" onClick={openHistoryDrawer} aria-label={t('history')} title={t('history')} type="button"><Clock3 size={17} /></button>
                 </div>
+                </>}
                 {selectedProviderQueueState && selectedProviderPauseSeconds > 0 && (
                    <section className="generation-provider-pause" aria-label={`${t('generationQueuePaused')}: ${selectedProviderQueueState.paused_until || ''}`}>
                      <strong>{t('generationQueuePaused')}</strong>
@@ -2602,11 +2658,13 @@ export default function GenerationPanel({
               </div>
               <button className="modal-icon-button" onClick={closeHistoryDrawer} aria-label={t('close')}><X size={20} strokeWidth={2.25} /></button>
             </div>
-            {visibleJobs.length === 0 && <p className="muted">{t('noGenerationJobs')}</p>}
+            {jobsState === 'loading' && <p role="status">{t('loading')}</p>}
+            {jobsState === 'error' && <div role="alert"><p>{t('loadFailed')}</p><button type="button" onClick={retryJobs}>{t('retry')}</button></div>}
+            {jobsState === 'ready' && visibleJobs.length === 0 && <p className="muted">{t('noGenerationJobs')}</p>}
             {visibleJobs.map(job => (
               <button key={job.id} className={`generation-history-item status-${job.status}`} onClick={() => previewHistoryJob(job)} aria-label={`${statusLabel(job.status, t, isUsedAsGenerationReference(job))} ${t('result')}, ${jobAspectRatio(job)}, ${jobQuality(job)}${job.provider === 'xai_grok_oauth' ? `, ${jobResolution(job)}` : ''}, ${jobModel(job)}`}>
                 <span className="generation-history-media">
-                  {jobResultUrl(job) ? <img src={jobResultUrl(job)} alt="" /> : <span className="generation-history-placeholder">{statusLabel(job.status, t, isUsedAsGenerationReference(job))}</span>}
+                  {jobResultUrl(job) ? <img src={jobResultUrl(job)} alt="" loading="lazy" decoding="async" /> : <span className="generation-history-placeholder">{statusLabel(job.status, t, isUsedAsGenerationReference(job))}</span>}
                 </span>
                 <span className="generation-history-status-grid" aria-hidden="true">
                   <span className="generation-history-cell"><b>{job.provider === 'openai_compatible' ? t('requestedImageSize') : t('queueAspectRatio')}</b><em>{job.provider === 'openai_compatible' ? sizeLabel(String(job.parameters?.size || '—')) : optionLabel(ASPECT_RATIO_OPTIONS, jobAspectRatio(job), t)}</em></span>

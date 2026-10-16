@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { CheckCircle2, Clock3, ImageOff, ImagePlus, ListTodo, Maximize2, Trash2, X, XCircle } from 'lucide-react';
 import { api, mediaUrl } from '../api/client';
 import type { GenerationJobRecord, GenerationJobSetRecord, GenerationJobStatusCounts, GenerationProviderQueueState } from '../types';
-import { generationFailure } from '../utils/generationFailures';
+import { generationFailure, generationModerationGuidance } from '../utils/generationFailures';
 import { providerPauseSeconds } from '../utils/generationSets';
 import { mapGenerationRetryJob, rememberGenerationReviewOpenContext, resolveGenerationRetryGroup } from '../utils/generationSiblings';
 import type { Translator } from '../utils/i18n';
@@ -333,10 +333,14 @@ export default function GenerationQueueDrawer({
     + generationSets.filter(set => set.total > 1).reduce((total, set) => total + set.remaining, 0),
   );
   useEffect(() => {
-    refresh().catch(() => undefined);
-    if (!open && !hasActiveWork) return undefined;
-    const timer = window.setInterval(() => refresh().catch(() => undefined), 6000);
-    return () => window.clearInterval(timer);
+    let cancelled = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      await refresh().catch(() => undefined);
+      if (!cancelled && (open || hasActiveWork)) timer = window.setTimeout(poll, 6000);
+    };
+    void poll();
+    return () => { cancelled = true; window.clearTimeout(timer); };
   }, [hasActiveWork, open, refresh, refreshKey]);
 
   useEffect(() => {
@@ -586,6 +590,7 @@ export default function GenerationQueueDrawer({
 
   const renderFailedJob = (job: GenerationJobRecord) => {
      const failure = generationFailure(job, t);
+     const moderationGuidance = generationModerationGuidance(job, t);
     const retryId = retriedByJobId(job);
     const retry = retryId ? jobs.find(candidate => candidate.id === retryId) : undefined;
     return (
@@ -595,6 +600,7 @@ export default function GenerationQueueDrawer({
           <span className="generation-queue-failure-copy">
             <strong>{retryId ? t('queueRetried') : failure.title}</strong>
             <span>{failure.guidance}</span>
+            {moderationGuidance && <span>{moderationGuidance}</span>}
             <small>{job.edited_prompt_text || job.prompt_text}</small>
           </span>
         </button>

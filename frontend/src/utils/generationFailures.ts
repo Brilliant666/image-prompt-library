@@ -54,3 +54,14 @@ export function generationFailure(job: GenerationFailureSource, t?: Translator) 
     guidance: t ? t(FAILURE_TRANSLATION_KEYS[kind].guidance) : fallback.guidance,
   };
 }
+
+// Read only structured diagnostics; free-form errors cannot establish the moderation stage.
+export function generationModerationGuidance(job: GenerationFailureSource, t: Translator): string | undefined {
+  const diagnostics = job.metadata?.error_diagnostics;
+  const error = diagnostics && typeof diagnostics === 'object' ? (diagnostics as Record<string, unknown>).error : undefined;
+  const fields = error && typeof error === 'object' ? error as Record<string, unknown> : {};
+  const details = fields.moderation_details;
+  if (job.metadata?.error_kind !== 'policy_violation' && fields.code !== 'moderation_blocked' && !details) return undefined;
+  const stage = details && typeof details === 'object' ? (details as Record<string, unknown>).moderation_stage : undefined;
+  return t(stage === 'input' ? 'generationModerationInput' : stage === 'output' ? 'generationModerationOutput' : 'generationModerationUnknown');
+}
