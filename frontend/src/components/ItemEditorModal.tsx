@@ -6,25 +6,21 @@ import type { ClusterRecord, ImageRecord, ItemDetail, TagRecord, AiProvider, Upl
 import { imageThumbnailPath } from '../utils/images';
 import type { Translator } from '../utils/i18n';
 import SuggestedTitleField from './SuggestedTitleField';
+import { mergeEditorPrompts } from '../utils/editorPrompts';
 
 function promptText(item: ItemDetail | undefined, language: string) {
   return item?.prompts.find(prompt => prompt.language === language)?.text || '';
 }
 
 function initialTraditionalPrompt(item: ItemDetail | undefined) {
-  return promptText(item, 'zh_hant') || promptText(item, 'original');
+  return promptText(item, 'zh_hant');
 }
 
 function initialOriginalLanguage(item: ItemDetail | undefined) {
   if (!item) return 'zh_hans';
   const original = item?.prompts.find(prompt => prompt.is_original);
-  if (original?.language === 'en' || original?.language === 'zh_hant' || original?.language === 'zh_hans') return original.language;
+  if (original?.language) return original.language;
   return 'en';
-}
-
-function promptProvenance(language: string, originalLanguage: string) {
-  if (language === originalLanguage) return { kind: 'manual', source_language: language, derived_from: null, method: null };
-  return { kind: 'manual', source_language: originalLanguage, derived_from: originalLanguage, method: null };
 }
 
 export default function ItemEditorModal({
@@ -50,8 +46,8 @@ export default function ItemEditorModal({
 }) {
   const [persistedItem, setPersistedItem] = useState(item);
   const [title, setTitle] = useState(item?.title || '');
-  const [model, setModel] = useState(item?.model || 'ChatGPT');
-  const [author, setAuthor] = useState(item?.author || 'User');
+  const [model, setModel] = useState(item ? item.model : 'ChatGPT');
+  const [author, setAuthor] = useState(item ? item.author || '' : 'User');
   const [sourceUrl, setSourceUrl] = useState(item?.source_url || '');
   const [notes, setNotes] = useState(item?.notes || '');
   const [cluster, setCluster] = useState(item?.cluster?.name || '');
@@ -59,6 +55,8 @@ export default function ItemEditorModal({
   const [zhHantPrompt, setZhHantPrompt] = useState(initialTraditionalPrompt(item));
   const [zhHansPrompt, setZhHansPrompt] = useState(promptText(item, 'zh_hans'));
   const [englishPrompt, setEnglishPrompt] = useState(promptText(item, 'en'));
+  const extraPrompts = (item?.prompts || []).filter((prompt, index, all) => !['en', 'zh_hant', 'zh_hans'].includes(prompt.language) || all.findIndex(other => other.language === prompt.language) !== index);
+  const [extraPromptTexts, setExtraPromptTexts] = useState<Record<string, string>>({});
   const [originalLanguage, setOriginalLanguage] = useState(initialOriginalLanguage(item));
   const [resultFile, setResultFile] = useState<File>();
   const [referenceFile, setReferenceFile] = useState<File>();
@@ -81,7 +79,7 @@ export default function ItemEditorModal({
   const { containerRef: editorDialogRef, handleModalKeyDown } = useModalFocus<HTMLDivElement>(handleClose, { fallbackFocusSelector: editorFallbackSelector });
 
   const hasExistingResultImage = imageDrafts.some(image => image.role === 'result_image');
-  const hasPrompt = Boolean(zhHantPrompt.trim() || zhHansPrompt.trim() || englishPrompt.trim());
+  const hasPrompt = Boolean(zhHantPrompt.trim() || zhHansPrompt.trim() || englishPrompt.trim() || extraPrompts.some(p => (extraPromptTexts[p.id] ?? p.text).trim()));
   const titleSuggestionPrompt = (
     originalLanguage === 'zh_hant' ? zhHantPrompt
       : originalLanguage === 'zh_hans' ? zhHansPrompt
@@ -165,33 +163,22 @@ export default function ItemEditorModal({
     setSaving(true);
     setSaveError('');
     try {
-      const promptDrafts = [
-        { language: 'en', text: englishPrompt.trim(), is_primary: true },
-        { language: 'zh_hant', text: zhHantPrompt.trim(), is_primary: !englishPrompt.trim() },
-        { language: 'zh_hans', text: zhHansPrompt.trim(), is_primary: !englishPrompt.trim() && !zhHantPrompt.trim() },
-      ];
-      const availableOriginal = promptDrafts.find(prompt => prompt.language === originalLanguage && prompt.text)
-        ? originalLanguage
-        : promptDrafts.find(prompt => prompt.text)?.language || originalLanguage;
-      const prompts = promptDrafts
-        .filter(prompt => prompt.text)
-        .map(prompt => ({
-          ...prompt,
-          is_original: prompt.language === availableOriginal,
-          provenance: promptProvenance(prompt.language, availableOriginal),
-        }));
+      const prompts = mergeEditorPrompts(item?.prompts || [], {
+        en: englishPrompt, zh_hant: zhHantPrompt, zh_hans: zhHansPrompt,
+      }, extraPromptTexts, originalLanguage);
+      const unchangedPrompts = item && JSON.stringify(prompts) === JSON.stringify(item.prompts.map(({ language, text, is_original, is_primary, provenance }) => ({ language, text, is_original, is_primary, provenance })));
       const payload = {
         title: title.trim(),
         model: model.trim() || undefined,
-        author: author.trim() || 'User',
+        author: author.trim() || null,
         source_url: sourceUrl.trim() || undefined,
         notes: notes.trim() || undefined,
         cluster_name: cluster.trim() || undefined,
         tags: tags.split(',').map(t => t.trim()).filter(Boolean),
-        prompts,
+        ...(unchangedPrompts ? {} : { prompts }),
       };
       const createdNewItem = !persistedItem;
-      let saved = persistedItem ? await api.updateItem(persistedItem.id, payload) : await api.createItem(payload);
+      let saved = persistedItem ? await api.updateItem(persistedItem.id, payload) : await api.createItem({ ...payload, prompts });
       if (persistedItem && imageDraftChanged) {
         saved = await api.updateImages(saved.id, imageDrafts.map(image => ({ id: image.id, role: image.role || 'result_image' })));
       }
@@ -290,11 +277,11 @@ export default function ItemEditorModal({
           </label>
           <label className="field">
             <span>{t('imageGeneratedFrom')}</span>
-            <input placeholder={t('defaultModel')} value={model} onChange={e => setModel(e.target.value)} />
+            <input placeholder={t('notReported')} value={model} onChange={e => setModel(e.target.value)} />
           </label>
           <label className="field">
             <span>{t('author')}</span>
-            <input placeholder="User" value={author} onChange={e => setAuthor(e.target.value)} />
+            <input placeholder={t('author')} value={author} onChange={e => setAuthor(e.target.value)} />
           </label>
           <label className="field">
             <span>{t('sourceUrl')}</span>
@@ -324,6 +311,10 @@ export default function ItemEditorModal({
             <span className="prompt-field-title">{t('simplifiedChinesePrompt')} <button type="button" className={`origin-marker ${originalLanguage === 'zh_hans' ? 'active' : ''}`} onClick={() => setOriginalLanguage('zh_hans')}>{originalLanguage === 'zh_hans' ? t('origin') : t('markAsOriginal')}</button></span>
             <textarea placeholder={t('simplifiedPromptPlaceholder')} value={zhHansPrompt} onChange={e => setZhHansPrompt(e.target.value)} />
           </label>
+          {extraPrompts.map(prompt => <label key={prompt.id} className="field prompt-field">
+            <span className="prompt-field-title">{prompt.language} <button type="button" className={`origin-marker ${originalLanguage === prompt.language ? 'active' : ''}`} onClick={() => setOriginalLanguage(prompt.language)}>{originalLanguage === prompt.language ? t('origin') : t('markAsOriginal')}</button></span>
+            <textarea aria-label={`Prompt (${prompt.language})`} value={extraPromptTexts[prompt.id] ?? prompt.text} onChange={event => setExtraPromptTexts(current => ({ ...current, [prompt.id]: event.target.value }))} />
+          </label>)}
           <label className="field prompt-field notes-field">
             <span>{t('notes')}</span>
             <textarea placeholder={t('addNote')} value={notes} onChange={e => setNotes(e.target.value)} />

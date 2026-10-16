@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from .config import APP_VERSION, resolve_hidden_features, resolve_library_path, resolve_library_storage_path, validate_app_owned_paths
 from .db import get_db_path, init_db
-from .routers import app_updates, cleanup, clusters, generation_jobs, generation_providers, images, import_drafts, items, tags
+from .routers import app_updates, captures, cleanup, clusters, generation_jobs, generation_providers, images, import_drafts, items, tags
 from .services.library_archives import LibraryOperationLock
 from .services.generation_queue import AUTOMATED_PROVIDER_IDS, enqueue_generation_jobs, recover_interrupted_generation_jobs
 
@@ -153,6 +153,7 @@ def create_app(library_path: Path | str | None = None, frontend_dist_path: Path 
         return await call_next(request)
 
     app.include_router(items.router, prefix="/api")
+    app.include_router(captures.router, prefix="/api")
     app.include_router(images.router, prefix="/api")
     app.include_router(clusters.router, prefix="/api")
     app.include_router(tags.router, prefix="/api")

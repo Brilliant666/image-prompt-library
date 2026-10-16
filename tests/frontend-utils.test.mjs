@@ -531,6 +531,8 @@ test('actual frontend API serializes frozen single/batch/edit recipes and preser
   let source = await readFile(new URL('../frontend/src/api/client.ts', import.meta.url), 'utf8');
   const readSource = await readFile(new URL('../frontend/src/api/readJson.ts', import.meta.url), 'utf8');
   source = source.replace("import { readJson } from './readJson';", readSource.replaceAll('export ', ''));
+  const captureSource = await readFile(new URL('../frontend/src/utils/quickCapture.ts', import.meta.url), 'utf8');
+  source = source.replace("import { captureFormData, type CaptureLanguageResult, type CaptureRequest } from '../utils/quickCapture';", captureSource.replaceAll('export ', ''));
   source = source.replace("import { DEFAULT_ITEM_SORT } from '../utils/searchSort';", "const DEFAULT_ITEM_SORT = 'updated_desc';").replaceAll('import.meta.env', '({})');
   const javascript = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
   const { api } = await import(`data:text/javascript;base64,${Buffer.from(javascript).toString('base64')}`);
@@ -687,4 +689,25 @@ test('moderation guidance distinguishes structured input and output without gues
   assert.equal(generationModerationGuidance({ metadata: { error_kind: 'policy_violation' }, error: 'input sexual' }, t), 'generationModerationUnknown');
   assert.equal(generationModerationGuidance({ metadata: { error_diagnostics: { error: { code: 'moderation_blocked' } } } }, t), 'generationModerationUnknown');
   assert.equal(generationModerationGuidance({ metadata: { error_kind: 'rate_limited' } }, t), undefined);
+});
+
+
+test('full editor preserves other languages, exact whitespace, source flags and provenance', async () => {
+  const { mergeEditorPrompts } = await importTypescript('../frontend/src/utils/editorPrompts.ts');
+  const existing = [
+    { id: 'a', language: 'und', text: '  星  \n', is_original: true, is_primary: true, provenance: { kind: 'manual', capture: { format: 'PNG' } } },
+    { id: 'b', language: 'en', text: '  Star\n\n', is_original: false, is_primary: false, provenance: { kind: 'translation' } },
+    { id: 'c', language: 'fr', text: 'Étoile', is_original: false, is_primary: false, provenance: {} },
+  ];
+  const updated = mergeEditorPrompts(existing, { en: '  Star!\n\n', zh_hans: '', zh_hant: '' }, {}, 'und');
+  assert.equal(updated.length, 3);
+  assert.equal(updated[0].text, existing[0].text);
+  assert.equal(updated[0].is_original, true);
+  assert.deepEqual(updated[0].provenance, existing[0].provenance);
+  assert.equal(updated[1].text, '  Star!\n\n');
+  assert.equal(updated[2].text, 'Étoile');
+  assert.equal(existing[1].text, '  Star\n\n');
+  const corrected = mergeEditorPrompts(existing, { en: existing[1].text }, {}, 'en');
+  assert.equal(corrected.filter(p => p.is_original).length, 1);
+  assert.equal(corrected.find(p => p.is_original).language, 'en');
 });

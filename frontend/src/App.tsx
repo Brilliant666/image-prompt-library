@@ -8,6 +8,7 @@ import ExploreView from './components/ExploreView';
 import CardsView from './components/CardsView';
 import ItemDetailModal from './components/ItemDetailModal';
 import ItemEditorModal from './components/ItemEditorModal';
+import QuickCaptureModal from './components/QuickCaptureModal';
 import GenerationPanel from './components/GenerationPanel';
 import GenerationQueueDrawer from './components/GenerationQueueDrawer';
 import ConfigPanel from './components/ConfigPanel';
@@ -23,6 +24,7 @@ import { APPEARANCE_STORAGE_KEY, applyAppearance, loadAppearance } from './utils
 import { DEFAULT_UI_LANGUAGE, UI_LANGUAGE_LABELS, makeTranslator, normalizeUiLanguage, type UiLanguage } from './utils/i18n';
 import { DEFAULT_PROMPT_LANGUAGE, normalizePromptLanguage, resolvePromptText, type PromptCopyLanguage } from './utils/prompts';
 import { DEFAULT_ITEM_SORT, parseSearchSortQuery, parseStructuredSearchChips, removeSearchSortOperator } from './utils/searchSort';
+import { quickCaptureLabels } from './utils/quickCaptureLabels';
 
 const UI_LANGUAGE_STORAGE_KEY = 'image-prompt-library.ui_language';
 const PROMPT_LANGUAGE_STORAGE_KEY = 'image-prompt-library.preferred_prompt_language';
@@ -104,6 +106,7 @@ export default function App() {
   const [detailId, setDetailId] = useState<string>();
   const [editing, setEditing] = useState<ItemDetail | undefined>();
   const [editorOpen, setEditorOpen] = useState(false);
+  const [quickCaptureOpen, setQuickCaptureOpen] = useState(false);
   const [itemsReloadKey, setItemsReloadKey] = useState(0);
   const [uiLanguage, setUiLanguage] = useState<UiLanguage>(loadUiLanguage);
   const [hasChosenUiLanguage, setHasChosenUiLanguage] = useState(loadHasChosenUiLanguage);
@@ -368,7 +371,7 @@ export default function App() {
   const emptyMode = currentScopeSettled
     ? (!isDemoMode && localizedData.items.length === 0 && !q.trim() && !clusterId ? 'first-run' : 'no-results')
     : undefined;
-  const openNewItemEditor = () => { generationJobRequestRef.current += 1; cancelPendingEdit(); setEditing(undefined); setEditorOpen(true); };
+  const openNewItemEditor = () => { generationJobRequestRef.current += 1; cancelPendingEdit(); setQuickCaptureOpen(true); };
   const openFilters = () => { generationJobRequestRef.current += 1; cancelPendingEdit(); setConfigOpen(false); setFocusConfigProviders(false); setGenerationQueueOpen(false); setFiltersOpen(true); };
   const openConfig = () => { generationJobRequestRef.current += 1; cancelPendingEdit(); setFiltersOpen(false); setFocusConfigProviders(false); setGenerationQueueOpen(false); setConfigOpen(true); };
   const closeConfig = () => { setConfigOpen(false); setFocusConfigProviders(false); };
@@ -524,9 +527,9 @@ export default function App() {
   };
   const showManagementActions = !isDemoMode && view === 'cards';
   const drawerModalOpen = filtersOpen || configOpen || generationQueueOpen;
-  const blockingModalOpen = !hasChosenUiLanguage || Boolean(detailId || editorOpen || standaloneGenerationOpen || batchActionDialog);
+  const blockingModalOpen = !hasChosenUiLanguage || Boolean(detailId || editorOpen || quickCaptureOpen || standaloneGenerationOpen || batchActionDialog);
   const showFloatingActions = Boolean(hasChosenUiLanguage && !selectionMode && !filtersOpen && !configOpen && !detailId);
-  const floatingActionsHidden = editorOpen || standaloneGenerationOpen;
+  const floatingActionsHidden = editorOpen || quickCaptureOpen || standaloneGenerationOpen;
   const updateBadgeLabel = restartRequiredVersion
     ? t('restartRequired')
     : (updateStatus?.update_available && updateStatus.update_capability !== 'source' ? t('updateAvailable') : undefined);
@@ -634,13 +637,14 @@ export default function App() {
         <GenerationQueueDrawer t={t} open={generationQueueOpen} refreshKey={generationQueueRefreshKey} onOpen={openGenerationQueue} onClose={closeGenerationQueue} onOpenJob={openGenerationJob} onOpenProviders={openProviders} />
         <div className="floating-action-rail">
           {view === 'cards' && localizedData.items.length > 0 && <button className="fab select-fab" onClick={() => { setSelectionMode(true); clearSelection(); }}>{t('selectReferences')}</button>}
-          <button className="fab add-fab" onClick={openNewItemEditor}><Plus/> {t('add')}</button>
+          <button className="fab add-fab" onClick={openNewItemEditor}><Plus/> {quickCaptureLabels(uiLanguage).heading}</button>
           <button className="fab generate-fab" onClick={openStandaloneGeneration}>{t('generate')}</button>
         </div>
       </div>
     )}
     {!standaloneGenerationOpen && detailId && <ItemDetailModal key={detailId} t={t} id={detailId} uiLanguage={uiLanguage} preferredLanguage={preferredLanguage} clusters={localizedClusters} tags={tags} onClose={closeItemDetail} onCopyPrompt={showCopyToast} onChanged={saved} onDelete={isDemoMode ? undefined : deleteDetail} onOpenItem={setDetailId} onGenerate={openGenerationFromDetail} onEdit={(item) => { closeItemDetail(); setEditing(item); setEditorOpen(true); }} showMutations={!isDemoMode} showManagementActions={showManagementActions} canGenerate={!isDemoMode} />}
     {toast && <div className={`toast copy-toast elegant-toast ${toast.tone}${toastClosing ? ' is-closing' : ''}`} role="status"><span className="toast-icon">{toast.tone === 'success' ? <Check size={16} /> : <XCircle size={16} />}</span><span className="toast-title">{toast.title}</span></div>}
+    {!isDemoMode && <QuickCaptureModal open={quickCaptureOpen} uiLanguage={uiLanguage} onClose={() => setQuickCaptureOpen(false)} onSaved={saved} onFullEditor={item => { setQuickCaptureOpen(false); setEditing(item); setEditorOpen(true); }} />}
     {editorOpen && <ItemEditorModal t={t} item={editing} clusters={localizedClusters} tags={tags} defaultAiProvider={defaultAiProvider} onClose={() => setEditorOpen(false)} onSaved={saved} onDeleted={deleted} allowDelete={showManagementActions} />}
     {standaloneGenerationOpen && <GenerationPanel item={generationSourceItem} sourceImageId={generationSourceImageId} t={t} preferredLanguage={preferredLanguage} clusters={localizedClusters} tags={tags} defaultAiProvider={defaultAiProvider} promptVariablesEnabled={Boolean(appConfig?.features?.camelot?.percival)} initialJobId={focusedGenerationJobId} onClose={closeStandaloneGeneration} onOpenProviders={openProviders} onQueueChanged={() => setGenerationQueueRefreshKey(key => key + 1)} onAccepted={(item, message) => { saved(); setToast({ title: message || t('saveReference'), tone: 'success' }); if (item?.id) setDetailId(item.id); }} />}
     </div>
