@@ -12,6 +12,8 @@
       <button id="open-pairing" class="secondary">打开图库配对设置</button>
       <label>图库提供的配对包<input id="pairing-package" type="password" placeholder="仅粘贴图库刚提供的配对 JSON" spellcheck="false" autocomplete="new-password" maxlength="8192"></label>
       <div class="button-row"><button id="connect" class="primary">连接图库</button><button id="disconnect" class="secondary">清除本机配对</button></div>
+      <p id="pairing-status" role="status" aria-live="polite">未连接</p>
+      <p id="pairing-error" class="error" role="alert" hidden></p>
       <p>收录凭据仅保存在此设备。撤销授权请到图库的“浏览器收录配对”。清除本机配对会保留当前草稿。</p>
       <button id="clear-permissions" class="text-button">移除已授予的图片网站权限</button>
     </section>

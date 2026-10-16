@@ -67,7 +67,11 @@ test('image network and local API credentials are separated, redirects and cooki
   assert.equal(local.headers['X-Capture-Token'], pairing.token);
   assert.equal(local.redirect, 'error');
   assert.equal(local.credentials, 'omit');
+  assert.equal(local.mode, 'cors');
+  assert.equal(local.referrerPolicy, 'no-referrer');
+  assert.equal(Object.keys(local.headers).some(key => key.toLowerCase() === 'origin'), false, 'Origin belongs to the browser');
   const download = downloadOptions(new AbortController().signal);
+  assert.equal(download.method, 'GET');
   assert.equal(JSON.stringify(download).includes(pairing.token), false);
   assert.equal(Object.keys(download.headers).some(key => /token|authorization|instance/i.test(key)), false);
   assert.equal(download.redirect, 'error');
@@ -161,13 +165,14 @@ class Element {
   setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }
   click() { this.emit('click'); }
 }
-async function panelHarness({ initial, disconnected = false, postFailure, persistDelay = 0, receiptExists = false, imageDelay = 5, editorAvailable = true, transferError = false } = {}) {
+async function panelHarness({ initial, disconnected = false, postFailure, persistDelay = 0, receiptExists = false, receiptFailure, connectionFailure, connectionDelay = 0, imageDelay = 5, editorAvailable = true, transferError = false } = {}) {
   const document = { elements: {}, listeners: {}, activeElement: null, getElementById(id) { return this.elements[id] ||= new Element(id, this); }, addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }, emit(type, extra = {}) { for (const fn of this.listeners[type] || []) fn({ target: this.getElementById('image-target'), preventDefault() {}, ...extra }); } };
   let stored = initial ? structuredClone(initial) : undefined;
   let posts = 0;
   let receipts = 0;
   let failed = false;
   const posted = [];
+  const requests = [];
   let savedConfig = disconnected ? null : { ...pairing };
   let releasePage;
   const lockQueues = new Map();
@@ -181,9 +186,20 @@ async function panelHarness({ initial, disconnected = false, postFailure, persis
   const window = { addEventListener(type, fn) { if (type === 'pagehide') releasePage = fn; } };
   const chrome = { runtime: { id: pairing.extension_id }, tabs: { create() {} } };
   const fakeRequest = async (_, path, options) => {
-    if (path.endsWith('/connection')) return { instance_id: pairing.instance_id, client_id: pairing.client_id };
+    requests.push({ path, method: options?.method || 'GET' });
+    if (path.endsWith('/connection')) {
+      if (connectionDelay) await new Promise(resolve => setTimeout(resolve, connectionDelay));
+      if (options?.method !== 'POST' || connectionFailure) throw new ApiError(connectionFailure || 401);
+      return { instance_id: pairing.instance_id, client_id: pairing.client_id };
+    }
     if (path.endsWith('/detect-language')) return { language: 'und', uncertain: true };
-    if (path.includes('/receipts/')) { receipts++; if (!receiptExists) throw new ApiError(404); return { request_id: stored.frozen.request_id, item_id: 'recovered_item' }; }
+    if (path.includes('/receipts/')) {
+      receipts++;
+      if (options?.method !== 'POST') throw new ApiError(401);
+      if (receiptFailure) throw new ApiError(receiptFailure === 'network' ? undefined : receiptFailure);
+      if (!receiptExists) throw new ApiError(404);
+      return { request_id: stored.frozen.request_id, item_id: 'recovered_item' };
+    }
     posts++;
     posted.push({ prompt: JSON.parse(options.body.get('prompt_text_json')), request_id: options.body.get('request_id'), blob: options.body.get('file') });
     if (postFailure && !failed) { failed = true; throw new ApiError(postFailure === 'network' ? undefined : postFailure); }
@@ -201,7 +217,7 @@ async function panelHarness({ initial, disconnected = false, postFailure, persis
   const AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;
   await new AsyncFunction(...Object.keys(dependencies), source)(...Object.values(dependencies));
   return {
-    document, get: id => document.getElementById(id), state: () => stored, posts: () => posts, receipts: () => receipts, posted,
+    document, get: id => document.getElementById(id), state: () => stored, posts: () => posts, receipts: () => receipts, posted, requests,
     close: () => releasePage?.(),
     paste({ file, text = '', intoPrompt = false } = {}) {
       const target = document.getElementById(intoPrompt ? 'prompt' : 'image-target');
@@ -214,6 +230,63 @@ async function until(check) {
   const deadline = Date.now() + 2000;
   while (!check()) { if (Date.now() > deadline) throw new Error('event did not settle'); await new Promise(resolve => setTimeout(resolve, 5)); }
 }
+
+test('connection import and recheck use POST, prevent duplicate clicks and show progress next to settings', async () => {
+  const panel = await panelHarness({ initial: draft(), disconnected: true, connectionDelay: 25 });
+  panel.get('base-url').value = pairing.base_url;
+  panel.get('pairing-package').value = JSON.stringify(pairing);
+  panel.get('connect').click();
+  panel.get('connect').click();
+  assert.equal(panel.get('connect').disabled, true);
+  assert.equal(panel.get('connect').textContent, '正在连接…');
+  assert.match(panel.get('pairing-status').textContent, /正在检查/);
+  await until(() => panel.get('settings').hidden && !panel.get('connect').disabled);
+  assert.match(panel.get('connection-status').textContent, /已连接/);
+  assert.equal(panel.get('pairing-package').value, '');
+  assert.deepEqual(panel.requests.filter(r => r.path.endsWith('/connection')), [{ path: '/api/captures/connection', method: 'POST' }]);
+  assert.equal(panel.posts(), 0, 'connecting must not automatically capture a complete draft');
+  panel.get('reconnect').click();
+  await until(() => panel.requests.filter(r => r.path.endsWith('/connection')).length === 2 && !panel.get('connect').disabled);
+  assert.equal(panel.requests.filter(r => r.path.endsWith('/connection')).every(r => r.method === 'POST'), true);
+  panel.close();
+  const restored = await panelHarness({ initial: draft() });
+  assert.deepEqual(restored.requests.filter(r => r.path.endsWith('/connection')), [{ path: '/api/captures/connection', method: 'POST' }]);
+  assert.equal(restored.posts(), 0);
+  restored.close();
+});
+
+test('connection failure stays visible beside connect button and preserves the pairing package and draft', async () => {
+  const panel = await panelHarness({ initial: { ...draft(), error: '旧卡片错误' }, disconnected: true, connectionFailure: 401 });
+  panel.get('base-url').value = pairing.base_url;
+  const packageText = JSON.stringify(pairing);
+  panel.get('pairing-package').value = packageText;
+  panel.get('connect').click();
+  await until(() => !panel.get('connect').disabled);
+  assert.equal(panel.get('settings').hidden, false);
+  assert.equal(panel.get('pairing-error').hidden, false);
+  assert.match(panel.get('pairing-error').textContent, /配对无效/);
+  assert.equal(panel.state().error, '旧卡片错误', 'a new connection failure is visible without destroying the earlier card error');
+  assert.equal(panel.get('pairing-status').textContent, '未连接');
+  assert.equal(panel.get('pairing-package').value, packageText);
+  assert.equal(panel.get('pairing-error').textContent.includes(pairing.token), false);
+  assert.equal(panel.state().prompt, draft().prompt);
+  assert.equal(panel.posts(), 0);
+  panel.close();
+});
+
+test('receipt POST errors retain the frozen request without uploading or silently unlocking it', async () => {
+  for (const status of [400, 401, 403, 500, 'network']) {
+    const initial = core.failCard(core.freezeCard(draft(), pairing, () => requestId), undefined, 'uncertain');
+    const panel = await panelHarness({ initial, receiptFailure: status });
+    panel.get('save').click();
+    await until(() => panel.receipts() === 1 && panel.get('save').textContent !== '保存中…');
+    assert.equal(panel.posts(), 0);
+    assert.deepEqual(panel.state().frozen, initial.frozen);
+    assert.equal(panel.state().status, 'uncertain');
+    assert.deepEqual(panel.requests.filter(r => r.path.includes('/receipts/')), [{ path: `/api/captures/receipts/${requestId}`, method: 'POST' }]);
+    panel.close();
+  }
+});
 
 test('actual sidepanel handlers accept either order, save once and clear both fields for next card', async () => {
   for (const imageFirst of [true, false]) {

@@ -28,11 +28,13 @@ def _paired_client(request: Request):
 
 
 @router.get("/captures/connection")
+@router.post("/captures/connection")
 def capture_connection(request: Request):
     return _paired_client(request)
 
 
 @router.get("/captures/receipts/{request_id}", response_model=CaptureReceipt)
+@router.post("/captures/receipts/{request_id}", response_model=CaptureReceipt)
 def capture_receipt(request_id: uuid.UUID, request: Request):
     client = _paired_client(request)
     with connect(request.app.state.library_path) as conn:

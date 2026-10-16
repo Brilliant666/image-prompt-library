@@ -7,6 +7,8 @@ const $ = id => document.getElementById(id);
 let card = emptyCard();
 let config = null;
 let connected = false;
+let connecting = false;
+let connectionError = '';
 let reading = false;
 let busy = false;
 let composing = false;
@@ -23,7 +25,12 @@ let releaseEditor = () => {};
 const channel = new BroadcastChannel('image-prompt-library-capture');
 const languages = { zh_hans: '简体中文', zh_hant: '繁體中文', en: 'English', und: '不确定 / 混合文本' };
 
-function showError(message) { $('error').textContent = message; $('error').hidden = !message; }
+function showError(message) {
+  $('error').textContent = message;
+  $('error').hidden = !message || !$('settings').hidden;
+  $('pairing-error').textContent = message;
+  $('pairing-error').hidden = !message;
+}
 function enqueue(action) {
   operation = operation.then(action).catch(error => { showError(error.message || '操作未完成，草稿仍保留。'); });
   return operation;
@@ -59,8 +66,11 @@ function render() {
   // replace an active, editable textarea with an older persisted snapshot.
   if ((document.activeElement !== $('prompt') || locked || saved) && $('prompt').value !== card.prompt) $('prompt').value = card.prompt;
   $('language').value = card.language;
-  $('connection-status').textContent = connected ? `已连接 · ${config.base_url}` : config ? '未连接 / 授权待检查' : '尚未配对本地图库';
+  $('connection-status').textContent = connecting ? '正在检查配对…' : connected ? `已连接 · ${config.base_url}` : config ? '未连接 / 授权待检查' : '尚未配对本地图库';
   $('connection-status').className = connected ? 'connected' : '';
+  $('pairing-status').textContent = connecting ? '正在检查配对，请稍候…' : connected ? `已连接 · ${config.base_url}` : '未连接';
+  $('connect').textContent = connecting ? '正在连接…' : '连接图库';
+  $('reconnect').disabled = connecting;
   const image = card.image;
   if (renderedBlob !== image?.blob) {
     if (imageObjectURL) URL.revokeObjectURL(imageObjectURL);
@@ -88,8 +98,8 @@ function render() {
   $('save').disabled = !ownsEditor || busy || reading || Boolean(pendingURL) || !connected || (!card.frozen && !canSave(card, connected));
   $('save').textContent = busy ? '保存中…' : card.frozen ? '恢复回执 / 重试原请求' : '保存到图库';
   $('status').textContent = saved ? '已保存' : busy ? '保存中…' : reading ? '正在读取和检查图片…' : card.frozen ? '结果未确认 · 原请求和图文已锁定保留' : !image ? '等待图片' : !card.prompt.trim() ? '等待提示词' : !connected ? '图文已保留 · 等待连接图库' : '图文已就绪 · 可手动保存';
-  for (const id of ['connect', 'disconnect', 'clear-permissions', 'discard', 'continue']) $(id).disabled = !ownsEditor || busy;
-  showError(ownsEditor ? card.error : '另一窗口正在编辑当前收录卡片。本窗口只读；请回到原窗口，或关闭原侧栏后重新打开这里。');
+  for (const id of ['connect', 'disconnect', 'clear-permissions', 'discard', 'continue']) $(id).disabled = !ownsEditor || busy || connecting;
+  showError(ownsEditor ? connectionError || card.error : '另一窗口正在编辑当前收录卡片。本窗口只读；请回到原窗口，或关闭原侧栏后重新打开这里。');
 }
 async function detectLanguage() {
   const text = card.prompt;
@@ -103,16 +113,21 @@ async function detectLanguage() {
   } catch { if (version === detectionGeneration) $('language-result').textContent = '暂未判断语言，保存时仍可自动判断'; }
 }
 async function verifyConnection() {
+  if (connecting) return;
+  connecting = Boolean(config);
+  connectionError = '';
   connected = false;
   render();
   if (!config) return;
   try {
-    const response = await localRequest(config, '/api/captures/connection');
+    // Host-permitted extension GETs may omit Origin. POST keeps the browser's
+    // Origin available without weakening the server's paired-origin check.
+    const response = await localRequest(config, '/api/captures/connection', { method: 'POST' });
     if (response.instance_id !== config.instance_id || response.client_id !== config.client_id) throw new Error('本地实例或配对身份不一致，请检查配对设置。');
     connected = true;
-    render();
     void detectLanguage();
-  } catch (error) { render(); showError(error.message); }
+  } catch (error) { connectionError = error.message; }
+  finally { connecting = false; render(); }
 }
 async function submit() {
   if (!ownsEditor || busy || reading || pendingURL || composing || !connected || !config) return;
@@ -131,7 +146,7 @@ async function submit() {
       try {
         let receipt;
         if (recovering) {
-          try { receipt = await localRequest(config, `/api/captures/receipts/${card.frozen.request_id}`); }
+          try { receipt = await localRequest(config, `/api/captures/receipts/${card.frozen.request_id}`, { method: 'POST' }); }
           catch (error) { if (!(error instanceof ApiError) || error.status !== 404) throw error; }
         }
         if (!receipt) { capturePosted = true; receipt = await localRequest(config, '/api/captures', { method: 'POST', body: captureBody(card.frozen) }); }
@@ -273,6 +288,7 @@ $('view-library').addEventListener('click', () => {
 $('settings-toggle').addEventListener('click', () => {
   $('settings').hidden = !$('settings').hidden;
   $('settings-toggle').setAttribute('aria-expanded', String(!$('settings').hidden));
+  render();
 });
 $('copy-id').addEventListener('click', async () => {
   try { await navigator.clipboard.writeText(chrome.runtime.id); $('copy-id').textContent = '已复制'; }
@@ -283,14 +299,17 @@ $('open-pairing').addEventListener('click', () => {
   catch (error) { showError(error.message); }
 });
 $('connect').addEventListener('click', async () => {
-  if (!ownsEditor || busy) return;
+  if (!ownsEditor || busy || connecting) return;
+  connecting = true;
+  connectionError = '';
+  render();
   try {
     const next = parsePairing($('pairing-package').value, chrome.runtime.id, $('base-url').value);
     if (card.frozen && !sameTarget(card.frozen, next)) throw new Error('当前有结果未确认的收录，不能换成新的配对客户端。请恢复原配对包，或先到原图库核对并清除当前草稿。');
     connected = false;
     render();
     if (!await grantHost(next.base_url)) throw new Error('未授权本地图库地址，尚未连接。');
-    const result = await localRequest(next, '/api/captures/connection');
+    const result = await localRequest(next, '/api/captures/connection', { method: 'POST' });
     if (result.instance_id !== next.instance_id || result.client_id !== next.client_id) throw new Error('配对包与本地实例不一致。');
     await navigator.locks.request('image-prompt-library-capture', async () => {
       card = await readCard() || emptyCard();
@@ -304,9 +323,10 @@ $('connect').addEventListener('click', async () => {
     $('settings-toggle').setAttribute('aria-expanded', 'false');
     render();
     void detectLanguage(); // Connection/detection/restoration never initiates a capture.
-  } catch (error) { showError(error.message); }
+  } catch (error) { connectionError = error.message; }
+  finally { connecting = false; render(); }
 });
-$('disconnect').addEventListener('click', () => enqueue(async () => { await writeConfig(null); config = null; connected = false; $('pairing-package').value = ''; render(); }));
+$('disconnect').addEventListener('click', () => enqueue(async () => { await writeConfig(null); config = null; connected = false; connectionError = ''; $('pairing-package').value = ''; render(); }));
 $('reconnect').addEventListener('click', () => enqueue(verifyConnection));
 $('clear-permissions').addEventListener('click', async () => {
   const permissions = await chrome.permissions.getAll();

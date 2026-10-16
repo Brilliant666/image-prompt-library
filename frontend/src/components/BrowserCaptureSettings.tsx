@@ -69,7 +69,7 @@ export default function BrowserCaptureSettings({ uiLanguage }: { uiLanguage: UiL
     <h3 id="capture-pairing-heading"><Link size={18} />{en ? 'Browser capture' : '浏览器快捷收录'}</h3>
     <p className="muted">{en ? 'Authorize a browser extension to save images and prompts to this local library. It cannot browse the library or use generation accounts.' : '授权浏览器插件向此本地图库收录图片与提示词。插件不能浏览整个图库或使用生图账号。'}</p>
     <p className="capture-instance">{location.origin}</p>
-    <label>{en ? 'Extension ID' : '扩展 ID'}<input value={extensionId} onChange={event => setExtensionId(event.target.value.trim())} maxLength={32} placeholder="chrome://extensions" autoComplete="off" spellCheck={false} /></label>
+    <label>{en ? 'Extension ID' : '扩展 ID'}<input value={extensionId} onChange={event => setExtensionId(event.target.value.trim())} maxLength={32} placeholder={en ? '32 letters from a to p' : '32 位扩展 ID（a–p 字母）'} autoComplete="off" spellCheck={false} /></label>
     <label>{en ? 'Name' : '配对名称'}<input value={name} onChange={event => setName(event.target.value)} maxLength={80} /></label>
     <button className="secondary" type="button" disabled={busy || !/^[a-p]{32}$/.test(extensionId)} onClick={() => void authorize()}>{en ? 'Authorize capture only' : '授权此扩展收录'}</button>
     {pairing && <div className="capture-pairing-ready">

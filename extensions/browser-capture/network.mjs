@@ -4,7 +4,7 @@ export class ApiError extends Error {
   constructor(status) { super(safeFailure(status)); this.status = status; }
 }
 export function apiOptions(config, options = {}) {
-  return { ...options, credentials: 'omit', redirect: 'error', cache: 'no-store', referrerPolicy: 'no-referrer', headers: {
+  return { ...options, mode: 'cors', credentials: 'omit', redirect: 'error', cache: 'no-store', referrerPolicy: 'no-referrer', headers: {
     ...(options.headers || {}), 'X-Capture-Token': config.token, 'X-Capture-Instance': config.instance_id,
   } };
 }

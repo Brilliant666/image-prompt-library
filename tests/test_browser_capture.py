@@ -128,18 +128,68 @@ def test_capture_validates_real_bytes_preserves_original_and_replays(setup_captu
     assert submit(client, headers, image=b"https://example.invalid/image.png").status_code == 400
 
 
-def test_same_request_id_is_scoped_to_each_client_and_receipt_survives_restart(setup_capture):
+@pytest.mark.parametrize("query_method", ["GET", "POST"])
+def test_same_request_id_is_scoped_to_each_client_and_receipt_survives_restart(setup_capture, query_method):
     client, library, _ = setup_capture
     first = authorization(pair(client))
     second = authorization(pair(client, "p" * 32))
     request_id = str(uuid.uuid4())
     result = submit(client, first, request_id).json()
-    assert client.get(f"/api/captures/receipts/{request_id}", headers=second).status_code == 404
+    assert client.request(query_method, f"/api/captures/receipts/{request_id}", headers=second).status_code == 404
     second_result = submit(client, second, request_id, "Other prompt").json()
     assert result["item_id"] != second_result["item_id"]
     restarted = TestClient(create_app(library_path=library), base_url=TARGET, client=("127.0.0.1", 54321))
-    assert restarted.get(f"/api/captures/receipts/{request_id}", headers=first).json() == result
+    assert restarted.request(query_method, f"/api/captures/receipts/{request_id}", headers=first).json() == result
     assert submit(restarted, first, request_id).json() == result
+
+
+@pytest.mark.parametrize("query_method", ["GET", "POST"])
+def test_connection_and_receipt_queries_require_full_identity_and_never_create_items(setup_capture, query_method):
+    client, library, _ = setup_capture
+    pairing = pair(client)
+    headers = authorization(pairing)
+    request_id = str(uuid.uuid4())
+    paths = ("/api/captures/connection", f"/api/captures/receipts/{request_id}")
+    for path in paths:
+        for changes in ({"Origin": None}, {"Origin": "null"}, {"Origin": TARGET},
+                        {"Origin": "chrome-extension://" + "p" * 32},
+                        {"X-Capture-Instance": "wrong-instance"}, {"X-Capture-Token": "invalid"}):
+            invalid = {key: value for key, value in {**headers, **changes}.items() if value is not None}
+            assert client.request(query_method, path, headers=invalid).status_code == 401
+    assert client.request(query_method, paths[0], headers=headers).json() == {"instance_id": pairing["instance_id"], "client_id": pairing["client_id"]}
+    assert client.request(query_method, paths[1], headers=headers).status_code == 404
+    with connect(library) as conn:
+        assert conn.execute("SELECT count(*) FROM items").fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM capture_requests").fetchone()[0] == 0
+    receipt = submit(client, headers, request_id).json()
+    for _ in range(3):
+        assert client.request(query_method, paths[0], headers=headers).status_code == 200
+        assert client.request(query_method, paths[1], headers=headers).json() == receipt
+    with connect(library) as conn:
+        assert conn.execute("SELECT count(*) FROM items").fetchone()[0] == 1
+        assert conn.execute("SELECT count(*) FROM capture_requests").fetchone()[0] == 1
+    assert client.delete("/api/capture-clients/" + pairing["client_id"], headers={"Origin": TARGET}).status_code == 204
+    for path in paths:
+        assert client.request(query_method, path, headers=headers).status_code == 401
+
+
+def test_query_post_alias_preflights_do_not_expand_capture_permission(setup_capture):
+    client, _, _ = setup_capture
+    paired = authorization(pair(client))
+    headers = {"Origin": ORIGIN, "Access-Control-Request-Method": "POST",
+               "Access-Control-Request-Headers": "content-type,x-capture-token,x-capture-instance"}
+    for path in ("/api/captures/connection", f"/api/captures/receipts/{uuid.uuid4()}"):
+        response = client.options(path, headers=headers)
+        assert response.status_code == 204
+        assert response.headers["access-control-allow-origin"] == ORIGIN
+        assert response.headers["access-control-allow-methods"] == "POST"
+        assert client.post(path, headers={"Origin": ORIGIN}).status_code == 401
+        assert client.options(path, headers={**headers, "Origin": "null"}).status_code in {400, 403}
+        assert client.options(path, headers={**headers, "Origin": "chrome-extension://" + "p" * 32}).status_code == 403
+        assert client.options(path, headers={**headers, "Access-Control-Request-Method": "DELETE"}).status_code == 403
+    for path in ("/api/captures/receipts", "/api/captures/connection/extra", "/api/config", "/api/items"):
+        assert client.post(path, headers=paired).status_code == 403
+        assert client.options(path, headers=headers).status_code == 403
 
 
 def test_simultaneous_paired_submission_creates_one_item(setup_capture):
@@ -255,12 +305,13 @@ def test_language_detection_and_capture_do_not_require_manual_language(setup_cap
     assert submit(client, headers, prompt=prompt).status_code == 200
 
 
-def test_manual_language_override_and_deleted_receipt(setup_capture):
+@pytest.mark.parametrize("query_method", ["GET", "POST"])
+def test_manual_language_override_and_deleted_receipt(setup_capture, query_method):
     client, _, _ = setup_capture
     headers = authorization(pair(client))
     request_id = str(uuid.uuid4())
     result = submit(client, headers, request_id, "123 mixed", language="zh_hant").json()
     assert client.get("/api/items/" + result["item_id"]).json()["prompts"][0]["language"] == "zh_hant"
     assert client.delete("/api/items/" + result["item_id"]).status_code == 200
-    assert client.get(f"/api/captures/receipts/{request_id}", headers=headers).status_code == 410
+    assert client.request(query_method, f"/api/captures/receipts/{request_id}", headers=headers).status_code == 410
     assert submit(client, headers, request_id, "123 mixed", language="zh_hant").status_code == 410

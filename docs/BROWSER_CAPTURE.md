@@ -36,6 +36,13 @@ into the extension's connection settings. The resulting credential is bound to
 this extension, client, local origin, and library instance. The connection check
 does not submit an image.
 
+Connection validation and own-receipt queries use POST without creating assets.
+Chrome may omit `Origin` on host-permitted extension GETs; these POST requests
+allow the browser to supply it while the server still requires the exact paired
+Origin, token, local target and instance. The original GET routes remain available
+with the same strict checks. The extension never manufactures an Origin header.
+The pairing panel shows connection progress and errors beside the connect button.
+
 Use the same settings section to **revoke** a pairing. It does not delete assets.
 Close the settings drawer to discard the in-memory copy of a newly issued secret.
 Do not paste pairing information into chats or commit it to Git.

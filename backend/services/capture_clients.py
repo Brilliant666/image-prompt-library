@@ -69,9 +69,11 @@ def require_local_management(request: Request) -> str:
 
 
 def capture_route_allowed(path: str, method: str) -> bool:
-    if method == "POST":
-        return path in {"/api/captures", "/api/captures/detect-language"}
-    return method == "GET" and (path == "/api/captures/connection" or _RECEIPT.fullmatch(path) is not None)
+    if method == "POST" and path in {"/api/captures", "/api/captures/detect-language"}:
+        return True
+    # Chrome may omit Origin on extension GETs with host permission. POST
+    # aliases retain the exact same identity checks and read-only behavior.
+    return method in {"GET", "POST"} and (path == "/api/captures/connection" or _RECEIPT.fullmatch(path) is not None)
 
 
 def namespaced_request_id(client_id: str, request_id: str | uuid.UUID) -> uuid.UUID:
