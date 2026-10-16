@@ -35,7 +35,7 @@ MAX_UPLOAD_BYTES = 30 * 1024 * 1024
 
 def _sanitize_generation_input_image_spec(spec: object) -> object:
     if not isinstance(spec, dict):
-        return spec
+        return sanitize_generation_parameters({"value": spec}, redact_image_data=True).get("value")
     has_inline_image = any(
         str(key).lower().replace("_", "").replace("-", "").endswith(("dataurl", "imageurl"))
         or (isinstance(value, str) and value.lstrip().lower().startswith("data:image/"))
@@ -49,9 +49,10 @@ def _sanitize_generation_input_image_spec(spec: object) -> object:
 
 
 def _sanitize_generation_job_parameters(parameters: object) -> object:
-    sanitized = sanitize_generation_parameters(parameters)
-    input_images = sanitized.get("input_images")
-    redacted = sanitize_generation_parameters(sanitized, redact_image_data=True)
+    # Remove multi-megabyte inline image payloads before credential scanning.
+    # Scanning bytes which are never returned makes every history poll expensive.
+    redacted = sanitize_generation_parameters(parameters, redact_image_data=True)
+    input_images = parameters.get("input_images") if isinstance(parameters, dict) else None
     if not isinstance(input_images, list):
         return redacted
     redacted["input_images"] = [

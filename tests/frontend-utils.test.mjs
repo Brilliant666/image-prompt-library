@@ -18,7 +18,7 @@ const {
 } = await importTypescript('../frontend/src/utils/searchSort.ts');
 const { resolveOriginalPrompt, resolvePromptText } = await importTypescript('../frontend/src/utils/prompts.ts');
 const { downloadFileName, imageDisplayPath, imageThumbnailPath, selectPrimaryImage } = await importTypescript('../frontend/src/utils/images.ts');
-const { generationFailure } = await importTypescript('../frontend/src/utils/generationFailures.ts');
+const { generationFailure, generationModerationGuidance } = await importTypescript('../frontend/src/utils/generationFailures.ts');
 const { generationSetProgressText, providerPauseSeconds } = await importTypescript('../frontend/src/utils/generationSets.ts');
 const { generationAspectRatio } = await importTypescript('../frontend/src/utils/generationAspectRatio.ts');
 const { generationResultActions } = await importTypescript('../frontend/src/utils/generationResultActions.ts');
@@ -529,6 +529,8 @@ test('transparency conflicts are blocked and compression zero survives JSON seri
 
 test('actual frontend API serializes frozen single/batch/edit recipes and preserves prompt bytes', async () => {
   let source = await readFile(new URL('../frontend/src/api/client.ts', import.meta.url), 'utf8');
+  const readSource = await readFile(new URL('../frontend/src/api/readJson.ts', import.meta.url), 'utf8');
+  source = source.replace("import { readJson } from './readJson';", readSource.replaceAll('export ', ''));
   source = source.replace("import { DEFAULT_ITEM_SORT } from '../utils/searchSort';", "const DEFAULT_ITEM_SORT = 'updated_desc';").replaceAll('import.meta.env', '({})');
   const javascript = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
   const { api } = await import(`data:text/javascript;base64,${Buffer.from(javascript).toString('base64')}`);
@@ -650,4 +652,39 @@ test('size badge preserves exact custom pixels and does not infer a billing tier
   assert.equal(imageSizeLabel('1728x2304'), '1728x2304 (3:4)');
   assert.equal(imageSizeBadge('4096x4096'), 'px');
   assert.equal(imageSizeBadge('invalid'), 'px');
+});
+
+
+test('metadata GETs share in-flight work and time out even when fetch ignores abort', async () => {
+  const { readJson } = await importTypescript('../frontend/src/api/readJson.ts');
+  const originalFetch = globalThis.fetch;
+  let requests = 0;
+  let signal;
+  globalThis.fetch = (_url, init) => { requests += 1; signal = init.signal; return new Promise(() => {}); };
+  try {
+    const first = readJson('/bounded-test', 15);
+    const duplicate = readJson('/bounded-test', 15);
+    assert.equal(first, duplicate);
+    await assert.rejects(first, /timed out/);
+    assert.equal(requests, 1);
+    assert.equal(signal.aborted, true);
+    globalThis.fetch = async () => ({ ok: true, json: async () => ({ recovered: true }) });
+    assert.deepEqual(await readJson('/bounded-test', 100), { recovered: true });
+    globalThis.fetch = async () => ({ ok: true, json: () => new Promise(() => {}) });
+    await assert.rejects(readJson('/body-timeout', 15), /timed out/);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+
+test('moderation guidance distinguishes structured input and output without guessing from text', () => {
+  const t = key => key;
+  const job = stage => ({ metadata: { error_kind: 'policy_violation', error_diagnostics: { error: {
+    moderation_details: { moderation_stage: stage },
+  } } } });
+  assert.equal(generationModerationGuidance(job('input'), t), 'generationModerationInput');
+  assert.equal(generationModerationGuidance(job('output'), t), 'generationModerationOutput');
+  assert.equal(generationModerationGuidance(job('secret'), t), 'generationModerationUnknown');
+  assert.equal(generationModerationGuidance({ metadata: { error_kind: 'policy_violation' }, error: 'input sexual' }, t), 'generationModerationUnknown');
+  assert.equal(generationModerationGuidance({ metadata: { error_diagnostics: { error: { code: 'moderation_blocked' } } } }, t), 'generationModerationUnknown');
+  assert.equal(generationModerationGuidance({ metadata: { error_kind: 'rate_limited' } }, t), undefined);
 });

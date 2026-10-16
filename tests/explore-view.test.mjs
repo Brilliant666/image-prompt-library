@@ -1292,7 +1292,7 @@ test('compatible image providers retain the existing batch count menu and queue-
 
 test('pending recipe references lock every composer edit until restoration finishes', async () => {
   const generation = await readFile(`${ROOT}/frontend/src/components/GenerationPanel.tsx`, 'utf8');
-  const start = generation.indexOf('<fieldset disabled={recipeLoading}');
+  const start = generation.indexOf("<fieldset disabled={recipeLoading || providersState !== 'ready'}");
   assert.ok(start >= 0, 'native fieldset must guard edits while asynchronous references load');
   const end = generation.indexOf('</fieldset>', start);
   assert.ok(end > start);
@@ -1307,7 +1307,7 @@ test('pending recipe references lock every composer edit until restoration finis
     'ref={attachmentInputRef}', 'ref={generationCountTriggerRef}',
   ]) assert.ok(guarded.includes(control), `${control} must stay within the pending-restore guard`);
   assert.doesNotMatch(guarded, /<legend[\s>]/, 'legend controls bypass fieldset disabled semantics');
-  assert.match(guarded, /aria-busy=\{recipeLoading\}/);
+  assert.match(guarded, /aria-busy=\{recipeLoading \|\| providersState === 'loading'\}/);
   assert.match(guarded, /recipeLoading \? t\('recipeRestoreLoading'\)/);
 });
 
@@ -1362,4 +1362,32 @@ test('new references default to simplified Chinese while editing preserves origi
     assert.equal(originalField(html), label);
     assert.ok(html.includes(text));
   }
+});
+
+
+test('generation loading and failed GETs cannot masquerade as empty history or a default provider', async () => {
+  const generation = await readFile(`${ROOT}/frontend/src/components/GenerationPanel.tsx`, 'utf8');
+  assert.match(generation, /providersState === 'ready' && providerCanGenerate/);
+  assert.match(generation, /providersState === 'ready' && <>/);
+  assert.match(generation, /jobsState === 'ready' && visibleJobs.length === 0/);
+  assert.match(generation, /jobsState === 'error'[\s\S]*?onClick=\{retryJobs\}/);
+  assert.doesNotMatch(generation, /setProviders\(\[\{/);
+  assert.doesNotMatch(generation, /openAICompatibleProfiles\(\)\.catch/);
+  const retryControl = generation.indexOf('onClick={() => setProviderReload');
+  const fieldset = generation.indexOf('<fieldset disabled=');
+  assert.ok(retryControl >= 0 && retryControl < fieldset, 'failed GET retry must remain outside disabled composer');
+  assert.match(generation, /jobsRequestRef.current !== requestId\) return undefined;\s*replaceGenerationJobs\(nextJobs\)/);
+  assert.match(generation, /src=\{jobResultUrl\(job\)\} alt="" loading="lazy" decoding="async"/);
+});
+
+
+test('generation loading stays in the header and metadata polling waits for completion', async () => {
+  const panel = await readFile(`${ROOT}/frontend/src/components/GenerationPanel.tsx`, 'utf8');
+  const queue = await readFile(`${ROOT}/frontend/src/components/GenerationQueueDrawer.tsx`, 'utf8');
+  const header = panel.slice(panel.indexOf('<header className="generation-workspace-head"'), panel.indexOf('</header>', panel.indexOf('<header className="generation-workspace-head"')));
+  assert.match(header, /generation-provider-status/);
+  assert.doesNotMatch(panel, /setInterval\(.*refreshActiveWork/);
+  assert.doesNotMatch(queue, /setInterval\(.*refresh\(/);
+  assert.match(panel, /if \(!cancelled\) timer = window.setTimeout\(refreshActiveWork, 2500\)/);
+  assert.match(queue, /await refresh\(\).*\r?\n.*if \(!cancelled/);
 });
