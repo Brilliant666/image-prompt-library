@@ -69,6 +69,11 @@ def resolve_openai_compatible_config_path() -> Path:
     return Path(configured).expanduser() if configured else DEFAULT_APP_STATE_PATH / "openai-compatible.json"
 
 
+def resolve_capture_clients_path() -> Path:
+    configured = os.environ.get("IMAGE_PROMPT_LIBRARY_CAPTURE_CLIENTS_PATH")
+    return Path(configured).expanduser() if configured else DEFAULT_APP_STATE_PATH / "capture-clients.json"
+
+
 def _path_identities(path: Path | str) -> tuple[Path, Path]:
     absolute = Path(os.path.abspath(Path(path).expanduser()))
     try:
@@ -117,6 +122,7 @@ def validate_app_owned_paths(library_path: Path | str) -> None:
         ("IMAGE_PROMPT_LIBRARY_GROK_AUTH_PATH", resolve_grok_auth_path()),
         ("IMAGE_PROMPT_LIBRARY_CONFIG_PATH", resolve_config_path()),
         ("IMAGE_PROMPT_LIBRARY_OPENAI_COMPATIBLE_CONFIG_PATH", resolve_openai_compatible_config_path()),
+        ("IMAGE_PROMPT_LIBRARY_CAPTURE_CLIENTS_PATH", resolve_capture_clients_path()),
     ):
         path_absolute, path_resolved = _path_identities(configured_path)
         if _path_is_within(path_absolute, library_absolute) or _path_is_within(path_resolved, library_resolved):

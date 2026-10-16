@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import OpenAICompatibleSettings from './OpenAICompatibleSettings';
+import BrowserCaptureSettings from './BrowserCaptureSettings';
 import { X } from 'lucide-react';
 import { api, isDemoMode } from '../api/client';
 import { restoreFocusAfterMotion } from '../hooks/useModalFocus';
@@ -406,6 +407,8 @@ export default function ConfigPanel({
           <X size={20} strokeWidth={2.25} />
         </button>
       </div>
+
+      {open && !isDemoMode && <BrowserCaptureSettings uiLanguage={uiLanguage} />}
 
       <section className="setting-group">
         <h3>{t('uiLanguage')}</h3>

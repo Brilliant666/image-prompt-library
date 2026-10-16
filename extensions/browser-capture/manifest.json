@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Image Prompt Library · 快捷收录",
+  "version": "0.1.0",
+  "description": "主动放入一张图片和原始提示词，保存到已配对的本地 Image Prompt Library。",
+  "minimum_chrome_version": "116",
+  "permissions": ["sidePanel", "storage", "activeTab", "scripting"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "background": {"service_worker": "background.js", "type": "module"},
+  "action": {"default_title": "打开图片＋提示词收录"},
+  "side_panel": {"default_path": "sidepanel.html"},
+  "content_security_policy": {"extension_pages": "script-src 'self'; object-src 'none'; base-uri 'none'; frame-src 'none'"}
+}
