@@ -8,6 +8,7 @@ import { checkedImage, dataImage, transferredImageURL } from '../extensions/brow
 
 const pairing = { version: 1, base_url: 'http://127.0.0.1:8013', extension_id: 'a'.repeat(32), instance_id: 'instance_123', client_id: 'client_123', token: 'synthetic-test-token-not-a-real-secret' };
 const requestId = 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa';
+const manifest = JSON.parse(await readFile(new URL('../extensions/browser-capture/manifest.json', import.meta.url), 'utf8'));
 const image = { blob: new Blob([Uint8Array.from([137,80,78,71,13,10,26,10,1,2,3])], { type: 'image/png' }), name: 'capture.png', width: 1, height: 1, source: 'file' };
 const draft = () => ({ ...core.emptyCard(), image, prompt: '  原始提示词\r\n第二行\n\n', language: 'auto' });
 
@@ -184,7 +185,7 @@ async function panelHarness({ initial, disconnected = false, postFailure, persis
     return result;
   } }, clipboard: { writeText: async () => {} } };
   const window = { addEventListener(type, fn) { if (type === 'pagehide') releasePage = fn; } };
-  const chrome = { runtime: { id: pairing.extension_id }, tabs: { create() {} } };
+  const chrome = { runtime: { id: pairing.extension_id, getManifest: () => manifest }, tabs: { create() {} } };
   const fakeRequest = async (_, path, options) => {
     requests.push({ path, method: options?.method || 'GET' });
     if (path.endsWith('/connection')) {
@@ -240,8 +241,12 @@ test('connection import and recheck use POST, prevent duplicate clicks and show 
   assert.equal(panel.get('connect').disabled, true);
   assert.equal(panel.get('connect').textContent, '正在连接…');
   assert.match(panel.get('pairing-status').textContent, /正在检查/);
+  assert.equal(panel.get('connection-feedback').hidden, false);
+  assert.equal(panel.get('connection-feedback-title').textContent, '正在连接图库…');
   await until(() => panel.get('settings').hidden && !panel.get('connect').disabled);
   assert.match(panel.get('connection-status').textContent, /已连接/);
+  assert.equal(panel.get('connection-feedback-title').textContent, '已连接图库');
+  assert.match(panel.get('connection-feedback-detail').textContent, /连接本身不会保存/);
   assert.equal(panel.get('pairing-package').value, '');
   assert.deepEqual(panel.requests.filter(r => r.path.endsWith('/connection')), [{ path: '/api/captures/connection', method: 'POST' }]);
   assert.equal(panel.posts(), 0, 'connecting must not automatically capture a complete draft');
@@ -252,6 +257,8 @@ test('connection import and recheck use POST, prevent duplicate clicks and show 
   const restored = await panelHarness({ initial: draft() });
   assert.deepEqual(restored.requests.filter(r => r.path.endsWith('/connection')), [{ path: '/api/captures/connection', method: 'POST' }]);
   assert.equal(restored.posts(), 0);
+  assert.equal(restored.get('extension-version').textContent, `v${manifest.version}`);
+  assert.equal(restored.get('connection-feedback').hidden, true, 'restoration does not show an unsolicited connection popup');
   restored.close();
 });
 
@@ -265,11 +272,80 @@ test('connection failure stays visible beside connect button and preserves the p
   assert.equal(panel.get('settings').hidden, false);
   assert.equal(panel.get('pairing-error').hidden, false);
   assert.match(panel.get('pairing-error').textContent, /配对无效/);
+  assert.equal(panel.get('connection-feedback').hidden, false);
+  assert.equal(panel.get('connection-feedback-title').textContent, '连接失败');
+  assert.match(panel.get('connection-feedback-detail').textContent, /配对无效/);
+  assert.equal(panel.get('connection-feedback-detail').textContent.includes(pairing.token), false);
   assert.equal(panel.state().error, '旧卡片错误', 'a new connection failure is visible without destroying the earlier card error');
   assert.equal(panel.get('pairing-status').textContent, '未连接');
   assert.equal(panel.get('pairing-package').value, packageText);
   assert.equal(panel.get('pairing-error').textContent.includes(pairing.token), false);
   assert.equal(panel.state().prompt, draft().prompt);
+  assert.equal(panel.posts(), 0);
+  panel.close();
+});
+
+test('dismissed connection feedback stays closed through completion until another explicit check', async () => {
+  const panel = await panelHarness({ initial: draft(), connectionDelay: 25 });
+  assert.equal(panel.get('connection-feedback').hidden, true);
+  panel.get('reconnect').click();
+  await until(() => panel.get('connect').disabled);
+  assert.equal(panel.get('connection-feedback').hidden, false);
+  panel.get('dismiss-connection-feedback').click();
+  assert.equal(panel.get('connection-feedback').hidden, true);
+  await until(() => !panel.get('connect').disabled);
+  assert.equal(panel.get('connection-feedback').hidden, true);
+  panel.get('reconnect').click();
+  await until(() => panel.get('connect').disabled);
+  assert.equal(panel.get('connection-feedback').hidden, false);
+  await until(() => !panel.get('connect').disabled);
+  assert.equal(panel.get('connection-feedback-title').textContent, '已连接图库');
+  panel.get('disconnect').click();
+  await until(() => panel.get('connection-status').textContent === '尚未配对本地图库');
+  assert.equal(panel.get('connection-feedback').hidden, true);
+  assert.equal(panel.state().prompt, draft().prompt);
+  assert.equal(panel.posts(), 0);
+  panel.close();
+});
+
+test('checking without a pairing and failed startup give accurate feedback without uploading the draft', async () => {
+  const panel = await panelHarness({ initial: draft(), disconnected: true });
+  panel.get('reconnect').click();
+  await until(() => !panel.get('connection-feedback').hidden && !panel.get('connect').disabled);
+  assert.equal(panel.get('connection-feedback-title').textContent, '尚未连接图库');
+  assert.equal(panel.get('connect').disabled, false);
+  assert.equal(panel.requests.length, 0);
+  panel.close();
+  const restored = await panelHarness({ initial: draft(), connectionFailure: 401 });
+  assert.equal(restored.get('connection-feedback').hidden, true);
+  restored.get('reconnect').click();
+  await until(() => !restored.get('connection-feedback').hidden && !restored.get('connect').disabled);
+  assert.equal(restored.get('connection-feedback-title').textContent, '连接失败');
+  assert.equal(restored.posts(), 0);
+  restored.close();
+});
+
+test('connection feedback is immediate and repeated checks coalesce while image intake is queued', async () => {
+  const panel = await panelHarness({ initial: core.emptyCard(), imageDelay: 50 });
+  panel.paste({ file: image.blob });
+  await until(() => panel.get('status').textContent.includes('正在读取'));
+  panel.get('reconnect').click();
+  panel.get('reconnect').click();
+  assert.equal(panel.get('connection-feedback').hidden, false);
+  assert.equal(panel.get('reconnect').disabled, true);
+  assert.match(panel.get('connection-feedback-detail').textContent, /等待当前操作/);
+  await until(() => !panel.get('reconnect').disabled);
+  assert.equal(panel.requests.filter(r => r.path.endsWith('/connection')).length, 2, 'startup plus one deliberate check');
+  assert.equal(panel.get('connection-feedback-title').textContent, '已连接图库');
+  let announcements = 0;
+  for (const id of ['connection-feedback-title', 'connection-feedback-detail']) {
+    let value = panel.get(id).textContent;
+    Object.defineProperty(panel.get(id), 'textContent', { get: () => value, set: next => { value = next; announcements++; } });
+  }
+  panel.get('prompt').value = 'typed after connection';
+  panel.get('prompt').emit('input');
+  await until(() => panel.state().prompt === 'typed after connection');
+  assert.equal(announcements, 0, 'typing must not rewrite the unchanged live region');
   assert.equal(panel.posts(), 0);
   panel.close();
 });

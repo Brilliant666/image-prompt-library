@@ -18,6 +18,11 @@ PR #4 has quick capture but does not have extension pairing.
    **Load unpacked**, and select `extensions/browser-capture` in this repository.
 4. Pin the extension and click its icon to open Chrome's native side panel.
 
+After a source update, reload the extension in Chrome's extension manager, then
+close and reopen the sidebar. Its header displays the loaded manifest version
+(currently v0.1.1). Reloading preserves pairing and the current buffered card;
+do not uninstall the extension to update it.
+
 Chrome 116 or newer is required. The native side-panel API is described in
 [Chrome's documentation](https://developer.chrome.com/docs/extensions/reference/api/sidePanel).
 Moving the unpacked directory can change its extension ID; create a new pairing
@@ -41,7 +46,10 @@ Chrome may omit `Origin` on host-permitted extension GETs; these POST requests
 allow the browser to supply it while the server still requires the exact paired
 Origin, token, local target and instance. The original GET routes remain available
 with the same strict checks. The extension never manufactures an Origin header.
-The pairing panel shows connection progress and errors beside the connect button.
+Explicit connection checks show a dismissible status at the bottom of the sidebar,
+as well as status in the pairing settings. It reports progress, success or failure
+without moving focus. Background checks on reopening do not show the popup, and a
+successful connection never saves the current card by itself.
 
 Use the same settings section to **revoke** a pairing. It does not delete assets.
 Close the settings drawer to discard the in-memory copy of a newly issued secret.

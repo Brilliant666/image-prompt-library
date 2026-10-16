@@ -8,7 +8,9 @@ let card = emptyCard();
 let config = null;
 let connected = false;
 let connecting = false;
+let connectionCheckQueued = false;
 let connectionError = '';
+let connectionFeedbackVisible = false;
 let reading = false;
 let busy = false;
 let composing = false;
@@ -70,7 +72,15 @@ function render() {
   $('connection-status').className = connected ? 'connected' : '';
   $('pairing-status').textContent = connecting ? '正在检查配对，请稍候…' : connected ? `已连接 · ${config.base_url}` : '未连接';
   $('connect').textContent = connecting ? '正在连接…' : '连接图库';
-  $('reconnect').disabled = connecting;
+  $('reconnect').disabled = connecting || connectionCheckQueued;
+  $('connection-feedback').hidden = !connectionFeedbackVisible;
+  const checking = connecting || connectionCheckQueued;
+  $('connection-feedback').className = `connection-feedback${checking ? '' : connectionError ? ' connection-feedback-failed' : connected ? ' connection-feedback-connected' : ''}`;
+  const feedbackTitle = checking ? '正在连接图库…' : connectionError ? '连接失败' : connected ? '已连接图库' : '尚未连接图库';
+  const feedbackDetail = connecting ? '正在检查本地地址与配对授权，请稍候。' : connectionCheckQueued ? '等待当前操作完成后检查连接，请稍候。' : connectionError || (connected ? `${config.base_url} · 可以继续收录。连接本身不会保存当前卡片。` : '请在连接设置中粘贴图库提供的配对包。');
+  // Ordinary typing also renders the card. Do not re-announce unchanged status.
+  if ($('connection-feedback-title').textContent !== feedbackTitle) $('connection-feedback-title').textContent = feedbackTitle;
+  if ($('connection-feedback-detail').textContent !== feedbackDetail) $('connection-feedback-detail').textContent = feedbackDetail;
   const image = card.image;
   if (renderedBlob !== image?.blob) {
     if (imageObjectURL) URL.revokeObjectURL(imageObjectURL);
@@ -98,7 +108,7 @@ function render() {
   $('save').disabled = !ownsEditor || busy || reading || Boolean(pendingURL) || !connected || (!card.frozen && !canSave(card, connected));
   $('save').textContent = busy ? '保存中…' : card.frozen ? '恢复回执 / 重试原请求' : '保存到图库';
   $('status').textContent = saved ? '已保存' : busy ? '保存中…' : reading ? '正在读取和检查图片…' : card.frozen ? '结果未确认 · 原请求和图文已锁定保留' : !image ? '等待图片' : !card.prompt.trim() ? '等待提示词' : !connected ? '图文已保留 · 等待连接图库' : '图文已就绪 · 可手动保存';
-  for (const id of ['connect', 'disconnect', 'clear-permissions', 'discard', 'continue']) $(id).disabled = !ownsEditor || busy || connecting;
+  for (const id of ['connect', 'disconnect', 'clear-permissions', 'discard', 'continue']) $(id).disabled = !ownsEditor || busy || connecting || connectionCheckQueued;
   showError(ownsEditor ? connectionError || card.error : '另一窗口正在编辑当前收录卡片。本窗口只读；请回到原窗口，或关闭原侧栏后重新打开这里。');
 }
 async function detectLanguage() {
@@ -299,7 +309,8 @@ $('open-pairing').addEventListener('click', () => {
   catch (error) { showError(error.message); }
 });
 $('connect').addEventListener('click', async () => {
-  if (!ownsEditor || busy || connecting) return;
+  if (!ownsEditor || busy || connecting || connectionCheckQueued) return;
+  connectionFeedbackVisible = true;
   connecting = true;
   connectionError = '';
   render();
@@ -326,8 +337,18 @@ $('connect').addEventListener('click', async () => {
   } catch (error) { connectionError = error.message; }
   finally { connecting = false; render(); }
 });
-$('disconnect').addEventListener('click', () => enqueue(async () => { await writeConfig(null); config = null; connected = false; connectionError = ''; $('pairing-package').value = ''; render(); }));
-$('reconnect').addEventListener('click', () => enqueue(verifyConnection));
+$('disconnect').addEventListener('click', () => enqueue(async () => { await writeConfig(null); config = null; connected = false; connectionError = ''; connectionFeedbackVisible = false; $('pairing-package').value = ''; render(); }));
+$('reconnect').addEventListener('click', () => {
+  if (connecting || connectionCheckQueued) return;
+  connectionFeedbackVisible = true;
+  connectionCheckQueued = true;
+  render();
+  enqueue(async () => {
+    try { await verifyConnection(); }
+    finally { connectionCheckQueued = false; render(); }
+  });
+});
+$('dismiss-connection-feedback').addEventListener('click', () => { connectionFeedbackVisible = false; $('connection-feedback').hidden = true; });
 $('clear-permissions').addEventListener('click', async () => {
   const permissions = await chrome.permissions.getAll();
   const current = config ? permissionPattern(config.base_url) : null;
@@ -346,6 +367,7 @@ try {
     }).catch(reject);
   });
   $('extension-id').textContent = chrome.runtime.id;
+  $('extension-version').textContent = `v${chrome.runtime.getManifest().version}`;
   card = await readCard() || emptyCard();
   config = await readConfig();
   if (config) $('base-url').value = config.base_url;
