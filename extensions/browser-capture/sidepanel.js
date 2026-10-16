@@ -1,5 +1,6 @@
-import { emptyCard, isLocked, canSave, shouldAutoSave, freezeCard, failCard, completeCard, parseLocalBase, parsePairing, sameTarget, permissionPattern, publicImageURL, captureBody, LANGUAGES } from './core.mjs';
-import { readCard, writeCard, readConfig, writeConfig } from './storage.mjs';
+import { emptyCard, isLocked, canSave, shouldAutoSave, freezeCard, failCard, completeCard, parseLocalBase, parsePairing, sameTarget, permissionPattern, publicImageURL, captureBody, LANGUAGES, receiptKey, recentForTarget } from './core.mjs';
+import { readCard, writeCard, readConfig, writeConfig, readRecent, writeSavedCard, clearRecent } from './storage.mjs';
+import { createAutoContinue } from './auto-continue.mjs';
 import { localRequest, ApiError, grantHost, downloadPublicImage, pageImage } from './network.mjs';
 import { checkedImage, dataImage, transferredImageURL, thumbnail } from './images.mjs';
 
@@ -24,8 +25,58 @@ let renderedBlob = null;
 let renderedThumbnail = null;
 let ownsEditor = false;
 let releaseEditor = () => {};
+let pageActive = true;
+let recent = [];
+let recentExpanded = false;
+let recentRendered = null;
+let recentTarget = '';
+let recentExpandedRendered = false;
+let recentObjectURLs = [];
 const channel = new BroadcastChannel('image-prompt-library-capture');
 const languages = { zh_hans: '简体中文', zh_hant: '繁體中文', en: 'English', und: '不确定 / 混合文本' };
+const autoContinue = createAutoContinue({
+  onTick(seconds) {
+    $('continue-countdown').textContent = seconds === null ? '' : seconds === 0 ? '返回侧栏后继续收录' : `${seconds} 秒后继续收录`;
+    $('stay-saved').hidden = seconds === null;
+  },
+  onElapsed(identity, epoch) { enqueue(() => clearCurrent({ ...identity, epoch })); },
+});
+
+function openReceipt(receipt) {
+  chrome.tabs.create({ url: `${parseLocalBase(receipt.base_url)}/?capture_item=${encodeURIComponent(receipt.item_id)}` });
+}
+function renderRecent() {
+  const target = config ? JSON.stringify([config.base_url, config.instance_id]) : '';
+  if (recentRendered === recent && recentTarget === target && recentExpandedRendered === recentExpanded) return;
+  recentRendered = recent; recentTarget = target; recentExpandedRendered = recentExpanded;
+  recentObjectURLs.forEach(url => URL.revokeObjectURL(url));
+  recentObjectURLs = [];
+  const entries = recentForTarget(recent, config);
+  $('recent-captures').hidden = !config;
+  $('recent-empty').hidden = entries.length > 0;
+  $('clear-recent').disabled = !ownsEditor || entries.length === 0;
+  $('toggle-recent').hidden = entries.length <= 5;
+  $('toggle-recent').textContent = recentExpanded ? '收起记录' : `展开全部 ${entries.length} 条`;
+  $('recent-list').replaceChildren();
+  for (const entry of entries.slice(0, recentExpanded ? 20 : 5)) {
+    const row = document.createElement('li');
+    if (entry.thumbnail) {
+      const img = document.createElement('img');
+      const url = URL.createObjectURL(entry.thumbnail);
+      recentObjectURLs.push(url);
+      img.src = url; img.alt = '已收录图片缩略图'; row.append(img);
+    }
+    const info = document.createElement('div');
+    const title = document.createElement('strong'); title.textContent = entry.title || '已保存的收录';
+    const time = document.createElement('time');
+    time.dateTime = entry.created_at || '';
+    time.textContent = Number.isFinite(Date.parse(entry.created_at)) ? new Date(entry.created_at).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '已保存';
+    info.append(title, time);
+    const view = document.createElement('button'); view.className = 'text-button'; view.textContent = '在图库查看';
+    view.addEventListener('click', () => openReceipt(entry));
+    row.append(info, view); $('recent-list').append(row);
+  }
+}
 
 function showError(message) {
   $('error').textContent = message;
@@ -39,7 +90,8 @@ function enqueue(action) {
 }
 async function store(next) {
   next.revision = (card.revision || 0) + 1;
-  await writeCard(next); // Durable state always precedes any capture POST.
+  if (next.status === 'saved') recent = await writeSavedCard(next); // Card and recent receipt commit together.
+  else await writeCard(next); // Durable state always precedes any capture POST.
   card = next;
   channel.postMessage('changed');
 }
@@ -61,12 +113,14 @@ function render() {
   $('save-hint').hidden = saved;
   $('discard').hidden = saved;
   $('prompt').disabled = locked || busy;
+  $('capture-title').disabled = locked || busy;
   $('language').disabled = locked || busy;
   $('image-target').disabled = locked || busy || reading;
   $('file-input').disabled = locked || busy || reading;
   // IndexedDB writes can finish after another keystroke/composition event. Never
   // replace an active, editable textarea with an older persisted snapshot.
   if ((document.activeElement !== $('prompt') || locked || saved) && $('prompt').value !== card.prompt) $('prompt').value = card.prompt;
+  if ((document.activeElement !== $('capture-title') || locked || saved) && $('capture-title').value !== (card.title || '')) $('capture-title').value = card.title || '';
   $('language').value = card.language;
   $('connection-status').textContent = connecting ? '正在检查配对…' : connected ? `已连接 · ${config.base_url}` : config ? '未连接 / 授权待检查' : '尚未配对本地图库';
   $('connection-status').className = connected ? 'connected' : '';
@@ -105,11 +159,13 @@ function render() {
     renderedThumbnail = thumb;
   }
   $('saved-preview').hidden = !thumb;
+  $('saved-title').textContent = card.receipt?.title || '图片和原文已进入你的图库。';
   $('save').disabled = !ownsEditor || busy || reading || Boolean(pendingURL) || !connected || (!card.frozen && !canSave(card, connected));
   $('save').textContent = busy ? '保存中…' : card.frozen ? '恢复回执 / 重试原请求' : '保存到图库';
   $('status').textContent = saved ? '已保存' : busy ? '保存中…' : reading ? '正在读取和检查图片…' : card.frozen ? '结果未确认 · 原请求和图文已锁定保留' : !image ? '等待图片' : !card.prompt.trim() ? '等待提示词' : !connected ? '图文已保留 · 等待连接图库' : '图文已就绪 · 可手动保存';
   for (const id of ['connect', 'disconnect', 'clear-permissions', 'discard', 'continue']) $(id).disabled = !ownsEditor || busy || connecting || connectionCheckQueued;
   showError(ownsEditor ? connectionError || card.error : '另一窗口正在编辑当前收录卡片。本窗口只读；请回到原窗口，或关闭原侧栏后重新打开这里。');
+  renderRecent();
 }
 async function detectLanguage() {
   const text = card.prompt;
@@ -142,6 +198,7 @@ async function verifyConnection() {
 async function submit() {
   if (!ownsEditor || busy || reading || pendingURL || composing || !connected || !config) return;
   busy = true;
+  let completed = null;
   render();
   try {
     await navigator.locks.request('image-prompt-library-capture', async () => {
@@ -162,6 +219,7 @@ async function submit() {
         if (!receipt) { capturePosted = true; receipt = await localRequest(config, '/api/captures', { method: 'POST', body: captureBody(card.frozen) }); }
         const preview = await thumbnail(card.frozen.image);
         await store(completeCard(card, receipt, preview));
+        completed = { key: receiptKey(card.receipt), revision: card.revision };
         pendingURL = null;
       } catch (error) {
         // No response body, URL, submitted prompt, token, or server traceback is logged/displayed.
@@ -170,6 +228,7 @@ async function submit() {
       }
     });
   } finally { busy = false; render(); }
+  if (completed && pageActive) autoContinue.start(completed, !document.hidden);
 }
 async function maybeAuto(event, generation) {
   if (generation === inputGeneration && shouldAutoSave(card, { event, connected, reading, composing })) await submit();
@@ -235,7 +294,7 @@ $('file-input').addEventListener('change', event => {
   if (file) enqueue(() => putImage(file, 'file', 'choose', generation));
 });
 document.addEventListener('paste', event => {
-  if (event.target.closest('#settings')) return;
+  if (event.target.closest('#settings') || event.target === $('capture-title')) return;
   const selection = event.target === $('prompt') ? { start: $('prompt').selectionStart, end: $('prompt').selectionEnd } : null;
   if (event.clipboardData && captureTransfer(event.clipboardData, 'paste', selection)) event.preventDefault();
 });
@@ -243,12 +302,19 @@ document.addEventListener('dragover', event => { if (!event.target.closest('#set
 document.addEventListener('dragleave', () => $('image-target').classList.remove('is-dragging'));
 document.addEventListener('drop', event => {
   $('image-target').classList.remove('is-dragging');
-  if (event.target.closest('#settings')) return;
+  if (event.target.closest('#settings') || event.target === $('capture-title')) return;
   event.preventDefault();
   if (event.dataTransfer) captureTransfer(event.dataTransfer, 'drop', null);
 });
 $('prompt').addEventListener('compositionstart', () => { composing = true; ++inputGeneration; });
 $('prompt').addEventListener('compositionend', () => { composing = false; });
+$('capture-title').addEventListener('compositionstart', () => { composing = true; ++inputGeneration; });
+$('capture-title').addEventListener('compositionend', () => { composing = false; });
+$('capture-title').addEventListener('input', () => {
+  ++inputGeneration;
+  const title = $('capture-title').value;
+  enqueue(() => edit(current => ({ ...current, title })));
+});
 $('prompt').addEventListener('input', () => {
   ++inputGeneration;
   const text = $('prompt').value;
@@ -277,23 +343,38 @@ $('page-image').addEventListener('click', async () => {
   enqueue(async () => { reading = true; render(); try { await putImage(await pageImage(url), 'web', 'drop', generation); } finally { reading = false; render(); } });
 });
 $('cancel-url').addEventListener('click', () => { ++inputGeneration; pendingURL = null; render(); });
-async function clearCurrent() {
-  if (!ownsEditor || busy) return;
+async function clearCurrent(expected) {
+  if (!ownsEditor || busy || !pageActive) return;
   await navigator.locks.request('image-prompt-library-capture', async () => {
     card = await readCard() || emptyCard();
+    if (expected && (!autoContinue.isCurrent(expected.epoch) || card.status !== 'saved' || card.revision !== expected.revision || receiptKey(card.receipt) !== expected.key)) return;
+    if (expected && document.hidden) {
+      autoContinue.deferUntilVisible({ key: expected.key, revision: expected.revision }, expected.epoch);
+      return;
+    }
     if (card.frozen && !confirm('这条请求可能已在图库保存。清除草稿无法撤销保存，也无法再用原请求恢复回执。请先核对图库；确认仍要清除？')) return;
     ++inputGeneration;
     pendingURL = null;
     await store(emptyCard());
     $('prompt').value = '';
+    $('capture-title').value = '';
     render();
     $('language-result').textContent = '语言将自动判断，不影响保存';
   });
 }
-$('discard').addEventListener('click', () => { ++inputGeneration; enqueue(clearCurrent); });
-$('continue').addEventListener('click', () => { ++inputGeneration; enqueue(clearCurrent); });
+$('discard').addEventListener('click', () => { autoContinue.cancel(); ++inputGeneration; enqueue(() => clearCurrent()); });
+$('continue').addEventListener('click', () => { autoContinue.cancel(); ++inputGeneration; enqueue(() => clearCurrent()); });
+$('stay-saved').addEventListener('click', () => { autoContinue.cancel(); });
+document.addEventListener('visibilitychange', () => autoContinue.setVisible(!document.hidden));
+$('toggle-recent').addEventListener('click', () => { recentExpanded = !recentExpanded; renderRecent(); });
+$('clear-recent').addEventListener('click', () => {
+  if (!ownsEditor || !config || !confirm('仅清空此图库在插件中的最近收录记录，不会删除图库中的图片或提示词。')) return;
+  const target = { ...config };
+  enqueue(async () => { recent = await clearRecent(target); channel.postMessage('changed'); renderRecent(); });
+});
 $('view-library').addEventListener('click', () => {
-  if (card.receipt) chrome.tabs.create({ url: `${parseLocalBase(card.receipt.base_url)}/?capture_item=${encodeURIComponent(card.receipt.item_id)}` });
+  autoContinue.cancel();
+  if (card.receipt) openReceipt(card.receipt);
 });
 $('settings-toggle').addEventListener('click', () => {
   $('settings').hidden = !$('settings').hidden;
@@ -310,6 +391,7 @@ $('open-pairing').addEventListener('click', () => {
 });
 $('connect').addEventListener('click', async () => {
   if (!ownsEditor || busy || connecting || connectionCheckQueued) return;
+  autoContinue.cancel();
   connectionFeedbackVisible = true;
   connecting = true;
   connectionError = '';
@@ -337,7 +419,7 @@ $('connect').addEventListener('click', async () => {
   } catch (error) { connectionError = error.message; }
   finally { connecting = false; render(); }
 });
-$('disconnect').addEventListener('click', () => enqueue(async () => { await writeConfig(null); config = null; connected = false; connectionError = ''; connectionFeedbackVisible = false; $('pairing-package').value = ''; render(); }));
+$('disconnect').addEventListener('click', () => { autoContinue.cancel(); enqueue(async () => { await writeConfig(null); config = null; connected = false; connectionError = ''; connectionFeedbackVisible = false; $('pairing-package').value = ''; render(); }); });
 $('reconnect').addEventListener('click', () => {
   if (connecting || connectionCheckQueued) return;
   connectionFeedbackVisible = true;
@@ -356,8 +438,8 @@ $('clear-permissions').addEventListener('click', async () => {
   if (origins.length) await chrome.permissions.remove({ origins });
   showError('已移除图片网站的额外访问权限；下次下载会重新询问。');
 });
-channel.addEventListener('message', () => { if (!busy) enqueue(async () => { card = await readCard() || emptyCard(); render(); }); });
-window.addEventListener('pagehide', () => { releaseEditor(); if (imageObjectURL) URL.revokeObjectURL(imageObjectURL); if (savedObjectURL) URL.revokeObjectURL(savedObjectURL); channel.close(); });
+channel.addEventListener('message', () => { if (!busy) enqueue(async () => { card = await readCard() || emptyCard(); recent = await readRecent(); render(); }); });
+window.addEventListener('pagehide', () => { pageActive = false; autoContinue.cancel(); releaseEditor(); if (imageObjectURL) URL.revokeObjectURL(imageObjectURL); if (savedObjectURL) URL.revokeObjectURL(savedObjectURL); recentObjectURLs.forEach(url => URL.revokeObjectURL(url)); channel.close(); });
 
 try {
   ownsEditor = await new Promise((resolve, reject) => {
@@ -369,6 +451,7 @@ try {
   $('extension-id').textContent = chrome.runtime.id;
   $('extension-version').textContent = `v${chrome.runtime.getManifest().version}`;
   card = await readCard() || emptyCard();
+  recent = await readRecent();
   config = await readConfig();
   if (config) $('base-url').value = config.base_url;
   else { $('settings').hidden = false; $('settings-toggle').setAttribute('aria-expanded', 'true'); }

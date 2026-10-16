@@ -2,7 +2,7 @@
 
 The extension collects **one image and the exact prompt you provide** into Image
 Prompt Library. It does not generate images, inspect chat history, infer prompts,
-or use your generation provider accounts. This first version depends on the
+or use your generation provider accounts. The extension depends on the
 quick-capture API from PR #4.
 
 ## Load locally
@@ -20,7 +20,7 @@ PR #4 has quick capture but does not have extension pairing.
 
 After a source update, reload the extension in Chrome's extension manager, then
 close and reopen the sidebar. Its header displays the loaded manifest version
-(currently v0.1.1). Reloading preserves pairing and the current buffered card;
+(currently v0.2.0). Reloading preserves pairing and the current buffered card;
 do not uninstall the extension to update it.
 
 Chrome 116 or newer is required. The native side-panel API is described in
@@ -73,11 +73,39 @@ exports. The extension uses local storage only, never Chrome sync.
   language detection, reconnection and reopening the panel do not trigger saves.
   Use **Save** or **Ctrl+Enter** after typing or editing.
 - Language defaults to automatic. An uncertain result does not block saving;
-  manual correction takes priority. Titles and other metadata are optional and
-  are handled by the existing capture service.
-- After success, use **Continue capture** for a completely empty next card, or
-  **View in library** to open the item. The previous prompt is never reused for a
-  new image implicitly.
+  manual correction takes priority. A name is optional: an explicit name wins,
+  then the capture service uses a meaningful original filename when available,
+  otherwise it chooses a neutral fallback. It does not rewrite the prompt or
+  rename existing library items.
+- After success, the visible panel starts a **3-second Continue capture**
+  countdown. Cancel it to keep the success card, choose **Continue capture**
+  immediately, or use **View in library**. Continuing clears both image and
+  prompt; it does not submit anything or reuse the previous prompt.
+- Moving the panel into the background pauses the countdown. Closing/reopening
+  the sidebar, reloading the extension, or restoring an older saved card does
+  not automatically restart the countdown or clear the restored card. The
+  explicit **Continue capture** action remains available.
+
+The web quick-capture form and the extension send the optional
+`original_filename` field as upload metadata. An original file name is not
+inferred from a generated transport filename, a URL, or the prompt. This field
+travels with the frozen capture snapshot, so a retry retains its original name,
+bytes and request ID. Clients that omit the new field remain supported, including
+older buffered requests; upgrading does not force them to create a new request.
+
+## Recent captures
+
+The panel shows the current connected instance's **5 most recent captures**;
+expand the list to see up to **20**. These are bounded local receipts and small
+thumbnails, accumulated after successful captures in this extension version.
+The extension does not scan the library, read all its items, or import an old
+saved card as new history. Each receipt can open its saved item in the library.
+
+Recent receipts are local conveniences, not another asset library or a batch
+queue. They do not retain original files or complete prompts and are not cloud
+synced. Clearing recent records removes this local history only; it does not
+delete images, prompts or records from the library. Switching the connected
+instance does not present another instance's entries as its own.
 
 For a webpage image drop, the browser may supply a file, a data URL, a public
 HTTP(S) URL, or a page-local blob URL. A URL is not an image until its bytes have
@@ -92,7 +120,7 @@ or tokens or call private image-generation endpoints.
 
 ## Recovery and limits
 
-IndexedDB stores only the current card and necessary receipt. Before a submission,
+IndexedDB stores the current card and bounded recent receipts. Before a submission,
 the image, original text, language, target, client identity and request UUID are
 frozen durably. Closing the panel or losing a response retains that snapshot.
 Reopening does not automatically submit. A deliberate retry checks its own
@@ -102,14 +130,14 @@ uncertain request as a new client.
 
 A definite validation failure allows correction. Network/server failures keep
 the card. There is no infinite retry loop. After success, the original temporary
-image is removed; only a small preview and receipt remain until the next card.
+image is removed; only a small preview and receipt remain in bounded local history.
 **Clear draft** discards local buffered content. It never deletes a library item;
 if a result was uncertain, check the library before recapturing it.
 
 The credential permits only capture, language detection, connection validation
 and recovery of that client's own receipt. It cannot list the library, read
 provider configuration, change settings, generate images or delete arbitrary
-assets. Normal same-origin write protections remain in place. This first version
+assets. Normal same-origin write protections remain in place. The extension
 does not implement asset undo or batch capture.
 
 ## Verification
@@ -122,7 +150,11 @@ that library; never point automated tests at a personal library.
 Unit and API tests cannot prove OS drag-and-drop or a native side panel opened.
 Manual browser acceptance should cover: load unpacked; click the pinned icon;
 pair to an isolated instance; paste image then prompt; reverse the order; confirm
-one saved item; continue with a second card; close/reopen an unfinished card;
+one saved item; cancel and complete the 3-second countdown; pause it in the
+background; reopen a saved card without automatic continuation; continue with a
+second card; inspect the current instance's recent list and clear it without
+deleting library items; verify optional names and meaningful original filenames;
+close/reopen an unfinished card;
 stop the extension worker during an uncertain result and recover; revoke pairing;
 try a public image URL and an inaccessible/blob image. Verify file hashes and
 exact prompt text in the isolated library. Do not use paid image generation for

@@ -1,4 +1,4 @@
-import { MAX_IMAGE_BYTES, imageSizeCheck, validateImageHeader } from './core.mjs';
+import { MAX_IMAGE_BYTES, imageSizeCheck, validateImageHeader, originalFilename } from './core.mjs';
 
 export async function checkedImage(blob, name = 'capture', source = 'file') {
   imageSizeCheck(blob.size);
@@ -10,7 +10,8 @@ export async function checkedImage(blob, name = 'capture', source = 'file') {
   if (!width || !height || width * height > 16_000_000) throw new Error('图片尺寸无效或超过 1,600 万像素限制。');
   const extension = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' }[type];
   // Blob.slice changes the MIME label only; it does not encode or alter the bytes.
-  return { blob: blob.slice(0, blob.size, type), name: `capture.${extension}`, width, height, source };
+  const originalName = originalFilename(name === 'capture' ? '' : name);
+  return { blob: blob.slice(0, blob.size, type), name: originalName || `capture.${extension}`, originalName, width, height, source };
 }
 export async function dataImage(value) {
   if (value.length > MAX_IMAGE_BYTES * 3 + 256 || !/^data:image\/(png|jpeg|webp|gif)(;base64)?,/i.test(value)) throw new Error('图片 data URL 格式或大小不受支持。');

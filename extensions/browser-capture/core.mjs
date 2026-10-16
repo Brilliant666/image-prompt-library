@@ -4,7 +4,7 @@ export const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'
 export const LANGUAGES = ['auto', 'zh_hans', 'zh_hant', 'en', 'und'];
 
 export function emptyCard() {
-  return { version: 1, status: 'draft', image: null, prompt: '', language: 'auto', frozen: null, receipt: null, error: '', revision: 0 };
+  return { version: 1, status: 'draft', image: null, prompt: '', title: '', language: 'auto', frozen: null, receipt: null, error: '', revision: 0 };
 }
 export function isLocked(card) { return Boolean(card.frozen) || card.status === 'saved'; }
 export function canSave(card, connected, reading = false) {
@@ -19,6 +19,7 @@ export function freezeCard(card, config, makeId = () => crypto.randomUUID()) {
   if (!canSave(card, true)) throw new Error('请放入一张有效图片和非空提示词。');
   return { ...card, status: 'submitting', error: '', frozen: {
     request_id: makeId(), prompt: card.prompt, language: card.language,
+    title: card.title || '', original_filename: card.image.originalName || '',
     image: card.image, base_url: config.base_url, instance_id: config.instance_id,
     extension_id: config.extension_id, client_id: config.client_id,
   } };
@@ -34,6 +35,8 @@ export function completeCard(card, receipt, thumbnail = null) {
   return { ...emptyCard(), revision: card.revision, status: 'saved', receipt: {
     request_id: receipt.request_id, item_id: receipt.item_id, base_url: card.frozen.base_url,
     instance_id: card.frozen.instance_id, thumbnail,
+    title: typeof receipt.title === 'string' ? receipt.title.slice(0, 300) : card.frozen.title || '已保存的收录',
+    created_at: typeof receipt.created_at === 'string' && Number.isFinite(Date.parse(receipt.created_at)) ? receipt.created_at : new Date().toISOString(),
   } };
 }
 export function parseLocalBase(input) {
@@ -89,7 +92,30 @@ export function captureBody(frozen) {
   body.set('request_id', frozen.request_id);
   body.set('prompt_text_json', JSON.stringify(frozen.prompt));
   body.set('language', frozen.language);
+  // Old frozen requests must replay exactly; never backfill new metadata.
+  if (frozen.title !== undefined) body.set('title', frozen.title);
+  if (frozen.original_filename !== undefined) body.set('original_filename', frozen.original_filename);
   return body;
+}
+
+export function originalFilename(value) {
+  if (typeof value !== 'string' || /^(?:https?:|blob:|data:)/i.test(value)) return '';
+  const basename = value.split(/[\\/]/).pop().replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, '').trim();
+  return basename.length <= 300 ? basename : '';
+}
+export function receiptKey(receipt) {
+  return JSON.stringify([receipt.base_url, receipt.instance_id, receipt.item_id]);
+}
+export function recentForTarget(recent, config) {
+  return config ? recent.filter(entry => entry.base_url === config.base_url && entry.instance_id === config.instance_id) : [];
+}
+export function appendRecent(recent, receipt) {
+  if (recent.some(entry => receiptKey(entry) === receiptKey(receipt))) return recent.slice(0, 20);
+  // Explicit projection: never persist credentials, original bytes or prompt text here.
+  const entry = { item_id: receipt.item_id, request_id: receipt.request_id, base_url: receipt.base_url,
+    instance_id: receipt.instance_id, title: receipt.title || '已保存的收录', created_at: receipt.created_at,
+    thumbnail: receipt.thumbnail || null };
+  return [entry, ...recent].slice(0, 20);
 }
 export function safeFailure(status) {
   if ([401,403].includes(status)) return '配对无效、已撤销或没有权限。请检查图库中的配对，再重试原请求。';

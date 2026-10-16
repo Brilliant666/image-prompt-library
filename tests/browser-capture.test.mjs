@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import * as core from '../extensions/browser-capture/core.mjs';
 import { ApiError, apiOptions, downloadOptions, downloadPublicImage, localRequest, readBounded } from '../extensions/browser-capture/network.mjs';
 import { checkedImage, dataImage, transferredImageURL } from '../extensions/browser-capture/images.mjs';
+import { createAutoContinue } from '../extensions/browser-capture/auto-continue.mjs';
 
 const pairing = { version: 1, base_url: 'http://127.0.0.1:8013', extension_id: 'a'.repeat(32), instance_id: 'instance_123', client_id: 'client_123', token: 'synthetic-test-token-not-a-real-secret' };
 const requestId = 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa';
@@ -157,23 +158,50 @@ test('percent-encoded binary data image preserves non-UTF8 octets and literal pl
 // This adapter executes the production event handlers and asynchronous queue, not
 // OS drag/drop or Chrome sidePanel APIs. Native browser acceptance is documented separately.
 class Element {
-  constructor(id, document) { this.id = id; this.document = document; this.value = ''; this.hidden = false; this.disabled = false; this.listeners = {}; this.classList = { add() {}, remove() {}, toggle() {} }; this.selectionStart = this.selectionEnd = 0; }
+  constructor(id, document) { this.id = id; this.document = document; this.value = ''; this.hidden = false; this.disabled = false; this.listeners = {}; this.children = []; this.classList = { add() {}, remove() {}, toggle() {} }; this.selectionStart = this.selectionEnd = 0; }
   addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
   emit(type, extra = {}) { for (const fn of this.listeners[type] || []) fn({ type, target: this, preventDefault() {}, ...extra }); }
   setAttribute() {}
   removeAttribute() {}
   closest() { return null; }
   setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }
+  append(...children) { this.children.push(...children); }
+  replaceChildren(...children) { this.children = [...children]; }
   click() { this.emit('click'); }
 }
-async function panelHarness({ initial, disconnected = false, postFailure, persistDelay = 0, receiptExists = false, receiptFailure, connectionFailure, connectionDelay = 0, imageDelay = 5, editorAvailable = true, transferError = false } = {}) {
-  const document = { elements: {}, listeners: {}, activeElement: null, getElementById(id) { return this.elements[id] ||= new Element(id, this); }, addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }, emit(type, extra = {}) { for (const fn of this.listeners[type] || []) fn({ target: this.getElementById('image-target'), preventDefault() {}, ...extra }); } };
+function fakeClock() {
+  let current = 0;
+  let sequence = 0;
+  const timers = new Map();
+  return {
+    now: () => current,
+    schedule(fn, delay) { const id = ++sequence; timers.set(id, { at: current + delay, fn }); return id; },
+    unschedule(id) { timers.delete(id); },
+    pending: () => [...timers.values()].map(timer => timer.fn),
+    advance(milliseconds) {
+      const end = current + milliseconds;
+      for (;;) {
+        const due = [...timers.entries()].filter(([, timer]) => timer.at <= end).sort((a,b) => a[1].at - b[1].at)[0];
+        if (!due) break;
+        current = due[1].at;
+        timers.delete(due[0]);
+        due[1].fn();
+      }
+      current = end;
+    },
+  };
+}
+async function panelHarness({ initial, initialRecent = [], disconnected = false, postFailure, persistDelay = 0, savedPersistFailure = false, receiptExists = false, receiptFailure, connectionFailure, connectionDelay = 0, imageDelay = 5, editorAvailable = true, transferError = false } = {}) {
+  const document = { elements: {}, listeners: {}, activeElement: null, hidden: false, createElement(tag) { return new Element(tag, this); }, getElementById(id) { return this.elements[id] ||= new Element(id, this); }, addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }, emit(type, extra = {}) { for (const fn of this.listeners[type] || []) fn({ target: this.getElementById('image-target'), preventDefault() {}, ...extra }); } };
   let stored = initial ? structuredClone(initial) : undefined;
+  let storedRecent = structuredClone(initialRecent);
   let posts = 0;
   let receipts = 0;
   let failed = false;
   const posted = [];
   const requests = [];
+  const opened = [];
+  const clock = fakeClock();
   let savedConfig = disconnected ? null : { ...pairing };
   let releasePage;
   const lockQueues = new Map();
@@ -185,7 +213,7 @@ async function panelHarness({ initial, disconnected = false, postFailure, persis
     return result;
   } }, clipboard: { writeText: async () => {} } };
   const window = { addEventListener(type, fn) { if (type === 'pagehide') releasePage = fn; } };
-  const chrome = { runtime: { id: pairing.extension_id, getManifest: () => manifest }, tabs: { create() {} } };
+  const chrome = { runtime: { id: pairing.extension_id, getManifest: () => manifest }, tabs: { create(value) { opened.push(value); } } };
   const fakeRequest = async (_, path, options) => {
     requests.push({ path, method: options?.method || 'GET' });
     if (path.endsWith('/connection')) {
@@ -199,18 +227,28 @@ async function panelHarness({ initial, disconnected = false, postFailure, persis
       if (options?.method !== 'POST') throw new ApiError(401);
       if (receiptFailure) throw new ApiError(receiptFailure === 'network' ? undefined : receiptFailure);
       if (!receiptExists) throw new ApiError(404);
-      return { request_id: stored.frozen.request_id, item_id: 'recovered_item' };
+      return { request_id: stored.frozen.request_id, item_id: 'recovered_item', title: 'Recovered title', created_at: '2026-10-16T12:00:00Z' };
     }
     posts++;
-    posted.push({ prompt: JSON.parse(options.body.get('prompt_text_json')), request_id: options.body.get('request_id'), blob: options.body.get('file') });
+    posted.push({ prompt: JSON.parse(options.body.get('prompt_text_json')), request_id: options.body.get('request_id'), blob: options.body.get('file'), title: options.body.get('title'), original_filename: options.body.get('original_filename') });
     if (postFailure && !failed) { failed = true; throw new ApiError(postFailure === 'network' ? undefined : postFailure); }
-    return { request_id: options.body.get('request_id'), item_id: `item_${posts}` };
+    return { request_id: options.body.get('request_id'), item_id: `item_${posts}`, title: options.body.get('title') || `Saved title ${posts}`, created_at: '2026-10-16T12:00:00Z' };
   };
   const dependencies = {
     ...core, freezeCard: (card, config) => core.freezeCard(card, config, randomUUID), readCard: async () => structuredClone(stored), writeCard: async next => { if (persistDelay) await new Promise(resolve => setTimeout(resolve, persistDelay)); stored = structuredClone(next); },
+    readRecent: async () => structuredClone(storedRecent),
+    writeSavedCard: async next => {
+      if (savedPersistFailure) throw new Error('synthetic saved-receipt persistence failure');
+      if (persistDelay) await new Promise(resolve => setTimeout(resolve, persistDelay));
+      storedRecent = core.appendRecent(storedRecent, next.receipt);
+      stored = structuredClone(next);
+      return structuredClone(storedRecent);
+    },
+    clearRecent: async config => { storedRecent = storedRecent.filter(entry => entry.base_url !== config.base_url || entry.instance_id !== config.instance_id); return structuredClone(storedRecent); },
+    createAutoContinue: options => createAutoContinue({ ...options, now: clock.now, schedule: clock.schedule, unschedule: clock.unschedule }),
     readConfig: async () => savedConfig, writeConfig: async next => { savedConfig = next; },
     localRequest: fakeRequest, ApiError, grantHost: async () => true, downloadPublicImage: async () => image.blob, pageImage: async () => image.blob,
-    checkedImage: async blob => { await new Promise(resolve => setTimeout(resolve, imageDelay)); return { ...image, blob }; }, dataImage: async () => image.blob,
+    checkedImage: async (blob, name, source) => { await new Promise(resolve => setTimeout(resolve, imageDelay)); return { ...image, blob, originalName: core.originalFilename(name), source }; }, dataImage: async () => image.blob,
     transferredImageURL: () => { if (transferError) throw new Error('这次投递包含多张图片'); return null; }, thumbnail: async () => new Blob(['thumb']),
     document, window, navigator, chrome, BroadcastChannel: class { postMessage() {} addEventListener() {} close() {} }, confirm: () => true,
   };
@@ -218,8 +256,9 @@ async function panelHarness({ initial, disconnected = false, postFailure, persis
   const AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;
   await new AsyncFunction(...Object.keys(dependencies), source)(...Object.values(dependencies));
   return {
-    document, get: id => document.getElementById(id), state: () => stored, posts: () => posts, receipts: () => receipts, posted, requests,
+    document, get: id => document.getElementById(id), state: () => stored, recent: () => storedRecent, posts: () => posts, receipts: () => receipts, posted, requests, opened, clock,
     close: () => releasePage?.(),
+    setHidden(value) { document.hidden = value; document.emit('visibilitychange'); },
     paste({ file, text = '', intoPrompt = false } = {}) {
       const target = document.getElementById(intoPrompt ? 'prompt' : 'image-target');
       if (intoPrompt) { document.activeElement = target; target.selectionStart = target.selectionEnd = target.value.length; }
@@ -525,5 +564,286 @@ test('a persisted submitting card is recovered without replay and revoked auth r
   assert.equal(panel.state().frozen.request_id, requestId);
   assert.equal(panel.state().frozen.prompt, draft().prompt);
   assert.equal(panel.get('save').disabled, true);
+  panel.close();
+});
+
+function recentReceipt(index, extra = {}) {
+  return { item_id: `recent_${index}`, request_id: `request_${index}`, base_url: pairing.base_url,
+    instance_id: pairing.instance_id, title: `Synthetic capture ${index}`, created_at: '2026-10-16T12:00:00Z',
+    thumbnail: new Blob([`thumbnail ${index}`]), ...extra };
+}
+
+test('a newly persisted success continues after 3 seconds, clears every input and keeps recent receipt', async () => {
+  const panel = await panelHarness({ initial: { ...draft(), title: 'Optional name', language: 'en', image: { ...image, originalName: 'Original.png' } } });
+  panel.get('save').click();
+  await until(() => panel.state()?.status === 'saved' && panel.clock.pending().length > 0);
+  assert.equal(panel.get('continue-countdown').textContent, '3 秒后继续收录');
+  assert.equal(panel.get('stay-saved').hidden, false);
+  assert.equal(panel.recent().length, 1);
+  assert.equal(panel.recent()[0].title, 'Optional name');
+  assert.equal(panel.recent()[0].created_at, '2026-10-16T12:00:00Z');
+  panel.clock.advance(2999);
+  assert.equal(panel.state().status, 'saved');
+  assert.equal(panel.get('continue-countdown').textContent, '1 秒后继续收录');
+  panel.clock.advance(1);
+  await until(() => panel.state()?.status === 'draft');
+  assert.equal(panel.state().image, null);
+  assert.equal(panel.state().prompt, '');
+  assert.equal(panel.state().title, '');
+  assert.equal(panel.state().language, 'auto');
+  assert.equal(panel.state().frozen, null);
+  assert.equal(panel.state().receipt, null);
+  assert.equal(panel.get('prompt').value, '');
+  assert.equal(panel.get('capture-title').value, '');
+  assert.equal(panel.get('language').value, 'auto');
+  assert.equal(panel.recent().length, 1);
+  assert.equal(panel.get('recent-list').children.length, 1);
+  assert.equal(panel.posts(), 1);
+  panel.close();
+});
+
+test('stay and view-library cancel automatic continuation without deleting success or recent history', async () => {
+  for (const action of ['stay-saved', 'view-library']) {
+    const panel = await panelHarness({ initial: draft() });
+    panel.get('save').click();
+    await until(() => panel.state()?.status === 'saved' && panel.clock.pending().length > 0);
+    panel.clock.advance(750);
+    panel.get(action).click();
+    assert.equal(panel.clock.pending().length, 0);
+    panel.clock.advance(10_000);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(panel.state().status, 'saved');
+    assert.equal(panel.recent().length, 1);
+    assert.equal(panel.get('continue-countdown').textContent, '');
+    if (action === 'view-library') assert.deepEqual(panel.opened, [{ url: `${pairing.base_url}/?capture_item=item_1` }]);
+    else assert.equal(panel.opened.length, 0);
+    panel.close();
+  }
+});
+
+test('background visibility pauses the remaining countdown and foreground resumes only the remaining time', async () => {
+  const panel = await panelHarness({ initial: draft() });
+  panel.get('save').click();
+  await until(() => panel.state()?.status === 'saved' && panel.clock.pending().length > 0);
+  panel.clock.advance(1000);
+  panel.setHidden(true);
+  assert.equal(panel.clock.pending().length, 0);
+  panel.clock.advance(60_000);
+  assert.equal(panel.state().status, 'saved');
+  panel.setHidden(false);
+  assert.equal(panel.get('continue-countdown').textContent, '2 秒后继续收录');
+  panel.clock.advance(1999);
+  assert.equal(panel.state().status, 'saved');
+  panel.clock.advance(1);
+  await until(() => panel.state()?.status === 'draft');
+  assert.equal(panel.posts(), 1);
+  panel.close();
+});
+
+test('expiry queued behind a slow reconnect defers clearing if the panel becomes hidden first', async () => {
+  const panel = await panelHarness({ initial: draft(), connectionDelay: 70 });
+  panel.get('save').click();
+  await until(() => panel.state()?.status === 'saved' && panel.clock.pending().length > 0);
+  panel.get('reconnect').click();
+  await until(() => panel.requests.filter(request => request.path.endsWith('/connection')).length === 2);
+  panel.clock.advance(3000);
+  panel.setHidden(true);
+  await until(() => !panel.get('reconnect').disabled && panel.get('continue-countdown').textContent === '返回侧栏后继续收录');
+  assert.equal(panel.state().status, 'saved');
+  panel.clock.advance(30_000);
+  assert.equal(panel.state().status, 'saved');
+  panel.setHidden(false);
+  await until(() => panel.state()?.status === 'draft');
+  assert.equal(panel.recent().length, 1);
+  assert.equal(panel.posts(), 1);
+  panel.close();
+});
+
+test('stay or view cancels a deferred expired continuation before another foreground transition', async () => {
+  for (const action of ['stay-saved', 'view-library']) {
+    const panel = await panelHarness({ initial: draft(), connectionDelay: 70 });
+    panel.get('save').click();
+    await until(() => panel.state()?.status === 'saved' && panel.clock.pending().length > 0);
+    panel.get('reconnect').click();
+    await until(() => panel.requests.filter(request => request.path.endsWith('/connection')).length === 2);
+    panel.clock.advance(3000);
+    panel.setHidden(true);
+    await until(() => !panel.get('reconnect').disabled && panel.get('continue-countdown').textContent === '返回侧栏后继续收录');
+    panel.get(action).click();
+    panel.setHidden(false);
+    panel.clock.advance(30_000);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(panel.state().status, 'saved');
+    assert.equal(panel.recent().length, 1);
+    assert.equal(panel.clock.pending().length, 0);
+    assert.equal(panel.posts(), 1);
+    panel.close();
+  }
+});
+
+test('restoring a saved card neither starts a timer nor backfills recent history', async () => {
+  const saved = core.completeCard(core.freezeCard(draft(), pairing, () => requestId), { request_id: requestId, item_id: 'old_saved' });
+  const panel = await panelHarness({ initial: saved });
+  assert.equal(panel.clock.pending().length, 0);
+  panel.clock.advance(60_000);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(panel.state().status, 'saved');
+  assert.equal(panel.recent().length, 0);
+  assert.equal(panel.posts(), 0);
+  assert.equal(panel.receipts(), 0);
+  panel.get('continue').click();
+  await until(() => panel.state()?.status === 'draft');
+  panel.close();
+});
+
+test('closed panel cancels its timer and reopening the committed success does not restart it', async () => {
+  const panel = await panelHarness({ initial: draft() });
+  panel.get('save').click();
+  await until(() => panel.state()?.status === 'saved' && panel.clock.pending().length > 0);
+  const state = structuredClone(panel.state());
+  const history = structuredClone(panel.recent());
+  panel.close();
+  panel.clock.advance(10_000);
+  assert.equal(panel.state().status, 'saved');
+  const reopened = await panelHarness({ initial: state, initialRecent: history });
+  reopened.clock.advance(10_000);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(reopened.state().status, 'saved');
+  assert.equal(reopened.clock.pending().length, 0);
+  assert.equal(reopened.recent().length, 1);
+  assert.equal(reopened.posts(), 0);
+  reopened.close();
+});
+
+test('cancelled old timer callbacks cannot clear the next draft or reuse its previous prompt', async () => {
+  const panel = await panelHarness({ initial: draft() });
+  panel.get('save').click();
+  await until(() => panel.state()?.status === 'saved' && panel.clock.pending().length > 0);
+  const oldCallbacks = panel.clock.pending();
+  panel.get('continue').click();
+  await until(() => panel.state()?.status === 'draft');
+  const prompt = panel.get('prompt');
+  panel.document.activeElement = prompt;
+  prompt.value = 'New unsaved prompt'; prompt.emit('input');
+  await until(() => panel.state()?.prompt === 'New unsaved prompt');
+  for (const callback of oldCallbacks) callback();
+  panel.clock.advance(60_000);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(panel.state().status, 'draft');
+  assert.equal(panel.state().prompt, 'New unsaved prompt');
+  assert.equal(panel.state().image, null);
+  assert.equal(panel.posts(), 1);
+  assert.equal(panel.recent().length, 1);
+  panel.close();
+});
+
+test('recent UI shows current instance only, expands 5 to 20 and clearing history never calls asset APIs', async () => {
+  const own = Array.from({ length: 20 }, (_, index) => recentReceipt(index));
+  const foreign = [recentReceipt('other-port', { base_url: 'http://127.0.0.1:9000' }), recentReceipt('other-instance', { instance_id: 'another_instance' })];
+  const panel = await panelHarness({ initial: core.emptyCard(), initialRecent: [...own, ...foreign] });
+  const list = panel.get('recent-list');
+  assert.equal(list.children.length, 5);
+  assert.equal(panel.get('toggle-recent').hidden, false);
+  panel.get('toggle-recent').click();
+  assert.equal(list.children.length, 20);
+  const names = list.children.map(row => row.children.find(child => child.id === 'div').children[0].textContent);
+  assert.deepEqual(names, own.map(entry => entry.title));
+  list.children[0].children.at(-1).click();
+  assert.deepEqual(panel.opened, [{ url: `${pairing.base_url}/?capture_item=recent_0` }]);
+  assert.equal(panel.posts(), 0);
+  panel.get('toggle-recent').click();
+  assert.equal(list.children.length, 5);
+  const requestCount = panel.requests.length;
+  panel.get('clear-recent').click();
+  await until(() => panel.recent().length === 2);
+  assert.deepEqual(panel.recent(), foreign);
+  assert.equal(list.children.length, 0);
+  assert.equal(panel.get('recent-empty').hidden, false);
+  assert.equal(panel.requests.length, requestCount, 'history clearing is local-only, not a library deletion');
+  assert.equal(panel.state().status, 'draft');
+  panel.close();
+});
+
+test('recent projection is bounded and excludes original blobs, prompts and credentials', () => {
+  let history = [];
+  for (let index = 0; index < 25; index++) history = core.appendRecent(history, { ...recentReceipt(index), prompt: 'must not persist', token: pairing.token, image: image.blob });
+  assert.equal(history.length, 20);
+  assert.equal(history[0].item_id, 'recent_24');
+  assert.equal(history.at(-1).item_id, 'recent_5');
+  assert.equal(history.some(entry => 'prompt' in entry || 'token' in entry || 'image' in entry), false);
+  const replayed = core.appendRecent(history, recentReceipt(24));
+  assert.deepEqual(replayed, history);
+});
+
+test('saved-receipt persistence failure retains the frozen original and never starts auto-continue', async () => {
+  const original = { ...draft(), title: 'Keep this title', image: { ...image, originalName: 'Keep this original.png' } };
+  const panel = await panelHarness({ initial: original, savedPersistFailure: true });
+  panel.get('save').click();
+  await until(() => panel.state()?.status === 'uncertain');
+  assert.equal(panel.posts(), 1);
+  assert.equal(panel.state().frozen.request_id, panel.posted[0].request_id);
+  assert.equal(panel.state().frozen.prompt, original.prompt);
+  assert.equal(panel.state().frozen.title, original.title);
+  assert.equal(panel.state().frozen.original_filename, original.image.originalName);
+  assert.deepEqual(await panel.state().frozen.image.blob.arrayBuffer(), await image.blob.arrayBuffer());
+  assert.equal(panel.recent().length, 0);
+  assert.equal(panel.clock.pending().length, 0);
+  panel.clock.advance(10_000);
+  assert.equal(panel.state().status, 'uncertain');
+  panel.close();
+});
+
+test('optional title typing and IME never auto-submit and preserve the newest name for manual save', async () => {
+  const panel = await panelHarness({ initial: draft(), persistDelay: 10 });
+  const title = panel.get('capture-title');
+  panel.document.activeElement = title;
+  title.emit('compositionstart');
+  for (const text of ['名', '名称', '名称保留原文']) { title.value = text; title.emit('input'); }
+  await until(() => panel.state()?.title === '名称保留原文');
+  assert.equal(title.value, '名称保留原文');
+  panel.document.emit('keydown', { target: title, ctrlKey: true, key: 'Enter', isComposing: true });
+  assert.equal(panel.posts(), 0);
+  title.emit('compositionend');
+  let prevented = false;
+  panel.document.emit('paste', { target: title, clipboardData: { files: [], getData: () => 'pasted name' }, preventDefault: () => { prevented = true; } });
+  assert.equal(prevented, false, 'title paste keeps native text-input behavior');
+  assert.equal(panel.state().prompt, draft().prompt);
+  assert.equal(panel.posts(), 0);
+  panel.document.emit('keydown', { target: title, ctrlKey: true, key: 'Enter', isComposing: false });
+  await until(() => panel.state()?.status === 'saved');
+  assert.equal(panel.posted[0].title, '名称保留原文');
+  assert.equal(panel.posted[0].prompt, draft().prompt);
+  panel.close();
+});
+
+test('actual file intake transports the supplied original name independently of neutral upload filename', async () => {
+  const panel = await panelHarness({ initial: { ...core.emptyCard(), prompt: 'existing original prompt' } });
+  const original = new File([image.blob], '清晨的森林.png', { type: 'image/png' });
+  panel.paste({ file: original });
+  await until(() => panel.state()?.status === 'saved');
+  assert.equal(panel.posted[0].original_filename, '清晨的森林.png');
+  assert.equal(panel.posted[0].blob.name, 'capture.png');
+  assert.deepEqual(await panel.posted[0].blob.arrayBuffer(), await original.arrayBuffer());
+  assert.equal(panel.posted[0].title, '');
+  assert.equal(core.originalFilename('https://example.com/generated.png?secret=value'), '');
+  assert.equal(core.originalFilename('blob:https://example.com/id'), '');
+  panel.close();
+});
+
+test('older frozen payloads retry without inventing title or filename fields after an upgrade', async () => {
+  const initial = core.failCard(core.freezeCard(draft(), pairing, () => requestId), undefined, 'uncertain');
+  delete initial.title;
+  delete initial.frozen.title;
+  delete initial.frozen.original_filename;
+  const panel = await panelHarness({ initial });
+  assert.equal(panel.posts(), 0);
+  panel.get('save').click();
+  await until(() => panel.state()?.status === 'saved');
+  assert.equal(panel.posted[0].request_id, requestId);
+  assert.equal(panel.posted[0].prompt, draft().prompt);
+  assert.equal(panel.posted[0].title, null);
+  assert.equal(panel.posted[0].original_filename, null);
+  assert.deepEqual(await panel.posted[0].blob.arrayBuffer(), await image.blob.arrayBuffer());
+  assert.equal(panel.posts(), 1);
   panel.close();
 });

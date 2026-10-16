@@ -111,12 +111,14 @@ def test_capture_validates_real_bytes_preserves_original_and_replays(setup_captu
     result = submit(client, headers, request_id, prompt)
     assert result.status_code == 200, result.text
     receipt = result.json()
-    assert set(receipt) == {"request_id", "item_id"}
+    assert set(receipt) == {"request_id", "item_id", "title", "created_at"}
     assert receipt["request_id"] == request_id
     assert submit(client, headers, request_id, prompt).json() == receipt
     assert submit(client, headers, request_id, prompt + "changed").status_code == 409
     assert client.get(f"/api/captures/receipts/{request_id}", headers=headers).json() == receipt
     item = client.get("/api/items/" + receipt["item_id"]).json()
+    assert receipt["title"] == item["title"]
+    assert receipt["created_at"] == item["created_at"]
     assert item["prompts"][0]["text"] == prompt
     assert (library / item["images"][0]["original_path"]).read_bytes() == png()
     for key in ("preview_path", "thumb_path"):
@@ -126,6 +128,30 @@ def test_capture_validates_real_bytes_preserves_original_and_replays(setup_captu
     with connect(library) as conn:
         assert conn.execute("SELECT count(*) FROM items").fetchone()[0] == 1
     assert submit(client, headers, image=b"https://example.invalid/image.png").status_code == 400
+
+
+@pytest.mark.parametrize("query_method", ["GET", "POST"])
+def test_receipt_reports_only_own_saved_title_and_utc_creation_time(setup_capture, query_method):
+    client, library, _ = setup_capture
+    headers = authorization(pair(client))
+    other_client = authorization(pair(client, "p" * 32))
+    request_id = str(uuid.uuid4())
+    result = submit(client, headers, request_id, original_filename="书店角落.png")
+    assert result.status_code == 200
+    receipt = result.json()
+    assert set(receipt) == {"request_id", "item_id", "title", "created_at"}
+    assert receipt["title"] == "书店角落"
+    assert receipt["created_at"].endswith("+00:00")
+    assert client.request(query_method, f"/api/captures/receipts/{request_id}", headers=headers).json() == receipt
+    assert client.request(query_method, f"/api/captures/receipts/{request_id}", headers=other_client).status_code == 404
+    edited = client.patch("/api/items/" + receipt["item_id"], json={"title": "后续手动整理的标题"})
+    assert edited.status_code == 200
+    replay = submit(client, headers, request_id, original_filename="书店角落.png").json()
+    assert replay["title"] == "后续手动整理的标题"
+    assert replay["created_at"] == receipt["created_at"]
+    assert client.request(query_method, f"/api/captures/receipts/{request_id}", headers=headers).json() == replay
+    with connect(library) as conn:
+        assert conn.execute("SELECT count(*) FROM items").fetchone()[0] == 1
 
 
 @pytest.mark.parametrize("query_method", ["GET", "POST"])

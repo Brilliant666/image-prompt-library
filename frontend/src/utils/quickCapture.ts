@@ -25,6 +25,9 @@ export function captureImageError(files: readonly Pick<File, 'type' | 'name' | '
 export function captureFormData(payload: CaptureRequest): FormData {
   const body = new FormData();
   body.set('file', payload.file);
+  // Upload metadata only; the original File is retained by CaptureSubmission so
+  // retries keep the same filename together with the frozen bytes and prompt.
+  body.set('original_filename', payload.file.name);
   body.set('request_id', payload.request_id);
   // Multipart string fields normalize bare LF to CRLF. A JSON string keeps the
   // user's exact line endings and whitespace through the browser's serializer.

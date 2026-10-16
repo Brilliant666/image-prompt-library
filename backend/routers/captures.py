@@ -18,6 +18,8 @@ router = APIRouter()
 class CaptureReceipt(BaseModel):
     request_id: uuid.UUID
     item_id: str
+    title: str | None = None
+    created_at: str | None = None
 
 
 def _paired_client(request: Request):
@@ -38,13 +40,14 @@ def capture_connection(request: Request):
 def capture_receipt(request_id: uuid.UUID, request: Request):
     client = _paired_client(request)
     with connect(request.app.state.library_path) as conn:
-        row = conn.execute("SELECT item_id FROM capture_requests WHERE request_id=?",
+        row = conn.execute("SELECT capture_requests.item_id,items.title,items.created_at FROM capture_requests "
+                           "LEFT JOIN items ON items.id=capture_requests.item_id WHERE request_id=?",
                            (str(namespaced_request_id(client["client_id"], request_id)),)).fetchone()
     if row is None:
         raise HTTPException(404, "No saved receipt for this request")
     if row["item_id"] is None:
         raise HTTPException(410, "The captured item was deleted; it will not be recreated")
-    return {"request_id": str(request_id), "item_id": row["item_id"]}
+    return {"request_id": str(request_id), "item_id": row["item_id"], "title": row["title"], "created_at": row["created_at"]}
 
 
 @router.post("/captures/detect-language", response_model=LanguageDetection)
@@ -56,6 +59,7 @@ def detect_language(payload: LanguageDetectionRequest):
 async def capture(request: Request, file: UploadFile = File(...), prompt_text: str | None = Form(None),
                   prompt_text_json: str | None = Form(None),
                   request_id: str = Form(...), language: str = Form("auto"), title: str = Form(""),
+                  original_filename: str = Form(""),
                   source_name: str = Form(""), source_url: str = Form(""), notes: str = Form("")):
     form = await request.form()
     if sum(hasattr(value, "filename") for _, value in form.multi_items()) != 1:
@@ -76,7 +80,8 @@ async def capture(request: Request, file: UploadFile = File(...), prompt_text: s
         raise HTTPException(422, "Prompt text is required")
     try:
         fields = CaptureFields(request_id=request_id, prompt_text=prompt_text, language=language,
-                               title=title, source_name=source_name, source_url=source_url, notes=notes)
+                               title=title, original_filename=original_filename,
+                               source_name=source_name, source_url=source_url, notes=notes)
     except ValidationError as exc:
         # Do not echo submitted prompt/source fields in validation error payloads.
         raise HTTPException(422, "Invalid capture fields or field length") from exc
@@ -88,7 +93,8 @@ async def capture(request: Request, file: UploadFile = File(...), prompt_text: s
             fields = fields.model_copy(update={"request_id": namespaced_request_id(paired["client_id"], fields.request_id)})
         result = await run_in_threadpool(capture_item, request.app.state.library_path, fields, data)
         if paired:
-            return CaptureReceipt(request_id=original_request_id, item_id=result.id)
+            return CaptureReceipt(request_id=original_request_id, item_id=result.id,
+                                  title=result.title, created_at=result.created_at)
         return result
     except CaptureError as exc:
         raise HTTPException(exc.status, str(exc)) from exc

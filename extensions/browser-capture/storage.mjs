@@ -1,3 +1,5 @@
+import { appendRecent } from './core.mjs';
+
 const DATABASE = 'image-prompt-library-capture';
 const STORE = 'current';
 function open() {
@@ -24,6 +26,51 @@ export async function writeCard(card) {
     tx.objectStore(STORE).put(card, 'card');
     tx.oncomplete = () => { db.close(); resolve(); };
     tx.onerror = () => { db.close(); reject(new Error('草稿未能写入本地存储；尚未提交，请保留当前窗口。')); };
+    tx.onabort = tx.onerror;
+  });
+}
+export async function readRecent() {
+  const db = await open();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readonly');
+    const request = tx.objectStore(STORE).get('recent');
+    tx.oncomplete = () => { db.close(); resolve(request.result || []); };
+    tx.onerror = () => { db.close(); reject(new Error('无法读取最近收录。')); };
+    tx.onabort = tx.onerror;
+  });
+}
+export async function writeSavedCard(card) {
+  const db = await open();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    const store = tx.objectStore(STORE);
+    const request = store.get('recent');
+    let recent;
+    request.onsuccess = () => {
+      try {
+        recent = appendRecent(request.result || [], card.receipt);
+        store.put(recent, 'recent');
+        store.put(card, 'card');
+      } catch { tx.abort(); }
+    };
+    tx.oncomplete = () => { db.close(); resolve(recent); };
+    tx.onerror = () => { db.close(); reject(new Error('保存回执未能写入本机，原请求仍保留，请恢复回执。')); };
+    tx.onabort = tx.onerror;
+  });
+}
+export async function clearRecent(config) {
+  const db = await open();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    const store = tx.objectStore(STORE);
+    const request = store.get('recent');
+    let recent;
+    request.onsuccess = () => {
+      recent = (request.result || []).filter(entry => entry.base_url !== config.base_url || entry.instance_id !== config.instance_id);
+      store.put(recent, 'recent');
+    };
+    tx.oncomplete = () => { db.close(); resolve(recent); };
+    tx.onerror = () => { db.close(); reject(new Error('未能清空最近收录，图库中的内容不受影响。')); };
     tx.onabort = tx.onerror;
   });
 }

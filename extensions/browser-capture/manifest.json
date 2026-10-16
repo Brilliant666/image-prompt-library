@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Image Prompt Library · 快捷收录",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "主动放入一张图片和原始提示词，保存到已配对的本地 Image Prompt Library。",
   "minimum_chrome_version": "116",
   "permissions": ["sidePanel", "storage", "activeTab", "scripting"],

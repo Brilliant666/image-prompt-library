@@ -15,6 +15,7 @@ test('capture transport keeps original file bytes, prompt whitespace and manual 
   assert.equal(body.get('prompt_text'), null);
   assert.equal(body.get('notes'), draft.notes);
   assert.equal(body.get('language'), 'und');
+  assert.equal(body.get('original_filename'), file.name);
   assert.equal(body.get('request_id'), 'a-request-id');
   assert.deepEqual(new Uint8Array(await body.get('file').arrayBuffer()), new Uint8Array(await file.arrayBuffer()));
   assert.equal(body.get('model'), null);
@@ -49,10 +50,15 @@ test('double click is guarded synchronously and uncertain retries reuse the orig
   assert.equal(session.reset(), false);
   session.fail(false);
   assert.equal(session.locked, true);
-  const retry = session.begin({ ...draft, prompt_text: 'accidentally changed', language: 'en' }, nextId);
+  const replacement = new File(['different bytes'], 'different-name.png', { type: 'image/png' });
+  const retry = session.begin({ ...draft, file: replacement, prompt_text: 'accidentally changed', language: 'en' }, nextId);
   assert.equal(retry, first);
   assert.equal(retry.prompt_text, draft.prompt_text);
   assert.equal(retry.language, 'auto');
+  assert.equal(retry.file, file);
+  assert.equal(captureFormData(retry).get('original_filename'), file.name);
+  assert.equal(captureFormData(retry).get('request_id'), first.request_id);
+  assert.equal(captureFormData(retry).get('prompt_text_json'), JSON.stringify(draft.prompt_text));
   assert.equal(ids, 1);
   session.succeed();
   assert.equal(session.begin(draft, nextId), undefined);
