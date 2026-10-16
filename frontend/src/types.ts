@@ -49,4 +49,4 @@ export type ItemBatchAction = 'delete' | 'archive' | 'unarchive' | 'favorite' | 
 export interface ItemBatchRequest { item_ids: string[]; action: ItemBatchAction; tags?: string[]; cluster_id?: string; cluster_name?: string }
 export interface ItemBatchResult { requested: number; changed: number; skipped: number; failed: number; item_ids: string[]; errors: Record<string, string> }
 export type ItemSortMode = 'updated_desc' | 'created_desc' | 'created_asc' | 'title_asc' | 'title_desc' | 'source_asc' | 'model_asc'
-export interface ItemCreate { title: string; cluster_name?: string; tags?: string[]; prompts: Array<{language: string; text: string; is_primary?: boolean; is_original?: boolean; provenance?: Record<string, unknown>}>; model?: string; source_name?: string; source_url?: string; author?: string; notes?: string }
+export interface ItemCreate { title: string; cluster_name?: string; tags?: string[]; prompts: Array<{language: string; text: string; is_primary?: boolean; is_original?: boolean; provenance?: Record<string, unknown>}>; model?: string; source_name?: string; source_url?: string; author?: string | null; notes?: string }

@@ -3,6 +3,8 @@ import { Check, Copy, Download, ExternalLink, Heart, Maximize2, Pencil, Plus, Tr
 import { api, mediaUrl } from '../api/client';
 import { focusFirstAvailable } from '../hooks/useModalFocus';
 import type { ClusterRecord, ImageRecord, ItemDetail, PromptRecord, TagRecord, UiLanguage } from '../types';
+import { mergeEditorPrompts } from '../utils/editorPrompts';
+import { quickCaptureLabels } from '../utils/quickCaptureLabels';
 import { copyTextToClipboard } from '../utils/clipboard';
 import { localizedDemoTitle } from '../utils/demoTitles';
 import { downloadFileName, imageDisplayPath, imageHeroPath, imageOriginalPath, imageThumbnailPath, selectPrimaryImage } from '../utils/images';
@@ -51,7 +53,7 @@ function generationSourceLabel(image?: ImageRecord) {
 function resolvePromptRecord<T extends { language: string; text: string }>(
   prompts: T[],
   selectedLanguage: string,
-  preferredLanguage: PromptLanguage,
+  preferredLanguage: string,
 ): T | undefined {
   const usable = prompts.filter(prompt => prompt.text.trim().length > 0);
   return usable.find(prompt => prompt.language === selectedLanguage)
@@ -61,10 +63,10 @@ function resolvePromptRecord<T extends { language: string; text: string }>(
 }
 
 
-function resolveInitialPromptLanguage(prompts: PromptRecord[], preferredLanguage: PromptCopyLanguage): PromptLanguage {
+function resolveInitialPromptLanguage(prompts: PromptRecord[], preferredLanguage: PromptCopyLanguage): string {
   if (preferredLanguage === 'origin') {
     const originalLanguage = resolveOriginalPrompt(prompts)?.language;
-    if (originalLanguage === 'en' || originalLanguage === 'zh_hant' || originalLanguage === 'zh_hans') return originalLanguage;
+    if (originalLanguage) return originalLanguage;
     return 'en';
   }
   return preferredLanguage;
@@ -322,9 +324,11 @@ export default function ItemDetailModal({
     return () => window.cancelAnimationFrame(frame);
   }, [isHeroFullscreen]);
 
+  const displayLanguages = [...new Set([...promptDisplayOrder, ...(item?.prompts.map(prompt => prompt.language) || [])])];
+  const [promptSaveError, setPromptSaveError] = useState('');
   const availablePromptRecords = useMemo(() => {
     if (!item) return [];
-    return promptDisplayOrder
+    return [...new Set([...promptDisplayOrder, ...item.prompts.map(prompt => prompt.language)])]
       .map(promptLanguage => item.prompts.find(prompt => prompt.language === promptLanguage && prompt.text.trim().length > 0))
       .filter((prompt): prompt is NonNullable<typeof prompt> => Boolean(prompt));
   }, [item]);
@@ -404,19 +408,13 @@ export default function ItemDetailModal({
     const copied = await copyTextToClipboard(text);
     onCopyPrompt(copied);
   };
-  const commitPrompt = (language: string, text: string) => {
+  const commitPrompt = async (language: string, text: string) => {
     if (!item) return;
-    const merged = new Map(item.prompts.map(existing => [existing.language, existing.text]));
-    if (text.trim()) merged.set(language, text.trim());
-    else merged.delete(language);
-    const orderedPromptTexts = promptDisplayOrder.map(promptLanguage => ({ promptLanguage, text: merged.get(promptLanguage)?.trim() || '' }));
-    const primaryLanguage = orderedPromptTexts.find(nextPrompt => nextPrompt.text)?.promptLanguage;
-    const prompts = orderedPromptTexts
-      .map(nextPrompt => ({ language: nextPrompt.promptLanguage, text: nextPrompt.text, is_primary: nextPrompt.promptLanguage === primaryLanguage }))
-      .filter(nextPrompt => nextPrompt.text);
-    commitInlineUpdate({ prompts });
+    const prompts = mergeEditorPrompts(item.prompts, { [language]: text }, {}, resolveOriginalPrompt(item.prompts)?.language || language);
+    await commitInlineUpdate({ prompts });
   };
   const startPromptEdit = (language: string, text: string) => {
+    setPromptSaveError('');
     setEditingPromptLanguage(language);
     setPromptDraft(text);
   };
@@ -424,10 +422,14 @@ export default function ItemDetailModal({
     setEditingPromptLanguage(undefined);
     setPromptDraft('');
   };
-  const confirmPromptEdit = () => {
-    if (!editingPromptLanguage) return;
-    commitPrompt(editingPromptLanguage, promptDraft);
-    cancelPromptEdit();
+  const confirmPromptEdit = async () => {
+    if (!editingPromptLanguage || inlineMutationBusyRef.current) return;
+    try {
+      await commitPrompt(editingPromptLanguage, promptDraft);
+      cancelPromptEdit();
+    } catch (error) {
+      setPromptSaveError(error instanceof Error ? error.message : t('saveFailed'));
+    }
   };
   const unlinkTag = (tagName: string) => {
     if (!item) return;
@@ -602,9 +604,9 @@ export default function ItemDetailModal({
                   <InlineEditableField t={t} className="title-inline-edit" value={showMutations ? item.title : (displayTitle || item.title)} placeholder={t('titlePlaceholder')} onCommit={value => commitInlineUpdate({ title: value.trim() || item.title })} editable={allowManagementActions && !inlineMutationBusy} />
                 </h2>
                 <p className="muted metadata-row">
-                  <InlineEditableField t={t} className="metadata-inline-edit" value={item.model || t('defaultModel')} placeholder={t('imageGeneratedFrom')} onCommit={value => commitInlineUpdate({ model: value.trim() || item.model })} editable={allowManagementActions && !inlineMutationBusy} />
+                  <InlineEditableField t={t} className="metadata-inline-edit" value={item.model || ''} placeholder={t('notReported')} onCommit={value => commitInlineUpdate({ model: value.trim() })} editable={allowManagementActions && !inlineMutationBusy} />
                   <span>·</span>
-                  <InlineEditableField t={t} className="metadata-inline-edit" value={`@${item.author || 'User'}`} placeholder="@User" onCommit={value => commitInlineUpdate({ author: value.replace(/^@/, '').trim() || 'User' })} editable={allowManagementActions && !inlineMutationBusy} />
+                  <InlineEditableField t={t} className="metadata-inline-edit" value={item.author ? `@${item.author}` : ''} placeholder={t('author')} onCommit={value => commitInlineUpdate({ author: value.replace(/^@/, '').trim() || null })} editable={allowManagementActions && !inlineMutationBusy} />
                   {item.source_url && (
                     <a className="source-icon-link" href={item.source_url} target="_blank" rel="noreferrer" aria-label={t('source')}>
                       <ExternalLink size={16} />
@@ -624,7 +626,7 @@ export default function ItemDetailModal({
                       <section className="prompt-block prompt-panel active">
                         <header className="prompt-block-header">
                           <div className="prompt-language-tabs tabs" role="tablist" aria-label={t('promptLanguage')}>
-                            {promptDisplayOrder.map(promptLanguage => {
+                            {displayLanguages.map(promptLanguage => {
                               const tabPrompt = item.prompts.find(prompt => prompt.language === promptLanguage);
                               const isOriginalPrompt = Boolean(tabPrompt?.is_original || originalPrompt?.language === promptLanguage);
                               return (
@@ -637,7 +639,7 @@ export default function ItemDetailModal({
                                   title={tabPrompt?.text.trim() ? undefined : t('promptText')}
                                   key={promptLanguage}
                                 >
-                                  {LANG_LABELS[promptLanguage] || promptLanguage}
+                                  {promptLanguage === 'und' ? quickCaptureLabels(uiLanguage).und : LANG_LABELS[promptLanguage] || promptLanguage}
                                   {isOriginalPrompt && <span className="origin-badge">{t('origin')}</span>}
                                 </button>
                               );
@@ -653,6 +655,7 @@ export default function ItemDetailModal({
                           </span>
                         </header>
                         <div className="prompt-panel-body">
+                          {promptSaveError && <p role="alert">{promptSaveError}</p>}
                           {allowManagementActions && editingPromptLanguage === lang ? (
                             <>
                               <textarea

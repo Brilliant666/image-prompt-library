@@ -219,23 +219,33 @@ class ItemRepository:
 
     def create_item(self, payload: ItemCreate, imported: bool = False, forced_id: str | None = None) -> ItemDetail:
         with connect(self.library_path) as conn:
-            iid = forced_id or new_id("itm")
-            ts = now()
-            cluster_id = self.ensure_cluster(conn, payload.cluster_name, payload.cluster_id)
-            slug = self._unique_slug(conn, payload.slug or payload.title)
-            conn.execute("""INSERT INTO items(id,title,slug,model,media_type,source_name,source_url,author,cluster_id,rating,favorite,archived,notes,created_at,updated_at,imported_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (iid, payload.title, slug, payload.model, payload.media_type, payload.source_name, payload.source_url, payload.author, cluster_id, payload.rating, int(payload.favorite), int(payload.archived), payload.notes, ts, ts, ts if imported else None))
-            normalized_prompts = self._normalized_prompts(payload.prompts, strict_original=not imported)
-            for idx, prompt in enumerate(normalized_prompts):
-                self._insert_prompt(conn, iid, prompt, prompt.is_primary or idx == 0, ts)
-            for tag in _sync_template_tag_names(payload.tags, normalized_prompts):
-                if tag.strip():
-                    tid = self.ensure_tag(conn, tag)
-                    conn.execute("INSERT OR IGNORE INTO item_tags(item_id,tag_id) VALUES(?,?)", (iid, tid))
-            self.rebuild_search(conn, iid)
+            iid = self.create_item_in_transaction(conn, payload, imported=imported, forced_id=forced_id)
             conn.commit()
         return self.get_item(iid)
+
+    def create_item_in_transaction(self, conn, payload: ItemCreate, *, imported: bool = False,
+                                   forced_id: str | None = None, preserve_prompts: bool = False) -> str:
+        """Insert through the caller's transaction; capture can keep one exact original."""
+        iid = forced_id or new_id("itm")
+        ts = now()
+        cluster_id = self.ensure_cluster(conn, payload.cluster_name, payload.cluster_id)
+        slug = self._unique_slug(conn, payload.slug or payload.title)
+        conn.execute("""INSERT INTO items(id,title,slug,model,media_type,source_name,source_url,author,cluster_id,rating,favorite,archived,notes,created_at,updated_at,imported_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (iid, payload.title, slug, payload.model, payload.media_type, payload.source_name, payload.source_url, payload.author, cluster_id, payload.rating, int(payload.favorite), int(payload.archived), payload.notes, ts, ts, ts if imported else None))
+        if preserve_prompts:
+            self._validate_explicit_original(payload.prompts)
+            normalized_prompts = payload.prompts
+        else:
+            normalized_prompts = self._normalized_prompts(payload.prompts, strict_original=not imported)
+        for idx, prompt in enumerate(normalized_prompts):
+            self._insert_prompt(conn, iid, prompt, prompt.is_primary or idx == 0, ts)
+        for tag in _sync_template_tag_names(payload.tags, normalized_prompts):
+            if tag.strip():
+                tid = self.ensure_tag(conn, tag)
+                conn.execute("INSERT OR IGNORE INTO item_tags(item_id,tag_id) VALUES(?,?)", (iid, tid))
+        self.rebuild_search(conn, iid)
+        return iid
 
     def update_item(self, item_id: str, payload: ItemUpdate) -> ItemDetail:
         data = payload.model_dump(exclude_unset=True)
@@ -256,7 +266,13 @@ class ItemRepository:
             prompts_for_template_tag = None
             if "prompts" in data and data["prompts"] is not None:
                 raw_prompts = [PromptIn.model_validate(prompt) if isinstance(prompt, dict) else prompt for prompt in (payload.prompts or [])]
-                prompts_for_template_tag = self._normalized_prompts(raw_prompts, strict_original=True)
+                if conn.execute("SELECT 1 FROM capture_requests WHERE item_id=?", (item_id,)).fetchone():
+                    # Captured originals are edited as supplied; do not silently
+                    # introduce a translated variant when the full editor saves.
+                    self._validate_explicit_original(raw_prompts)
+                    prompts_for_template_tag = self._with_single_original(raw_prompts)
+                else:
+                    prompts_for_template_tag = self._normalized_prompts(raw_prompts, strict_original=True)
             if prompts_for_template_tag is None:
                 prompts_for_template_tag = self._prompts(conn, item_id)
             if "tags" in data and data["tags"] is not None:
@@ -382,16 +398,20 @@ class ItemRepository:
         return self.update_item(item_id, ItemUpdate(favorite=not bool(row["favorite"])))
 
     def add_image(self, item_id: str, image: StoredImageInput) -> ImageRecord:
-        if image.role not in {"result_image", "reference_image"}:
-            raise ValueError("Invalid image role")
         with connect(self.library_path) as conn:
-            iid = new_id("img")
-            ts = now()
-            order = conn.execute("SELECT COALESCE(MAX(sort_order),-1)+1 FROM images WHERE item_id=?", (item_id,)).fetchone()[0]
-            conn.execute("""INSERT INTO images(id,item_id,original_path,thumb_path,preview_path,remote_url,width,height,file_sha256,generation_provider,generation_model,role,sort_order,created_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (iid,item_id,image.original_path,image.thumb_path,image.preview_path,image.remote_url,image.width,image.height,image.file_sha256,image.generation_provider,image.generation_model,image.role,order,ts))
+            iid = self.add_image_in_transaction(conn, item_id, image)
             conn.commit()
         return self._image_by_id(iid)
+
+    def add_image_in_transaction(self, conn, item_id: str, image: StoredImageInput) -> str:
+        if image.role not in {"result_image", "reference_image"}:
+            raise ValueError("Invalid image role")
+        iid = new_id("img")
+        ts = now()
+        order = conn.execute("SELECT COALESCE(MAX(sort_order),-1)+1 FROM images WHERE item_id=?", (item_id,)).fetchone()[0]
+        conn.execute("""INSERT INTO images(id,item_id,original_path,thumb_path,preview_path,remote_url,width,height,file_sha256,generation_provider,generation_model,role,sort_order,created_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (iid,item_id,image.original_path,image.thumb_path,image.preview_path,image.remote_url,image.width,image.height,image.file_sha256,image.generation_provider,image.generation_model,image.role,order,ts))
+        return iid
 
     def _cluster_from_row(self, row) -> ClusterRecord | None:
         if not row or not row["cluster_id"]: return None
