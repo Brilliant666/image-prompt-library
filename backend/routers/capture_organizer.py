@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Request, Response
 
 from backend.services.capture_clients import require_local_management
-from backend.services.capture_organizer import OrganizerConfig, OrganizerError
+from backend.services.capture_organizer import OrganizerConfig, OrganizerError, test_saved_configuration
 
 router = APIRouter()
 
@@ -45,3 +45,9 @@ def check_config(request: Request, response: Response):
         return {**value, "message": "Configuration checked locally; no model request was sent"}
     except OrganizerError as exc:
         raise HTTPException(422, str(exc)) from None
+
+
+@router.post("/capture-organizer/test")
+def test_config(request: Request, response: Response):
+    _store(request, response)
+    return test_saved_configuration(request.app.state.library_path)

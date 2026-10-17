@@ -16,7 +16,7 @@ export interface CaptureOrganizerConfig extends CaptureOrganizerFields {
 }
 
 export const organizerDefaults: CaptureOrganizerFields = {
-  enabled: false, base_url: '', model: 'gpt6-luna', timeout_seconds: 60,
+  enabled: false, base_url: '', model: 'gpt-6-luna', timeout_seconds: 60,
   generate_title: true, assign_collection: true, allow_new_collections: true,
 };
 
@@ -111,5 +111,80 @@ export async function organizerSettingsRequest(operation: 'load' | 'save' | 'che
   } finally {
     clearTimeout(timeout);
     signal?.removeEventListener('abort', abort);
+  }
+}
+
+const ORGANIZER_TEST_CATEGORIES = ['configuration', 'authentication', 'model', 'rate_limit', 'timeout', 'connection', 'http_error', 'invalid_response', 'busy'] as const;
+export type OrganizerTestCategory = typeof ORGANIZER_TEST_CATEGORIES[number];
+export interface OrganizerConnectionTestResult {
+  status: 'succeeded' | 'failed';
+  model: string;
+  elapsed_seconds: number;
+  category: OrganizerTestCategory | '';
+  http_status: number | null;
+  outcome_uncertain?: boolean;
+}
+
+export function organizerTestTimeoutMs(savedTimeoutSeconds: number): number {
+  const seconds = Number.isInteger(savedTimeoutSeconds) && savedTimeoutSeconds >= 10 && savedTimeoutSeconds <= 120 ? savedTimeoutSeconds : organizerDefaults.timeout_seconds;
+  return (seconds + 10) * 1000;
+}
+
+/** Test responses are separate from actual capture-organization results. */
+export function readOrganizerTestResult(value: unknown): OrganizerConnectionTestResult | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const input = value as Record<string, unknown>;
+  if (!['succeeded', 'failed'].includes(String(input.status)) || typeof input.model !== 'string'
+    || (input.model !== '' && !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$/.test(input.model))
+    || typeof input.elapsed_seconds !== 'number' || !Number.isFinite(input.elapsed_seconds) || input.elapsed_seconds < 0
+    || (input.http_status !== null && !(typeof input.http_status === 'number' && Number.isInteger(input.http_status) && input.http_status >= 100 && input.http_status <= 599))) return undefined;
+  if (input.status === 'succeeded') {
+    if (!input.model || input.category !== '' || typeof input.http_status !== 'number' || input.http_status < 200 || input.http_status > 299) return undefined;
+  } else if (!(ORGANIZER_TEST_CATEGORIES as readonly unknown[]).includes(input.category)) return undefined;
+  return { status: input.status as 'succeeded' | 'failed', model: input.model, elapsed_seconds: input.elapsed_seconds,
+    category: input.category as OrganizerTestCategory | '', http_status: input.http_status as number | null,
+    ...(input.status === 'failed' && ['timeout', 'connection', 'invalid_response'].includes(String(input.category)) ? { outcome_uncertain: true } : {}),
+  };
+}
+
+/** One explicit test of saved configuration. Never forwards form values, keys or library data. */
+export async function testOrganizerConnection(saved: CaptureOrganizerConfig, signal?: AbortSignal): Promise<OrganizerConnectionTestResult> {
+  if (!saved.configured || !saved.has_api_key) return {
+    status: 'failed', model: saved.model, elapsed_seconds: 0, category: 'configuration', http_status: null,
+  };
+  const started = performance.now();
+  const controller = new AbortController();
+  let deadlineReached = false;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const abort = () => controller.abort();
+  const abortFailure = new Error('connection_test_interrupted');
+  let rejectOnAbort: (() => void) | undefined;
+  const interruption = new Promise<never>((_resolve, reject) => {
+    rejectOnAbort = () => reject(abortFailure);
+    controller.signal.addEventListener('abort', rejectOnAbort, { once: true });
+  });
+  if (signal?.aborted) abort();
+  signal?.addEventListener('abort', abort, { once: true });
+  const failed = (category: OrganizerTestCategory, httpStatus: number | null = null, uncertain = true): OrganizerConnectionTestResult => ({
+    status: 'failed', model: saved.model, elapsed_seconds: Math.max(0, (performance.now() - started) / 1000),
+    category, http_status: httpStatus, outcome_uncertain: uncertain,
+  });
+  try {
+    timeout = setTimeout(() => { deadlineReached = true; abort(); }, organizerTestTimeoutMs(saved.timeout_seconds));
+    const response = await Promise.race([fetch('/api/capture-organizer/test', {
+      method: 'POST', credentials: 'same-origin', redirect: 'error', cache: 'no-store', signal: controller.signal,
+    }), interruption]);
+    // An outer HTTP error is from the local route, not an upstream model status.
+    if (!response.ok) return failed(response.status === 403 ? 'configuration' : 'http_error');
+    let body: unknown;
+    try { body = await Promise.race([response.json(), interruption]); }
+    catch (error) { if (error instanceof SyntaxError) return failed('invalid_response'); throw error; }
+    return readOrganizerTestResult(body) || failed('invalid_response');
+  } catch {
+    return failed(deadlineReached ? 'timeout' : 'connection');
+  } finally {
+    clearTimeout(timeout);
+    signal?.removeEventListener('abort', abort);
+    if (rejectOnAbort) controller.signal.removeEventListener('abort', rejectOnAbort);
   }
 }

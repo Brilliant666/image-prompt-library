@@ -122,11 +122,21 @@ or tokens or call private image-generation endpoints.
 
 Library **Settings → Capture auto-organizer** configures a separate OpenAI-compatible
 Base URL, API key, vision-capable text model and timeout. The extension settings
-link to this page, but cannot read or modify these credentials. `gpt6-luna` is the
+link to this page, but cannot read or modify these credentials. `gpt-6-luna` is the
 suggested model identifier, not a claim of support by every provider.
 
-This feature is disabled by default. Saving or checking configuration is local
-only and does not validate a real model call. After enabling, newly captured
+This feature is disabled by default. Saving configuration is local only and does
+not validate a real model call. After saving, **Test connection** explicitly sends
+one small synthetic image and fixed text to the saved model. It may incur the
+provider's text/vision charges, does not send library images or prompts, and is
+never automatically retried. The result shows the model, elapsed time and a safe
+failure category/HTTP status when available. Success verifies that the configured
+endpoint accepts the image-and-text request and returns usable structured output;
+it does not guarantee that every later capture will succeed. An interrupted test
+may already have reached the provider, so check its billing before testing again.
+The legacy local `/capture-organizer/check` endpoint does not call the model.
+
+After enabling automatic organization, newly captured
 images and exact prompts are saved first. The server then sends an analysis-sized
 image copy, prompt, existing title and Collection names to `/v1/chat/completions`;
 this may incur the configured provider's text/vision charges. Original image

@@ -24,3 +24,5 @@
 .capture-organizer-feedback { margin: 14px 0 0; font-size: 12px; line-height: 1.6; }
 .capture-organizer-feedback p { margin: 0 0 8px; }
 .capture-organizer-feedback.error { border-inline-start: 3px solid var(--studio-accent, var(--accent)); padding-inline-start: 10px; }
+.capture-organizer-test-result strong { display: block; margin-bottom: 7px; }
+.capture-organizer-test-result code { font-size: inherit; overflow-wrap: anywhere; }
