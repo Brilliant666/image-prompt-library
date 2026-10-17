@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { IDBFactory, IDBObjectStore } from 'fake-indexeddb';
 import { emptyCard, freezeCard, completeCard, recentForTarget } from '../extensions/browser-capture/core.mjs';
-import { readCard, writeCard, readRecent, writeSavedCard, clearRecent } from '../extensions/browser-capture/storage.mjs';
+import { readCard, writeCard, readRecent, writeSavedCard, clearRecent, refreshReceiptMetadata } from '../extensions/browser-capture/storage.mjs';
 
 const target = { base_url: 'http://127.0.0.1:8013', instance_id: 'isolated-instance', client_id: 'test-client', extension_id: 'a'.repeat(32) };
 const source = { ...emptyCard(), image: { blob: new Blob(['synthetic original']), name: 'fixture.png' }, prompt: '  synthetic prompt\r\n\n', title: 'Optional title' };
@@ -93,4 +93,41 @@ test('concurrent history writes serialize without losing either receipt', async 
   await Promise.all([writeSavedCard(saved(1)), writeSavedCard(saved(2))]);
   assert.deepEqual(new Set((await readRecent()).map(entry => entry.item_id)), new Set(['item-1', 'item-2']));
   assert.equal((await readCard()).status, 'saved');
+});
+
+test('organizer receipt refresh preserves timer revision, order, thumbnail and next draft', async () => {
+  globalThis.indexedDB = new IDBFactory();
+  const card = saved(1); card.revision = 7;
+  await writeSavedCard(card);
+  const response = { request_id: 'request-1', item_id: 'item-1', title: '红格头巾', organizer: { status: 'succeeded', collection: '格纹与针织', api_key: 'must-not-persist', message: 'raw provider body must not persist' } };
+  let result = await refreshReceiptMetadata(target, response);
+  assert.equal(result.card.revision, 7);
+  assert.equal(result.card.status, 'saved');
+  assert.equal(result.card.receipt.title, '红格头巾');
+  assert.deepEqual(result.recent[0].organizer, { status: 'succeeded', collection: '格纹与针织' });
+  assert.equal(await result.recent[0].thumbnail.text(), 'small preview');
+  assert.equal(result.recent[0].created_at, card.receipt.created_at);
+  await writeCard(source);
+  await refreshReceiptMetadata(target, response);
+  assert.equal((await readCard()).prompt, source.prompt);
+  assert.equal(await (await readCard()).image.blob.text(), 'synthetic original');
+  await clearRecent(target);
+  result = await refreshReceiptMetadata(target, response);
+  assert.equal(result.recent.length, 0, 'cleared history must not reappear');
+  assert.equal(result.card.prompt, source.prompt);
+});
+
+test('organizer response is scoped to target, item and request and cannot recreate missing card', async () => {
+  globalThis.indexedDB = new IDBFactory();
+  await writeSavedCard(saved(1));
+  const response = { request_id: 'request-1', item_id: 'item-1', title: 'new title' };
+  for (const [scope, update] of [[{...target,instance_id:'other'},response],[target,{...response,request_id:'other'}],[target,{...response,item_id:'other'}]]) {
+    const result = await refreshReceiptMetadata(scope, update);
+    assert.equal(result.card.receipt.title, 'Saved 1');
+    assert.equal(result.recent[0].title, 'Saved 1');
+  }
+  globalThis.indexedDB = new IDBFactory();
+  const result = await refreshReceiptMetadata(target, response);
+  assert.equal(result.card, undefined);
+  assert.deepEqual(result.recent, []);
 });

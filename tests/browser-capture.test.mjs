@@ -6,6 +6,7 @@ import * as core from '../extensions/browser-capture/core.mjs';
 import { ApiError, apiOptions, downloadOptions, downloadPublicImage, localRequest, readBounded } from '../extensions/browser-capture/network.mjs';
 import { checkedImage, dataImage, transferredImageURL } from '../extensions/browser-capture/images.mjs';
 import { createAutoContinue } from '../extensions/browser-capture/auto-continue.mjs';
+import { organizerLabel, pendingOrganizer, matchesReceipt, updateReceiptMetadata } from '../extensions/browser-capture/organizer.mjs';
 
 const pairing = { version: 1, base_url: 'http://127.0.0.1:8013', extension_id: 'a'.repeat(32), instance_id: 'instance_123', client_id: 'client_123', token: 'synthetic-test-token-not-a-real-secret' };
 const requestId = 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa';
@@ -191,7 +192,7 @@ function fakeClock() {
     },
   };
 }
-async function panelHarness({ initial, initialRecent = [], disconnected = false, postFailure, persistDelay = 0, savedPersistFailure = false, receiptExists = false, receiptFailure, connectionFailure, connectionDelay = 0, imageDelay = 5, editorAvailable = true, transferError = false } = {}) {
+async function panelHarness({ initial, initialRecent = [], disconnected = false, postFailure, persistDelay = 0, savedPersistFailure = false, receiptExists = false, receiptFailure, connectionFailure, connectionDelay = 0, imageDelay = 5, editorAvailable = true, transferError = false, organizer, receiptUpdate } = {}) {
   const document = { elements: {}, listeners: {}, activeElement: null, hidden: false, createElement(tag) { return new Element(tag, this); }, getElementById(id) { return this.elements[id] ||= new Element(id, this); }, addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }, emit(type, extra = {}) { for (const fn of this.listeners[type] || []) fn({ target: this.getElementById('image-target'), preventDefault() {}, ...extra }); } };
   let stored = initial ? structuredClone(initial) : undefined;
   let storedRecent = structuredClone(initialRecent);
@@ -219,22 +220,29 @@ async function panelHarness({ initial, initialRecent = [], disconnected = false,
     if (path.endsWith('/connection')) {
       if (connectionDelay) await new Promise(resolve => setTimeout(resolve, connectionDelay));
       if (options?.method !== 'POST' || connectionFailure) throw new ApiError(connectionFailure || 401);
-      return { instance_id: pairing.instance_id, client_id: pairing.client_id };
+      return { instance_id: pairing.instance_id, client_id: pairing.client_id, organizer: organizer ? { enabled: true, configured: true } : undefined };
     }
     if (path.endsWith('/detect-language')) return { language: 'und', uncertain: true };
     if (path.includes('/receipts/')) {
       receipts++;
       if (options?.method !== 'POST') throw new ApiError(401);
       if (receiptFailure) throw new ApiError(receiptFailure === 'network' ? undefined : receiptFailure);
+      if (receiptUpdate) return receiptUpdate(path);
       if (!receiptExists) throw new ApiError(404);
       return { request_id: stored.frozen.request_id, item_id: 'recovered_item', title: 'Recovered title', created_at: '2026-10-16T12:00:00Z' };
     }
     posts++;
     posted.push({ prompt: JSON.parse(options.body.get('prompt_text_json')), request_id: options.body.get('request_id'), blob: options.body.get('file'), title: options.body.get('title'), original_filename: options.body.get('original_filename') });
     if (postFailure && !failed) { failed = true; throw new ApiError(postFailure === 'network' ? undefined : postFailure); }
-    return { request_id: options.body.get('request_id'), item_id: `item_${posts}`, title: options.body.get('title') || `Saved title ${posts}`, created_at: '2026-10-16T12:00:00Z' };
+    return { request_id: options.body.get('request_id'), item_id: `item_${posts}`, title: options.body.get('title') || `Saved title ${posts}`, created_at: '2026-10-16T12:00:00Z', organizer };
   };
   const dependencies = {
+    organizerLabel, pendingOrganizer, setTimeout: clock.schedule, clearTimeout: clock.unschedule,
+    refreshReceiptMetadata: async (target, update) => {
+      storedRecent = storedRecent.map(entry => matchesReceipt(entry, target, update) ? updateReceiptMetadata(entry, update) : entry);
+      if (stored?.status === 'saved' && matchesReceipt(stored.receipt, target, update)) stored = { ...stored, receipt: updateReceiptMetadata(stored.receipt, update) };
+      return { card: structuredClone(stored), recent: structuredClone(storedRecent) };
+    },
     ...core, freezeCard: (card, config) => core.freezeCard(card, config, randomUUID), readCard: async () => structuredClone(stored), writeCard: async next => { if (persistDelay) await new Promise(resolve => setTimeout(resolve, persistDelay)); stored = structuredClone(next); },
     readRecent: async () => structuredClone(storedRecent),
     writeSavedCard: async next => {
@@ -845,5 +853,40 @@ test('older frozen payloads retry without inventing title or filename fields aft
   assert.equal(panel.posted[0].original_filename, null);
   assert.deepEqual(await panel.posted[0].blob.arrayBuffer(), await image.blob.arrayBuffer());
   assert.equal(panel.posts(), 1);
+  panel.close();
+});
+
+test('metadata refresh during success preserves the original three-second continuation', async () => {
+  const panel = await panelHarness({ initial: draft(), organizer: { status: 'pending' }, receiptUpdate: path => ({ request_id: path.split('/').pop(), item_id: 'item_1', title: '红格头巾', organizer: { status: 'succeeded', collection: '格纹与针织' } }) });
+  panel.get('save').click();
+  await until(() => panel.state().status === 'saved');
+  const revision = panel.state().revision;
+  panel.clock.advance(1500);
+  panel.get('refresh-recent').click();
+  await until(() => panel.recent()[0]?.title === '红格头巾');
+  assert.equal(panel.state().revision, revision, 'metadata cannot cancel the active continuation identity');
+  assert.match(panel.get('saved-organizer').textContent, /格纹与针织/);
+  panel.clock.advance(1500);
+  await until(() => panel.state().status === 'draft');
+  assert.equal(panel.state().prompt, '');
+  assert.equal(panel.posts(), 1);
+  assert.equal(panel.recent().length, 1);
+  panel.close();
+});
+
+test('pending metadata is polled through own receipt without blocking next capture or creating another item', async () => {
+  const panel = await panelHarness({ initial: draft(), organizer: { status: 'running' }, receiptUpdate: path => ({ request_id: path.split('/').pop(), item_id: 'item_1', title: '窗影里的白色蕾丝', organizer: { status: 'succeeded', collection: '窗边光影' } }) });
+  panel.get('save').click();
+  await until(() => panel.state().status === 'saved');
+  panel.clock.advance(3000);
+  await until(() => panel.state().status === 'draft');
+  panel.get('prompt').value = '下一条正在输入'; panel.get('prompt').emit('input');
+  await until(() => panel.state().prompt === '下一条正在输入');
+  panel.clock.advance(2000);
+  await until(() => panel.recent()[0]?.title === '窗影里的白色蕾丝');
+  assert.equal(panel.state().prompt, '下一条正在输入');
+  assert.equal(panel.posts(), 1);
+  assert.equal(panel.receipts(), 1);
+  assert.equal(panel.requests.filter(r => r.path.includes('/receipts/')).every(r => r.method === 'POST'), true);
   panel.close();
 });

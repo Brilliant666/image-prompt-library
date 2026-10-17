@@ -1,4 +1,5 @@
 import { appendRecent } from './core.mjs';
+import { matchesReceipt, updateReceiptMetadata } from './organizer.mjs';
 
 const DATABASE = 'image-prompt-library-capture';
 const STORE = 'current';
@@ -71,6 +72,32 @@ export async function clearRecent(config) {
     };
     tx.oncomplete = () => { db.close(); resolve(recent); };
     tx.onerror = () => { db.close(); reject(new Error('未能清空最近收录，图库中的内容不受影响。')); };
+    tx.onabort = tx.onerror;
+  });
+}
+// Refresh only existing receipt metadata. Never insert a history row, restore a
+// cleared card, change revision, or reset the independent continue countdown.
+export async function refreshReceiptMetadata(target, update) {
+  const db = await open();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    const store = tx.objectStore(STORE);
+    const historyRequest = store.get('recent');
+    const cardRequest = store.get('card');
+    let recent, card;
+    historyRequest.onsuccess = () => {
+      recent = (historyRequest.result || []).map(entry => matchesReceipt(entry, target, update) ? updateReceiptMetadata(entry, update) : entry);
+      store.put(recent, 'recent');
+    };
+    cardRequest.onsuccess = () => {
+      card = cardRequest.result;
+      if (card?.status === 'saved' && matchesReceipt(card.receipt, target, update)) {
+        card = { ...card, receipt: updateReceiptMetadata(card.receipt, update) };
+        store.put(card, 'card');
+      }
+    };
+    tx.oncomplete = () => { db.close(); resolve({ card, recent }); };
+    tx.onerror = () => { db.close(); reject(new Error('整理状态暂未同步；图库中的收录不受影响。')); };
     tx.onabort = tx.onerror;
   });
 }

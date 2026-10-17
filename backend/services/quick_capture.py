@@ -17,6 +17,7 @@ from backend.db import connect
 from backend.repositories import ItemRepository, StoredImageInput, now
 from backend.schemas import ItemCreate, ItemDetail, PromptIn
 from backend.services.capture_naming import capture_title, safe_original_filename
+from backend.services.capture_organizer import register_capture
 from backend.services.image_store import MAX_IMAGE_PIXELS, _atomic_write_bytes, store_image
 from backend.services.prompt_language import MAX_PROMPT_CHARACTERS, detect_prompt_language
 
@@ -148,6 +149,7 @@ def capture_item(library_path: Path | str, fields: CaptureFields, data: bytes) -
                     ))
                     conn.execute("INSERT INTO capture_requests(request_id,fingerprint,item_id,created_at) VALUES(?,?,?,?)",
                                  (request_id, fingerprint, item_id, now()))
+                    register_capture(conn, library, request_id, item_id, manual_title=bool(fields.title.strip()))
                     conn.commit()
                 except Exception:
                     conn.rollback()

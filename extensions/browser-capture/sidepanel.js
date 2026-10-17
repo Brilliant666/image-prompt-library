@@ -1,5 +1,6 @@
 import { emptyCard, isLocked, canSave, shouldAutoSave, freezeCard, failCard, completeCard, parseLocalBase, parsePairing, sameTarget, permissionPattern, publicImageURL, captureBody, LANGUAGES, receiptKey, recentForTarget } from './core.mjs';
-import { readCard, writeCard, readConfig, writeConfig, readRecent, writeSavedCard, clearRecent } from './storage.mjs';
+import { readCard, writeCard, readConfig, writeConfig, readRecent, writeSavedCard, clearRecent, refreshReceiptMetadata } from './storage.mjs';
+import { organizerLabel, pendingOrganizer } from './organizer.mjs';
 import { createAutoContinue } from './auto-continue.mjs';
 import { localRequest, ApiError, grantHost, downloadPublicImage, pageImage } from './network.mjs';
 import { checkedImage, dataImage, transferredImageURL, thumbnail } from './images.mjs';
@@ -32,6 +33,10 @@ let recentRendered = null;
 let recentTarget = '';
 let recentExpandedRendered = false;
 let recentObjectURLs = [];
+let organizerEnabled = false;
+let organizerTimer = null;
+let organizerRefreshing = false;
+let organizerPolls = 0;
 const channel = new BroadcastChannel('image-prompt-library-capture');
 const languages = { zh_hans: '简体中文', zh_hant: '繁體中文', en: 'English', und: '不确定 / 混合文本' };
 const autoContinue = createAutoContinue({
@@ -72,6 +77,8 @@ function renderRecent() {
     time.dateTime = entry.created_at || '';
     time.textContent = Number.isFinite(Date.parse(entry.created_at)) ? new Date(entry.created_at).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '已保存';
     info.append(title, time);
+    const metadataLabel = organizerLabel(entry.organizer);
+    if (metadataLabel) { const status = document.createElement('span'); status.className = 'organizer-note'; status.textContent = metadataLabel; info.append(status); }
     const view = document.createElement('button'); view.className = 'text-button'; view.textContent = '在图库查看';
     view.addEventListener('click', () => openReceipt(entry));
     row.append(info, view); $('recent-list').append(row);
@@ -160,6 +167,9 @@ function render() {
   }
   $('saved-preview').hidden = !thumb;
   $('saved-title').textContent = card.receipt?.title || '图片和原文已进入你的图库。';
+  $('saved-organizer').textContent = organizerLabel(card.receipt?.organizer);
+  $('organizer-status').textContent = connected ? (organizerEnabled ? '自动整理已开启 · 保存后后台处理标题与 Collection' : '自动整理未开启 · 可在图库设置中配置') : '自动整理在连接的图库中设置';
+  $('refresh-recent').disabled = !connected || organizerRefreshing;
   $('save').disabled = !ownsEditor || busy || reading || Boolean(pendingURL) || !connected || (!card.frozen && !canSave(card, connected));
   $('save').textContent = busy ? '保存中…' : card.frozen ? '恢复回执 / 重试原请求' : '保存到图库';
   $('status').textContent = saved ? '已保存' : busy ? '保存中…' : reading ? '正在读取和检查图片…' : card.frozen ? '结果未确认 · 原请求和图文已锁定保留' : !image ? '等待图片' : !card.prompt.trim() ? '等待提示词' : !connected ? '图文已保留 · 等待连接图库' : '图文已就绪 · 可手动保存';
@@ -191,9 +201,48 @@ async function verifyConnection() {
     const response = await localRequest(config, '/api/captures/connection', { method: 'POST' });
     if (response.instance_id !== config.instance_id || response.client_id !== config.client_id) throw new Error('本地实例或配对身份不一致，请检查配对设置。');
     connected = true;
+    organizerEnabled = response.organizer?.enabled === true && response.organizer?.configured === true;
     void detectLanguage();
   } catch (error) { connectionError = error.message; }
   finally { connecting = false; render(); }
+  organizerPolls = 0;
+  scheduleOrganizerRefresh();
+}
+function scheduleOrganizerRefresh() {
+  if (organizerTimer !== null) clearTimeout(organizerTimer);
+  organizerTimer = null;
+  if (!pageActive || document.hidden || !connected || !config || !ownsEditor || organizerPolls >= 30) return;
+  if (!recentForTarget(recent, config).some(pendingOrganizer) && !pendingOrganizer(card.receipt)) return;
+  organizerTimer = setTimeout(() => { organizerTimer = null; organizerPolls++; void refreshOrganizerReceipts(); }, 5000);
+}
+async function refreshOrganizerReceipts(all = false) {
+  if (organizerRefreshing || !pageActive || !connected || !config || !ownsEditor) return;
+  const target = { ...config };
+  const entries = recentForTarget(recent, target).filter(entry => all || pendingOrganizer(entry));
+  if (card.status === 'saved' && card.receipt?.base_url === target.base_url && card.receipt?.instance_id === target.instance_id
+      && (all || pendingOrganizer(card.receipt)) && !entries.some(entry => receiptKey(entry) === receiptKey(card.receipt))) entries.push(card.receipt);
+  organizerRefreshing = true;
+  render();
+  try {
+    for (const entry of entries.slice(0, 20)) {
+      if (!pageActive || !config || config.base_url !== target.base_url || config.instance_id !== target.instance_id || config.client_id !== target.client_id) break;
+      try {
+        // Own receipt queries cannot schedule model calls or create library items.
+        const result = await localRequest(target, `/api/captures/receipts/${entry.request_id}`, { method: 'POST' });
+        if (result.item_id !== entry.item_id || result.request_id !== entry.request_id) continue;
+        await navigator.locks.request('image-prompt-library-capture', async () => {
+          if (!pageActive || !config || config.base_url !== target.base_url || config.instance_id !== target.instance_id || config.client_id !== target.client_id) return;
+          const updated = await refreshReceiptMetadata(target, result);
+          card = updated.card || emptyCard(); recent = updated.recent;
+          channel.postMessage('changed'); render();
+        });
+      } catch {
+        // Network or revoked-pairing failures never replay captures or model POSTs.
+        if (all) $('recent-refresh-status').textContent = '部分记录暂未同步，可稍后刷新；已保存图文不受影响。';
+        break;
+      }
+    }
+  } finally { organizerRefreshing = false; render(); scheduleOrganizerRefresh(); }
 }
 async function submit() {
   if (!ownsEditor || busy || reading || pendingURL || composing || !connected || !config) return;
@@ -229,6 +278,7 @@ async function submit() {
     });
   } finally { busy = false; render(); }
   if (completed && pageActive) autoContinue.start(completed, !document.hidden);
+  if (completed) { organizerPolls = 0; scheduleOrganizerRefresh(); }
 }
 async function maybeAuto(event, generation) {
   if (generation === inputGeneration && shouldAutoSave(card, { event, connected, reading, composing })) await submit();
@@ -365,7 +415,12 @@ async function clearCurrent(expected) {
 $('discard').addEventListener('click', () => { autoContinue.cancel(); ++inputGeneration; enqueue(() => clearCurrent()); });
 $('continue').addEventListener('click', () => { autoContinue.cancel(); ++inputGeneration; enqueue(() => clearCurrent()); });
 $('stay-saved').addEventListener('click', () => { autoContinue.cancel(); });
-document.addEventListener('visibilitychange', () => autoContinue.setVisible(!document.hidden));
+document.addEventListener('visibilitychange', () => { autoContinue.setVisible(!document.hidden); scheduleOrganizerRefresh(); });
+$('refresh-recent').addEventListener('click', () => { organizerPolls = 0; $('recent-refresh-status').textContent = ''; void refreshOrganizerReceipts(true); });
+$('open-organizer').addEventListener('click', () => {
+  try { chrome.tabs.create({ url: `${parseLocalBase(config?.base_url || $('base-url').value)}/?capture_organizer=1` }); }
+  catch (error) { showError(error.message); }
+});
 $('toggle-recent').addEventListener('click', () => { recentExpanded = !recentExpanded; renderRecent(); });
 $('clear-recent').addEventListener('click', () => {
   if (!ownsEditor || !config || !confirm('仅清空此图库在插件中的最近收录记录，不会删除图库中的图片或提示词。')) return;
@@ -410,12 +465,14 @@ $('connect').addEventListener('click', async () => {
       await writeConfig(next);
       config = next;
       connected = true;
+      organizerEnabled = result.organizer?.enabled === true && result.organizer?.configured === true;
     });
     $('pairing-package').value = '';
     $('settings').hidden = true;
     $('settings-toggle').setAttribute('aria-expanded', 'false');
     render();
     void detectLanguage(); // Connection/detection/restoration never initiates a capture.
+    organizerPolls = 0; scheduleOrganizerRefresh();
   } catch (error) { connectionError = error.message; }
   finally { connecting = false; render(); }
 });
@@ -439,7 +496,7 @@ $('clear-permissions').addEventListener('click', async () => {
   showError('已移除图片网站的额外访问权限；下次下载会重新询问。');
 });
 channel.addEventListener('message', () => { if (!busy) enqueue(async () => { card = await readCard() || emptyCard(); recent = await readRecent(); render(); }); });
-window.addEventListener('pagehide', () => { pageActive = false; autoContinue.cancel(); releaseEditor(); if (imageObjectURL) URL.revokeObjectURL(imageObjectURL); if (savedObjectURL) URL.revokeObjectURL(savedObjectURL); recentObjectURLs.forEach(url => URL.revokeObjectURL(url)); channel.close(); });
+window.addEventListener('pagehide', () => { pageActive = false; autoContinue.cancel(); if (organizerTimer !== null) clearTimeout(organizerTimer); releaseEditor(); if (imageObjectURL) URL.revokeObjectURL(imageObjectURL); if (savedObjectURL) URL.revokeObjectURL(savedObjectURL); recentObjectURLs.forEach(url => URL.revokeObjectURL(url)); channel.close(); });
 
 try {
   ownsEditor = await new Promise((resolve, reject) => {

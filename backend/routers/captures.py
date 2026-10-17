@@ -9,6 +9,7 @@ from starlette.concurrency import run_in_threadpool
 from backend.db import connect
 from backend.schemas import ItemDetail
 from backend.services.capture_clients import namespaced_request_id
+from backend.services.capture_organizer import connection_status, enqueue_jobs
 from backend.services.prompt_language import MAX_PROMPT_CHARACTERS, LanguageDetection, LanguageDetectionRequest, detect_prompt_language
 from backend.services.quick_capture import MAX_CAPTURE_BYTES, CaptureError, CaptureFields, capture_item
 
@@ -20,6 +21,7 @@ class CaptureReceipt(BaseModel):
     item_id: str
     title: str | None = None
     created_at: str | None = None
+    organizer: dict | None = None
 
 
 def _paired_client(request: Request):
@@ -32,22 +34,31 @@ def _paired_client(request: Request):
 @router.get("/captures/connection")
 @router.post("/captures/connection")
 def capture_connection(request: Request):
-    return _paired_client(request)
+    return {**_paired_client(request), "organizer": connection_status(request.app.state.library_path)}
+
+
+def _receipt(library, internal_id, original_id):
+    # Title and terminal organizer state must come from one snapshot; otherwise
+    # a fast worker can report succeeded alongside the pre-enrichment title.
+    with connect(library) as conn:
+        row = conn.execute("SELECT c.item_id,i.title,i.created_at,j.status,j.category,k.name collection "
+                           "FROM capture_requests c LEFT JOIN items i ON i.id=c.item_id "
+                           "LEFT JOIN clusters k ON k.id=i.cluster_id "
+                           "LEFT JOIN capture_organizer_jobs j ON j.request_id=c.request_id WHERE c.request_id=?",
+                           (str(internal_id),)).fetchone()
+    if row is None:
+        raise HTTPException(404, "No saved receipt for this request")
+    if row["item_id"] is None:
+        raise HTTPException(410, "The captured item was deleted; it will not be recreated")
+    return {"request_id": str(original_id), "item_id": row["item_id"], "title": row["title"], "created_at": row["created_at"],
+            "organizer": {"status": row["status"] or "disabled", "category": row["category"] or "", "collection": row["collection"]}}
 
 
 @router.get("/captures/receipts/{request_id}", response_model=CaptureReceipt)
 @router.post("/captures/receipts/{request_id}", response_model=CaptureReceipt)
 def capture_receipt(request_id: uuid.UUID, request: Request):
     client = _paired_client(request)
-    with connect(request.app.state.library_path) as conn:
-        row = conn.execute("SELECT capture_requests.item_id,items.title,items.created_at FROM capture_requests "
-                           "LEFT JOIN items ON items.id=capture_requests.item_id WHERE request_id=?",
-                           (str(namespaced_request_id(client["client_id"], request_id)),)).fetchone()
-    if row is None:
-        raise HTTPException(404, "No saved receipt for this request")
-    if row["item_id"] is None:
-        raise HTTPException(410, "The captured item was deleted; it will not be recreated")
-    return {"request_id": str(request_id), "item_id": row["item_id"], "title": row["title"], "created_at": row["created_at"]}
+    return _receipt(request.app.state.library_path, namespaced_request_id(client["client_id"], request_id), request_id)
 
 
 @router.post("/captures/detect-language", response_model=LanguageDetection)
@@ -92,9 +103,9 @@ async def capture(request: Request, file: UploadFile = File(...), prompt_text: s
         if paired:
             fields = fields.model_copy(update={"request_id": namespaced_request_id(paired["client_id"], fields.request_id)})
         result = await run_in_threadpool(capture_item, request.app.state.library_path, fields, data)
+        enqueue_jobs(request.app.state.library_path)
         if paired:
-            return CaptureReceipt(request_id=original_request_id, item_id=result.id,
-                                  title=result.title, created_at=result.created_at)
+            return _receipt(request.app.state.library_path, fields.request_id, original_request_id)
         return result
     except CaptureError as exc:
         raise HTTPException(exc.status, str(exc)) from exc

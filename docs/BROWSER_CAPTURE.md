@@ -20,7 +20,7 @@ PR #4 has quick capture but does not have extension pairing.
 
 After a source update, reload the extension in Chrome's extension manager, then
 close and reopen the sidebar. Its header displays the loaded manifest version
-(currently v0.2.0). Reloading preserves pairing and the current buffered card;
+(currently v0.3.0). Reloading preserves pairing and the current buffered card;
 do not uninstall the extension to update it.
 
 Chrome 116 or newer is required. The native side-panel API is described in
@@ -117,6 +117,39 @@ claiming it is the platform's original. If a blob or authenticated image cannot
 be read through the explicitly authorized current tab, use **Copy image** or
 download the image and drop the file. The extension does not export site cookies
 or tokens or call private image-generation endpoints.
+
+## Optional title and Collection organization
+
+Library **Settings → Capture auto-organizer** configures a separate OpenAI-compatible
+Base URL, API key, vision-capable text model and timeout. The extension settings
+link to this page, but cannot read or modify these credentials. `gpt6-luna` is the
+suggested model identifier, not a claim of support by every provider.
+
+This feature is disabled by default. Saving or checking configuration is local
+only and does not validate a real model call. After enabling, newly captured
+images and exact prompts are saved first. The server then sends an analysis-sized
+image copy, prompt, existing title and Collection names to `/v1/chat/completions`;
+this may incur the configured provider's text/vision charges. Original image
+bytes and prompt text remain unchanged. There is no image-generation call.
+
+Explicit capture names win over generated titles. The model is instructed to
+retain concrete descriptions and avoid generic suffixes such as 人像. Collections
+reuse existing names where suitable, without a fixed taxonomy; new Collections
+can be disabled. Uncertain classification may remain unset. Existing captures
+are not backfilled, and edits made while a job is waiting are preserved.
+
+The key is stored outside the library in a per-library file under
+`~/.image-prompt-library/capture-organizer/`. The optional
+`IMAGE_PROMPT_LIBRARY_CAPTURE_ORGANIZER_CONFIG_PATH` override is also scoped to
+the library. This file cannot be inside the asset library and is excluded from
+library archives and exports. Public settings expose only whether a key exists.
+
+Organization does not block the 3-second continue countdown. Recent receipts
+show eventual title, Collection and status updates; their refresh uses the
+existing client-scoped receipt endpoint and never resubmits a capture or model
+call. Jobs are durably claimed before the external POST. A failed or interrupted
+request is not automatically retried, including after service restart. A failed
+organization does not undo a successfully saved capture.
 
 ## Recovery and limits
 

@@ -105,13 +105,14 @@ def test_capture_validates_real_bytes_preserves_original_and_replays(setup_captu
     client, library, _ = setup_capture
     pairing = pair(client)
     headers = authorization(pairing)
-    assert client.get("/api/captures/connection", headers=headers).json() == {"instance_id": pairing["instance_id"], "client_id": pairing["client_id"]}
+    assert client.get("/api/captures/connection", headers=headers).json() == {"instance_id": pairing["instance_id"], "client_id": pairing["client_id"], "organizer": {"enabled": False, "configured": False}}
     request_id = str(uuid.uuid4())
     prompt = "  红色天空\nEnglish line\r\n\t "
     result = submit(client, headers, request_id, prompt)
     assert result.status_code == 200, result.text
     receipt = result.json()
-    assert set(receipt) == {"request_id", "item_id", "title", "created_at"}
+    assert set(receipt) == {"request_id", "item_id", "title", "created_at", "organizer"}
+    assert receipt["organizer"] == {"status": "disabled", "category": "", "collection": None}
     assert receipt["request_id"] == request_id
     assert submit(client, headers, request_id, prompt).json() == receipt
     assert submit(client, headers, request_id, prompt + "changed").status_code == 409
@@ -139,7 +140,8 @@ def test_receipt_reports_only_own_saved_title_and_utc_creation_time(setup_captur
     result = submit(client, headers, request_id, original_filename="书店角落.png")
     assert result.status_code == 200
     receipt = result.json()
-    assert set(receipt) == {"request_id", "item_id", "title", "created_at"}
+    assert set(receipt) == {"request_id", "item_id", "title", "created_at", "organizer"}
+    assert receipt["organizer"] == {"status": "disabled", "category": "", "collection": None}
     assert receipt["title"] == "书店角落"
     assert receipt["created_at"].endswith("+00:00")
     assert client.request(query_method, f"/api/captures/receipts/{request_id}", headers=headers).json() == receipt
@@ -182,7 +184,7 @@ def test_connection_and_receipt_queries_require_full_identity_and_never_create_i
                         {"X-Capture-Instance": "wrong-instance"}, {"X-Capture-Token": "invalid"}):
             invalid = {key: value for key, value in {**headers, **changes}.items() if value is not None}
             assert client.request(query_method, path, headers=invalid).status_code == 401
-    assert client.request(query_method, paths[0], headers=headers).json() == {"instance_id": pairing["instance_id"], "client_id": pairing["client_id"]}
+    assert client.request(query_method, paths[0], headers=headers).json() == {"instance_id": pairing["instance_id"], "client_id": pairing["client_id"], "organizer": {"enabled": False, "configured": False}}
     assert client.request(query_method, paths[1], headers=headers).status_code == 404
     with connect(library) as conn:
         assert conn.execute("SELECT count(*) FROM items").fetchone()[0] == 0

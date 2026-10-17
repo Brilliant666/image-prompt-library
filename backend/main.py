@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import asyncio
 import os
 import ipaddress
 import re
@@ -10,9 +11,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from .config import APP_VERSION, resolve_hidden_features, resolve_library_path, resolve_library_storage_path, validate_app_owned_paths
 from .db import get_db_path, init_db
-from .routers import app_updates, capture_clients, captures, cleanup, clusters, generation_jobs, generation_providers, images, import_drafts, items, tags
+from .routers import app_updates, capture_clients, capture_organizer, captures, cleanup, clusters, generation_jobs, generation_providers, images, import_drafts, items, tags
 from .services.capture_clients import CAPTURE_HEADERS, CaptureClients, capture_route_allowed, local_target_origin
 from .services.library_archives import LibraryOperationLock
+from .services.capture_organizer import drain_jobs, recover_jobs
 from .services.generation_queue import AUTOMATED_PROVIDER_IDS, enqueue_generation_jobs, recover_interrupted_generation_jobs
 
 DEFAULT_FRONTEND_DIST_PATH = Path(__file__).resolve().parents[1] / "frontend" / "dist"
@@ -126,10 +128,16 @@ def create_app(library_path: Path | str | None = None, frontend_dist_path: Path 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         with LibraryOperationLock(library):
-            for provider in AUTOMATED_PROVIDER_IDS:
-                recover_interrupted_generation_jobs(library, provider=provider)
-                enqueue_generation_jobs(library, provider=provider)
-            yield
+            try:
+                recover_jobs(library)
+                for provider in AUTOMATED_PROVIDER_IDS:
+                    recover_interrupted_generation_jobs(library, provider=provider)
+                    enqueue_generation_jobs(library, provider=provider)
+                yield
+            finally:
+                # No metadata worker may write after backup/restore can acquire
+                # the library lease. Pending jobs remain durable and unstarted.
+                await asyncio.to_thread(drain_jobs, library)
 
     app = FastAPI(title="Image Prompt Library", version=APP_VERSION, lifespan=lifespan)
     app.state.library_path = library
@@ -190,6 +198,7 @@ def create_app(library_path: Path | str | None = None, frontend_dist_path: Path 
     app.include_router(items.router, prefix="/api")
     app.include_router(captures.router, prefix="/api")
     app.include_router(capture_clients.router, prefix="/api")
+    app.include_router(capture_organizer.router, prefix="/api")
     app.include_router(images.router, prefix="/api")
     app.include_router(clusters.router, prefix="/api")
     app.include_router(tags.router, prefix="/api")

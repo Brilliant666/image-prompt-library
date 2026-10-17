@@ -1,3 +1,4 @@
+import { organizerMetadata } from './organizer.mjs';
 export const MAX_IMAGE_BYTES = 30 * 1024 * 1024;
 export const MAX_PROMPT_LENGTH = 200_000;
 export const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
@@ -37,6 +38,7 @@ export function completeCard(card, receipt, thumbnail = null) {
     instance_id: card.frozen.instance_id, thumbnail,
     title: typeof receipt.title === 'string' ? receipt.title.slice(0, 300) : card.frozen.title || '已保存的收录',
     created_at: typeof receipt.created_at === 'string' && Number.isFinite(Date.parse(receipt.created_at)) ? receipt.created_at : new Date().toISOString(),
+    ...(organizerMetadata(receipt.organizer) ? { organizer: organizerMetadata(receipt.organizer) } : {}),
   } };
 }
 export function parseLocalBase(input) {
@@ -115,6 +117,7 @@ export function appendRecent(recent, receipt) {
   const entry = { item_id: receipt.item_id, request_id: receipt.request_id, base_url: receipt.base_url,
     instance_id: receipt.instance_id, title: receipt.title || '已保存的收录', created_at: receipt.created_at,
     thumbnail: receipt.thumbnail || null };
+  if (organizerMetadata(receipt.organizer)) entry.organizer = organizerMetadata(receipt.organizer);
   return [entry, ...recent].slice(0, 20);
 }
 export function safeFailure(status) {

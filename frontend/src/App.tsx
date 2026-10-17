@@ -95,7 +95,7 @@ export default function App() {
   const viewTransitionTimerRef = useRef<number | undefined>(undefined);
   const viewTransitionRunRef = useRef(0);
   const [filtersOpen, setFiltersOpen] = useState(false);
-  const [configOpen, setConfigOpen] = useState(() => !isDemoMode && new URLSearchParams(location.search).has('capture_pair'));
+  const [configOpen, setConfigOpen] = useState(() => !isDemoMode && ['capture_pair', 'capture_organizer'].some(key => new URLSearchParams(location.search).has(key)));
   const [focusConfigProviders, setFocusConfigProviders] = useState(false);
   const [clusters, setClusters] = useState<ClusterRecord[]>([]);
   const [clustersLoading, setClustersLoading] = useState(true);
