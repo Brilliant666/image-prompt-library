@@ -16,6 +16,8 @@ from backend.config import resolve_library_storage_path
 from backend.db import connect
 from backend.repositories import ItemRepository, StoredImageInput, now
 from backend.schemas import ItemCreate, ItemDetail, PromptIn
+from backend.services.capture_naming import capture_title, safe_original_filename
+from backend.services.capture_organizer import register_capture
 from backend.services.image_store import MAX_IMAGE_PIXELS, _atomic_write_bytes, store_image
 from backend.services.prompt_language import MAX_PROMPT_CHARACTERS, detect_prompt_language
 
@@ -34,6 +36,7 @@ class CaptureFields(BaseModel):
     prompt_text: str = Field(min_length=1, max_length=MAX_PROMPT_CHARACTERS)
     language: str = "auto"
     title: str = Field(default="", max_length=300)
+    original_filename: str = Field(default="", max_length=1024)
     source_name: str = Field(default="", max_length=300)
     source_url: str = Field(default="", max_length=4096)
     notes: str = Field(default="", max_length=20_000)
@@ -60,6 +63,10 @@ def _image_extension(data: bytes) -> str:
 
 def _fingerprint(fields: CaptureFields, data: bytes) -> str:
     payload = fields.model_dump(mode="json", exclude={"request_id"})
+    # Old frozen clients never sent this field. Their durable fingerprint must
+    # stay byte-for-byte compatible, including when they explicitly send "".
+    if not fields.original_filename:
+        payload.pop("original_filename")
     payload["image_sha256"] = hashlib.sha256(data).hexdigest()
     try:
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -100,11 +107,15 @@ def capture_item(library_path: Path | str, fields: CaptureFields, data: bytes) -
     extension = _image_extension(data)
     detection = detect_prompt_language(fields.prompt_text)
     language = detection.language if fields.language == "auto" else fields.language
-    title = fields.title.strip() or next(line.strip()[:80] for line in fields.prompt_text.splitlines() if line.strip())
+    filename = safe_original_filename(fields.original_filename)
+    title = capture_title(fields.title, filename, request_id, now())
+    provenance = {"kind": "manual", "source_language": language, "method": "quick-capture",
+                  "language_detection": {"mode": "auto" if fields.language == "auto" else "manual", **detection.model_dump()}}
+    if filename:
+        provenance["original_filename"] = filename
     prompt = PromptIn(
         language=language, text=fields.prompt_text, is_primary=True, is_original=True,
-        provenance={"kind": "manual", "source_language": language, "method": "quick-capture",
-                    "language_detection": {"mode": "auto" if fields.language == "auto" else "manual", **detection.model_dump()}},
+        provenance=provenance,
     )
     payload = ItemCreate(title=title, model="", prompts=[prompt], source_name=fields.source_name or None,
                          source_url=fields.source_url or None, notes=fields.notes or None)
@@ -138,6 +149,7 @@ def capture_item(library_path: Path | str, fields: CaptureFields, data: bytes) -
                     ))
                     conn.execute("INSERT INTO capture_requests(request_id,fingerprint,item_id,created_at) VALUES(?,?,?,?)",
                                  (request_id, fingerprint, item_id, now()))
+                    register_capture(conn, library, request_id, item_id, manual_title=bool(fields.title.strip()))
                     conn.commit()
                 except Exception:
                     conn.rollback()

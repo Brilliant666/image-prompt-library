@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>快捷收录 · Image Prompt Library</title><link rel="stylesheet" href="sidepanel.css"></head>
+<body>
+  <main>
+    <header><div><p class="kicker">Image Prompt Library <span id="extension-version"></span></p><h1>快捷收录</h1></div><button id="settings-toggle" class="icon-button" title="连接与配对设置" aria-label="连接与配对设置" aria-expanded="false">⚙</button></header>
+    <p class="intro">一张图片，一段原文。放入后，继续浏览。</p>
+    <section id="settings" class="settings" hidden aria-label="连接与配对设置">
+      <label>本地图库地址<input id="base-url" type="url" value="http://127.0.0.1:8013" spellcheck="false"></label>
+      <p>首次连接需在图库授权此扩展。不会自动连接正式 8000。</p>
+      <div class="extension-id">扩展 ID <code id="extension-id"></code><button id="copy-id" class="text-button">复制</button></div>
+      <button id="open-pairing" class="secondary">打开图库配对设置</button>
+      <label>图库提供的配对包<input id="pairing-package" type="password" placeholder="仅粘贴图库刚提供的配对 JSON" spellcheck="false" autocomplete="new-password" maxlength="8192"></label>
+      <div class="button-row"><button id="connect" class="primary">连接图库</button><button id="disconnect" class="secondary">清除本机配对</button></div>
+      <p id="pairing-status" role="status" aria-live="polite">未连接</p>
+      <p id="pairing-error" class="error" role="alert" hidden></p>
+      <p>收录凭据仅保存在此设备。撤销授权请到图库的“浏览器收录配对”。清除本机配对会保留当前草稿。</p>
+      <button id="clear-permissions" class="text-button">移除已授予的图片网站权限</button>
+      <div class="organizer-settings"><p id="organizer-status" class="note">自动整理在连接的图库中设置</p><button id="open-organizer" class="secondary" type="button">打开自动整理设置</button><p class="note">Base URL、Key 和模型仅在本机图库设置中管理，插件不保存模型密钥。</p></div>
+    </section>
+    <div class="connection"><span id="connection-status" role="status">尚未连接</span><button id="reconnect" class="text-button">检查连接</button></div>
+    <section id="editor" aria-label="当前收录卡片">
+      <button id="image-target" class="image-target" type="button" aria-label="选择或拖入一张图片">
+        <img id="image-preview" alt="当前图片预览" hidden>
+        <span id="image-placeholder"><svg viewBox="0 0 32 32" aria-hidden="true"><rect x="3" y="5" width="26" height="22" rx="4"/><circle cx="11" cy="12" r="2"/><path d="m4 23 8-7 6 5 5-8 6 10"/></svg><strong>拖入图片，或粘贴图片</strong><span>也可以点击选择文件</span></span>
+        <span id="image-replace" class="image-replace" hidden>更换图片</span>
+      </button>
+      <input id="file-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+      <p id="image-info" class="note">保留取得的原始字节，支持 PNG、JPEG、WebP、GIF，最大 30 MB。</p>
+      <label class="prompt-label" for="capture-title">名称 <span class="optional">可选</span></label>
+      <input id="capture-title" class="capture-title" type="text" maxlength="300" placeholder="留空优先使用有效原文件名" autocomplete="off">
+      <p class="note">随机文件名或无文件名时，按收录时间命名。</p>
+      <div id="url-actions" class="url-actions" hidden><p id="url-note"></p><div class="button-row"><button id="download-image" class="secondary">授权下载这张图片</button><button id="page-image" class="secondary">从当前标签页获取</button></div><button id="cancel-url" class="text-button">取消图片地址</button></div>
+      <label class="prompt-label" for="prompt">提示词</label>
+      <textarea id="prompt" class="prompt" rows="8" placeholder="粘贴或拖入完整提示词，保留你的原文。" spellcheck="false" maxlength="200000"></textarea>
+      <div class="language-row"><span id="language-result">语言将自动判断，不影响保存</span><details id="language-settings"><summary>纠正语言</summary><label>原文语言<select id="language"><option value="auto">自动判断</option><option value="zh_hans">简体中文</option><option value="zh_hant">繁體中文</option><option value="en">English</option><option value="und">不确定 / 其他</option></select></label></details></div>
+    </section>
+    <section id="success" class="success" hidden><img id="saved-preview" alt="已保存图片的缩略预览" hidden><h2>已保存</h2><p id="saved-title">图片和原文已进入你的图库。</p><p id="saved-organizer" class="note"></p><p id="continue-countdown" aria-live="off"></p><button id="stay-saved" class="text-button" hidden>停留查看</button><div class="button-row"><button id="continue" class="primary">立即继续</button><button id="view-library" class="secondary">在图库查看</button></div></section>
+    <footer><p id="status" role="status" aria-live="polite">等待图片</p><p id="error" class="error" role="alert" hidden></p><button id="save" class="primary save" disabled>保存到图库</button><p id="save-hint" class="note">拖放或粘贴完成后自动保存；手动输入可按 Ctrl+Enter。</p><button id="discard" class="text-button">清除当前草稿</button></footer>
+    <section id="recent-captures" class="recent-captures" aria-labelledby="recent-heading" hidden>
+      <div class="recent-heading"><h2 id="recent-heading">最近收录</h2><button id="clear-recent" class="text-button">清空记录</button></div>
+      <p class="note">当前图库 · 仅此插件最近保存的记录</p>
+      <button id="refresh-recent" class="text-button" type="button">刷新标题与整理状态</button><p id="recent-refresh-status" class="note" role="status"></p>
+      <p id="recent-empty" class="note">暂无记录。新收录成功后显示在这里。</p>
+      <ul id="recent-list"></ul><button id="toggle-recent" class="text-button" hidden>展开全部</button>
+    </section>
+  </main>
+  <aside id="connection-feedback" class="connection-feedback" hidden aria-label="连接结果">
+    <div role="status" aria-live="polite"><strong id="connection-feedback-title"></strong><p id="connection-feedback-detail"></p></div>
+    <button id="dismiss-connection-feedback" class="text-button" aria-label="关闭连接提示">关闭</button>
+  </aside>
+  <script type="module" src="sidepanel.js"></script>
+</body>
+</html>

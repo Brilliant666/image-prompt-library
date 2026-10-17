@@ -1,0 +1,11 @@
+.browser-capture-settings h3 { display: flex; align-items: center; gap: .5rem; }
+.browser-capture-settings label { display: grid; gap: .4rem; margin: .8rem 0; font-size: .9rem; }
+.browser-capture-settings input { min-width: 0; width: 100%; box-sizing: border-box; border: 1px solid var(--border, #d9d6cc); border-radius: 10px; padding: .65rem; background: var(--surface, #fff); color: inherit; font: inherit; }
+.browser-capture-settings .secondary { display: inline-flex; gap: .4rem; align-items: center; white-space: normal; }
+.capture-instance { font-size: .85rem; overflow-wrap: anywhere; }
+.capture-pairing-ready { padding: .75rem; margin-top: .8rem; border: 1px solid var(--border, #d9d6cc); border-radius: 12px; }
+.capture-pairing-ready p { margin-top: 0; font-size: .85rem; line-height: 1.5; }
+.capture-clients { padding: 0; list-style: none; }
+.capture-clients li { display: flex; align-items: center; justify-content: space-between; gap: .5rem; padding: .7rem 0; border-bottom: 1px solid var(--border, #d9d6cc); }
+.capture-clients li div { min-width: 0; }
+.capture-clients code { display: block; overflow-wrap: anywhere; font-size: .72rem; margin-top: .35rem; }

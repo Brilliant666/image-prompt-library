@@ -29,7 +29,7 @@ Requires **Python 3.10+** and **Node.js 24** for source builds. Existing install
 
 ### Save your first prompt
 
-A fresh local library starts empty. Choose **+ Add**, add an image and prompt, give the card a title, and save it. Collections, tags, notes, and source links are optional.
+A fresh local library starts empty. Choose **Quick capture**, add an image and the original prompt, and save it. Language is detected automatically; a title is optional. You can also collect images and prompts in Chrome's native sidebar using the [local browser extension](docs/BROWSER_CAPTURE.md).
 
 To browse examples first, import one of the optional sample bundles:
 

@@ -4,7 +4,7 @@ on:
   push:
     branches: [main, codex/sub2api-images]
   pull_request:
-    branches: [main, codex/sub2api-images]
+    branches: [main, codex/sub2api-images, feat/quick-capture]
   workflow_dispatch:
 
 permissions:
@@ -40,6 +40,10 @@ jobs:
         run: python -m pytest -q
       - name: Run frontend behavior tests
         run: npm run test:frontend
+      - name: Check native browser extension and capture behavior
+        run: |
+          npm run build:extension
+          npm run test:extension
       - name: Build read-only demo
         run: npm run build:demo
 

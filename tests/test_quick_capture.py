@@ -1,6 +1,8 @@
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
+import hashlib
 import json
 import sqlite3
 import threading
@@ -143,6 +145,101 @@ def test_capture_unknown_is_not_original_language(capture_client):
     assert response.json()["prompts"][0]["is_original"] is True
 
 
+@pytest.mark.parametrize("filename,expected", [
+    ("书店角落的阅读时光.png", "书店角落的阅读时光"),
+    ("Quiet garden at sunrise.jpeg", "Quiet garden at sunrise"),
+    (".hidden garden.jpeg", ".hidden garden"),
+    (r"C:\Downloads\柔和的灯光.webp", "柔和的灯光"),
+    ("../../originals/星空.gif", "星空"),
+    ("含有许多中文字符的正常描述性标题" * 3 + ".png", "含有许多中文字符的正常描述性标题" * 3),
+    ("Blue flowers", "Blue flowers"),
+])
+def test_original_filename_suggests_title_without_changing_storage_paths(capture_client, filename, expected):
+    client, library = capture_client
+    prompt = "  原文保留\n\r\nThis is a prompt, not a title.  "
+    result = capture(client, data={"prompt_text": prompt, "original_filename": filename})
+    assert result.status_code == 200
+    item = result.json()
+    assert item["title"] == expected
+    assert item["prompts"][0]["text"] == prompt
+    assert item["prompts"][0]["provenance"]["original_filename"] == filename.replace("\\", "/").rsplit("/", 1)[-1]
+    assert item["images"][0]["original_path"].startswith("originals/captures/")
+    assert item["images"][0]["original_path"].endswith("/image.png")
+    assert (library / item["images"][0]["original_path"]).read_bytes() == image_bytes()
+
+
+@pytest.mark.parametrize("filename", ["", ".png", "image.png", "image123.png", "capture.png", "clipboard.png", "image (2).png",
+    "IMG_2488.jpeg", "Screenshot 2026-10-17 123456.png", "8e522588-92dc-326d-bff4-dd6ba7153cc0.png",
+    "8e52258892dc326dbff4dd6ba7153cc0.png", "x1G7kZa0H4uPn2qT9rW3eY6bI5oAs8dF.png"])
+def test_generic_or_missing_filename_uses_local_neutral_title(capture_client, monkeypatch, filename):
+    client, _ = capture_client
+    timestamp = "2026-10-17T04:05:00+00:00"
+    monkeypatch.setattr(capture_service, "now", lambda: timestamp)
+    request_id = str(uuid.uuid4())
+    item = capture(client, data={"request_id": request_id, "original_filename": filename, "prompt_text": "Never use this prompt as the title"}).json()
+    local_time = datetime.fromisoformat(timestamp).astimezone().strftime("%Y-%m-%d %H:%M")
+    assert item["title"] == f"收录 · {local_time} · {request_id[:8]}"
+    if filename:
+        assert item["prompts"][0]["provenance"]["original_filename"] == filename
+    else:
+        assert "original_filename" not in item["prompts"][0]["provenance"]
+
+
+def test_explicit_title_wins_and_filename_metadata_is_safe(capture_client):
+    client, _ = capture_client
+    item = capture(client, data={"title": "  手填名称  ", "original_filename": "../private/柔和\u202e\t灯光.png"}).json()
+    assert item["title"] == "手填名称"
+    assert item["prompts"][0]["provenance"]["original_filename"] == "柔和灯光.png"
+    assert "private" not in json.dumps(item, ensure_ascii=False)
+    unsafe = capture(client, data={"original_filename": "photo.png?token=not-a-filename"}).json()
+    assert unsafe["title"].startswith("收录 · ")
+    assert "original_filename" not in unsafe["prompts"][0]["provenance"]
+
+
+def test_legacy_fingerprint_and_title_survive_absent_or_empty_filename(capture_client):
+    client, library = capture_client
+    request_id = str(uuid.uuid4())
+    prompt = "This was the old prompt-derived title"
+    legacy_payload = {"prompt_text": prompt, "language": "auto", "title": "", "source_name": "", "source_url": "", "notes": "",
+                      "image_sha256": hashlib.sha256(image_bytes()).hexdigest()}
+    legacy_fingerprint = hashlib.sha256(json.dumps(legacy_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+    first = capture(client, data={"request_id": request_id, "prompt_text": prompt}).json()
+    # Simulate the pre-filename release's persisted title and its exact hash.
+    with connect(library) as conn:
+        actual = conn.execute("SELECT fingerprint FROM capture_requests WHERE request_id=?", (request_id,)).fetchone()[0]
+        assert actual == legacy_fingerprint
+        conn.execute("UPDATE items SET title=? WHERE id=?", (prompt, first["id"]))
+        conn.commit()
+    for fields in ({}, {"original_filename": ""}):
+        replay = capture(client, data={"request_id": request_id, "prompt_text": prompt, **fields})
+        assert replay.status_code == 200
+        assert replay.json()["id"] == first["id"]
+        assert replay.json()["title"] == prompt
+    assert capture(client, data={"request_id": request_id, "prompt_text": prompt, "original_filename": "New name.png"}).status_code == 409
+    assert counts(library)["items"] == 1
+
+
+def test_new_filename_is_frozen_in_capture_fingerprint(capture_client):
+    client, library = capture_client
+    fields = {"request_id": str(uuid.uuid4()), "original_filename": "书店.png"}
+    first = capture(client, data=fields).json()
+    replay = capture(client, data=fields)
+    assert replay.status_code == 200 and replay.json()["id"] == first["id"]
+    for filename in ("另一个书店.png", ""):
+        assert capture(client, data={**fields, "original_filename": filename}).status_code == 409
+    assert counts(library)["items"] == 1
+
+
+def test_upload_filename_is_not_inferred_for_old_frozen_requests(capture_client):
+    client, _ = capture_client
+    fields = {"request_id": str(uuid.uuid4())}
+    first = capture(client, data=fields, filename="Meaningful old transport filename.png").json()
+    assert first["title"].startswith("收录 · ")
+    assert "original_filename" not in first["prompts"][0]["provenance"]
+    replay = capture(client, data=fields, filename="A different transport filename.png")
+    assert replay.status_code == 200 and replay.json()["id"] == first["id"]
+
+
 def test_json_prompt_preserves_mixed_line_endings_and_unicode(capture_client):
     client, library = capture_client
     prompt = '  \n简体中文，\r\n\t"quotes" \\ slash\r孤立回车 😀\n\n  '
@@ -183,6 +280,7 @@ def test_editing_captured_original_does_not_add_automatic_translation(capture_cl
     ({"language": "original"}, None, 400),
     ({"request_id": "../../bad"}, None, 422),
     ({"title": "x" * 301}, None, 422),
+    ({"original_filename": "x" * 1025}, None, 422),
     ({"prompt_text": "x" * 200001}, None, 422),
     ({}, b"", 400),
     ({}, b"not an image", 400),

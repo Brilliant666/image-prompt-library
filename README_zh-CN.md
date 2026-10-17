@@ -29,7 +29,7 @@ Requires **Python 3.10+** and **Node.js 24** for source builds. Existing install
 
 ### 保存第一个 prompt
 
-新资料库默认是空的。选择 **+ Add**，加入图片、prompt 和标题后保存。Collection、tag、备注和来源链接均为选填。
+新资料库默认是空的。选择 **快捷收录**，加入图片和原始提示词后保存，语言自动判断，标题可选。也可以使用 [Chrome 侧栏收录插件](docs/BROWSER_CAPTURE.md)，在浏览网页时直接收录，无需切回图库填写资料。
 
 想先浏览示例，可选择导入一个 sample pack：
 
