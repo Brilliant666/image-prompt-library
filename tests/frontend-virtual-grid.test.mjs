@@ -156,7 +156,7 @@ test('TaskGrid passes the supplied scrollRef to virtualization while retaining g
   const jsx = (type, props) => ({ type, props });
   const metrics = { columns: 2, rowHeight: 100, rowGap: 10, columnGap: 12, width: 600 };
   const dependencies = {
-    react: { useRef: value => ({ current: value }), useState: value => [value, () => {}] },
+    react: { useRef: value => ({ current: value }), useState: value => [value, () => {}], useEffect: () => {} },
     'react/jsx-runtime': { jsx, jsxs: jsx }, 'lucide-react': new Proxy({}, { get: (_, key) => key }),
     '../../api/client': { mediaUrl: path => path }, '../../utils/playground/virtualGrid': gridMath,
     '../../utils/playground/useVirtualGrid': { useVirtualGrid: (...args) => { calls.push(args); return { startIndex: 6, endIndex: 8, paddingTop: 330, paddingBottom: 0, metricsRef: { current: metrics } }; } },

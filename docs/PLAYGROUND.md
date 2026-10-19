@@ -53,7 +53,14 @@ History loads in pages; search and status filters cover the loaded pages, and
 Compact horizontal task cards show the original image without stretching, the
 prompt, actual returned dimensions, state and existing task actions. The results
 list scrolls independently above the composer, so expanding a prompt
-or reference images does not cover result cards. Compact parameter pills show
+or reference images does not cover result cards. Selecting tasks replaces the
+search controls within the same toolbar space; it does not move the cards.
+Copy success is confirmed briefly on the clicked button. Completion notices
+float without changing the list layout, while action errors remain dismissible.
+The details dialog separates the original image from the prompt and request
+settings, with its main actions at the bottom. Requested/actual output checks,
+mismatch warnings, reference images and full request provenance remain available.
+Compact parameter pills show
 the full model, size, quality and count; **More** groups format, transparency,
 moderation and applicable compression. Transparency maps to `auto`, `opaque`
 (`false`) or `transparent` (`true`); transparent output requires PNG or WebP.

@@ -365,13 +365,81 @@ function workspaceHarness(t, api, overrides = {}, environment = {}) {
     '../GenerationQueueDrawer': { __esModule: true, default: 'GenerationQueueDrawer', groupGenerationQueueJobs: jobs => [...new Set(jobs.map(job => job.generation_group_id))].map(id => ({ generationGroupId: id, jobs: jobs.filter(job => job.generation_group_id === id) })) },
   };
   const module = { exports: {} };
-  new Function('require', 'module', 'exports', 'fetch', 'document', 'window', 'URL', 'setTimeout', workspaceJs)(name => { assert.ok(name in deps, `unmocked workspace dependency: ${name}`); return deps[name]; }, module, module.exports, environment.fetch || globalThis.fetch, environment.document || globalThis.document, environment.window || globalThis.window, environment.URL || globalThis.URL, environment.setTimeout || globalThis.setTimeout);
+  new Function('require', 'module', 'exports', 'fetch', 'document', 'window', 'URL', 'setTimeout', 'clearTimeout', workspaceJs)(name => { assert.ok(name in deps, `unmocked workspace dependency: ${name}`); return deps[name]; }, module, module.exports, environment.fetch || globalThis.fetch, environment.document || globalThis.document, environment.window || globalThis.window, environment.URL || globalThis.URL, environment.setTimeout || globalThis.setTimeout, environment.clearTimeout || globalThis.clearTimeout);
   const props = { active: true, queueOpen: false, onQueueOpenChange() {}, t: key => key, preferences: {}, refreshKey: 0, configurationRevision: 0, onOpenSettings() {}, onAccepted() {}, onQueueChanged() {}, ...overrides };
   const render = () => { dirty = false; cursor = 0; tree = module.exports.default(props); effects.splice(0).forEach(effect => effect()); };
   const flush = async () => { for (let i = 0; i < 20; i++) { if (dirty) render(); await Promise.resolve(); } if (dirty) render(); };
   render(); t.after(() => slots.forEach(slot => slot?.cleanup?.()));
-  return { flush, node: (type, predicate = () => true) => children(tree).find(node => node.type === type && predicate(node.props))?.props };
+  return { flush, get tree() { return tree; }, node: (type, predicate = () => true) => children(tree).find(node => node.type === type && predicate(node.props))?.props };
 }
+
+test('gallery selection replaces the header controls without inserting a row and cancellation restores focus', async t => {
+  const job = historicalJob({ id: 'selected-job' });
+  const harness = workspaceHarness(t, { generationJobs: async () => ({ jobs: [job], total: 1 }) });
+  await harness.flush();
+  const header = () => harness.node('header', props => props.className === 'pg-gallery-header');
+  const toolbar = () => harness.node('div', props => props['aria-label'] === '批量操作');
+  const filters = () => harness.node('div', props => props.className?.split(' ').includes('pg-gallery-filters'));
+  const results = () => harness.node('div', props => props.className === 'pg-gallery-results');
+  const primaryChildren = () => harness.tree.props.children.filter(node => node && typeof node === 'object').slice(0, 2).map(node => node.props.className);
+  const focus = [];
+  results().ref.current = { focus: options => focus.push(options) };
+  assert.deepEqual(primaryChildren(), ['pg-gallery-header', 'pg-gallery-results']);
+  assert.equal(header().children.length, 2);
+  assert.equal(toolbar().inert, true);
+  assert.equal(toolbar()['aria-hidden'], true);
+  assert.equal(filters().inert, false);
+  harness.node('input', props => props['aria-label'] === '搜索生成历史').onChange({ target: { value: '原文' } }); await harness.flush();
+  harness.node('TaskGrid').onSelection(new Set([job.id])); await harness.flush();
+  assert.deepEqual(primaryChildren(), ['pg-gallery-header', 'pg-gallery-results']);
+  assert.equal(header().children.length, 2, 'both header modes stay mounted');
+  assert.equal(toolbar().inert, false);
+  assert.equal(filters().inert, true);
+  assert.equal(filters()['aria-hidden'], true);
+  assert.equal(harness.node('b').children, 1);
+  harness.node('button', props => props.children === '取消选择').onClick(); await harness.flush();
+  assert.equal(harness.node('TaskGrid').selected.size, 0);
+  assert.deepEqual(focus, [{ preventScroll: true }]);
+  assert.equal(toolbar().inert, true);
+  assert.equal(filters().inert, false);
+  assert.equal(harness.node('input', props => props['aria-label'] === '搜索生成历史').value, '原文');
+  assert.deepEqual(primaryChildren(), ['pg-gallery-header', 'pg-gallery-results']);
+});
+
+test('completion feedback dismisses itself without adding content before the gallery results', async t => {
+  const timers = new Map(); let nextTimer = 0;
+  let job = historicalJob({ status: 'running' });
+  const harness = workspaceHarness(t, { generationJobs: async () => ({ jobs: [job], total: 1 }) }, { preferences: { notifyOnCompletion: true } }, {
+    setTimeout(callback, delay) { const id = ++nextTimer; timers.set(id, { callback, delay }); return id; },
+    clearTimeout(id) { timers.delete(id); },
+  });
+  await harness.flush();
+  job = { ...job, status: 'succeeded' };
+  harness.node('button', props => props['aria-label'] === '刷新生成历史').onClick(); await harness.flush();
+  const feedback = harness.node('div', props => props.className?.split(' ').includes('pg-gallery-feedback'));
+  assert.equal(feedback.role, 'status');
+  assert.equal(feedback.children[0].props.children, '生成任务已有新结果');
+  assert.deepEqual(harness.tree.props.children.filter(node => node && typeof node === 'object').slice(0, 2).map(node => node.props.className), ['pg-gallery-header', 'pg-gallery-results']);
+  const timer = [...timers.values()].find(value => value.delay === 3500);
+  assert.ok(timer, 'a completion notification has a bounded lifetime');
+  timer.callback(); await harness.flush();
+  assert.equal(harness.node('div', props => props.className?.split(' ').includes('pg-gallery-feedback')), undefined);
+});
+
+test('copy failure feedback survives history refresh until explicitly dismissed', async t => {
+  const job = historicalJob(); let refreshes = 0;
+  const harness = workspaceHarness(t, { generationJobs: async () => { refreshes++; return { jobs: [job], total: 1 }; } });
+  await harness.flush();
+  harness.node('TaskGrid').onMessage('复制失败，请打开详情手动复制'); await harness.flush();
+  const feedback = () => harness.node('div', props => props.className?.split(' ').includes('pg-gallery-feedback'));
+  assert.equal(feedback().role, 'alert');
+  harness.node('button', props => props['aria-label'] === '刷新生成历史').onClick(); await harness.flush();
+  assert.equal(refreshes, 2);
+  assert.equal(feedback().children[0].props.children, '复制失败，请打开详情手动复制');
+  harness.node('button', props => props['aria-label'] === '关闭画廊提示').onClick(); await harness.flush();
+  assert.equal(feedback(), undefined);
+  assert.equal(harness.node('TaskGrid').jobs[0].prompt_text, originalPrompt);
+});
 
 test('actual history load-more callbacks can reach entries beyond 1000 through bounded API pages', async t => {
   const all = Array.from({ length: 1201 }, (_, index) => historicalJob({ id: `job-${index}` }));
