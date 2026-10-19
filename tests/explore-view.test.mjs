@@ -14,6 +14,7 @@ let CardsView;
 let ItemCard;
 let GenerationQueueDrawer;
 let BatchActionDialog;
+let TopBar;
 let groupGenerationQueueJobs;
 let generationQueueBatchCounts;
 
@@ -150,10 +151,49 @@ before(async () => {
   ({ default: ItemCard } = await vite.ssrLoadModule('/src/components/ItemCard.tsx'));
   ({ default: GenerationQueueDrawer, groupGenerationQueueJobs, generationQueueBatchCounts } = await vite.ssrLoadModule('/src/components/GenerationQueueDrawer.tsx'));
   ({ default: BatchActionDialog } = await vite.ssrLoadModule('/src/components/BatchActionDialog.tsx'));
+  ({ default: TopBar } = await vite.ssrLoadModule('/src/components/TopBar.tsx'));
 });
 
 after(async () => {
   await vite?.close();
+});
+
+test('all workspaces keep the same main navigation and move Library search into a separate tool row', () => {
+  let mainHeader;
+  for (const view of ['explore', 'cards', 'gallery', 'agent']) {
+    const html = renderToStaticMarkup(React.createElement(TopBar, {
+      t, view, q: 'saved query', queryFilterChips: ['tag:portrait'],
+      onQ() {}, onView() {}, onFilters() {}, onConfig() {}, onCapture() {},
+    }));
+    const header = html.match(/<header\b[\s\S]*?<\/header>/)?.[0];
+    assert.ok(header);
+    assert.match(header, /logo-wordmark/);
+    assert.match(header, /class="view-dock"/);
+    assert.match(header, /class="header-actions"/);
+    assert.match(header, /workspace-capture/);
+    assert.match(header, /config-button/);
+    assert.doesNotMatch(header, /library-toolbar|toolbar-search|filter-button/);
+    const stableHeader = header.replaceAll('class="active"', 'class=""').replaceAll('aria-pressed="true"', 'aria-pressed="false"');
+    if (mainHeader) assert.equal(stableHeader, mainHeader, `header structure stays fixed for ${view}`);
+    else mainHeader = stableHeader;
+    const tools = html.slice(html.indexOf('</header>') + '</header>'.length);
+    assert.match(tools, /class="library-tools"/);
+    assert.match(tools, /value="saved query"/);
+    assert.match(tools, /aria-controls="filters-drawer"/);
+    if (view === 'gallery' || view === 'agent') {
+      assert.match(tools, /^<div class="library-tools" hidden="" aria-hidden="true">/);
+      assert.doesNotMatch(tools, /tag:portrait/);
+    } else {
+      assert.match(tools, /^<div class="library-tools">/);
+      assert.match(tools, /tag:portrait/);
+    }
+  }
+  const blocked = renderToStaticMarkup(React.createElement(TopBar, {
+    t, view: 'cards', q: '', queryFilterChips: [], modalOpen: true,
+    onQ() {}, onView() {}, onFilters() {}, onConfig() {},
+  }));
+  assert.match(blocked, /<header class="chrome" inert="" aria-hidden="true">/);
+  assert.match(blocked, /<div class="library-tools" inert="" aria-hidden="true">/);
 });
 
 test('batch tag and move actions use in-app searchable dialogs', async () => {
@@ -960,9 +1000,9 @@ test('Explore wiring preserves Library management, semantic appearance, and rest
   assert.match(generationPanel, /secondaryFallbackFocusSelector: item \? '\.detail\.modal'/);
   assert.match(modalFocus, /\.\.\.fallbacks, \.\.\.secondaryFallbacks, appFallback/);
   assert.match(appearance, /image-prompt-library\.appearance\.v1/);
-  assert.match(appearance, /DEFAULT_APPEARANCE: AppearancePreset = 'gallery_vermilion'/);
+  assert.match(appearance, /DEFAULT_APPEARANCE: AppearancePreset = 'pure_white'/);
   assert.match(app, /applyAppearance\(appearance\)/);
-  for (const preset of ['gallery_vermilion', 'pine_archive', 'aubergine_ink']) {
+  for (const preset of ['pure_white', 'gallery_vermilion', 'pine_archive', 'aubergine_ink']) {
     assert.match(config, new RegExp(preset));
   }
   // Preserve every former settings control in its new named tab instead of
@@ -1217,9 +1257,14 @@ test('redesign interaction guards keep overlays mutually exclusive and focus-saf
   assert.match(styles, /\.scope-sort-picker\{position:relative;display:flex;align-items:center;min-width:0\}/);
   assert.match(styles, /\.scope-sort-select\{[^}]*width:auto;[^}]*cursor:pointer;[^}]*appearance:none/);
   assert.doesNotMatch(styles, /\.scope-sort-select\{[^}]*position:absolute;[^}]*opacity:0/);
-  assert.match(styles, /main\{max-width:1600px[\s\S]*?@media\(min-width:1760px\)\{main,\.chrome \.nav-row,\.status-row\{max-width:1920px\}\}/);
-  assert.match(styles, /\.library-toolbar\[hidden\]\{display:none!important\}/);
-  assert.match(styles, /@media\(max-width:760px\)\{[\s\S]*?\.library-toolbar\{grid-column:1\/-1;grid-row:3\}[\s\S]*?\.view-dock\{grid-column:1\/-1;grid-row:2;justify-self:stretch;width:100%\}[\s\S]*?\.view-dock \.toggle button\{flex:1 1 0;min-width:0;min-height:36px;padding:0 8px\}/);
+  assert.match(styles, /main\{max-width:1600px[\s\S]*?@media\(min-width:1760px\)\{main\{max-width:1920px\}\}/);
+  assert.match(styles, /\.library-tools\[hidden\]\{display:none!important\}/);
+  assert.match(styles, /--app-shell-width:1280px/);
+  assert.match(styles, /\.nav-row\{[^}]*grid-template-columns:minmax\(0,1fr\) auto minmax\(0,1fr\);[^}]*max-width:var\(--app-shell-width\)/);
+  assert.match(styles, /--app-header-height:calc\(65px \+ env\(safe-area-inset-top\)\)/);
+  assert.match(styles, /\.view-dock \.toggle\{display:grid;grid-auto-flow:column;grid-auto-columns:72px\}/, 'desktop navigation width is independent of the active label font weight');
+  assert.match(styles, /\.view-dock \.toggle\{width:100%;grid-auto-columns:minmax\(0,1fr\);min-height:44px/, 'mobile navigation divides its available width among the actual two or four items');
+  assert.match(styles, /@media\(max-width:760px\)\{\s*:root\{--app-header-height:calc\(115px \+ env\(safe-area-inset-top\)\)\}[\s\S]*?\.nav-row\{[^}]*grid-template-rows:44px 44px;gap:8px\}[\s\S]*?\.view-dock\{grid-column:1\/-1;grid-row:2;justify-self:stretch;width:100%\}[\s\S]*?\.view-dock \.toggle button\{flex:1 1 0;min-width:0;min-height:36px;padding:0 8px\}/);
   assert.match(styles, /@media\(max-width:760px\)\{[\s\S]*?\.scope-sort-control\{height:40px;max-width:min\(190px,48vw\);min-height:40px\}[\s\S]*?\.scope-sort-select\{height:38px;min-height:38px/);
   assert.match(styles, /\.generation-generating-block::after\{[\s\S]*?opacity:0[\s\S]*?transform:translateX\(-130%\)[\s\S]*?animation:generation-exposure-sweep 1\.45s/);
   assert.match(styles, /@keyframes generation-exposure-sweep/);

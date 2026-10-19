@@ -28,6 +28,8 @@ For an endpoint without remembered choices, the composer defaults to automatic s
 
 Background supports `auto`, `opaque`, `transparent`; output supports PNG, JPEG and WebP. Transparent + JPEG is blocked without erasing the background choice. JPEG/WebP compression supports integers 0–100; PNG omits compression. Originals are saved byte-for-byte. Newly created transparent previews and thumbnails preserve alpha, with checkerboard only in CSS; existing assets are not rebuilt. Downloads use the original file.
 
+Gallery's **More** menu also exposes optional `moderation: auto | low`, supported by the OpenAI Images generation and edit contracts. An omitted historical setting stays omitted; an explicit selection is validated, forwarded in JSON or multipart, and retained in request history and per-profile preferences. This is a request setting, not the returned `moderation_details` diagnostic, and does not guarantee that a third-party service supports it or accepts the prompt.
+
 Settings follow single, batch, edit, history/draft and saved-image reuse. A queued batch freezes each request model/settings and endpoint ID before execution, so changing the default endpoint does not reroute queued jobs. History and saved-image drafts restore that endpoint; a deleted endpoint blocks execution and requires an explicit choice in a new draft. Credentials are resolved from that endpoint’s current configuration at execution time, so edit an existing endpoint’s URL only after its queue has finished, or add a new endpoint instead. Prompt text is preserved, including whitespace; variable expansion only applies when using an actual template.
 
 Sources: [official image generation guide](https://developers.openai.com/api/docs/guides/image-generation), [Images API reference](https://developers.openai.com/api/reference/resources/images/methods/generate). Documented model names do not establish access for a particular gateway/key.
@@ -95,6 +97,8 @@ The existing queue deliberately submits `n=1` per task, including batches; each 
 ## Single size control
 
 Third-party API generation uses one size menu: automatic, exact pixel presets with aspect-ratio labels, or a custom `WIDTHxHEIGHT`. Quality is independent and never derives or overwrites size. New drafts do not add a separate aspect-ratio parameter or composition hint. Historical composition ratios remain visible and preserved until the user explicitly selects or edits a size; existing stored dimensions remain authoritative. Other OAuth providers retain their original ratio controls.
+
+In Gallery this control opens a centered dialog: **Auto**, **By ratio** (1K/2K/4K and common/custom ratios), or **Custom dimensions**. It previews the exact pixels before applying; cancellation keeps the previous recipe. Image 2.5-specific custom-size bounds only apply to the model IDs already covered by the existing validator. Other model aliases retain their existing positive-integer dimension contract rather than inheriting a new model restriction.
 
 Custom dimensions are validated before submission. GPT Image 2.5 uses its documented edge, multiple-of-16, ratio and pixel-count constraints. Preset names describe requested pixels, not guaranteed provider billing tiers or returned dimensions.
 

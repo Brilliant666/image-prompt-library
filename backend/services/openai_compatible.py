@@ -126,6 +126,9 @@ def normalize_image_parameters(parameters, default_model=""):
         raise OpenAICompatibleError("Unsupported quality for the selected image model")
     result["background"] = result.get("background", "auto")
     result["output_format"] = result.get("output_format", "png")
+    # Optional on the wire: preserve omitted historical settings and provider defaults.
+    if "moderation" in result and result["moderation"] not in ("auto", "low"):
+        raise OpenAICompatibleError("Moderation must be auto or low")
     if result["background"] not in ("auto", "opaque", "transparent"):
         raise OpenAICompatibleError("Background must be auto, opaque or transparent")
     if result["output_format"] not in ("png", "jpeg", "webp"):
@@ -440,7 +443,7 @@ class OpenAICompatibleProvider:
         normalized = normalize_image_parameters(parameters, settings["model"])
         if not isinstance(prompt, str) or not prompt.strip():
             raise OpenAICompatibleError("Generation prompt is required")
-        payload = {key: normalized[key] for key in ("model", "size", "quality", "background", "output_format", "output_compression") if key in normalized}
+        payload = {key: normalized[key] for key in ("model", "size", "quality", "background", "output_format", "output_compression", "moderation") if key in normalized}
         request_prompt = prompt
         ratio = normalized.get("requested_aspect_ratio", "auto")
         if normalized.get("aspect_ratio_prompt_injection") is True and ratio in ASPECT_RATIO_SIZES and ratio != "auto":
@@ -525,11 +528,11 @@ class OpenAICompatibleProvider:
         except OpenAICompatibleError:
             fail("image_decode", "Image API result did not decode to a supported safe image")
         fmt, width, height = decoded["format"], decoded["width"], decoded["height"]
-        fields = ("model", "size", "generation_id", "quality", "background", "output_format", "output_compression", "usage", "revised_prompt", "request_id", "created")
+        fields = ("model", "size", "generation_id", "quality", "background", "output_format", "output_compression", "moderation", "usage", "revised_prompt", "request_id", "created")
         top = {key: _safe_value(body[key], settings["api_key"]) for key in fields if key in body}
         item = {key: _safe_value(first[key], settings["api_key"]) for key in fields if key in first}
         actual = {key: item[key] if key in item else top.get(key) for key in fields}
-        for key in ("model", "size", "quality", "background", "output_format", "generation_id"):
+        for key in ("model", "size", "quality", "background", "output_format", "moderation", "generation_id"):
             if actual[key] is not None and not isinstance(actual[key], str):
                 actual[key] = None
         actual["request_id"] = actual.get("request_id") or diagnostics["request_id"]

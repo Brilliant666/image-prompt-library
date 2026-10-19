@@ -14,6 +14,7 @@ export function readGenerationPreference(storage: StorageLike, profile: string, 
       ...(value.size_mode === 'auto4k' ? { size_mode: 'auto4k' as const } : {}),
       background: ['auto', 'opaque', 'transparent'].includes(value.background) ? value.background : 'auto',
       output_format: ['png', 'jpeg', 'webp'].includes(value.output_format) ? value.output_format : 'png',
+      ...(value.moderation === 'auto' || value.moderation === 'low' ? { moderation: value.moderation } : {}),
       ...(Number.isInteger(value.output_compression) && value.output_compression >= 0 && value.output_compression <= 100 ? { output_compression: value.output_compression } : {}),
     };
   } catch { return fallback; }
@@ -21,8 +22,8 @@ export function readGenerationPreference(storage: StorageLike, profile: string, 
 export function writeGenerationPreference(storage: StorageLike, profile: string, recipe: CompatibleRecipe): void {
   try {
     // Explicit allowlist: never persist credentials, prompts, images or provider URLs.
-    const { model, quality, size, background, output_format, output_compression, size_mode } = recipe;
-    storage.setItem(PREFIX + profile, JSON.stringify({ model, quality, size, background, output_format, output_compression, size_mode }));
+    const { model, quality, size, background, output_format, output_compression, moderation, size_mode } = recipe;
+    storage.setItem(PREFIX + profile, JSON.stringify({ model, quality, size, background, output_format, output_compression, moderation, size_mode }));
     storage.setItem(PREFIX + 'selected-profile', profile);
   } catch { /* Storage may be unavailable or full; generation still works. */ }
 }

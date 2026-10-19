@@ -26,6 +26,53 @@ def config(tmp_path, monkeypatch):
     return cfg
 
 
+@pytest.mark.parametrize("moderation", [None, "auto", "low"])
+@pytest.mark.parametrize("edits", [False, True])
+def test_optional_moderation_reaches_json_and_multipart_without_changing_default(config, moderation, edits):
+    calls = []
+    def handler(request):
+        calls.append(request)
+        if edits:
+            body = request.content.decode("latin1")
+            if moderation is None:
+                assert 'name="moderation"' not in body
+            else:
+                assert f'name="moderation"\r\n\r\n{moderation}\r\n' in body
+        else:
+            body = json.loads(request.content)
+            assert body.get("moderation") == moderation
+            if moderation is None:
+                assert "moderation" not in body
+        return httpx.Response(200, json={"data": [{"b64_json": base64.b64encode(png()).decode()}]})
+    parameters = {} if moderation is None else {"moderation": moderation}
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        _, _, metadata = OpenAICompatibleProvider(config, client).generate("original", parameters, [("ref.png", png(), "image/png")] if edits else None)
+    assert metadata["requested"].get("moderation") == moderation
+    if moderation is None:
+        assert "moderation" not in metadata["requested"]
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("moderation", ["off", "none", "high", "", False, 0, None, [], {}])
+def test_invalid_moderation_is_rejected_before_post(config, moderation):
+    with httpx.Client(transport=httpx.MockTransport(lambda request: pytest.fail("Must not POST invalid moderation"))) as client:
+        with pytest.raises(OpenAICompatibleError, match="Moderation"):
+            OpenAICompatibleProvider(config, client).generate("original", {"moderation": moderation})
+
+
+def test_moderation_freezes_and_restores_requested_value(config, tmp_path):
+    from backend.schemas import GenerationJobCreate
+    from backend.services.generation_jobs import GenerationJobRepository
+    repo = GenerationJobRepository(tmp_path / "library")
+    job = repo.create_job(GenerationJobCreate(provider="openai_compatible", prompt_text="original", parameters={"moderation": "low", "size": "2560x3840"}))
+    assert repo.get_job(job.id).parameters["moderation"] == "low"
+    restored = repo._restore_compatible_request(job.model_copy(update={"parameters": {**job.parameters, "moderation": "auto"}, "metadata": {"requested": {"moderation": "low"}}}))
+    assert restored.parameters["moderation"] == "low"
+    assert restored.parameters["size"] == "2560x3840"
+    untouched = repo.create_job(GenerationJobCreate(provider="openai_compatible", prompt_text="legacy", parameters={}))
+    assert "moderation" not in repo._restore_compatible_request(untouched).parameters
+
+
 def test_config_preserves_blank_key_and_blocks_library(tmp_path, config):
     config.save({"api_key": "", "display_name": "Example"})
     assert config.read()["api_key"] == "test-only-secret"

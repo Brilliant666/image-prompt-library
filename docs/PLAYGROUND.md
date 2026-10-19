@@ -28,10 +28,14 @@ The navigation is **Explore / Library / 画廊 (Gallery) / Agent**. Quick captur
 the settings button remain available without an image or text API account.
 Workspace navigation retains the composer, filters, selection and scroll position.
 Tasks and conversations live on the server; reopening a page never submits them.
+The shared navigation keeps the same layout in every workspace; Library search
+and filters sit in its own toolbar. Pure white is the default appearance for a
+new browser, while an explicitly saved vermilion, pine or aubergine theme remains
+selected. Appearance can be changed in General settings.
 
 In Gallery, enter a prompt, optionally choose Library/history images or upload,
 paste or drop image files, and select an API profile. Model ID, pixel size,
-quality, background, output format and compression are separate request settings.
+quality, background, output format, compression and moderation are separate request settings.
 The existing 4K target resolver and prompt variables are retained. A target is
 not a promise of the returned resolution; the details view distinguishes the
 request, reported response and decoded file. Original image bytes are retained.
@@ -46,10 +50,28 @@ an already accepted Library image. Protected Agent references remain usable.
 History loads in pages; search and status filters cover the loaded pages, and
 **Load more** makes older pages available.
 
-The results list scrolls independently above the composer, so expanding a prompt
+Compact horizontal task cards show the original image without stretching, the
+prompt, actual returned dimensions, state and existing task actions. The results
+list scrolls independently above the composer, so expanding a prompt
 or reference images does not cover result cards. Compact parameter pills show
-the full model, size, quality and count; **More** groups background, format and
-compression. The **+** button opens image input options. The top-right history
+the full model, size, quality and count; **More** groups format, transparency,
+moderation and applicable compression. Transparency maps to `auto`, `opaque`
+(`false`) or `transparent` (`true`); transparent output requires PNG or WebP.
+Moderation offers `auto` and `low`, as defined by the Images
+[generation](https://developers.openai.com/api/reference/resources/images/methods/generate)
+and [edit](https://developers.openai.com/api/reference/resources/images/methods/edit)
+APIs. Old recipes omit this optional parameter until explicitly selected. An API
+may reject or ignore a setting; selecting `low` does not guarantee acceptance.
+
+The single size button opens a dialog with **Auto / By ratio / Custom dimensions**.
+Auto includes both service-decided `size: auto` and the existing prompt-first 4K
+target. By ratio offers 1K/2K/4K presets and common or custom ratios, with a pixel
+preview before confirmation (for example, 4K at 2:3 requests 2304×3456). Explicit
+historical sizes remain unchanged when reopened; invalid custom dimensions are
+reported rather than silently rescaled. Cancel leaves the request unchanged.
+These presets only select request dimensions; they never stretch saved images.
+
+The **+** button opens image input options. The top-right history
 icon opens the existing work queue, including running tasks and older batches.
 Opening a batch scopes the results list to that batch; **Return to all history**
 restores the full loaded list. Neither action resubmits a generation request.
@@ -113,6 +135,7 @@ errors. Provider-origin diagnostics and persisted response fields are sanitized.
 | --- | --- | --- |
 | `virtualGrid.ts`, `useVirtualGrid.ts` | Reused measured virtualization and rectangular selection; adapted for hidden workspaces | Local behavior and browser verification |
 | `TaskGrid`, `TaskCard`, `InputBar`, `DetailModal` | Adapted layout and operations to existing generation jobs, recipes, profiles and Library acceptance | Local HTTP mock and browser verification |
+| `SizePickerModal`, `size.ts` | Adapted three-tab size selection, ratio presets and bounded pixel calculations; retained existing auto-4K resolver | Local parameter tests and browser verification |
 | `Lightbox`, `clickSuppression` | Reused zoom, pan, pinch, double-tap, swipe and click suppression; scoped styles/focus handling | Desktop browser verification; physical touch gestures need device acceptance |
 | `AgentWorkspace`, conversation/reference/response helpers | Adapted branch, mention, message and tool-result semantics; server-owned request lifecycle | Local HTTP JSON/SSE and browser verification; real providers unverified |
 | `SettingsModal`, settings/profile interactions | Grouped dialog, list edit/copy/order, local workflow preferences | Local tests and browser verification |

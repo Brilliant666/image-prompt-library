@@ -22,7 +22,7 @@ const { generationFailure, generationModerationGuidance } = await importTypescri
 const { generationSetProgressText, providerPauseSeconds } = await importTypescript('../frontend/src/utils/generationSets.ts');
 const { generationAspectRatio } = await importTypescript('../frontend/src/utils/generationAspectRatio.ts');
 const { generationResultActions } = await importTypescript('../frontend/src/utils/generationResultActions.ts');
-const { APPEARANCE_STORAGE_KEY, DEFAULT_APPEARANCE, normalizeAppearance } = await importTypescript('../frontend/src/utils/appearance.ts');
+const { APPEARANCE_STORAGE_KEY, DEFAULT_APPEARANCE, normalizeAppearance, loadAppearance, applyStoredAppearance } = await importTypescript('../frontend/src/utils/appearance.ts');
 const { DEFAULT_AI_PROVIDER_STORAGE_KEY, resolveDefaultAiProvider } = await importTypescript('../frontend/src/utils/defaultAiProvider.ts');
 const {
   createGenerationReviewSession,
@@ -238,12 +238,38 @@ test('provider pause countdown derives from the authoritative deadline', () => {
 
 test('appearance presets stay browser-local and reject unknown values', () => {
   assert.equal(APPEARANCE_STORAGE_KEY, 'image-prompt-library.appearance.v1');
-  assert.equal(DEFAULT_APPEARANCE, 'gallery_vermilion');
+  assert.equal(DEFAULT_APPEARANCE, 'pure_white');
+  assert.equal(normalizeAppearance('pure_white'), 'pure_white');
   assert.equal(normalizeAppearance('gallery_vermilion'), 'gallery_vermilion');
   assert.equal(normalizeAppearance('pine_archive'), 'pine_archive');
   assert.equal(normalizeAppearance('aubergine_ink'), 'aubergine_ink');
-  assert.equal(normalizeAppearance('dark'), 'gallery_vermilion');
-  assert.equal(normalizeAppearance(null), 'gallery_vermilion');
+  assert.equal(normalizeAppearance('dark'), 'pure_white');
+  assert.equal(normalizeAppearance(null), 'pure_white');
+  assert.equal(normalizeAppearance(undefined), 'pure_white');
+});
+
+test('starting the app applies the saved appearance without overwriting an existing choice', t => {
+  const oldWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  const oldDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  let stored = null;
+  const writes = [];
+  const document = { documentElement: { dataset: {} } };
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: { localStorage: {
+    getItem(key) { assert.equal(key, APPEARANCE_STORAGE_KEY); return stored; },
+    setItem(...args) { writes.push(args); },
+  } } });
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: document });
+  t.after(() => {
+    if (oldWindow) Object.defineProperty(globalThis, 'window', oldWindow); else delete globalThis.window;
+    if (oldDocument) Object.defineProperty(globalThis, 'document', oldDocument); else delete globalThis.document;
+  });
+  for (const saved of [null, 'pure_white', 'gallery_vermilion', 'pine_archive', 'aubergine_ink']) {
+    stored = saved;
+    assert.equal(loadAppearance(), saved || 'pure_white');
+    applyStoredAppearance();
+    assert.equal(document.documentElement.dataset.appearance, saved || 'pure_white');
+  }
+  assert.deepEqual(writes, []);
 });
 
 test('default AI provider uses the sole available provider and preserves an explicit preference', () => {
@@ -276,16 +302,16 @@ test('appearance names are localized without changing preset identifiers', () =>
   const english = makeTranslator('en');
 
   assert.deepEqual(
-    ['appearanceGalleryVermilion', 'appearancePineArchive', 'appearanceAubergineInk'].map(key => traditional(key)),
-    ['朱紅', '松綠', '茄紫'],
+    ['appearancePureWhite', 'appearanceGalleryVermilion', 'appearancePineArchive', 'appearanceAubergineInk'].map(key => traditional(key)),
+    ['純白', '朱紅', '松綠', '茄紫'],
   );
   assert.deepEqual(
-    ['appearanceGalleryVermilion', 'appearancePineArchive', 'appearanceAubergineInk'].map(key => simplified(key)),
-    ['朱红', '松绿', '茄紫'],
+    ['appearancePureWhite', 'appearanceGalleryVermilion', 'appearancePineArchive', 'appearanceAubergineInk'].map(key => simplified(key)),
+    ['纯白', '朱红', '松绿', '茄紫'],
   );
   assert.deepEqual(
-    ['appearanceGalleryVermilion', 'appearancePineArchive', 'appearanceAubergineInk'].map(key => english(key)),
-    ['Red', 'Green', 'Purple'],
+    ['appearancePureWhite', 'appearanceGalleryVermilion', 'appearancePineArchive', 'appearanceAubergineInk'].map(key => english(key)),
+    ['Pure white', 'Red', 'Green', 'Purple'],
   );
 });
 

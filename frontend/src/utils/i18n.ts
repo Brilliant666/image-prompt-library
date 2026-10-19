@@ -15,7 +15,7 @@ type TranslationKey =
   | 'libraryEmptyTitle' | 'libraryEmptyHelp' | 'noMatchingPrompts' | 'noMatchingPromptsHelp' | 'addFirstPrompt'
   | 'firstRunEmptyTitle' | 'firstRunEmptyHelp' | 'firstRunOpenConfig'
   | 'firstRunSampleCommand' | 'firstRunSampleHelp' | 'firstRunGenerationHelp' | 'firstRunLocalInstall'
-  | 'localSetup' | 'systemInformation' | 'localSetupHelp' | 'appearance' | 'appearanceHelp' | 'appearanceGalleryVermilion' | 'appearancePineArchive' | 'appearanceAubergineInk' | 'appVersion' | 'updateStatusLabel'
+  | 'localSetup' | 'systemInformation' | 'localSetupHelp' | 'appearance' | 'appearanceHelp' | 'appearancePureWhite' | 'appearanceGalleryVermilion' | 'appearancePineArchive' | 'appearanceAubergineInk' | 'appVersion' | 'updateStatusLabel'
   | 'generationStatusLabel' | 'setupCommands' | 'statusCommandHelp' | 'doctorCommandHelp'
   | 'generate' | 'createImage' | 'reviewGeneration' | 'workQueue' | 'generationQueue' | 'noGenerationActivity' | 'generationActivityHelp'
   | 'queueLoading' | 'queueLoadFailed' | 'queueRunning' | 'queueQueued' | 'queueReady' | 'queueUsedAsReference' | 'queueFailed' | 'queueSaved' | 'queueDiscarded' | 'queueCancelled'
@@ -181,6 +181,7 @@ const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
     localSetupHelp: '版本、資料位置及本機診斷資料。',
     appearance: '介面配色',
     appearanceHelp: '選擇介面主色；不會改變圖片或 Library 內容。',
+    appearancePureWhite: '純白',
     appearanceGalleryVermilion: '朱紅',
     appearancePineArchive: '松綠',
     appearanceAubergineInk: '茄紫',
@@ -309,6 +310,7 @@ const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
     localSetupHelp: '版本、数据位置及本机诊断信息。',
     appearance: '界面配色',
     appearanceHelp: '选择界面主色；不会改变图片或 Library 内容。',
+    appearancePureWhite: '纯白',
     appearanceGalleryVermilion: '朱红',
     appearancePineArchive: '松绿',
     appearanceAubergineInk: '茄紫',
@@ -415,6 +417,7 @@ const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
     localSetupHelp: 'Version, data locations, and local diagnostics.',
     appearance: 'Appearance',
     appearanceHelp: 'Choose an interface accent. Images and Library content are unchanged.',
+    appearancePureWhite: 'Pure white',
     appearanceGalleryVermilion: 'Red',
     appearancePineArchive: 'Green',
     appearanceAubergineInk: 'Purple',

@@ -561,6 +561,7 @@ export default function ConfigPanel({
         <p className="muted">{t('appearanceHelp')}</p>
         <div className="appearance-control" role="radiogroup" aria-label={t('appearance')}>
           {([
+            ['pure_white', 'appearancePureWhite'],
             ['gallery_vermilion', 'appearanceGalleryVermilion'],
             ['pine_archive', 'appearancePineArchive'],
             ['aubergine_ink', 'appearanceAubergineInk'],

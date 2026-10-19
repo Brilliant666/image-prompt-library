@@ -38,20 +38,34 @@ export default function TopBar({
   modalOpen = false,
 }: Props) {
   const hasActiveSearch = Boolean(queryFilterChips.length);
+  const isLibraryView = view === 'explore' || view === 'cards';
 
   return (
-    <header className="chrome" inert={modalOpen} aria-hidden={modalOpen || undefined}>
-      <nav className="nav-row" aria-label={t('primaryNavigation')}>
-        <div className="logo mobile-brand" aria-label={t('appHome')}>
-          <img className="logo-mark" src={headerLogo} alt="" aria-hidden="true" />
-          <b className="logo-wordmark" lang="en">Image Prompt Library</b>
-        </div>
+    <>
+      <header className="chrome" inert={modalOpen} aria-hidden={modalOpen || undefined}>
+        <nav className="nav-row" aria-label={t('primaryNavigation')}>
+          <div className="logo mobile-brand" aria-label={t('appHome')}>
+            <img className="logo-mark" src={headerLogo} alt="" aria-hidden="true" />
+            <b className="logo-wordmark" lang="en">Image Prompt Library</b>
+          </div>
 
-        <div className="view-dock">
-          <ViewToggle t={t} view={view} onView={onView} />
-        </div>
+          <div className="view-dock">
+            <ViewToggle t={t} view={view} onView={onView} />
+          </div>
 
-        <div className="library-toolbar" hidden={view === 'gallery' || view === 'agent'}>
+          <div className="header-actions">
+            {onCapture && <button className="iconbtn workspace-capture" onClick={onCapture} aria-label="快捷收录" title="快捷收录"><Plus size={18}/><span>收录</span></button>}
+
+            <button className="iconbtn config-button" onClick={onConfig} aria-label={t('config')} aria-haspopup="dialog" aria-expanded={configOpen} aria-controls="config-drawer">
+              <Settings size={19} />
+              {updateBadgeLabel && <span className="update-available-badge">{updateBadgeLabel}</span>}
+            </button>
+          </div>
+        </nav>
+      </header>
+
+      <div className="library-tools" hidden={!isLibraryView} inert={modalOpen} aria-hidden={!isLibraryView || modalOpen || undefined}>
+        <div className="library-toolbar">
           <label className="search toolbar-search" aria-label={t('searchAria')}>
             <Search size={20} />
             <input
@@ -74,23 +88,14 @@ export default function TopBar({
           </button>
         </div>
 
-        <div className="header-actions">
-          {onCapture && <button className="iconbtn workspace-capture" onClick={onCapture} aria-label="快捷收录" title="快捷收录"><Plus size={18}/><span>收录</span></button>}
-
-          <button className="iconbtn config-button" onClick={onConfig} aria-label={t('config')} aria-haspopup="dialog" aria-expanded={configOpen} aria-controls="config-drawer">
-            <Settings size={19} />
-            {updateBadgeLabel && <span className="update-available-badge">{updateBadgeLabel}</span>}
-          </button>
-        </div>
-      </nav>
-
-      {hasActiveSearch && (view === 'explore' || view === 'cards') && (
-        <div className="status-row mobile-status-view-row">
-          <div className="active-filter-strip" aria-label={t('currentFilters')}>
-            {queryFilterChips.map(chip => <span key={chip} className="chip query-filter-chip">{chip}</span>)}
+        {hasActiveSearch && isLibraryView && (
+          <div className="status-row mobile-status-view-row">
+            <div className="active-filter-strip" aria-label={t('currentFilters')}>
+              {queryFilterChips.map(chip => <span key={chip} className="chip query-filter-chip">{chip}</span>)}
+            </div>
           </div>
-        </div>
-      )}
-    </header>
+        )}
+      </div>
+    </>
   );
 }

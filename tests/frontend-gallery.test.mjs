@@ -214,6 +214,7 @@ function inputHarness(t, overrides = {}, apiOverrides = {}) {
     '../../utils/promptTemplateVariables': templates,
     '../../utils/galleryDraft': { readGalleryDraft: async () => undefined, saveGalleryDraft: async value => state.persisted.push(value) },
     './ReferencePicker': { __esModule: true, default: 'ReferencePicker' },
+    './SizeDialog': { __esModule: true, default: 'SizeDialog' },
     './InputBar.css': {},
   };
   const module = { exports: {} };
@@ -248,14 +249,16 @@ test('parameter chips display complete model and exact pixels and preserve edits
   harness.find('button', `请求模型 ${model}`).onClick(); await harness.flush();
   harness.find('input', '请求模型完整 ID').onChange({ target: { value: 'image-model-custom' } }); await harness.flush();
   harness.find('button', '请求尺寸 2560x3840').onClick(); await harness.flush();
-  harness.find('input', '自定义尺寸').onChange({ target: { value: '2048x3072' } }); await harness.flush();
-  harness.find('button', '应用尺寸').onClick(); await harness.flush();
+  const sizeDialog=children(harness.tree).find(node=>node.type==='SizeDialog');
+  assert.equal(sizeDialog.props.recipe.size, '2560x3840');
+  sizeDialog.props.onApply({size:'2048x3072',size_mode:undefined});sizeDialog.props.onClose();await harness.flush();
   harness.find('button', '质量 max').onClick(); await harness.flush();
   children(harness.tree).find(node => node.type === 'button' && text(node.props.children) === '超高 · xhigh').props.onClick(); await harness.flush();
-  harness.find('button', '更多 WEBP · 不透明背景 · 压缩 0').onClick(); await harness.flush();
+  harness.find('button', '更多 WEBP · 透明 false · 审核 auto · 压缩 0').onClick(); await harness.flush();
   harness.find('select', '图片背景').onChange({ target: { value: 'transparent' } });
   harness.find('select', '输出格式').onChange({ target: { value: 'webp' } });
   harness.find('input', '输出压缩').onChange({ target: { value: '0' } });
+  harness.find('select', '审核强度').onChange({ target: { value: 'low' } });
   harness.find('select', '生成数量').onChange({ target: { value: '3' } }); await harness.flush();
   assert.deepEqual(harness.find('select', '生成数量').children.map(option => option.props.value), [1, 3, 5, 10]);
   harness.find('button', '生成图片').onClick(); await harness.flush();
@@ -264,6 +267,7 @@ test('parameter chips display complete model and exact pixels and preserve edits
   assert.equal(request.job.prompt_text, originalPrompt); assert.equal(request.job.model, 'image-model-custom');
   assert.equal(request.job.parameters.size, '2048x3072'); assert.equal(request.job.parameters.quality, 'xhigh');
   assert.equal(request.job.parameters.background, 'transparent'); assert.equal(request.job.parameters.output_format, 'webp'); assert.equal(request.job.parameters.output_compression, 0);
+  assert.equal(request.job.parameters.moderation, 'low');
 });
 
 test('add-image menu opens original upload and Library/history paths without submitting', async t => {

@@ -24,6 +24,10 @@
 .pg-composer .pg-parameters-panel[data-panel=add]{left:auto;right:10px;width:min(280px,calc(100vw - 48px))}
 .pg-composer .pg-add-options{display:grid;gap:4px}.pg-composer .pg-add-options button{justify-content:flex-start;gap:10px;padding:10px 8px;border:0;border-radius:10px;background:transparent;text-align:left;font-size:13px}
 .pg-composer .pg-add-options button:hover{background:color-mix(in srgb,var(--ink) 4%,transparent)}
+.pg-composer .pg-parameters-panel[data-panel=more]{left:auto;right:100px;width:min(270px,calc(100vw - 24px))}
+.pg-composer .pg-more-fields{display:grid;gap:10px}.pg-composer .pg-more-fields>label{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:0;font-size:13px;color:var(--ink)}
+.pg-composer .pg-more-fields>label>select,.pg-composer .pg-more-fields>label>input{box-sizing:border-box;flex:0 0 112px;width:112px;min-width:0;max-width:112px;margin:0;padding:7px 11px;border:0;border-radius:8px;background:color-mix(in srgb,var(--ink) 6%,transparent);color:var(--ink);font-size:12px}
+.pg-more-fields>label>span>small{font-size:10px;color:var(--muted)}.pg-more-fields>small{font-size:10px;line-height:1.6;color:var(--muted);margin-top:2px}
 @media(max-width:760px){
   .pg-composer .pg-composer-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:5px}
   .pg-composer .pg-parameter-chips{display:contents}
@@ -32,4 +36,5 @@
   .pg-composer .pg-composer-actions{flex:0 0 auto;align-self:center;margin-left:auto;gap:3px;padding-bottom:0}
   .pg-composer .pg-composer-actions>button{width:34px;height:34px;min-width:34px;min-height:34px}
   .pg-composer .pg-parameters-panel{left:0;width:min(380px,calc(100vw - 24px));max-height:48dvh}
+  .pg-composer .pg-parameters-panel[data-panel=more]{left:auto;right:12px;width:min(270px,calc(100vw - 48px))}
 }

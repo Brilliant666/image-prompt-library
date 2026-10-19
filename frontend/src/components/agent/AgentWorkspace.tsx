@@ -315,6 +315,7 @@ export default function AgentWorkspace({ active, onOpenSettings, onOpenJob, onLi
     <main className="agent-main">
       <header className="agent-workspace-head"><div>{collapsed && <button onClick={() => setCollapsed(false)} aria-label="展开会话列表"><PanelLeftOpen size={18} /></button>}<strong>{current?.conversation.title || 'Agent'}</strong><span>{config?.config.apiConfigMode === 'hybrid' ? '混合工具模式' : config?.config.apiConfigMode === 'native' ? 'Responses 原生模式' : '跟随当前 API 配置'}</span></div><button onClick={onOpenSettings} title="Agent 设置"><Settings size={18} /><span>设置</span></button></header>
       <div className="agent-messages" ref={scroll}>
+        <div className="agent-content-column">
         {loading && !current && <p className="agent-center"><LoaderCircle className="spin" />读取会话…</p>}
         {!loading && !rounds.length && <div className="agent-welcome"><MessageSquare size={34} /><h2>从一个想法开始</h2><p>讨论提示词，选入参考图，再按需要授权本轮生成。<br />文字讨论不会调用图片工具。</p><button onClick={onOpenSettings}>配置 Agent 调用路径</button></div>}
         {rounds.map((round, roundIndex) => {
@@ -336,10 +337,12 @@ export default function AgentWorkspace({ active, onOpenSettings, onOpenJob, onLi
         })}
         {current?.request && <div className="agent-request-status"><strong>{statusText[current.request.state] || current.request.state}</strong><span>工具轮次 {current.request.usage.responseStepsStarted} / {current.request.authorization.maxToolRounds} · 图片 {current.request.usage.imageJobsCreated} / {current.request.authorization.maxImageJobs}</span>{current.request.recoveryReason && <p>{current.request.recoveryReason}</p>}{current.request.upstreamMayContinue && <p>已发送的上游请求可能仍在执行或计费；停止只阻止后续新调用。</p>}{current.request.canResume && <button disabled={busy} onClick={async () => { setBusy(true); try { applySnapshot(await agentApi.resume(current.request!.id, getAgentResumeId(localStorage, [current.request!.id, current.request!.usage.responseStepsStarted, current.request!.usage.imageJobsCreated].join(':'), () => crypto.randomUUID()))); } catch (reason) { setError(errorText(reason)); } finally { setBusy(false); } }}>继续已确认安全的步骤</button>}</div>}
       </div>
+      </div>
       <div className="agent-scroll-anchor">
         <button className="agent-scroll-bottom" aria-label="滚动到最新消息" onClick={() => scroll.current?.scrollTo({ top: scroll.current.scrollHeight, behavior: 'smooth' })}><ArrowDown size={16} /></button>
       </div>
       <div className="agent-input-area">
+        <div className="agent-content-column">
         {notice && <p role="status" className="agent-notice">{notice}<button aria-label="关闭提示" onClick={() => setNotice('')}><X size={13} /></button></p>}
         {error && <p role="alert" className="agent-error">{error}<button aria-label="关闭错误" onClick={() => setError('')}><X size={13} /></button></p>}
         {uncertain && <div className="agent-uncertain"><strong>上次提交结果尚未确认</strong><p>冻结的内容与请求 ID 已保留，重载不会自动重新收费提交。</p><button disabled={busy} onClick={() => void reconcile(uncertain)}>检查原请求状态</button><button disabled={busy} onClick={() => void reconcile(uncertain, true)}>用同一请求恢复</button></div>}
@@ -356,6 +359,7 @@ export default function AgentWorkspace({ active, onOpenSettings, onOpenJob, onLi
         {config?.config.apiConfigMode === 'off' && <label className="agent-profile-select">本轮 API 配置<select value={activeProfileId} onChange={event => setActiveProfileId(event.target.value)}><option value="">选择配置</option>{config.profiles.map(profile => <option key={profile.id} value={profile.id}>{profile.display_name}</option>)}</select></label>}
         <details className="agent-image-params"><summary>图片请求设置 · {draft.params.size} · {draft.params.quality}</summary><div><label>尺寸<input aria-label="Agent 图片尺寸" list="agent-size-options" value={draft.params.size} onChange={event => updateDraft({ params: { ...draft.params, size: event.target.value } })} /><datalist id="agent-size-options">{COMPATIBLE_SIZE_OPTIONS.map(size => <option key={size} value={size}>{imageSizeLabel(size)}</option>)}</datalist></label><label>质量<select value={draft.params.quality} onChange={event => updateDraft({ params: { ...draft.params, quality: event.target.value } })}>{IMAGE25_QUALITIES.map(value => <option key={value}>{value}</option>)}</select></label><label>背景<select value={draft.params.background} onChange={event => updateDraft({ params: { ...draft.params, background: event.target.value } })}>{['auto', 'opaque', 'transparent'].map(value => <option key={value}>{value}</option>)}</select></label><label>格式<select value={draft.params.output_format} onChange={event => updateDraft({ params: { ...draft.params, output_format: event.target.value as AgentImageParams['output_format'] } })}>{['png', 'jpeg', 'webp'].map(value => <option key={value}>{value}</option>)}</select></label>{draft.params.output_format !== 'png' && <label>压缩（0–100）<input type="number" min={0} max={100} value={draft.params.output_compression ?? ''} onChange={event => updateDraft({ params: { ...draft.params, output_compression: event.target.value === '' ? null : Number(event.target.value) } })} /></label>}</div></details>
         <p className="agent-input-hint">{preferences.enterSubmit ? 'Enter 发送，Shift+Enter 换行' : 'Ctrl+Enter 发送，Enter 换行'} · 发送会调用所选文本模型，可能产生费用。配置保存与浏览不调用模型。</p>
+        </div>
       </div>
     </main>
     {picker && <AgentReferencePicker remaining={Math.max(0, inputLimit - draft.refs.length)} onClose={() => setPicker(false)} onSelect={choices => updateDraft({ refs: [...draft.refs, ...choices.filter(choice => !draft.refs.some(existing => referenceKey(existing.reference) === referenceKey(choice.reference)))] })} />}
