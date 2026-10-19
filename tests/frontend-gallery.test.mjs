@@ -25,6 +25,7 @@ const drafts = await loadTs('../frontend/src/utils/galleryDraft.ts');
 const compatible = await loadTs('../frontend/src/utils/compatibleRecipe.ts');
 const references = await loadTs('../frontend/src/utils/recipeInputs.ts');
 const preferences = await loadTs('../frontend/src/utils/generationPreferences.ts');
+const profileSettings = await loadTs('../frontend/src/utils/profileSettings.ts');
 const templates = await loadTs('../frontend/src/utils/promptTemplateVariables.ts');
 const generationSiblings = await loadTs('../frontend/src/utils/generationSiblings.ts');
 const history = await loadTs('../frontend/src/utils/galleryHistory.ts');
@@ -212,6 +213,7 @@ function inputHarness(t, overrides = {}, apiOverrides = {}) {
     react: hooks, 'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'fragment' }, 'lucide-react': new Proxy({}, { get: (_, key) => key }),
     '../../api/client': { api, mediaUrl: path => `/media/${path}` }, '../../utils/compatibleRecipe': compatible,
     '../../utils/generationPreferences': preferences, '../../utils/recipeInputs': references, '../../utils/galleryRecipe': recipe,
+    '../../utils/profileSettings': profileSettings,
     '../../utils/promptTemplateVariables': templates,
     '../../utils/galleryDraft': { readGalleryDraft: async () => undefined, saveGalleryDraft: async value => state.persisted.push(value) },
     './ReferencePicker': { __esModule: true, default: 'ReferencePicker' },
@@ -239,6 +241,19 @@ test('actual InputBar submit callback locks two same-tick clicks and clears inpu
   assert.equal(harness.find('textarea', '画廊提示词').value, originalPrompt);
   pending.resolve(historicalJob()); await harness.flush();
   assert.equal(harness.find('textarea', '画廊提示词').value, ''); assert.equal(harness.state.created, 1);
+});
+
+test('gallery model suggestions follow the current API list and retain a restored historical model', async t => {
+  const harness = inputHarness(t, { command: { id: 971, job: historicalJob({ model: 'historical-model', parameters: { ...historicalJob().parameters, model: 'historical-model' } }) } }, {
+    openAICompatibleProfiles: async () => ({ profiles: [{ id: 'original-api', display_name: 'Original API', model: 'configured-default', models: ['model-one', 'model-two', 'model-one'], configured: true }], default_profile_id: 'original-api' }),
+  });
+  await harness.flush();
+  harness.find('button', '请求模型 historical-model').onClick(); await harness.flush();
+  const choices = () => children(harness.tree).find(node => node.type === 'datalist' && node.props.id === 'gallery-models').props.children.map(option => option.props.value);
+  assert.deepEqual(choices(), ['historical-model', 'configured-default', 'model-one', 'model-two']);
+  harness.find('input', '请求模型完整 ID').onChange({ target: { value: 'custom-entered-model' } }); await harness.flush();
+  assert.deepEqual(choices(), ['custom-entered-model', 'configured-default', 'model-one', 'model-two']);
+  assert.equal(harness.state.posts.length, 0, 'browsing and editing the model never submits a request');
 });
 
 test('parameter chips display complete model and exact pixels and preserve edits in a three-job request', async t => {

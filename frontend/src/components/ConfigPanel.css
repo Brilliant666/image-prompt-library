@@ -28,8 +28,6 @@
 .config-content input:not([type=checkbox]),.config-content select,.config-content textarea{min-width:0;max-width:100%;color:inherit;background:rgb(127 127 127 / .055);border:1px solid transparent;border-radius:10px;padding:9px 11px;font:inherit;font-size:13px;outline-offset:2px;box-sizing:border-box}
 .config-content input:not([type=checkbox]):focus,.config-content select:focus,.config-content textarea:focus{border-color:#93c5fd}
 .config-content .primary,.config-content .secondary,.config-content .danger{font-size:12px;padding:9px 12px;border-radius:10px;min-height:34px}
-.config-content .default-ai-provider-control{margin:16px 0 20px;padding:0;border:0;min-width:0}
-.config-content .default-ai-provider-control legend{font-size:12px;font-weight:600;margin-bottom:8px}
 .config-content .appearance-control{display:grid;gap:7px;grid-template-columns:repeat(3,minmax(0,1fr))}
 .config-content .appearance-control button{font-size:11px;min-width:0}
 .settings-field{display:grid;gap:7px;min-width:0;margin-top:16px;font-size:13px;line-height:1.5}
@@ -50,6 +48,8 @@
 .settings-connection-tabs button{display:grid;gap:4px;padding:12px 10px;text-align:left;border:1px solid var(--studio-hairline);border-radius:12px;background:transparent;color:var(--studio-muted);font-size:12px;cursor:pointer}
 .settings-connection-tabs button.active{background:rgb(var(--studio-accent-rgb) / .06);border-color:rgb(var(--studio-accent-rgb) / .35);color:var(--studio-accent)}
 .settings-connection-tabs small{font-size:10px;opacity:.7;overflow-wrap:anywhere}
+.settings-default-badge{display:inline-block;padding:2px 6px;border-radius:5px;color:var(--studio-accent);background:rgb(var(--studio-accent-rgb) / .08);font-size:10px;font-weight:500;vertical-align:middle}
+.settings-connection-tabs .settings-default-badge{margin-inline-start:7px}
 .settings-preference-group{padding:14px;border:1px solid var(--studio-hairline);border-radius:12px;margin-top:12px}
 .settings-preference-group .settings-field:first-child{margin-top:0}
 .settings-preference-group .settings-preference{border-top:1px solid var(--studio-hairline);padding-top:16px;margin-top:16px}

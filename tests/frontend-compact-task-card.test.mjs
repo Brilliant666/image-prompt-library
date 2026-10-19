@@ -88,6 +88,33 @@ test('compact card retains actual dimensions, full model, exact prompt and origi
   assert.equal(h.find('time', () => true).dateTime, job.created_at);
 });
 
+test('running stream preview is labelled provisional and cannot be downloaded or reused as a result', t => {
+  const version = 'a'.repeat(64);
+  const pending = { ...job, status: 'running', result_path: null, result_width: null, result_height: null,
+    metadata: { stream_preview: { path: `generation-results/${job.id}/stream-preview/image.png`, version, width: 320, height: 200, index: 0 } } };
+  const h = render(t, pending);
+  assert.equal(h.find('img', () => true).src, `/media/generation-results/${job.id}/stream-preview/image.png?preview=${version}`);
+  assert.equal(h.find('img', () => true).alt, '生成中预览，非最终结果');
+  assert.equal(h.find('span', props => props.className === 'pg-stream-preview-label').children, '生成中 · 预览');
+  assert.equal(h.find('span', props => props.className === 'pg-image-ratio'), undefined);
+  assert.equal(h.find('span', props => props.className === 'pg-image-dimensions'), undefined);
+  assert.equal(h.find('a', props => props['aria-label'] === '下载原图'), undefined);
+  assert.equal(h.find('button', props => props['aria-label'] === '使用结果继续编辑').disabled, true);
+});
+
+test('terminal jobs and foreign preview paths never render transient image metadata', t => {
+  const preview = { path: `generation-results/${job.id}/stream-preview/image.png`, version: 'a'.repeat(64) };
+  for (const candidate of [
+    { ...job, status: 'failed', result_path: null, metadata: { stream_preview: preview } },
+    { ...job, status: 'running', result_path: null, metadata: { stream_preview: { ...preview, path: 'https://outside.invalid/image.png' } } },
+    { ...job, status: 'running', result_path: null, metadata: { stream_preview: { ...preview, path: 'generation-results/another-job/stream-preview/image.png' } } },
+  ]) {
+    const h = render(t, candidate);
+    assert.equal(h.find('img', () => true), undefined);
+    assert.equal(h.find('a', props => props['aria-label'] === '下载原图'), undefined);
+  }
+});
+
 test('compact card callbacks preserve inspect, full-recipe reuse, edit, exact copy and independent selection', async t => {
   const selected = new Set(['previous']);
   const h = render(t, job, selected);

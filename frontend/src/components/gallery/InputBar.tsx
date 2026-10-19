@@ -7,6 +7,7 @@ import type { Translator } from '../../utils/i18n';
 import type { LocalPreferences } from '../../utils/localPreferences';
 import { resolveAuto4k, COMPATIBLE_ENTERPRISE_MODELS, IMAGE25_MODELS, IMAGE25_QUALITIES } from '../../utils/compatibleRecipe';
 import { readGenerationPreference, writeGenerationPreference, lastGenerationProfile } from '../../utils/generationPreferences';
+import { profileModelChoices } from '../../utils/profileSettings';
 import { recipeInputs, restoreRecipeInputs, type RecipeInput } from '../../utils/recipeInputs';
 import { draftFromJob, emptyGalleryDraft, galleryPayload, libraryRecipeImage, type GalleryDraft } from '../../utils/galleryRecipe';
 import { readGalleryDraft, saveGalleryDraft } from '../../utils/galleryDraft';
@@ -82,7 +83,7 @@ export default function InputBar({command,preferences,t,active,onCreated,onOpenS
   }
   const variables=promptVariablesEnabled?extractPromptTemplateVariableRecords(draft.prompt):[];
   const sizePreview=draft.provider==='openai_compatible'&&draft.recipe.size_mode==='auto4k'?resolveAuto4k(variables.length?resolvePromptTemplate(draft.prompt,draft.templateValues||{}):draft.prompt,referenceSize):undefined;
-  const models=[...new Set([profile?.model||provider?.default_image_model||'',...IMAGE25_MODELS,...COMPATIBLE_ENTERPRISE_MODELS])].filter(Boolean);
+  const models=profileModelChoices(draft.provider==='openai_compatible'?profile:{model:provider?.default_image_model||'',models:provider?.image_models},draft.recipe.model,[...IMAGE25_MODELS,...COMPATIBLE_ENTERPRISE_MODELS]);
   const providerLabel=draft.provider==='openai_compatible'?(profile?.display_name||'API 配置'):(provider?.display_name||'API 配置');
   const sizeValue=draft.provider==='openai_compatible'?(draft.recipe.size_mode==='auto4k'?`4K 自动比例${sizePreview&&!('error' in sizePreview)?` · ${sizePreview.size.replace('x',' × ')}`:''}`:draft.recipe.size.replace('x',' × ')):`${draft.aspectRatio}${draft.provider==='xai_grok_oauth'?` · ${draft.resolution}`:''}`;
   const sizeLabel=draft.provider==='openai_compatible'?(draft.recipe.size_mode==='auto4k'?'4K 自动比例':`请求尺寸 ${draft.recipe.size}`):draft.aspectRatio;

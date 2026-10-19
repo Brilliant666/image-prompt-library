@@ -43,6 +43,17 @@ test('filter defaults to successful and persists only recognized exact values', 
   assert.equal(history.galleryFilterStatuses('bogus'), undefined);
 });
 
+test('running preview metadata is never restored from the history cache', t => {
+  const { session } = installStorage(t);
+  const preview = { path: 'generation-results/job-1/stream-preview/image.png', version: 'a'.repeat(64), width: 320, height: 200, index: 0 };
+  history.saveGalleryHistory('/library-a', 'running', { jobs: [job({ status: 'running', result_path: null, result_width: null, result_height: null, metadata: { stream_preview: preview } })], total: 1 });
+  assert.ok(![...session.values()][0].includes('stream_preview'));
+  const cached = history.readGalleryHistory('/library-a', 'running');
+  assert.equal(cached.jobs[0].metadata, undefined);
+  assert.equal(cached.jobs[0].result_path, undefined);
+  assert.equal(cached.jobs[0].result_width, undefined);
+});
+
 test('snapshot restores card fields with exact prompt whitespace and strips secrets and image bytes', t => {
   const { local, session } = installStorage(t);
   const original = job({ api_key: 'DO-NOT-SAVE', error: 'DO-NOT-SAVE', reference_image_ids: ['private-image'],

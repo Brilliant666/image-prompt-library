@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import re
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from contextlib import nullcontext, suppress
@@ -54,6 +55,8 @@ STALE_RUNNING_JOB_AFTER = timedelta(minutes=10)
 STALE_RUNNING_JOB_ERROR = "Generation took too long and may have stalled. Retry to run it again."
 GENERATION_RESULT_ROOT = "generation-results"
 GENERATION_REFERENCE_ROOT = "generation-references"
+STREAM_PREVIEW_DIRECTORY = "stream-preview"
+STREAM_PREVIEW_MAX_BYTES = 30 * 1024 * 1024
 GENERATION_INPUT_IMAGE_ROOTS = {GENERATION_RESULT_ROOT, GENERATION_REFERENCE_ROOT}
 _ACCEPT_CLAIM_METADATA_KEY = "_generation_accept_claim"
 _ACCEPT_CLAIM_TIMESTAMP_METADATA_KEY = "_generation_accept_claim_at"
@@ -138,6 +141,8 @@ def resolve_generation_input_image_path(
     rel = Path(result_path)
     if not result_path or rel.is_absolute() or ".." in rel.parts or len(rel.parts) < 3 or rel.parts[0] not in roots:
         raise GenerationJobConflict("Generation edit input image path is invalid")
+    if len(rel.parts) >= 4 and rel.parts[0] == GENERATION_RESULT_ROOT and rel.parts[2] == STREAM_PREVIEW_DIRECTORY:
+        raise GenerationJobConflict("An unfinished stream preview cannot be used as a generation input")
     library_abs = Path(library_path).resolve()
     allowed_root_path = library_abs / rel.parts[0]
     if allowed_root_path.is_symlink():
@@ -328,6 +333,8 @@ class GenerationJobRepository:
         config = OpenAICompatibleConfig(library_path=self.library_path).read(parameters.get("compatible_profile_id"))
         parameters["compatible_profile_id"] = config["id"]
         parameters["compatible_profile_name"] = config["display_name"]
+        for key, default in (("base_url_mode", "versioned"), ("stream", False), ("partial_images", 0), ("response_format", "auto")):
+            parameters.setdefault(key, config.get(key, default))
         parameters = normalize_image_parameters(parameters, default_model=config["model"])
         return payload.model_copy(update={"model": parameters["model"], "parameters": parameters})
 
@@ -337,7 +344,7 @@ class GenerationJobRepository:
         parameters = dict(job.parameters or {})
         requested = job.metadata.get("requested", {})
         if isinstance(requested, dict):
-            for key in ("model", "quality", "size", "requested_aspect_ratio", "aspect_ratio_prompt_injection", "background", "output_format", "output_compression", "moderation", "compatible_profile_id", "compatible_profile_name"):
+            for key in ("model", "quality", "size", "requested_aspect_ratio", "aspect_ratio_prompt_injection", "background", "output_format", "output_compression", "moderation", "compatible_profile_id", "compatible_profile_name", "base_url_mode", "stream", "partial_images", "response_format"):
                 if key in requested:
                     parameters[key] = requested[key]
         parameters.setdefault("compatible_profile_id", "legacy")
@@ -669,6 +676,10 @@ class GenerationJobRepository:
                 (timestamp, generation_group_id),
             )
             conn.commit()
+        result = self.get_generation_set(generation_group_id)
+        for job in result.jobs:
+            if job.status == "cancelled":
+                self.clear_stream_preview(job.id)
         return self.get_generation_set(generation_group_id)
 
     @staticmethod
@@ -856,6 +867,116 @@ class GenerationJobRepository:
             provider_queue_states=self.list_provider_queue_states(),
         )
 
+    def _remove_stream_preview_files(self, job_id: str, *, keep: str | None = None) -> bool:
+        # Only these reserved transient filenames belong to this feature. Never
+        # follow metadata-provided paths or remove a whole result directory.
+        removed = True
+        for extension in ("png", "jpg", "webp"):
+            relative = Path(GENERATION_RESULT_ROOT) / job_id / STREAM_PREVIEW_DIRECTORY / f"image.{extension}"
+            if relative.as_posix() == keep:
+                continue
+            try:
+                path = resolve_generation_write_path(self.library_path, relative.as_posix(), allowed_root=GENERATION_RESULT_ROOT)
+                path.unlink(missing_ok=True)
+            except (OSError, GenerationJobConflict):
+                # A locked preview must not turn a completed paid request into
+                # a failed job. Terminal metadata remains available for cleanup.
+                removed = False
+        return removed
+
+    def stage_stream_preview(self, job_id: str, data: bytes, metadata: dict | None = None) -> None:
+        """Replace a running job's transient preview without publishing a result."""
+        if not data or len(data) > STREAM_PREVIEW_MAX_BYTES:
+            raise GenerationJobConflict("Generation stream preview exceeds the image size limit")
+        _validate_storeable_image_bytes(data)
+        with Image.open(BytesIO(data)) as image:
+            image.load()
+            width, height = image.size
+            extension = {"PNG": "png", "JPEG": "jpg", "WEBP": "webp"}.get(image.format or "")
+        if extension is None:
+            raise GenerationJobConflict("Generation stream preview format is unsupported")
+        index = (metadata or {}).get("partial_image_index", 0)
+        if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index <= 3:
+            raise GenerationJobConflict("Generation stream preview index is invalid")
+        relative = Path(GENERATION_RESULT_ROOT) / job_id / STREAM_PREVIEW_DIRECTORY / f"image.{extension}"
+        # A transaction serializes preview updates with cancellation/completion.
+        # Late callbacks never write another preview after a terminal transition.
+        with connect(self.library_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT status, metadata FROM generation_jobs WHERE id=?", (job_id,)).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            if row["status"] != "running":
+                return
+            path = resolve_generation_write_path(self.library_path, relative.as_posix(), allowed_root=GENERATION_RESULT_ROOT)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            current = _from_json(row["metadata"], {})
+            current = current if isinstance(current, dict) else {}
+            # A replacement can use a different format. Retain the last committed
+            # preview until its metadata replacement commits, so a failed SQL write
+            # can restore the old bytes without touching a final result or another job.
+            previous = current.get("stream_preview")
+            previous_path = None
+            previous_bytes = None
+            if isinstance(previous, dict):
+                previous_relative = previous.get("path")
+                allowed_paths = {
+                    (Path(GENERATION_RESULT_ROOT) / job_id / STREAM_PREVIEW_DIRECTORY / f"image.{suffix}").as_posix()
+                    for suffix in ("png", "jpg", "webp")
+                }
+                if isinstance(previous_relative, str) and previous_relative in allowed_paths:
+                    previous_path = resolve_generation_write_path(self.library_path, previous_relative, allowed_root=GENERATION_RESULT_ROOT)
+                    if previous_path.is_file() and previous_path.stat().st_size <= STREAM_PREVIEW_MAX_BYTES:
+                        previous_bytes = previous_path.read_bytes()
+            current["stream_preview"] = {
+                "path": relative.as_posix(), "width": width, "height": height,
+                "index": index, "version": hashlib.sha256(data).hexdigest(),
+            }
+            try:
+                _atomic_write_bytes(path, data)
+                conn.execute("UPDATE generation_jobs SET metadata=?, updated_at=? WHERE id=?", (_to_json(current), now(), job_id))
+                self._remove_stream_preview_files(job_id, keep=relative.as_posix())
+                conn.commit()
+            except Exception:
+                # Compensate before releasing the transaction lock. In particular,
+                # a first frame must not become an orphan if its UPDATE/COMMIT fails.
+                with suppress(OSError, sqlite3.Error):
+                    compensate = True
+                    if not conn.in_transaction:
+                        # SQLite can automatically roll back on an I/O error. Get
+                        # the lock back and do not overwrite a concurrent terminal
+                        # transition or a newer/actually committed preview.
+                        conn.execute("BEGIN IMMEDIATE")
+                        latest = conn.execute("SELECT status, metadata FROM generation_jobs WHERE id=?", (job_id,)).fetchone()
+                        compensate = latest is not None and latest["status"] == "running" and latest["metadata"] == row["metadata"]
+                        if latest is not None and latest["status"] not in {"queued", "running"}:
+                            self._remove_stream_preview_files(job_id)
+                    if compensate:
+                        path.unlink(missing_ok=True)
+                        if previous_bytes is not None and previous_path is not None:
+                            _atomic_write_bytes(previous_path, previous_bytes)
+                raise
+
+    def clear_stream_preview(self, job_id: str) -> None:
+        with connect(self.library_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT status, metadata FROM generation_jobs WHERE id=?", (job_id,)).fetchone()
+            if row is None or row["status"] in {"queued", "running"}:
+                return
+            metadata = _from_json(row["metadata"], {})
+            if not self._remove_stream_preview_files(job_id):
+                return
+            if isinstance(metadata, dict) and "stream_preview" in metadata:
+                metadata.pop("stream_preview", None)
+                conn.execute("UPDATE generation_jobs SET metadata=? WHERE id=?", (_to_json(metadata), job_id))
+            conn.commit()
+
+    def clear_terminal_stream_previews(self) -> None:
+        with connect(self.library_path) as conn:
+            rows = conn.execute("SELECT id FROM generation_jobs WHERE status NOT IN ('queued', 'running') AND json_valid(metadata) AND json_type(metadata, '$.stream_preview') IS NOT NULL").fetchall()
+        for row in rows:
+            self.clear_stream_preview(row["id"])
+
     def mark_running(self, job_id: str) -> GenerationJobRecord:
         timestamp = now()
         with connect(self.library_path) as conn:
@@ -904,6 +1025,7 @@ class GenerationJobRepository:
         if cursor.rowcount != 1:
             current = self.get_job(job_id)
             raise GenerationJobConflict(f"Generation job cannot be marked failed from status {current.status}")
+        self.clear_stream_preview(job_id)
         return self.get_job(job_id)
 
     def mark_running_provider_jobs_failed(self, provider: str, error: str) -> list[GenerationJobRecord]:
@@ -950,6 +1072,7 @@ class GenerationJobRepository:
         if cursor.rowcount != 1:
             current = self.get_job(job_id)
             raise GenerationJobConflict(f"Only running generation jobs can be marked failed; current status is {current.status}")
+        self.clear_stream_preview(job_id)
         return self.get_job(job_id)
 
     def stage_result(self, job_id: str, data: bytes, filename: str, metadata: dict | None = None) -> GenerationJobRecord:
@@ -994,6 +1117,8 @@ class GenerationJobRepository:
                             continue
                         if key == "reference_image_copies":
                             continue
+                        if key == "stream_preview":
+                            continue
                         if key in {"retry_of_generation_job_id", "retried_by_generation_job_id"} and key in result_metadata:
                             continue
                         result_metadata[key] = value
@@ -1014,6 +1139,7 @@ class GenerationJobRepository:
             if not preserve_result_file:
                 result_abs.unlink(missing_ok=True)
             raise
+        self.clear_stream_preview(job_id)
         return self.get_job(job_id)
 
     def _resolve_job_result_image_path(self, job: GenerationJobRecord) -> Path:
@@ -2311,6 +2437,7 @@ class GenerationJobRepository:
         if cursor.rowcount != 1:
             current = self.get_job(job_id)
             raise GenerationJobConflict(f"Only queued or running generation jobs can be cancelled; current status is {current.status}")
+        self.clear_stream_preview(job_id)
         return self.get_job(job_id)
 
     def create_job_set(self, payload: GenerationJobCreate, count: int) -> GenerationJobSetRecord:
@@ -2410,6 +2537,8 @@ class GenerationJobRepository:
         """Cancel every queued or running job in one database update."""
         timestamp = now()
         with connect(self.library_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute("SELECT id FROM generation_jobs WHERE status IN ('queued', 'running')").fetchall()
             cursor = conn.execute(
                 """
                 UPDATE generation_jobs
@@ -2419,6 +2548,8 @@ class GenerationJobRepository:
                 (timestamp, timestamp, timestamp),
             )
             conn.commit()
+        for row in rows:
+            self.clear_stream_preview(row["id"])
         return int(cursor.rowcount)
 
     def get_provider_queue_state(self, provider: str) -> GenerationProviderQueueState:

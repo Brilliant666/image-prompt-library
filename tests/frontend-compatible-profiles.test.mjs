@@ -118,7 +118,7 @@ test('profile copy and order send only identities to local routes and never retr
 
 const settingsSource = await readFile(new URL('../frontend/src/utils/profileSettings.ts', import.meta.url), 'utf8');
 const settingsJs = ts.transpileModule(settingsSource, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
-const { compatibleEndpointPreview, profileValidation } = await import(`data:text/javascript;base64,${Buffer.from(settingsJs).toString('base64')}`);
+const { compatibleEndpointPreview, profileValidation, parseProfileModels, profileModelChoices } = await import(`data:text/javascript;base64,${Buffer.from(settingsJs).toString('base64')}`);
 test('connection previews match the existing v1 contract and never expose credentials or accept image endpoints', () => {
   for (const base of ['https://api.example.test', 'https://api.example.test/', 'https://api.example.test/v1/', 'https://api.example.test/v1/v1']) {
     assert.deepEqual(compatibleEndpointPreview(base), { base: 'https://api.example.test/v1', generate: 'https://api.example.test/v1/images/generations', edit: 'https://api.example.test/v1/images/edits', responses: 'https://api.example.test/v1/responses' });
@@ -146,18 +146,31 @@ test('reset removes only this profile recipe and preserves selection, other APIs
   assert.equal(resetGenerationPreference({ removeItem() { throw Error('denied'); } }, 'a'), false);
 });
 
+test('custom root mode never appends v1 and model choices preserve exact configured and historical IDs', () => {
+  assert.equal(compatibleEndpointPreview('https://example.test/gateway/', 'custom').generate, 'https://example.test/gateway/images/generations');
+  assert.equal(compatibleEndpointPreview('https://example.test/v1/v1/', 'custom').base, 'https://example.test/v1/v1');
+  assert.equal(compatibleEndpointPreview('https://example.test/', 'custom').responses, 'https://example.test/responses');
+  assert.equal(compatibleEndpointPreview('https://key:secret@example.test/', 'custom'), undefined);
+  assert.deepEqual(parseProfileModels(' alpha, beta\r\nalpha， gamma\n'), ['alpha', 'beta', 'gamma']);
+  assert.deepEqual(parseProfileModels(' \n,'), []);
+  assert.deepEqual(profileModelChoices({ model: 'default-id', models: ['alpha', 'beta', 'alpha'] }, 'historical-id', ['legacy']), ['historical-id', 'default-id', 'alpha', 'beta']);
+  assert.deepEqual(profileModelChoices({ model: 'default-id', models: [] }, '', ['legacy']), ['default-id', 'legacy']);
+  for (const partial_images of [-1, 4, 1.5, NaN]) assert.equal(profileValidation({ display_name: 'API', base_url: 'https://example.test', timeout: 300, partial_images }), 'partial_images');
+  for (const models of [Array.from({ length: 101 }, (_, index) => `model-${index}`), ['a'.repeat(201)], ['model\tname']]) assert.equal(profileValidation({ display_name: 'API', base_url: 'https://example.test', timeout: 300, models }), 'models');
+});
+
 async function componentJs(path) {
   return ts.transpileModule(await readFile(new URL(path, import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
 }
 const settingsComponent = await componentJs('../frontend/src/components/OpenAICompatibleSettings.tsx');
 const generalComponent = await componentJs('../frontend/src/components/settings/GeneralSettings.tsx');
 function walk(node) { return !node || typeof node !== 'object' ? [] : [node, ...(Array.isArray(node.props?.children) ? node.props.children.flat(Infinity) : [node.props?.children]).flatMap(walk)]; }
-function settingsHarness(t) {
+function settingsHarness(t, apiOverrides = {}) {
   const profiles = [
     { id: 'a', display_name: 'Gateway A', base_url: 'https://a.example.test/v1', model: 'model-a', timeout: 300, api_key_present: true, configured: true },
     { id: 'b', display_name: 'Gateway B', base_url: 'https://b.example.test/v1', model: 'model-b', timeout: 600, api_key_present: true, configured: true },
   ];
-  const collection = { profiles, default_profile_id: 'a' }, calls = [], events = [], values = new Map();
+  const collection = { profiles, default_profile_id: 'a' }, calls = [], defaultCalls = [], events = [], values = new Map();
   const storage = { getItem: key => values.get(key), setItem: (key, value) => values.set(key, value), removeItem: key => values.delete(key) };
   const oldStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
   Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: storage });
@@ -172,29 +185,33 @@ function settingsHarness(t) {
   const jsx = (type, props) => ({ type, props });
   const dependencies = {
     react: hooks, 'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'fragment' }, 'lucide-react': new Proxy({}, { get: (_, key) => key }),
-    '../api/client': { api: { openAICompatibleProfiles: async () => collection, saveOpenAICompatibleProfile: async (id, fields) => { calls.push({ id, fields }); Object.assign(profiles.find(profile => profile.id === id), fields); return collection; } } },
+    '../api/client': { api: { openAICompatibleProfiles: async () => collection, saveOpenAICompatibleProfile: async (id, fields) => { calls.push({ id, fields }); Object.assign(profiles.find(profile => profile.id === id), fields); return collection; }, defaultOpenAICompatibleProfile: async id => { defaultCalls.push(id); collection.default_profile_id = id; return collection; }, ...apiOverrides } },
     '../api/profileActions': { copyApiProfile() { throw Error('unexpected copy'); }, reorderApiProfiles() { throw Error('unexpected reorder'); } },
-    '../utils/profileSettings': { compatibleEndpointPreview, profileValidation },
+    '../utils/profileSettings': { compatibleEndpointPreview, profileValidation, parseProfileModels },
     '../utils/generationPreferences': { readGenerationPreference, resetGenerationPreference },
     '../utils/compatibleRecipe': { COMPATIBLE_ENTERPRISE_MODELS: [], IMAGE25_MODELS: [] }, './OpenAICompatibleSettings.css': {},
   };
   const mod = { exports: {} };
   new Function('require', 'module', 'exports', 'window', settingsComponent)(name => { assert.ok(name in dependencies, name); return dependencies[name]; }, mod, mod.exports, { dispatchEvent: event => events.push(event) });
-  function render() { cursor = 0; dirty = false; tree = mod.exports.default({ onSaved: async () => {}, uiLanguage: 'zh_hans' }); effects.splice(0).forEach(effect => effect()); }
+  function render() { cursor = 0; dirty = false; tree = mod.exports.default({ onSaved: async () => {}, uiLanguage: 'zh_hans', onSetDefaultConnection: () => defaultCalls.push('connection') }); effects.splice(0).forEach(effect => effect()); }
   async function flush() { for (let i = 0; i < 20; i++) { if (dirty) render(); await Promise.resolve(); } if (dirty) render(); }
   render(); t.after(() => slots.forEach(slot => slot?.cleanup?.()));
   const find = (type, predicate = () => true) => walk(tree).find(node => node.type === type && predicate(node.props))?.props;
-  return { find, flush, calls, events, storage, get tree() { return tree; } };
+  return { find, flush, calls, defaultCalls, events, storage, get tree() { return tree; } };
 }
 test('editing a named profile preserves the existing key and does not issue model or generation requests', async t => {
   const h = settingsHarness(t); await h.flush();
   assert.equal(h.find('input', props => props.type === 'password').value, '');
-  assert.ok(h.find('button', props => props.className === 'compatible-current-profile'));
+  assert.ok(h.find('div', props => props.className === 'compatible-current-profile'));
+  assert.equal(h.find('div', props => props.id === 'compatible-registered-profiles').hidden, undefined);
+  assert.equal(h.find('details'), undefined, 'selected profile sections are fully expanded');
   h.find('input', props => props.type === 'url').onChange({ target: { value: 'https://changed.example.test/v1' } }); await h.flush();
   h.find('form').onSubmit({ preventDefault() {} }); await h.flush();
   assert.equal(h.calls.length, 1); assert.equal(h.calls[0].id, 'a');
   assert.equal(h.calls[0].fields.base_url, 'https://changed.example.test/v1');
   assert.equal(h.calls[0].fields.model, 'model-a');
+  assert.deepEqual(h.calls[0].fields.models, [], 'saving a legacy profile preserves an empty list and existing fallback suggestions');
+  assert.deepEqual(profileModelChoices(h.calls[0].fields, '', ['legacy-suggestion']), ['model-a', 'legacy-suggestion']);
   assert.ok(!('api_key' in h.calls[0].fields)); assert.ok(!('api_key_present' in h.calls[0].fields));
   h.find('input', props => props.type === 'url').onChange({ target: { value: 'https://user:secret@example.test' } }); await h.flush();
   h.find('form').onSubmit({ preventDefault() {} }); await h.flush();
@@ -212,6 +229,48 @@ test('browser recipe reset requires confirmation and emits only the selected pro
   assert.equal(readGenerationPreference(h.storage, 'a', 'model-a').model, 'model-a');
   assert.equal(h.events.length, 1); assert.equal(h.events[0].type, 'ipl:generation-preference-reset');
   assert.deepEqual(h.events[0].detail, { profileId: 'a' }); assert.equal(h.calls.length, 0);
+});
+
+test('viewing profiles leaves the default untouched and default changes only after an explicit successful action', async t => {
+  const h = settingsHarness(t); await h.flush();
+  const options = walk(h.tree).filter(node => node.type === 'button' && node.props.className?.includes('compatible-profile-option'));
+  options[1].props.onClick(); await h.flush();
+  assert.deepEqual(h.defaultCalls, []);
+  assert.equal(h.calls.length, 0);
+  h.find('button', props => props.children === '设为默认连接').onClick(); await h.flush();
+  assert.deepEqual(h.defaultCalls, ['b', 'connection']);
+});
+
+test('an uncertain profile default change never switches the global connection', async t => {
+  let requests = 0;
+  const h = settingsHarness(t, { defaultOpenAICompatibleProfile: async () => { requests++; throw Error('secret diagnostics'); } }); await h.flush();
+  walk(h.tree).filter(node => node.type === 'button' && node.props.className?.includes('compatible-profile-option'))[1].props.onClick(); await h.flush();
+  h.find('button', props => props.children === '设为默认连接').onClick(); await h.flush();
+  assert.equal(requests, 1); assert.deepEqual(h.defaultCalls, []);
+  assert.ok(h.find('p', props => props.role === 'status').children.includes('无法确认'));
+  assert.ok(!JSON.stringify(h.tree).includes('secret diagnostics'));
+});
+
+test('transport options save only into the edited API and preserve its key; disabled streaming retains preview preference', async t => {
+  const h = settingsHarness(t); await h.flush();
+  assert.equal(h.find('select', props => props['aria-label'] === '中间预览图数量').disabled, true);
+  h.find('textarea', props => props['aria-label'] === '可用图片模型').onChange({ target: { value: 'one, two\none' } }); await h.flush();
+  h.find('select', props => props['aria-label'] === '地址拼接方式').onChange({ target: { value: 'custom' } }); await h.flush();
+  h.find('input', props => props['aria-label'] === '流式传输').onChange({ target: { checked: true } }); await h.flush();
+  assert.equal(h.find('select', props => props['aria-label'] === '中间预览图数量').disabled, false);
+  h.find('select', props => props['aria-label'] === '中间预览图数量').onChange({ target: { value: '3' } }); await h.flush();
+  h.find('input', props => props['aria-label'] === '返回 Base64 图片数据').onChange({ target: { checked: true } }); await h.flush();
+  h.find('form').onSubmit({ preventDefault() {} }); await h.flush();
+  assert.equal(h.calls.length, 1); assert.equal(h.calls[0].id, 'a');
+  assert.deepEqual(h.calls[0].fields.models, ['one', 'two']);
+  assert.equal(h.calls[0].fields.base_url_mode, 'custom'); assert.equal(h.calls[0].fields.stream, true);
+  assert.equal(h.calls[0].fields.partial_images, 3); assert.equal(h.calls[0].fields.response_format, 'b64_json');
+  assert.ok(!('api_key' in h.calls[0].fields)); assert.deepEqual(h.defaultCalls, []);
+  h.find('input', props => props['aria-label'] === '流式传输').onChange({ target: { checked: false } }); await h.flush();
+  h.find('input', props => props['aria-label'] === '返回 Base64 图片数据').onChange({ target: { checked: false } }); await h.flush();
+  h.find('form').onSubmit({ preventDefault() {} }); await h.flush();
+  assert.equal(h.calls[1].fields.stream, false); assert.equal(h.calls[1].fields.partial_images, 3); assert.equal(h.calls[1].fields.response_format, 'auto');
+  assert.equal(h.find('select', props => props['aria-label'] === '中间预览图数量').disabled, true);
 });
 test('grouped workflow controls preserve other preferences when changing one option', () => {
   const changes = [], value = { enterSubmit: false, clearInputAfterSubmit: true, persistInputOnRestart: true, notifyOnCompletion: false };

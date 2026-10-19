@@ -1427,9 +1427,13 @@ test('title suggestions are explicit, provider-aware, prompt-only, and shared by
   assert.match(defaultProvider, /image-prompt-library\.default_ai_provider/);
   assert.match(app, /readyProviders\.length !== 1/);
   assert.match(app, /window\.localStorage\.setItem\(DEFAULT_AI_PROVIDER_STORAGE_KEY, provider\)/);
-  assert.match(config, /role="radiogroup"/);
-  assert.match(config, /disabled=\{!enabled\}/);
-  assert.match(config, /defaultAiProvider === providerId/);
+  assert.doesNotMatch(config, /className="default-ai-provider-control"/);
+  assert.match(config, /onClick=\{\(\) => setConnectionType\('api'\)\}/);
+  assert.match(config, /onClick=\{\(\) => setConnectionType\('account'\)\}/);
+  assert.match(config, /onSetDefaultConnection=\{\(\) => onDefaultAiProvider\('openai_compatible'\)\}/);
+  assert.match(config, /disabled=\{!enabled \|\| providerActionPending\}/);
+  assert.match(config, /defaultAiProvider === provider\.provider/);
+  assert.match(config, /onClick=\{\(\) => onDefaultAiProvider\(provider\.provider as AiProvider\)\}/);
   assert.match(styles, /\.title-suggestion-meta\{[^}]*display:flex;[^}]*gap:6px/);
 });
 

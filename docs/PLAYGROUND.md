@@ -109,12 +109,16 @@ does not change the default. Existing ChatGPT/Codex OAuth, Grok OAuth and the
 capture organizer keep their separate credentials and protocols. The organizer
 still uses Chat Completions; Agent uses Responses.
 
-The API page separates the default connection from individual API-key profiles.
+The API page has two connection views: API Key profiles and Account connections.
 sub2api and other synchronous OpenAI-compatible services are named profiles of
 the same protocol; ChatGPT/Codex and Grok account connections retain their own
-login flows. The expandable profile list shows the current/default profile and
-configuration state. Each profile exposes its name, base URL, independent key,
-default model, timeout and the derived Images/Responses endpoint addresses.
+login flows. Explicit default actions live inside the matching view; browsing
+the two views does not change the default. The always-visible profile list shows
+the current/default profile and configuration state. Selected fields are fully
+expanded: name, base URL and root mode, independent key, model list and default,
+timeout, Images streaming, intermediate preview count and optional Base64 request.
+The derived Images/Responses endpoint addresses and remembered browser parameters
+remain visible. See [API options and streaming](OPENAI_COMPATIBLE.md#optional-image-streaming).
 Saving or switching a profile does not test a paid endpoint. Empty key input
 preserves the existing key. A separate control can reset the selected profile's
 remembered image parameters in this browser without clearing the current prompt,

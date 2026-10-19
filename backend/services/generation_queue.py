@@ -39,6 +39,7 @@ def recover_interrupted_generation_jobs(library_path: Path | str, *, provider: s
     """
     repo = GenerationJobRepository(Path(library_path))
     repo.resume_pending_discard_repairs()
+    repo.clear_terminal_stream_previews()
     return repo.mark_running_provider_jobs_failed(provider, INTERRUPTED_BY_BACKEND_RESTART_ERROR)
 
 

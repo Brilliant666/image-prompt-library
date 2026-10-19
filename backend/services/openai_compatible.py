@@ -20,6 +20,7 @@ from backend.config import resolve_openai_compatible_config_path
 from backend.services.generation_jobs import GenerationJobConflict, GenerationJobRepository, resolve_generation_input_image_path
 from backend.services.image_store import MAX_IMAGE_PIXELS
 from backend.services.image_download import download_image, ImageDownloadError, MAX_IMAGE_BYTES
+from backend.services.image_api_stream import ImageStreamError, iter_image_events, read_json_response
 
 PROVIDER_ID = "openai_compatible"
 AUTH_MODE = "api_key"
@@ -170,16 +171,20 @@ def _safe_value(value, secret, depth=0):
     return value if value is None or isinstance(value, (bool, int, float)) else None
 
 
-def normalize_base_url(value: str) -> str:
+def normalize_base_url(value: str, mode: str = "versioned") -> str:
+    if mode not in ("versioned", "custom"):
+        raise OpenAICompatibleError("Unsupported API URL mode")
     parts = urlsplit(str(value).strip())
     if parts.scheme not in {"http", "https"} or not parts.hostname or parts.username or parts.password or parts.query or parts.fragment:
         raise OpenAICompatibleError("Base URL must be an HTTP(S) address without credentials, query, or fragment")
     path = parts.path.rstrip("/")
-    while path.endswith("/v1"):
-        path = path[:-3]
     if "/images/" in path:
         raise OpenAICompatibleError("Base URL must not contain an image endpoint")
-    return urlunsplit((parts.scheme, parts.netloc, path + "/v1", "", ""))
+    if mode == "versioned":
+        while path.endswith("/v1"):
+            path = path[:-3]
+        path += "/v1"
+    return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
 
 
 class OpenAICompatibleConfig:
@@ -195,7 +200,26 @@ class OpenAICompatibleConfig:
 
     @staticmethod
     def _defaults():
-        return {"display_name": "Third-party API", "base_url": "", "api_key": "", "model": "", "timeout": 300}
+        return {"display_name": "Third-party API", "base_url": "", "api_key": "", "model": "", "timeout": 300,
+                "models": [], "base_url_mode": "versioned", "stream": False, "partial_images": 0,
+                "response_format": "auto"}
+
+    @staticmethod
+    def _validate_options(value):
+        if not isinstance(value["models"], list) or len(value["models"]) > 100 or any(
+            not isinstance(model, str) or not model.strip() or len(model.strip()) > 200 or
+            any(ord(char) < 32 for char in model) for model in value["models"]
+        ):
+            raise OpenAICompatibleError("Models must be a list of up to 100 non-empty model IDs")
+        value["models"] = list(dict.fromkeys(model.strip() for model in value["models"]))
+        if value["base_url_mode"] not in ("versioned", "custom"):
+            raise OpenAICompatibleError("Unsupported API URL mode")
+        if type(value["stream"]) is not bool:
+            raise OpenAICompatibleError("Streaming must be true or false")
+        if type(value["partial_images"]) is not int or not 0 <= value["partial_images"] <= 3:
+            raise OpenAICompatibleError("Partial image count must be an integer from 0 to 3")
+        if value["response_format"] not in ("auto", "b64_json"):
+            raise OpenAICompatibleError("Response format must be auto or b64_json")
 
     def _document(self):
         try:
@@ -217,6 +241,7 @@ class OpenAICompatibleConfig:
                     raise ValueError()
                 if type(value["timeout"]) is not int or not 1 <= value["timeout"] <= 1800:
                     raise ValueError()
+                self._validate_options(value)
                 profiles[profile_id] = value
             default_id = raw.get("default_profile_id")
             if default_id is not None and default_id not in profiles:
@@ -273,6 +298,8 @@ class OpenAICompatibleConfig:
             raise OpenAICompatibleError("Provider configuration could not be saved") from None
 
     def save(self, payload, library_path=None, profile_id=None):
+        if not isinstance(payload, dict):
+            raise OpenAICompatibleError("Configuration must be an object")
         with _config_lock:
             document = self._document()
             profile_id = profile_id or document["default_profile_id"] or "legacy"
@@ -281,7 +308,11 @@ class OpenAICompatibleConfig:
             for field in ("display_name", "base_url", "model"):
                 if field in payload:
                     value[field] = str(payload[field] or "").strip()
-            value["base_url"] = normalize_base_url(value["base_url"])
+            for field in ("models", "base_url_mode", "stream", "partial_images", "response_format"):
+                if field in payload:
+                    value[field] = payload[field]
+            self._validate_options(value)
+            value["base_url"] = normalize_base_url(value["base_url"], value["base_url_mode"])
             if not value["display_name"]:
                 raise OpenAICompatibleError("Display name is required")
             try:
@@ -361,7 +392,7 @@ class OpenAICompatibleConfig:
         try:
             value = self.public()
             if value["base_url"]:
-                normalize_base_url(value["base_url"])
+                normalize_base_url(value["base_url"], value["base_url_mode"])
         except OpenAICompatibleError:
             broken = True
             value = {"display_name": "OpenAI compatible images", "api_key_present": False, "base_url": "", "model": ""}
@@ -372,7 +403,7 @@ class OpenAICompatibleConfig:
                 "status": "auth_error" if broken else ("ready" if ready else "login_required"), "message": "Provider configuration could not be read" if broken else ("Locally configured; live connectivity and image generation are not verified" if ready else "Configure image API settings first"),
                 "verification": {"configuration_complete": ready, "connectivity_verified": False, "image_generation_verified": False},
                 "can_generate": ready, "features": {"text_to_image": ready, "text_reference_to_image": ready, "image_edit": ready, "title_suggestion": False},
-                "max_input_images": MAX_INPUT_IMAGES, "image_models": list(dict.fromkeys(([value["model"]] if value["model"] else []) + list(IMAGE_25_MODELS))),
+                "max_input_images": MAX_INPUT_IMAGES, "image_models": list(dict.fromkeys(([value["model"]] if value["model"] else []) + value.get("models", []) + list(IMAGE_25_MODELS))),
                 "default_image_model": value["model"], "model": value["model"], "api_key_present": value["api_key_present"],
                 **(self.public_profiles() if not broken else {"profiles": [], "default_profile_id": None})}
 
@@ -436,11 +467,13 @@ class OpenAICompatibleProvider:
             images.append((f"reference-{len(images) + 1}.{ext}", data, Image.MIME[fmt]))
         return images
 
-    def generate(self, prompt, parameters, input_images=None):
+    def generate(self, prompt, parameters, input_images=None, on_partial=None):
         settings = self.config.read(parameters.get("compatible_profile_id"))
         if not settings["api_key"]:
             raise OpenAICompatibleError("Image API key is missing")
         normalized = normalize_image_parameters(parameters, settings["model"])
+        transport = {key: normalized.get(key, settings[key]) for key in ("base_url_mode", "stream", "partial_images", "response_format")}
+        OpenAICompatibleConfig._validate_options({**settings, **transport})
         if not isinstance(prompt, str) or not prompt.strip():
             raise OpenAICompatibleError("Generation prompt is required")
         payload = {key: normalized[key] for key in ("model", "size", "quality", "background", "output_format", "output_compression", "moderation") if key in normalized}
@@ -450,9 +483,15 @@ class OpenAICompatibleProvider:
             # Apply only at transport so the user's original prompt and historical jobs stay intact.
             request_prompt += f"\n\nRequested output aspect ratio: {ratio} (width:height). Compose the image in this aspect ratio."
         payload.update(prompt=request_prompt, n=1)
+        if transport["stream"]:
+            payload.update(stream=True, partial_images=transport["partial_images"])
+        # Official GPT Image models return Base64 without this parameter. It is an
+        # explicit compatibility option for gateways only, never sent by default.
+        if transport["response_format"] == "b64_json":
+            payload["response_format"] = "b64_json"
         inputs = input_images or []
         endpoint = "/images/edits" if inputs else "/images/generations"
-        url = normalize_base_url(settings["base_url"]) + endpoint
+        url = normalize_base_url(settings["base_url"], transport["base_url_mode"]) + endpoint
         started_at = datetime.now(timezone.utc).isoformat()
         started = time.monotonic()
         diagnostics = {"endpoint": url, "started_at": started_at}
@@ -469,9 +508,25 @@ class OpenAICompatibleProvider:
 
         client = self.http_client or httpx.Client(timeout=settings["timeout"], follow_redirects=False, transport=httpx.HTTPTransport(retries=0))
         try:
-            kwargs = {"data": {k: str(v) for k, v in payload.items()}, "files": [("image[]", item) for item in inputs]} if inputs else {"json": payload}
-            response = client.post(url, headers={"Authorization": "Bearer " + settings["api_key"], "Accept": "application/json"},
-                                   timeout=settings["timeout"], follow_redirects=False, **kwargs)
+            kwargs = {"data": {k: (str(v).lower() if type(v) is bool else str(v)) for k, v in payload.items()}, "files": [("image[]", item) for item in inputs]} if inputs else {"json": payload}
+            accept = "text/event-stream, application/json" if transport["stream"] else "application/json"
+            with client.stream("POST", url, headers={"Authorization": "Bearer " + settings["api_key"], "Accept": accept},
+                               timeout=settings["timeout"], follow_redirects=False, **kwargs) as response:
+                diagnostics.update(http_status=response.status_code, content_type=_safe_value(response.headers.get("content-type"), settings["api_key"]),
+                                   request_id=_safe_value(response.headers.get("x-request-id") or response.headers.get("request-id"), settings["api_key"]),
+                                   retry_after=_safe_value(response.headers.get("retry-after"), settings["api_key"]))
+                if response.status_code == 200 and "text/event-stream" in response.headers.get("content-type", "").lower():
+                    body = self._stream_body(response, on_partial, transport["partial_images"] if transport["stream"] else 0, fail)
+                    diagnostics["response_transport"] = "sse"
+                else:
+                    # Some compatible gateways ignore stream=true and return normal JSON.
+                    # Accept that single response; never send a fallback request.
+                    body = read_json_response(response)
+                    diagnostics["response_transport"] = "json"
+        except OpenAICompatibleError:
+            raise
+        except ImageStreamError as error:
+            fail(error.category, str(error))
         except httpx.ConnectTimeout:
             fail("connect_timeout", "Connection timed out; check service logs before resubmitting, upstream billing is unknown")
         except httpx.TimeoutException:
@@ -481,13 +536,6 @@ class OpenAICompatibleProvider:
         finally:
             if self.http_client is None:
                 client.close()
-        diagnostics.update(http_status=response.status_code, content_type=_safe_value(response.headers.get("content-type"), settings["api_key"]),
-                           request_id=_safe_value(response.headers.get("x-request-id") or response.headers.get("request-id"), settings["api_key"]),
-                           retry_after=_safe_value(response.headers.get("retry-after"), settings["api_key"]))
-        try:
-            body = response.json()
-        except (ValueError, UnicodeError):
-            fail("non_json_response", f"Image API returned HTTP {response.status_code} with non-JSON content; check API address, proxy, login/verification and gateway pages")
         if not isinstance(body, dict):
             fail("invalid_json_response", "Image API JSON must be an object")
         error_body = body.get("error")
@@ -538,6 +586,7 @@ class OpenAICompatibleProvider:
         actual["request_id"] = actual.get("request_id") or diagnostics["request_id"]
         actual.update(top_level=top, data_item=item, model_label_kind="service_returned_label")
         requested = dict(payload)
+        requested.update(transport)
         requested["compatible_profile_id"] = settings["id"]
         requested["compatible_profile_name"] = parameters.get("compatible_profile_name") or settings["display_name"]
         if "requested_aspect_ratio" in parameters:
@@ -560,6 +609,40 @@ class OpenAICompatibleProvider:
         extension = {"PNG": "png", "JPEG": "jpg", "WEBP": "webp"}[fmt]
         return data, "openai-compatible." + extension, metadata
 
+    @staticmethod
+    def _stream_body(response, on_partial, partial_count, fail):
+        seen = set()
+        for event, value in iter_image_events(response):
+            if value.get("error") or event == "error":
+                return {"error": value.get("error") or value, "request_id": value.get("request_id")}
+            if event in ("image_generation.partial_image", "image_edit.partial_image"):
+                index = value.get("partial_image_index")
+                if type(index) is not int or not 0 <= index < 3:
+                    fail("invalid_stream", "Image API partial image index is invalid")
+                if index in seen:
+                    continue
+                seen.add(index)
+                encoded = value.get("b64_json")
+                if not isinstance(encoded, str) or not encoded or len(encoded) > ((MAX_IMAGE_BYTES + 2) // 3) * 4:
+                    fail("invalid_stream", "Image API partial image data is missing or exceeds the size limit")
+                try:
+                    data = base64.b64decode(encoded, validate=True)
+                    decoded = _inspect_image(data, details=True)
+                except (ValueError, TypeError, OpenAICompatibleError):
+                    fail("image_decode", "Image API partial image did not decode to a supported safe image")
+                if on_partial is not None and index < partial_count:
+                    try:
+                        on_partial(data, {"width": decoded["width"], "height": decoded["height"],
+                                          "partial_image_index": index, "output_format": decoded["format"].lower()})
+                    except Exception:
+                        fail("preview_storage", "A partial image could not be stored locally; upstream outcome and billing are unknown, check service logs before resubmitting")
+            elif event in ("image_generation.completed", "image_edit.completed"):
+                if not isinstance(value.get("b64_json"), str) or not value["b64_json"]:
+                    fail("missing_image", "Image API completion did not contain a final image")
+                # Reuse exactly the same final-image validation and metadata path as JSON.
+                return {**{key: item for key, item in value.items() if key != "b64_json"}, "data": [value]}
+        fail("incomplete_stream", "Image API stream ended without a completed image; upstream outcome and billing are unknown, check service logs before resubmitting")
+
     def run_job(self, library_path, job_id):
         repo = GenerationJobRepository(library_path)
         job = repo.get_job(job_id)
@@ -581,13 +664,17 @@ class OpenAICompatibleProvider:
             parameters = dict(job.parameters or {})
             # Old jobs belonged to the original single provider, never a later default.
             parameters.setdefault("compatible_profile_id", "legacy")
+            # Old queued tasks must keep their original nonstreaming request behavior.
+            for key, value in {"base_url_mode": "versioned", "stream": False, "partial_images": 0, "response_format": "auto"}.items():
+                parameters.setdefault(key, value)
             if getattr(job, "model", None):
                 parameters["model"] = job.model
             if not parameters.get("model"):
                 parameters["model"] = ((getattr(job, "metadata", {}) or {}).get("requested") or {}).get("model")
             if not parameters.get("model"):
                 raise OpenAICompatibleError("This legacy job has no frozen request model; select a model and create a new task before generating")
-            data, filename, metadata = self.generate(prompt, parameters, inputs)
+            data, filename, metadata = self.generate(prompt, parameters, inputs,
+                on_partial=lambda data, metadata: repo.stage_stream_preview(job_id, data, metadata))
             metadata["source_job_id"] = job_id
             return repo.stage_result(job_id, data, filename, metadata)
         except Exception as exc:

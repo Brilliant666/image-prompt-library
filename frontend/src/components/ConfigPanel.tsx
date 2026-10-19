@@ -468,35 +468,19 @@ export default function ConfigPanel({
       <section ref={providersSectionRef} className="setting-group provider-section" tabIndex={-1} aria-labelledby="config-providers-title">
         <h3 id="config-providers-title">{en ? 'Connections and profiles' : '连接与配置'}</h3>
         <p className="muted">{en ? 'Choose a connection type, then manage its named profiles. API keys and account authorization are separate connection methods.' : '先区分连接方式，再管理各自的配置。API Key 接口与账号授权是不同的连接方式。'}</p>
-        <fieldset className="default-ai-provider-control">
-          <legend>{en ? 'Preferred connection type' : '默认连接方式'}</legend>
-          <div className="segmented-control" role="radiogroup" aria-label={t('defaultAiProvider')}>
-            {([
-              ['openai_codex_oauth_native', 'ChatGPT'],
-              ['xai_grok_oauth', 'Grok'],
-              ['openai_compatible', uiLanguage === 'en' ? 'OpenAI-compatible API' : 'OpenAI 兼容 API'],
-            ] as const).map(([providerId, label]) => {
-              const status = providers.find(candidate => candidate.provider === providerId);
-              const enabled = Boolean(status?.configured && status.authenticated && status.available && (status.features.text_to_image || status.features.title_suggestion));
-              return (
-                <button type="button" key={providerId} role="radio" aria-checked={defaultAiProvider === providerId} className={defaultAiProvider === providerId ? 'active' : ''} disabled={!enabled} onClick={() => onDefaultAiProvider(providerId)}>{label}</button>
-              );
-            })}
-          </div>
-          <p className="muted">{t('defaultAiProviderHelp')}</p>
-        </fieldset>
         <div className="settings-connection-tabs" role="group" aria-label={en ? 'Connection settings' : '管理连接配置'}>
-          <button type="button" aria-pressed={connectionType === 'api'} className={connectionType === 'api' ? 'active' : ''} onClick={() => setConnectionType('api')}>{en ? 'API key profiles' : 'API Key 配置'}<small>OpenAI Compatible</small></button>
-          <button type="button" aria-pressed={connectionType === 'account'} className={connectionType === 'account' ? 'active' : ''} onClick={() => setConnectionType('account')}>{en ? 'Account connections' : '账号连接'}<small>ChatGPT / Grok · OAuth</small></button>
+          <button type="button" aria-pressed={connectionType === 'api'} className={connectionType === 'api' ? 'active' : ''} onClick={() => setConnectionType('api')}>{en ? 'API key profiles' : 'API Key 配置'}<small>OpenAI Compatible{defaultAiProvider === 'openai_compatible' && <b className="settings-default-badge">{en ? 'Default' : '当前默认'}</b>}</small></button>
+          <button type="button" aria-pressed={connectionType === 'account'} className={connectionType === 'account' ? 'active' : ''} onClick={() => setConnectionType('account')}>{en ? 'Account connections' : '账号连接'}<small>ChatGPT / Grok · OAuth{defaultAiProvider !== 'openai_compatible' && <b className="settings-default-badge">{en ? 'Default' : '当前默认'}</b>}</small></button>
         </div>
         <div hidden={connectionType !== 'api'}>
-        {open && !isDemoMode && <OpenAICompatibleSettings onSaved={loadProviders} uiLanguage={uiLanguage} />}
+        {open && !isDemoMode && <OpenAICompatibleSettings onSaved={loadProviders} uiLanguage={uiLanguage} isDefaultConnection={defaultAiProvider === 'openai_compatible'} onSetDefaultConnection={() => onDefaultAiProvider('openai_compatible')} />}
         </div>
         <div hidden={connectionType !== 'account'}>
         <p className="muted">{en ? 'The built-in ChatGPT / Codex and Grok connections use account authorization. These are not OpenAI API keys. Manage official or compatible API keys under API key profiles.' : '内置 ChatGPT / Codex 与 Grok 使用账号授权，保留各自的登录流程；它们不是官方 API Key。官方或第三方兼容接口的 Key 请在「API Key 配置」中添加。'}</p>
         <div className="provider-list">
-          {providers.filter(provider => provider.provider !== 'openai_compatible').map(provider => {
+          {providers.filter(provider => ['openai_codex_oauth_native', 'xai_grok_oauth'].includes(provider.provider)).map(provider => {
             const authStart = authStarts[provider.provider];
+            const enabled = Boolean(provider.configured && provider.authenticated && provider.available && (provider.features.text_to_image || provider.features.title_suggestion));
             return (
             <article className={`provider-card state-${provider.state}`} key={provider.provider}>
               <div className="provider-card-head">
@@ -523,6 +507,7 @@ export default function ConfigPanel({
                     <button className="secondary" onClick={() => startProviderAuth(provider.provider)} disabled={isDemoMode || provider.state === 'not_configured' || providerActionPending}>{t('connect')}</button>
                   )}
                   {provider.authenticated && <button className="secondary" onClick={() => disconnectProviderAuth(provider.provider)} disabled={providerActionPending}>{t('disconnect')}</button>}
+                  {defaultAiProvider === provider.provider ? <span className="settings-default-badge">{en ? 'Current default connection' : '当前默认连接'}</span> : <button type="button" className="secondary" disabled={!enabled || providerActionPending} onClick={() => onDefaultAiProvider(provider.provider as AiProvider)}>{en ? 'Use as default connection' : '设为默认连接'}</button>}
                   {providerActionMessages[provider.provider] && <p className="provider-message" role="status">{providerActionMessages[provider.provider]}</p>}
                 </div>
               )}

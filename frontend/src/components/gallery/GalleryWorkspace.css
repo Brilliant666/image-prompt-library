@@ -41,6 +41,7 @@
 .pg-image-ratio,.pg-image-dimensions{max-width:100%;overflow:hidden;text-overflow:ellipsis;pointer-events:auto}
 .pg-task-duration{position:absolute;top:7px;left:7px;display:inline-flex;align-items:center;gap:4px;pointer-events:auto}
 .pg-task-duration.has-image{top:auto;left:auto;bottom:7px;right:7px}
+.pg-stream-preview-label{position:absolute;top:7px;left:7px;padding:3px 5px;border-radius:4px;background:#26272bb3;color:#fff;font-size:10px;line-height:1.25}
 .pg-job-state{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:7px;font-size:12px;color:var(--muted)}
 .pg-job-state.failed{color:#ed6269}.pg-job-state svg{flex-shrink:0}
 .pg-card-image img{width:100%;height:100%;object-fit:contain}.pg-card-copy{display:flex;flex-direction:column;gap:4px;padding:10px 10px 7px;min-width:0;min-height:0}
