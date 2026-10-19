@@ -13,7 +13,7 @@ from backend.services.openai_codex_native import (
 from backend.services.xai_grok_oauth import PROVIDER_ID as GROK_PROVIDER_ID, XaiGrokOAuthProvider
 from backend.services.openai_compatible import PROVIDER_ID as COMPATIBLE_PROVIDER_ID, OpenAICompatibleProvider
 
-AUTOMATED_PROVIDER_IDS = frozenset({CODEX_PROVIDER_ID, GROK_PROVIDER_ID, COMPATIBLE_PROVIDER_ID})
+AUTOMATED_PROVIDER_IDS = frozenset({CODEX_PROVIDER_ID, GROK_PROVIDER_ID, COMPATIBLE_PROVIDER_ID, "agent_native_batch"})
 
 MAX_CONCURRENT_GENERATION_JOBS = 5
 QUEUE_RESUME_RETRY_SECONDS = 5
@@ -59,7 +59,7 @@ def enqueue_generation_jobs(library_path: Path | str, *, provider: str = CODEX_P
         available = MAX_CONCURRENT_GENERATION_JOBS - len(_active)
         if available <= 0:
             return
-        queued = repo.next_queued_provider_jobs(provider, limit=available)
+        queued = [job for job in repo.next_queued_provider_jobs(provider, limit=available + len(_active)) if job.id not in _active][:available]
         if not queued:
             active_count = sum(active_provider == provider for active_provider in _active_providers.values())
             repo.clear_provider_backoff_if_drained(provider, active_count=active_count)
@@ -75,7 +75,7 @@ def _run_job_and_continue(library_path: Path, job_id: str, provider: str) -> Non
     try:
         _provider_slots.acquire()
         try:
-            _provider_for(provider).run_job(library_path, job_id)
+            _run_provider_job(library_path, job_id, provider)
         finally:
             _provider_slots.release()
     except Exception:
@@ -96,12 +96,23 @@ def run_generation_job_now(library_path: Path | str, job_id: str):
     try:
         library = Path(library_path)
         job = GenerationJobRepository(library).get_job(job_id)
-        return _provider_for(job.provider).run_job(library, job_id)
+        return _run_provider_job(library, job_id, job.provider)
     finally:
         _provider_slots.release()
 
 
+def _run_provider_job(library, job_id, provider):
+    job = GenerationJobRepository(library).get_job(job_id)
+    if provider == COMPATIBLE_PROVIDER_ID and (job.metadata or {}).get("agent"):
+        from .agent_execution import run_compatible_agent_job
+        return run_compatible_agent_job(library, job_id)
+    return _provider_for(provider).run_job(library, job_id)
+
+
 def _provider_for(provider: str):
+    if provider == "agent_native_batch":
+        from .agent_execution import NativeAgentImageProvider
+        return NativeAgentImageProvider()
     if provider == COMPATIBLE_PROVIDER_ID:
         return OpenAICompatibleProvider()
     if provider == CODEX_PROVIDER_ID:

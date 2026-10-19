@@ -9,7 +9,7 @@ import math
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from io import BytesIO
 from threading import RLock
 
@@ -358,7 +358,7 @@ class GenerationJobRepository:
             raise KeyError(image_id)
         return self._record_from_row(row)
 
-    def create_job(self, payload: GenerationJobCreate) -> GenerationJobRecord:
+    def create_job(self, payload: GenerationJobCreate, *, job_id: str | None = None, connection=None, metadata: dict | None = None) -> GenerationJobRecord:
         payload = self._freeze_compatible_request(payload)
         if payload.source_item_id:
             self.items.get_item(payload.source_item_id)
@@ -367,13 +367,13 @@ class GenerationJobRepository:
         input_limit = GENERATION_INPUT_LIMITS.get(payload.provider, MAX_GENERATION_INPUT_IMAGES)
         if isinstance(input_images, list) and len(input_images) > input_limit:
             raise GenerationJobConflict(f"Generation edit supports up to {input_limit} input images")
-        job_id = new_id("gen")
+        job_id = job_id or new_id("gen")
         prepared_parameters, library_reference_ids = self._prepare_library_reference_inputs(job_id, parameters)
         prepared_parameters, reference_image_copies = self._prepare_reference_input_clones(job_id, prepared_parameters, **({"persist_inline": True} if payload.provider == "openai_compatible" else {}))
         prepared_parameters = sanitize_generation_parameters(prepared_parameters)
-        metadata = {"reference_image_copies": reference_image_copies} if reference_image_copies else {}
+        metadata = {**(metadata or {}), **({"reference_image_copies": reference_image_copies} if reference_image_copies else {})}
         timestamp = now()
-        with connect(self.library_path) as conn:
+        with (nullcontext(connection) if connection is not None else connect(self.library_path)) as conn:
             conn.execute(
                 """
                 INSERT INTO generation_jobs(
@@ -399,7 +399,10 @@ class GenerationJobRepository:
                     timestamp,
                 ),
             )
-            conn.commit()
+            if connection is None:
+                conn.commit()
+            else:
+                return self._record_from_row(conn.execute("SELECT * FROM generation_jobs WHERE id=?", (job_id,)).fetchone())
         return self.get_job(job_id)
 
     def _prepare_library_reference_inputs(self, job_id: str, parameters: dict) -> tuple[dict, list[str]]:
@@ -2109,6 +2112,8 @@ class GenerationJobRepository:
             if row is None:
                 raise KeyError(job_id)
             job = self._record_from_row(row)
+            if job.provider in {"agent_native", "agent_native_batch"}:
+                raise GenerationJobConflict("请在 Agent 对话中重新生成此原生图片，并确认本轮授权。")
             if job.status != "failed":
                 raise GenerationJobConflict(f"Only failed generation jobs can be retried; current status is {job.status}")
             job = self._restore_compatible_request(job)
@@ -2184,6 +2189,8 @@ class GenerationJobRepository:
             raise
 
     def discard_and_retry_job(self, job_id: str) -> GenerationJobRetryResult:
+        if self.get_job(job_id).provider in {"agent_native", "agent_native_batch"}:
+            raise GenerationJobConflict("请在 Agent 对话中重新生成此原生图片，并确认本轮授权。")
         pending = self._resume_pending_discard_repair(job_id)
         if pending is not None:
             retry_id = pending.metadata.get("retried_by_generation_job_id")
@@ -2520,6 +2527,12 @@ class GenerationJobRepository:
                 """
                 SELECT * FROM generation_jobs
                 WHERE provider=? AND status='queued'
+                  AND (json_extract(metadata, '$.agent.requestId') IS NULL OR EXISTS (
+                    SELECT 1 FROM agent_requests
+                    WHERE agent_requests.id=json_extract(generation_jobs.metadata, '$.agent.requestId')
+                      AND agent_requests.state IN ('queued','running','waiting_for_jobs')
+                      AND agent_requests.stop_requested=0
+                  ))
                 ORDER BY created_at ASC
                 LIMIT ?
                 """,
