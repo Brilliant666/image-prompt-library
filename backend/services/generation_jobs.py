@@ -736,15 +736,21 @@ class GenerationJobRepository:
         self,
         *,
         status: str | None = None,
+        statuses: list[str] | None = None,
         source_item_id: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> GenerationJobList:
         conditions = []
         params: list[object] = []
+        if status is not None and statuses is not None:
+            raise ValueError("Use either status or statuses, not both")
         if status:
             conditions.append("status=?")
             params.append(status)
+        elif statuses:
+            conditions.append(f"status IN ({','.join('?' for _ in statuses)})")
+            params.extend(statuses)
         if source_item_id is not None:
             conditions.append("source_item_id=?")
             params.append(source_item_id)
@@ -763,7 +769,7 @@ class GenerationJobRepository:
             ))
             visibility = []
             summary_params: list[object] = []
-            if status is None:
+            if status is None and not statuses:
                 source_filter = " AND jobs.source_item_id=?" if source_item_id is not None else ""
                 visibility.append(
                     "EXISTS ("

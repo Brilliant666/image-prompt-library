@@ -46,5 +46,12 @@
 .settings-field-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
 .agent-settings fieldset{padding:0;margin:0;border:0;min-width:0}
 .agent-settings-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:22px}
+.settings-connection-tabs{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:20px}
+.settings-connection-tabs button{display:grid;gap:4px;padding:12px 10px;text-align:left;border:1px solid var(--studio-hairline);border-radius:12px;background:transparent;color:var(--studio-muted);font-size:12px;cursor:pointer}
+.settings-connection-tabs button.active{background:rgb(var(--studio-accent-rgb) / .06);border-color:rgb(var(--studio-accent-rgb) / .35);color:var(--studio-accent)}
+.settings-connection-tabs small{font-size:10px;opacity:.7;overflow-wrap:anywhere}
+.settings-preference-group{padding:14px;border:1px solid var(--studio-hairline);border-radius:12px;margin-top:12px}
+.settings-preference-group .settings-field:first-child{margin-top:0}
+.settings-preference-group .settings-preference{border-top:1px solid var(--studio-hairline);padding-top:16px;margin-top:16px}
 @media(max-width:640px){.config-dialog{height:85dvh;max-height:calc(100dvh - 24px);width:calc(100vw - 24px);border-radius:22px}.config-dialog-body{flex-direction:column}.config-dialog-header{padding:16px 18px}.config-version{display:none}.config-sidebar{width:auto;flex-direction:row;overflow-x:auto;overflow-y:hidden;border-right:0;border-bottom:1px solid var(--studio-hairline,#eceef1);padding:10px;gap:4px}.config-sidebar button{width:auto;padding:10px}.config-content{padding:20px}.config-content .appearance-control{grid-template-columns:1fr}.settings-field-grid{grid-template-columns:1fr}.settings-field-row{gap:12px}}
 @media(prefers-reduced-motion:reduce){.config-dialog,.settings-switch-row input,.settings-switch-row input:before{transition:none}}

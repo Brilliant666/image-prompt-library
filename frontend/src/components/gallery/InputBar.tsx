@@ -50,6 +50,11 @@ export default function InputBar({command,preferences,t,active,onCreated,onOpenS
   }).catch(e=>alive&&setError(String(e))).finally(()=>alive&&setLoading(false));return()=>{alive=false;};},[configurationRevision]);
   useEffect(()=>{if(loading||!initialized.current)return;const timer=setTimeout(()=>{persistSequence.current=persistSequence.current.then(()=>saveGalleryDraft(preferences.persistInputOnRestart?draft:undefined)).catch(()=>setError('草稿未能写入浏览器存储；请保持此页打开'));},300);return()=>clearTimeout(timer);},[draft,preferences.persistInputOnRestart,loading]);
   useEffect(()=>{if(!loading&&draft.provider==='openai_compatible'&&draft.profileId)writeGenerationPreference(localStorage,draft.profileId,draft.recipe);},[draft.profileId,draft.recipe,loading]);
+  useEffect(()=>{
+    const reset=(event:Event)=>{const id=(event as CustomEvent<{profileId?:string}>).detail?.profileId;if(!id)return;setDraft(current=>current.provider==='openai_compatible'&&current.profileId===id?{...current,recipe:readGenerationPreference(localStorage,id,profiles.find(profile=>profile.id===id)?.model||'')}:current);};
+    window.addEventListener('ipl:generation-preference-reset',reset);
+    return()=>window.removeEventListener('ipl:generation-preference-reset',reset);
+  },[profiles]);
   useEffect(()=>{if(!command||loading||consumedCommand.current===command.id)return;consumedCommand.current=command.id;const sequence=++readSequence.current;const current=()=>mounted.current&&sequence===readSequence.current;setReading(true);setError('');
     void (async()=>{
       let job=command.job;

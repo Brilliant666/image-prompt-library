@@ -122,6 +122,7 @@ export default function ConfigPanel({
   onLibraryCleanup?: () => void;
 }) {
   const [activeSection, setActiveSection] = useState<SettingsSection>('api');
+  const [connectionType, setConnectionType] = useState<'api' | 'account'>('api');
   const [browserPreferences, setBrowserPreferences] = useState(readLocalPreferences);
   const [preferencesMessage, setPreferencesMessage] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -129,7 +130,7 @@ export default function ConfigPanel({
   const en = uiLanguage === 'en';
   const sections = [
     { id: 'api', label: en ? 'API settings' : 'API 配置', icon: KeyRound },
-    { id: 'general', label: en ? 'General' : '通用设置', icon: SlidersHorizontal },
+    { id: 'general', label: en ? 'Preferences' : '习惯配置', icon: SlidersHorizontal },
     { id: 'agent', label: 'Agent', icon: Bot },
     { id: 'capture', label: en ? 'Capture' : '采集与整理', icon: ImagePlus },
     { id: 'data', label: en ? 'Data' : '数据管理', icon: Database },
@@ -465,15 +466,15 @@ export default function ConfigPanel({
           <div className="config-content" ref={scrollRef} onScroll={event => { scrollPositions.current[activeSection] = event.currentTarget.scrollTop; }}>
             <div role="tabpanel" id="settings-panel-api" aria-labelledby="settings-tab-api" hidden={activeSection !== 'api'}>
       <section ref={providersSectionRef} className="setting-group provider-section" tabIndex={-1} aria-labelledby="config-providers-title">
-        <h3 id="config-providers-title">{t('providers')}</h3>
-        <p className="muted">{t('providerSetupHelp')}</p>
+        <h3 id="config-providers-title">{en ? 'Connections and profiles' : '连接与配置'}</h3>
+        <p className="muted">{en ? 'Choose a connection type, then manage its named profiles. API keys and account authorization are separate connection methods.' : '先区分连接方式，再管理各自的配置。API Key 接口与账号授权是不同的连接方式。'}</p>
         <fieldset className="default-ai-provider-control">
-          <legend>{t('defaultAiProvider')}</legend>
+          <legend>{en ? 'Preferred connection type' : '默认连接方式'}</legend>
           <div className="segmented-control" role="radiogroup" aria-label={t('defaultAiProvider')}>
             {([
               ['openai_codex_oauth_native', 'ChatGPT'],
               ['xai_grok_oauth', 'Grok'],
-              ['openai_compatible', uiLanguage === 'en' ? 'Third-party API' : '第三方 API'],
+              ['openai_compatible', uiLanguage === 'en' ? 'OpenAI-compatible API' : 'OpenAI 兼容 API'],
             ] as const).map(([providerId, label]) => {
               const status = providers.find(candidate => candidate.provider === providerId);
               const enabled = Boolean(status?.configured && status.authenticated && status.available && (status.features.text_to_image || status.features.title_suggestion));
@@ -484,7 +485,15 @@ export default function ConfigPanel({
           </div>
           <p className="muted">{t('defaultAiProviderHelp')}</p>
         </fieldset>
+        <div className="settings-connection-tabs" role="group" aria-label={en ? 'Connection settings' : '管理连接配置'}>
+          <button type="button" aria-pressed={connectionType === 'api'} className={connectionType === 'api' ? 'active' : ''} onClick={() => setConnectionType('api')}>{en ? 'API key profiles' : 'API Key 配置'}<small>OpenAI Compatible</small></button>
+          <button type="button" aria-pressed={connectionType === 'account'} className={connectionType === 'account' ? 'active' : ''} onClick={() => setConnectionType('account')}>{en ? 'Account connections' : '账号连接'}<small>ChatGPT / Grok · OAuth</small></button>
+        </div>
+        <div hidden={connectionType !== 'api'}>
         {open && !isDemoMode && <OpenAICompatibleSettings onSaved={loadProviders} uiLanguage={uiLanguage} />}
+        </div>
+        <div hidden={connectionType !== 'account'}>
+        <p className="muted">{en ? 'The built-in ChatGPT / Codex and Grok connections use account authorization. These are not OpenAI API keys. Manage official or compatible API keys under API key profiles.' : '内置 ChatGPT / Codex 与 Grok 使用账号授权，保留各自的登录流程；它们不是官方 API Key。官方或第三方兼容接口的 Key 请在「API Key 配置」中添加。'}</p>
         <div className="provider-list">
           {providers.filter(provider => provider.provider !== 'openai_compatible').map(provider => {
             const authStart = authStarts[provider.provider];
@@ -520,11 +529,14 @@ export default function ConfigPanel({
             </article>
           );})}
         </div>
+        </div>
         {providerMessage && <p className="provider-message">{providerMessage}</p>}
       </section>
 
             </div>
             <div role="tabpanel" id="settings-panel-general" aria-labelledby="settings-tab-general" hidden={activeSection !== 'general'}>
+              <GeneralSettings value={localPreferences || browserPreferences} onChange={changePreferences} uiLanguage={uiLanguage} />
+              {preferencesMessage && <p className="provider-message" role="status">{preferencesMessage}</p>}
       <section className="setting-group">
         <h3>{t('uiLanguage')}</h3>
         <div className="segmented-control" aria-label={t('uiLanguage')}>
@@ -581,8 +593,6 @@ export default function ConfigPanel({
         </div>
       </section>
 
-              <GeneralSettings value={localPreferences || browserPreferences} onChange={changePreferences} uiLanguage={uiLanguage} />
-              {preferencesMessage && <p className="provider-message" role="status">{preferencesMessage}</p>}
             </div>
             <div role="tabpanel" id="settings-panel-agent" aria-labelledby="settings-tab-agent" hidden={activeSection !== 'agent'}>
               {open && !isDemoMode ? <AgentSettings uiLanguage={uiLanguage} active={activeSection === 'agent'} /> : <p className="muted">{en ? 'Agent settings are available in the local application.' : 'Agent 配置请在本机应用中使用。'}</p>}

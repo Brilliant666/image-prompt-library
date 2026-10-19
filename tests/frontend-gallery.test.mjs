@@ -27,6 +27,7 @@ const references = await loadTs('../frontend/src/utils/recipeInputs.ts');
 const preferences = await loadTs('../frontend/src/utils/generationPreferences.ts');
 const templates = await loadTs('../frontend/src/utils/promptTemplateVariables.ts');
 const generationSiblings = await loadTs('../frontend/src/utils/generationSiblings.ts');
+const history = await loadTs('../frontend/src/utils/galleryHistory.ts');
 const originalPrompt = '  原文\r\n\nB & <tag>\t ';
 const historicalJob = (change = {}) => ({
   id: 'historical', provider: 'openai_compatible', mode: 'text_to_image', prompt_text: originalPrompt,
@@ -191,7 +192,7 @@ function inputHarness(t, overrides = {}, apiOverrides = {}) {
   const state = { created: 0, settings: 0, posts: [], persisted: [] };
   const store = new Map();
   const oldStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
-  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { getItem: key => store.get(key) ?? null, setItem: (key, value) => store.set(key, value) } });
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { getItem: key => store.get(key) ?? null, setItem: (key, value) => store.set(key, value), removeItem: key => store.delete(key) } });
   const OldImage = globalThis.Image;
   globalThis.Image = class { naturalWidth = 1024; naturalHeight = 1024; async decode() {} };
   const hooks = {
@@ -218,14 +219,15 @@ function inputHarness(t, overrides = {}, apiOverrides = {}) {
     './InputBar.css': {},
   };
   const module = { exports: {} };
-  new Function('require', 'module', 'exports', inputJs)(name => { assert.ok(name in deps, `unmocked component dependency: ${name}`); return deps[name]; }, module, module.exports);
+  const eventTarget = new EventTarget();
+  new Function('require', 'module', 'exports', 'window', inputJs)(name => { assert.ok(name in deps, `unmocked component dependency: ${name}`); return deps[name]; }, module, module.exports, eventTarget);
   let props = { active: true, t: key => key, preferences: { enterSubmit: false, clearInputAfterSubmit: false, persistInputOnRestart: false, notifyOnCompletion: false }, onCreated: () => state.created++, onOpenSettings: () => state.settings++, configurationRevision: 0, ...overrides };
   const render = () => { dirty = false; cursor = 0; tree = module.exports.default(props); effects.splice(0).forEach(effect => effect()); };
   const flush = async () => { for (let i = 0; i < 15; i++) { if (dirty) render(); await Promise.resolve(); } if (dirty) render(); };
   const find = (type, label) => { const node = children(tree).find(node => node.type === type && (node.props['aria-label'] === label || node.props.children === label)); assert.ok(node, `${type} ${label} exists`); return node.props; };
   render();
   t.after(() => { slots.forEach(slot => slot?.cleanup?.()); if (oldStorage) Object.defineProperty(globalThis, 'localStorage', oldStorage); else delete globalThis.localStorage; if (OldImage) globalThis.Image = OldImage; else delete globalThis.Image; });
-  return { state, flush, find, update: value => { props = { ...props, ...value }; render(); }, get tree() { return tree; } };
+  return { state, flush, find, emitPreferenceReset: profileId => eventTarget.dispatchEvent(new CustomEvent('ipl:generation-preference-reset', { detail: { profileId } })), update: value => { props = { ...props, ...value }; render(); }, get tree() { return tree; } };
 }
 
 test('actual InputBar submit callback locks two same-tick clicks and clears input only after confirmed creation', async t => {
@@ -361,6 +363,7 @@ function workspaceHarness(t, api, overrides = {}, environment = {}) {
     fflate: { zipSync: environment.zipSync || (() => { throw Error('download not part of this test'); }) }, '../../api/client': { api, mediaUrl: path => `/media/${path}` },
     '../../utils/galleryRecipe': recipe, './InputBar': { __esModule: true, default: 'InputBar' }, './TaskGrid': { __esModule: true, default: 'TaskGrid' }, './DetailModal': { __esModule: true, default: 'DetailModal' }, './Lightbox': { __esModule: true, default: 'Lightbox' }, './GalleryWorkspace.css': {},
     '../../utils/generationSiblings': generationSiblings,
+    '../../utils/galleryHistory': history,
     // Grouping/retry collapsing has separate real-component coverage in explore-view.test.mjs.
     '../GenerationQueueDrawer': { __esModule: true, default: 'GenerationQueueDrawer', groupGenerationQueueJobs: jobs => [...new Set(jobs.map(job => job.generation_group_id))].map(id => ({ generationGroupId: id, jobs: jobs.filter(job => job.generation_group_id === id) })) },
   };
@@ -441,12 +444,118 @@ test('copy failure feedback survives history refresh until explicitly dismissed'
   assert.equal(harness.node('TaskGrid').jobs[0].prompt_text, originalPrompt);
 });
 
+function historyStorage(t) {
+  for (const name of ['localStorage', 'sessionStorage']) {
+    const previous = Object.getOwnPropertyDescriptor(globalThis, name), values = new Map();
+    Object.defineProperty(globalThis, name, { configurable: true, value: { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value), removeItem: key => values.delete(key) } });
+    t.after(() => { if (previous) Object.defineProperty(globalThis, name, previous); else delete globalThis[name]; });
+  }
+}
+
+test('gallery filters successes including accepted records before paging and remembers an explicit choice', async t => {
+  historyStorage(t);
+  const all = ['succeeded', 'accepted', 'failed', 'running'].map(status => historicalJob({ id: status, status }));
+  const calls = [];
+  const api = { generationJobs: async params => {
+    calls.push(params); const jobs = all.filter(job => !params.statuses || params.statuses.split(',').includes(job.status));
+    return { jobs, total: jobs.length };
+  } };
+  const harness = workspaceHarness(t, api); await harness.flush();
+  assert.deepEqual(harness.node('TaskGrid').jobs.map(job => job.id), ['succeeded', 'accepted']);
+  assert.equal(calls[0].prepare_references, false);
+  harness.node('select', props => props['aria-label'] === '任务状态筛选').onChange({ target: { value: 'completed' } }); await harness.flush();
+  assert.deepEqual(harness.node('TaskGrid').jobs.map(job => job.id), ['succeeded', 'accepted', 'failed']);
+  assert.equal(history.readGalleryFilter(), 'completed');
+  const reopened = workspaceHarness(t, api); await reopened.flush();
+  assert.equal(reopened.node('select', props => props['aria-label'] === '任务状态筛选').value, 'completed');
+});
+
+test('successful-only gallery confirms a queued submission without changing the saved filter', async t => {
+  historyStorage(t);
+  const calls = [];
+  let queueChanged = 0;
+  const harness = workspaceHarness(t, { generationJobs: async (params, options) => {
+    calls.push({ params, options }); return { jobs: [], total: 0 };
+  } }, { onQueueChanged: () => queueChanged++ });
+  await harness.flush();
+  harness.node('InputBar').onCreated(); await harness.flush();
+  assert.equal(harness.node('select', props => props['aria-label'] === '任务状态筛选').value, 'successful');
+  assert.equal(history.readGalleryFilter(), 'successful');
+  assert.ok(children(harness.tree).some(node => node.props?.children === '已加入工作队列，可通过右上角历史记录查看进度。'));
+  assert.equal(calls.at(-1).options.fresh, true);
+  assert.equal(queueChanged, 1);
+});
+
+test('cached cards appear while a request is pending but reuse waits for the authoritative full recipe', async t => {
+  historyStorage(t);
+  const job = historicalJob({ result_path: 'generation-results/result.png' });
+  history.saveGalleryHistory('library-a', 'successful', { jobs: [job], total: 1 });
+  const list = deferred(), detail = deferred();
+  const harness = workspaceHarness(t, { generationJobs: () => list.promise, generationJob: () => detail.promise }, { libraryScope: 'library-a' });
+  await harness.flush();
+  const cached = harness.node('TaskGrid').jobs[0];
+  assert.equal(cached.prompt_text, originalPrompt); assert.equal(cached.parameters?.compatible_profile_id, undefined);
+  harness.node('TaskGrid').onReuse(cached); await harness.flush();
+  assert.equal(harness.node('InputBar').command, undefined);
+  detail.resolve(job); await harness.flush();
+  assert.equal(harness.node('InputBar').command.job.parameters.compatible_profile_id, 'original-api');
+  list.resolve({ jobs: [], total: 0 }); await harness.flush();
+  assert.equal(harness.node('TaskGrid'), undefined);
+  assert.deepEqual(history.readGalleryHistory('library-a', 'successful').jobs, []);
+});
+
+test('late history for an old filter cannot replace the new filter or its cache', async t => {
+  historyStorage(t); const old = deferred();
+  const failed = historicalJob({ id: 'failed', status: 'failed' });
+  const harness = workspaceHarness(t, { generationJobs: params => params.statuses === 'succeeded,accepted' ? old.promise : Promise.resolve({ jobs: [failed], total: 1 }) }, { libraryScope: 'library-a' });
+  await harness.flush();
+  harness.node('select', props => props['aria-label'] === '任务状态筛选').onChange({ target: { value: 'completed' } }); await harness.flush();
+  old.resolve({ jobs: [historicalJob()], total: 1 }); await harness.flush();
+  assert.deepEqual(harness.node('TaskGrid').jobs.map(job => job.id), ['failed']);
+  assert.deepEqual(history.readGalleryHistory('library-a', 'completed').jobs.map(job => job.id), ['failed']);
+});
+
+test('cached history stays visible on outage and is identified as stale, never mistaken for a successful refresh', async t => {
+  historyStorage(t); const job = historicalJob();
+  history.saveGalleryHistory('library-a', 'successful', { jobs: [job], total: 1 });
+  const harness = workspaceHarness(t, { generationJobs: async () => { throw Error('offline'); } }, { libraryScope: 'library-a' });
+  await harness.flush();
+  assert.equal(harness.node('TaskGrid').jobs[0].id, job.id);
+  const feedback = harness.node('div', props => props.className?.includes('pg-gallery-feedback'));
+  assert.equal(feedback.role, 'alert'); assert.match(feedback.children[0].props.children, /上次列表.*offline/);
+});
+
+test('completion notice works when successful-only filtering hides running and failed rows', async t => {
+  const job = historicalJob(); let failed = 0;
+  const harness = workspaceHarness(t, { generationJobs: async () => ({ jobs: [job], total: 1, status_counts: { succeeded: 1, accepted: 0, failed } }) }, { preferences: { notifyOnCompletion: true } });
+  await harness.flush(); failed = 1;
+  harness.node('button', props => props['aria-label'] === '刷新生成历史').onClick(); await harness.flush();
+  assert.equal(harness.node('div', props => props.className?.includes('pg-gallery-feedback')).role, 'status');
+});
+
+test('resetting browser parameters only resets the matching recipe, preserving prompt and reference inputs', async t => {
+  const harness = inputHarness(t, { command: { id: 99, job: historicalJob() } }); await harness.flush();
+  harness.find('button', '添加参考图').onClick(); await harness.flush();
+  harness.find('button', '从 Library 或画廊选择参考图').onClick(); await harness.flush();
+  children(harness.tree).find(node => node.type === 'ReferencePicker').props.onSelect(input('retained')); await harness.flush();
+  harness.emitPreferenceReset('different-api'); await harness.flush();
+  assert.equal(harness.find('button', '生成图片').disabled, false);
+  preferences.resetGenerationPreference(localStorage, 'original-api');
+  harness.emitPreferenceReset('original-api'); await harness.flush();
+  harness.find('button', '生成图片').onClick(); await harness.flush();
+  const payload = harness.state.posts[0];
+  assert.equal(payload.prompt_text, originalPrompt); assert.equal(payload.parameters.quality, 'auto');
+  assert.equal(payload.parameters.size, 'auto'); assert.equal(payload.parameters.compatible_profile_id, 'original-api');
+  assert.equal(payload.parameters.input_images[0].id, 'retained');
+});
+
 test('actual history load-more callbacks can reach entries beyond 1000 through bounded API pages', async t => {
   const all = Array.from({ length: 1201 }, (_, index) => historicalJob({ id: `job-${index}` }));
   const calls = [];
   const harness = workspaceHarness(t, { generationJobs: async ({ limit, offset = 0 }) => { calls.push({ limit, offset }); return { jobs: all.slice(offset, offset + limit), total: all.length }; } });
   await harness.flush();
-  for (let i = 0; i < 6; i++) { const more = harness.node('button', props => props.className === 'pg-load-more'); assert.ok(more); assert.notEqual(more.disabled, true); more.onClick(); await harness.flush(); }
+  assert.equal(harness.node('TaskGrid').jobs.length, 48, 'first paint uses a small page');
+  for (let i = 0; i < 25; i++) { const more = harness.node('button', props => props.className === 'pg-load-more'); assert.ok(more); assert.notEqual(more.disabled, true); more.onClick(); await harness.flush(); }
   const jobs = harness.node('TaskGrid').jobs;
   assert.equal(jobs.length, 1201); assert.equal(jobs.at(-1).id, 'job-1200');
   assert.ok(calls.every(call => call.limit <= 1000)); assert.ok(calls.some(call => call.offset > 0));

@@ -2,9 +2,9 @@
 const pendingReads = new Map<string, Promise<unknown>>();
 export const READ_TIMEOUT_MS = 15000;
 
-export function readJson<T>(url: string, timeoutMs = READ_TIMEOUT_MS): Promise<T> {
+export function readJson<T>(url: string, timeoutMs = READ_TIMEOUT_MS, options?: { fresh?: boolean }): Promise<T> {
   const pending = pendingReads.get(url);
-  if (pending) return pending as Promise<T>;
+  if (pending && !options?.fresh) return pending as Promise<T>;
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout>;
   const deadline = new Promise<never>((_, reject) => {
@@ -20,7 +20,8 @@ export function readJson<T>(url: string, timeoutMs = READ_TIMEOUT_MS): Promise<T
   })();
   const result = Promise.race([request, deadline]).finally(() => {
     clearTimeout(timer);
-    pendingReads.delete(url);
+    // A mutation may have started a fresh read while this older read was pending.
+    if (pendingReads.get(url) === result) pendingReads.delete(url);
   });
   pendingReads.set(url, result);
   return result;

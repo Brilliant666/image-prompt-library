@@ -47,8 +47,21 @@ can be selected, downloaded as originals in a ZIP, inspected in the zoomable
 lightbox, restored for another request, or saved as a new Library reference or
 attached to an existing reference. Clearing a generation result does not delete
 an already accepted Library image. Protected Agent references remain usable.
-History loads in pages; search and status filters cover the loaded pages, and
-**Load more** makes older pages available.
+History starts with 48 results. **Only successful** is the default, including
+results already saved to Library; choose **Success and failure**, **All states**
+or an individual state to inspect other jobs. The browser remembers this choice.
+Status filtering happens before server pagination. Text search covers loaded
+pages, and **Load more** makes older pages available. Failed jobs remain in the
+queue and database; filtering never deletes them.
+
+Refreshing the page can display the previous list while checking the server.
+This tab-local cache is scoped to the library and filter, expires after 30
+minutes and contains bounded display metadata only, without image bytes,
+credentials or complete recipes. A failed refresh leaves the cached cards visible
+with an error notice. Opening details or restoring a recipe fetches the full job;
+a cached card cannot submit a generation request by itself. Clearing/accepting
+results invalidates the cache, and submitting shows a queue receipt even when
+the chosen filter hides pending jobs.
 
 Compact horizontal task cards show the original image without stretching, the
 prompt, actual returned dimensions, state and existing task actions. The results
@@ -83,12 +96,23 @@ icon opens the existing work queue, including running tasks and older batches.
 Opening a batch scopes the results list to that batch; **Return to all history**
 restores the full loaded list. Neither action resubmits a generation request.
 
-Settings are grouped into API, General, Agent, Capture, Data and About. API
+Settings are grouped into API, Preferences, Agent, Capture, Data and About. API
 profiles retain their stable IDs and independent keys. Copying a profile happens
 on the server; keys are never returned to the browser for copying. Reordering
 does not change the default. Existing ChatGPT/Codex OAuth, Grok OAuth and the
 capture organizer keep their separate credentials and protocols. The organizer
 still uses Chat Completions; Agent uses Responses.
+
+The API page separates the default connection from individual API-key profiles.
+sub2api and other synchronous OpenAI-compatible services are named profiles of
+the same protocol; ChatGPT/Codex and Grok account connections retain their own
+login flows. The expandable profile list shows the current/default profile and
+configuration state. Each profile exposes its name, base URL, independent key,
+default model, timeout and the derived Images/Responses endpoint addresses.
+Saving or switching a profile does not test a paid endpoint. Empty key input
+preserves the existing key. A separate control can reset the selected profile's
+remembered image parameters in this browser without clearing the current prompt,
+reference images, other profiles or history.
 
 General preferences apply only to the Gallery and Agent composers, not the
 browser capture extension. Input persistence is opt-in and local to this browser.

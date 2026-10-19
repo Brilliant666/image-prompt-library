@@ -1008,8 +1008,8 @@ test('Explore wiring preserves Library management, semantic appearance, and rest
   // Preserve every former settings control in its new named tab instead of
   // requiring the old one-column drawer order across unrelated groups.
   const settingsGroups = {
-    api: ["t('providers')", '<OpenAICompatibleSettings', 'startProviderAuth(provider.provider)', 'disconnectProviderAuth(provider.provider)'],
-    general: ["t('uiLanguage')", "t('promptCopyLanguage')", "t('appearance')", '<GeneralSettings'],
+    api: ['连接与配置', '<OpenAICompatibleSettings', 'startProviderAuth(provider.provider)', 'disconnectProviderAuth(provider.provider)'],
+    general: ['<GeneralSettings', "t('uiLanguage')", "t('promptCopyLanguage')", "t('appearance')"],
     agent: ['<AgentSettings'],
     capture: ['<BrowserCaptureSettings', '<CaptureOrganizerSettings'],
     data: ["t('cleanupTitle')", 'onClick={loadCleanupPreview}', 'onClick={applyCleanup}'],

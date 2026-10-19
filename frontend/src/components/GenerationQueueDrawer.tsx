@@ -315,7 +315,7 @@ export default function GenerationQueueDrawer({
     const requestId = refreshRequestRef.current + 1;
     refreshRequestRef.current = requestId;
     try {
-      const result = await api.generationJobs({ limit });
+      const result = await api.generationJobs({ limit: open ? limit : 1, prepare_references: false }, { fresh: true });
       if (refreshRequestRef.current !== requestId) return;
       setJobs(result.jobs);
       setJobTotal(result.total);
@@ -329,7 +329,7 @@ export default function GenerationQueueDrawer({
       setLoadError(error instanceof Error ? error.message : t('queueLoadFailed'));
       setHasLoaded(true);
     }
-  }, [t]);
+  }, [t, open]);
 
   const hasActiveWork = Boolean(
     (statusCounts?.queued || 0)

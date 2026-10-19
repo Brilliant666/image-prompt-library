@@ -30,3 +30,8 @@ export function writeGenerationPreference(storage: StorageLike, profile: string,
 export function lastGenerationProfile(storage: StorageLike): string | null {
   try { return storage.getItem(PREFIX + 'selected-profile'); } catch { return null; }
 }
+
+/** Reset only this profile's recipe. Keep the selected profile, drafts and other APIs. */
+export function resetGenerationPreference(storage: Pick<Storage, 'removeItem'>, profile: string): boolean {
+  try { storage.removeItem(PREFIX + profile); return true; } catch { return false; }
+}

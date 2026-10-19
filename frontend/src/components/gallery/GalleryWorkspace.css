@@ -74,3 +74,5 @@
 
 /* Short landscape windows scroll the page instead of collapsing the result area. */
 @media(max-height:600px){.pg-gallery{min-height:540px}}
+
+.pg-history-refreshing{animation:pg-history-spin 1.2s linear infinite}@keyframes pg-history-spin{to{transform:rotate(360deg)}}@media(prefers-reduced-motion:reduce){.pg-history-refreshing{animation:none}}
