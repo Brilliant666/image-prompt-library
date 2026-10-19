@@ -49,13 +49,13 @@ export default function InputBar({command,preferences,t,active,onCreated,onOpenS
   const ready=draft.provider==='openai_compatible'?Boolean(profile?.configured):Boolean(provider?.can_generate??provider?.available);
   useEffect(()=>{let alive=true;setLoading(true);Promise.all([api.generationProviders(),api.openAICompatibleProfiles()]).then(async([available,store])=>{
     if(!alive)return;setProviders(available.filter(p=>p.provider!=='manual_upload'));setProfiles(store.profiles);
-    if(!initialized.current&&active){let restored:GalleryDraft|undefined;if(preferences.persistInputOnRestart&&editRevision.current===0){try{restored=await readGalleryDraft();}catch{if(alive&&editRevision.current===0)setError('无法恢复本地草稿；已保存的任务不受影响');}}if(!alive)return;initialized.current=true;if(editRevision.current!==0)return;
+    if(!initialized.current){let restored:GalleryDraft|undefined;if(preferences.persistInputOnRestart&&editRevision.current===0){try{restored=await readGalleryDraft();}catch{if(alive&&editRevision.current===0)setError('无法恢复本地草稿；已保存的任务不受影响');}}if(!alive)return;initialized.current=true;if(editRevision.current!==0)return;
       const selected=store.profiles.find(p=>p.id===lastGenerationProfile(localStorage))||store.profiles.find(p=>p.id===store.default_profile_id);
       const preferred=available.find(p=>p.provider===preferredProvider&&p.can_generate);
       const fallback=preferred?.provider||(selected?'openai_compatible':available.find(p=>p.can_generate)?.provider)||'openai_compatible';
       setDraft(restored || {...emptyGalleryDraft(),provider:fallback,profileId:selected?.id||'',recipe:fallback==='openai_compatible'&&selected?readGenerationPreference(localStorage,selected.id,selected.model):{...emptyGalleryDraft().recipe,model:available.find(p=>p.provider===fallback)?.default_image_model||'gpt-image-2',quality:'medium'}});
     }
-  }).catch(e=>alive&&setError(String(e))).finally(()=>alive&&setLoading(false));return()=>{alive=false;};},[configurationRevision,active]);
+  }).catch(e=>alive&&setError(String(e))).finally(()=>alive&&setLoading(false));return()=>{alive=false;};},[configurationRevision]);
   useEffect(()=>{if(loading||!initialized.current)return;const timer=setTimeout(()=>{persistSequence.current=persistSequence.current.then(()=>saveGalleryDraft(preferences.persistInputOnRestart?draft:undefined)).catch(()=>setError('草稿未能写入浏览器存储；请保持此页打开'));},300);return()=>clearTimeout(timer);},[draft,preferences.persistInputOnRestart,loading]);
   useEffect(()=>{if(!loading&&draft.provider==='openai_compatible'&&draft.profileId)writeGenerationPreference(localStorage,draft.profileId,draft.recipe);},[draft.profileId,draft.recipe,loading]);
   useEffect(()=>{
@@ -79,7 +79,7 @@ export default function InputBar({command,preferences,t,active,onCreated,onOpenS
   },[command?.id,loading,active]);
   const recipe=(patch:Partial<GalleryDraft['recipe']>)=>editDraft(current=>({...current,recipe:{...current.recipe,...patch}}));
   async function addFiles(files:File[]) {
-    if(busy||!files.length)return; if(files.length+draft.inputs.filter(input=>!input.missing).length>limit){setError(`最多 ${limit} 张参考图，未截断本次选择`);return;}
+    if(busy||!files.length)return;if(pendingFiles.current){setError('上一批图片尚未读完，本次添加未处理；请稍后重新添加。');return;} if(files.length+draft.inputs.filter(input=>!input.missing).length>limit){setError(`最多 ${limit} 张参考图，未截断本次选择`);return;}
     beginEdit();const sequence=++fileReadSequence.current;const current=()=>mounted.current&&sequence===fileReadSequence.current;pendingFiles.current=true;
     setReading(true);setError('');try{const added=await Promise.all(files.map(async file=>{if(!file.type.startsWith('image/')||file.size>30*1024*1024)throw new Error('请选择 30 MB 内的图片文件');const dataUrl=await imageDataUrl(file);const image=new Image();image.src=dataUrl;await image.decode();return{id:crypto.randomUUID(),name:file.name,source:'uploaded' as const,previewUrl:dataUrl,dataUrl};}));if(current())setDraft(current=>{const remaining=[...added];return{...current,inputs:[...current.inputs.map(input=>input.missing&&remaining.length?remaining.shift()!:input),...remaining]};});}catch(e){if(current())setError(String(e));}finally{if(current()){pendingFiles.current=false;setReading(false);}}
   }

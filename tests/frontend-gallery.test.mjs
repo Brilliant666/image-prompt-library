@@ -440,6 +440,34 @@ test('hiding the composer invalidates a pending restore without replaying it whe
   assert.equal(h.find('button', '生成图片').disabled, false);
 });
 
+test('returning to an initialized composer restores a new command through deferred lookup and reference decoding', async t => {
+  const providerRefresh = deferred(), profileRefresh = deferred(), lookup = deferred(), decode = deferred();
+  const available = [{ provider: 'openai_compatible', display_name: 'Compatible', max_input_images: 4, can_generate: true }];
+  const profileStore = { profiles: [{ id: 'original-api', display_name: 'Original API', model: 'gateway-original-alias', configured: true }], default_profile_id: 'original-api' };
+  let providerCalls = 0, profileCalls = 0, lookups = 0;
+  const h = inputHarness(t, {}, {
+    generationProviders: () => ++providerCalls === 3 ? providerRefresh.promise : Promise.resolve(available),
+    openAICompatibleProfiles: () => ++profileCalls === 3 ? profileRefresh.promise : Promise.resolve(profileStore),
+    generationJobForImage: () => { lookups++; return lookup.promise; },
+  }, { decode: () => decode.promise });
+  await h.flush(); h.find('textarea', '画廊提示词').onChange({ target: { value: 'existing draft' } }); await h.flush();
+  h.update({ active: false }); await h.flush();
+  const item = { id: 'library-item', title: 'Library result', prompts: [], images: [{ id: 'library-image', role: 'reference_image', generation_provider: 'openai_compatible' }] };
+  h.update({ active: true, command: { id: 1350, item } }); await h.flush();
+  assert.equal(lookups, 1, 'the new Library command starts after returning to the gallery');
+  providerRefresh.resolve(available); profileRefresh.resolve(profileStore); await h.flush();
+  assert.equal(h.find('button', '生成图片').disabled, true, 'the pending history lookup must still own the restore');
+  h.find('button', '生成图片').onClick(); await h.flush(); assert.equal(h.state.posts.length, 0);
+  lookup.resolve(historicalJob({ prompt_text: 'restored library prompt', parameters: { ...historicalJob().parameters, input_images: [{ data_url: 'data:image/png;base64,restored-original' }] } })); await h.flush();
+  assert.equal(h.find('button', '生成图片').disabled, true, 'the original reference must finish decoding before submission');
+  decode.resolve(); await h.flush();
+  assert.equal(h.find('textarea', '画廊提示词').value, 'restored library prompt');
+  assert.equal(children(h.tree).find(node => node.type === 'img').props.src, 'data:image/png;base64,restored-original');
+  assert.equal(h.find('button', '生成图片').disabled, false);
+  assert.equal(providerCalls, 1, 'view activation alone does not reload providers');
+  assert.equal(profileCalls, 1, 'view activation alone does not reload profiles');
+});
+
 test('settings refresh invalidates a pending history restore and leaves the current draft intact', async t => {
   const lookup = deferred();
   const h = inputHarness(t, { command: { id: 1400, job: historicalJob({ prompt_text: 'current prompt' }) } }, { generationJobForImage: () => lookup.promise }); await h.flush();
@@ -475,6 +503,26 @@ test('typing while a selected file is read preserves both inputs and blocks prem
   assert.equal(h.find('textarea', '画廊提示词').value, 'typed while reading image');
   h.find('button', '生成图片').onClick(); await h.flush();
   assert.equal(h.state.posts.length, 1); assert.equal(h.state.posts[0].parameters.input_images[0].data_url, 'data:image/png;base64,chosen-original');
+});
+
+for (const entry of ['file-picker', 'paste']) test(`a second ${entry} cannot discard the first pending file batch`, async t => {
+  const first = deferred(), second = deferred(), reads = [];
+  const h = inputHarness(t, {}, {}, { readFile: file => { reads.push(file.name); return file.name === 'first.png' ? first.promise : second.promise; } }); await h.flush();
+  h.find('textarea', '画廊提示词').onChange({ target: { value: 'keep the first image' } }); await h.flush();
+  const choose = name => children(h.tree).find(node => node.type === 'input' && node.props.type === 'file').props.onChange({ target: { files: [new File(['synthetic'], name, { type: 'image/png' })], value: name } });
+  choose('first.png'); await h.flush();
+  if (entry === 'file-picker') choose('second.png');
+  else h.find('textarea', '画廊提示词').onPaste({ preventDefault() {}, clipboardData: { files: [new File(['synthetic'], 'second.png', { type: 'image/png' })] } });
+  await h.flush();
+  assert.deepEqual(reads, ['first.png'], 'reject the overlapping batch before starting another FileReader');
+  assert.ok(children(h.tree).some(node => node.props?.children === '上一批图片尚未读完，本次添加未处理；请稍后重新添加。'));
+  assert.equal(h.find('button', '生成图片').disabled, true); h.find('button', '生成图片').onClick(); await h.flush(); assert.equal(h.state.posts.length, 0);
+  first.resolve('data:image/png;base64,first-original'); await h.flush();
+  assert.equal(children(h.tree).find(node => node.type === 'img').props.src, 'data:image/png;base64,first-original');
+  h.find('button', '生成图片').onClick(); await h.flush();
+  assert.equal(h.state.posts.length, 1);
+  assert.equal(h.state.posts[0].parameters.input_images.length, 1);
+  assert.equal(h.state.posts[0].parameters.input_images[0].data_url, 'data:image/png;base64,first-original');
 });
 
 for (const interruption of ['new-command', 'inactive']) test(`late selected file is ignored after ${interruption}`, async t => {
