@@ -95,7 +95,7 @@ export default function App() {
   const viewTransitionTimerRef = useRef<number | undefined>(undefined);
   const viewTransitionRunRef = useRef(0);
   const [filtersOpen, setFiltersOpen] = useState(false);
-  const [configOpen, setConfigOpen] = useState(false);
+  const [configOpen, setConfigOpen] = useState(() => !isDemoMode && ['capture_pair', 'capture_organizer'].some(key => new URLSearchParams(location.search).has(key)));
   const [focusConfigProviders, setFocusConfigProviders] = useState(false);
   const [clusters, setClusters] = useState<ClusterRecord[]>([]);
   const [clustersLoading, setClustersLoading] = useState(true);
@@ -103,7 +103,10 @@ export default function App() {
   const [libraryTotal, setLibraryTotal] = useState<number>();
   const libraryTotalRequestRef = useRef(0);
   const [tags, setTags] = useState<TagRecord[]>([]);
-  const [detailId, setDetailId] = useState<string>();
+  const [detailId, setDetailId] = useState<string | undefined>(() => {
+    const value = new URLSearchParams(location.search).get('capture_item');
+    return value && /^[a-zA-Z0-9_-]{1,80}$/.test(value) ? value : undefined;
+  });
   const [editing, setEditing] = useState<ItemDetail | undefined>();
   const [editorOpen, setEditorOpen] = useState(false);
   const [quickCaptureOpen, setQuickCaptureOpen] = useState(false);

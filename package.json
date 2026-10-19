@@ -4,8 +4,10 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 5177",
     "build": "tsc && vite build",
+    "build:extension": "node scripts/check-browser-extension.mjs",
+    "test:extension": "node --test tests/browser-capture*.test.mjs",
     "build:demo": "tsc && vite build --mode demo --base /image-prompt-library/",
-    "test:frontend": "node --test tests/frontend-utils.test.mjs tests/explore-view.test.mjs tests/frontend-recipe-inputs.test.mjs tests/frontend-ratio-mismatch.test.mjs tests/frontend-compatible-profiles.test.mjs tests/frontend-quick-capture.test.mjs",
+    "test:frontend": "node --test tests/frontend-utils.test.mjs tests/explore-view.test.mjs tests/frontend-recipe-inputs.test.mjs tests/frontend-ratio-mismatch.test.mjs tests/frontend-compatible-profiles.test.mjs tests/frontend-quick-capture.test.mjs tests/frontend-capture-organizer.test.mjs",
     "preview": "vite preview --host 127.0.0.1 --port 5177"
   },
   "dependencies": {
@@ -18,6 +20,7 @@
   },
   "devDependencies": {
     "@types/react": "19.2.14",
-    "@types/react-dom": "19.2.3"
+    "@types/react-dom": "19.2.3",
+    "fake-indexeddb": "6.2.6"
   }
 }

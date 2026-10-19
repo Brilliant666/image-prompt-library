@@ -1,17 +1,20 @@
 from contextlib import asynccontextmanager
+import asyncio
 import os
 import ipaddress
 import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from .config import APP_VERSION, resolve_hidden_features, resolve_library_path, resolve_library_storage_path, validate_app_owned_paths
 from .db import get_db_path, init_db
-from .routers import app_updates, captures, cleanup, clusters, generation_jobs, generation_providers, images, import_drafts, items, tags
+from .routers import app_updates, capture_clients, capture_organizer, captures, cleanup, clusters, generation_jobs, generation_providers, images, import_drafts, items, tags
+from .services.capture_clients import CAPTURE_HEADERS, CaptureClients, capture_route_allowed, local_target_origin
 from .services.library_archives import LibraryOperationLock
+from .services.capture_organizer import drain_jobs, recover_jobs
 from .services.generation_queue import AUTOMATED_PROVIDER_IDS, enqueue_generation_jobs, recover_interrupted_generation_jobs
 
 DEFAULT_FRONTEND_DIST_PATH = Path(__file__).resolve().parents[1] / "frontend" / "dist"
@@ -125,14 +128,21 @@ def create_app(library_path: Path | str | None = None, frontend_dist_path: Path 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         with LibraryOperationLock(library):
-            for provider in AUTOMATED_PROVIDER_IDS:
-                recover_interrupted_generation_jobs(library, provider=provider)
-                enqueue_generation_jobs(library, provider=provider)
-            yield
+            try:
+                recover_jobs(library)
+                for provider in AUTOMATED_PROVIDER_IDS:
+                    recover_interrupted_generation_jobs(library, provider=provider)
+                    enqueue_generation_jobs(library, provider=provider)
+                yield
+            finally:
+                # No metadata worker may write after backup/restore can acquire
+                # the library lease. Pending jobs remain durable and unstarted.
+                await asyncio.to_thread(drain_jobs, library)
 
     app = FastAPI(title="Image Prompt Library", version=APP_VERSION, lifespan=lifespan)
     app.state.library_path = library
     app.state.frontend_dist_path = frontend_dist
+    app.state.capture_clients = CaptureClients(library)
     allowed_hostnames = _allowed_hostnames()
     development_origins = _development_origins()
     development_origin_authorities = {
@@ -144,6 +154,39 @@ def create_app(library_path: Path | str | None = None, frontend_dist_path: Path 
     async def reject_cross_origin_api_writes(request: Request, call_next):
         if not _request_host_allowed(request, allowed_hostnames):
             return JSONResponse(status_code=400, content={"detail": "Unrecognized request host"})
+        origin = request.headers.get("origin", "")
+        capture_request = origin.startswith("chrome-extension:") or any(
+            header in request.headers for header in ("x-capture-token", "x-capture-instance")
+        ) or request.headers.get("authorization", "").lower().startswith("bearer ipl_capture_")
+        if capture_request:
+            cors_headers = {"Cache-Control": "no-store"}
+            try:
+                target = local_target_origin(request)
+                store = request.app.state.capture_clients
+                if store.known_origin(target, origin):
+                    cors_headers.update({"Access-Control-Allow-Origin": origin, "Vary": "Origin"})
+                preflight = request.method == "OPTIONS" and "access-control-request-method" in request.headers
+                method = request.headers.get("access-control-request-method", "").upper() if preflight else request.method
+                if not capture_route_allowed(request.url.path, method):
+                    raise HTTPException(403, "Capture pairing does not authorize this route")
+                if preflight:
+                    headers = {part.strip().lower() for part in request.headers.get("access-control-request-headers", "").split(",") if part.strip()}
+                    if not store.known_origin(target, origin) or not headers.issubset(CAPTURE_HEADERS):
+                        raise HTTPException(403, "Capture preflight is not authorized")
+                    cors_headers.update({"Access-Control-Allow-Methods": method,
+                                         "Access-Control-Allow-Headers": ", ".join(sorted(CAPTURE_HEADERS)),
+                                         "Access-Control-Max-Age": "60"})
+                    if request.headers.get("access-control-request-private-network") == "true":
+                        cors_headers["Access-Control-Allow-Private-Network"] = "true"
+                    return Response(status_code=204, headers=cors_headers)
+                request.state.capture_client = store.authenticate(
+                    target, origin, request.headers.get("x-capture-token", ""), request.headers.get("x-capture-instance", "")
+                )
+            except HTTPException as exc:
+                return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail}, headers=cors_headers)
+            response = await call_next(request)
+            response.headers.update(cors_headers)
+            return response
         if (
             request.url.path.startswith("/api/")
             and request.method.upper() not in SAFE_HTTP_METHODS
@@ -154,6 +197,8 @@ def create_app(library_path: Path | str | None = None, frontend_dist_path: Path 
 
     app.include_router(items.router, prefix="/api")
     app.include_router(captures.router, prefix="/api")
+    app.include_router(capture_clients.router, prefix="/api")
+    app.include_router(capture_organizer.router, prefix="/api")
     app.include_router(images.router, prefix="/api")
     app.include_router(clusters.router, prefix="/api")
     app.include_router(tags.router, prefix="/api")
