@@ -521,7 +521,7 @@ test('compatible recipes retain six qualities for snapshots and gateway model al
     const recipe = { model, quality, size: '2160x3840', background: 'opaque', output_format: 'png' };
     assert.equal(compatibleValidation(recipe), undefined);
     assert.deepEqual(compatibleParameters(recipe), { ...recipe, n: 1 });
-    assert.deepEqual(restoreCompatibleRecipe({ model: 'old-default', parameters: { quality: 'low' }, metadata: { requested: recipe } }), { ...recipe, legacyDerived: false });
+    assert.deepEqual(restoreCompatibleRecipe({ model: 'old-default', parameters: { quality: 'low' }, metadata: { requested: recipe } }), { ...recipe, base_url_mode: 'versioned', stream: false, partial_images: 0, response_format: 'auto', transportLegacyDerived: true, legacyDerived: false });
   }
   assert.equal(compatibleValidation(restoreCompatibleRecipe({ parameters: {} })), 'imageModelRequired');
   for (const model of ['gpt-image-2', 'custom-mapping']) for (const quality of IMAGE25_QUALITIES) {

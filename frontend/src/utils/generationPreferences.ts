@@ -3,6 +3,8 @@ import type { CompatibleRecipe } from './compatibleRecipe';
 const PREFIX = 'image-prompt-library:generation:v1:';
 type StorageLike = Pick<Storage, 'getItem' | 'setItem'>;
 export function readGenerationPreference(storage: StorageLike, profile: string, model = ''): CompatibleRecipe {
+  // Request transport stays with a restored history card, not these ordinary
+  // image choices. Future tasks must continue using their API profile defaults.
   const fallback: CompatibleRecipe = { model, quality: 'auto', size: 'auto', background: 'auto', output_format: 'png' };
   try {
     const value = JSON.parse(storage.getItem(PREFIX + profile) || 'null');
@@ -21,7 +23,8 @@ export function readGenerationPreference(storage: StorageLike, profile: string, 
 }
 export function writeGenerationPreference(storage: StorageLike, profile: string, recipe: CompatibleRecipe): void {
   try {
-    // Explicit allowlist: never persist credentials, prompts, images or provider URLs.
+    // Explicit allowlist: never persist credentials, prompts, images, provider URLs,
+    // or a historical card's transport overrides as defaults for future requests.
     const { model, quality, size, background, output_format, output_compression, moderation, size_mode } = recipe;
     storage.setItem(PREFIX + profile, JSON.stringify({ model, quality, size, background, output_format, output_compression, moderation, size_mode }));
     storage.setItem(PREFIX + 'selected-profile', profile);

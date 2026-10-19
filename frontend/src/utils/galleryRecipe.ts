@@ -1,5 +1,5 @@
 import type { GenerationJobCreate, GenerationJobRecord, ItemDetail } from '../types';
-import { compatibleParameters, resolveAuto4k, restoreCompatibleRecipe, type CompatibleRecipe } from './compatibleRecipe';
+import { clearCompatibleTransportOverrides, compatibleParameters, resolveAuto4k, restoreCompatibleRecipe, type CompatibleRecipe } from './compatibleRecipe';
 import { recipeProfileId } from './compatibleProfiles';
 import type { RecipeInput } from './recipeInputs';
 import { extractPromptTemplateVariableRecords, resolvePromptTemplate } from './promptTemplateVariables';
@@ -15,7 +15,9 @@ export function draftFromJob(job: GenerationJobRecord, inputs: RecipeInput[]): G
   const requested={...job.parameters,...(returned&&typeof returned==='object'?returned as Record<string,unknown>:{})};
   const template=typeof job.parameters?.prompt_template==='string'?job.parameters.prompt_template:undefined;
   const values=job.parameters?.prompt_template_values;
-  return {prompt:template??galleryJobPrompt(job),promptLanguage:job.prompt_language||undefined,templateValues:values&&typeof values==='object'?Object.fromEntries(Object.entries(values).filter((entry):entry is [string,string]=>typeof entry[1]==='string')):undefined,provider:job.provider,profileId:recipeProfileId(job) || '',recipe:restoreCompatibleRecipe(job),inputs,sourceItemId:job.source_item_id,aspectRatio:String(requested.requested_aspect_ratio || 'auto'),aspectInjection:typeof requested.aspect_ratio_prompt_injection==='boolean'?requested.aspect_ratio_prompt_injection:undefined,resolution:String(requested.resolution || '1k')};
+  const restored=restoreCompatibleRecipe(job);
+  const recipe=job.provider==='openai_compatible'?restored:clearCompatibleTransportOverrides(restored);
+  return {prompt:template??galleryJobPrompt(job),promptLanguage:job.prompt_language||undefined,templateValues:values&&typeof values==='object'?Object.fromEntries(Object.entries(values).filter((entry):entry is [string,string]=>typeof entry[1]==='string')):undefined,provider:job.provider,profileId:recipeProfileId(job) || '',recipe,inputs,sourceItemId:job.source_item_id,aspectRatio:String(requested.requested_aspect_ratio || 'auto'),aspectInjection:typeof requested.aspect_ratio_prompt_injection==='boolean'?requested.aspect_ratio_prompt_injection:undefined,resolution:String(requested.resolution || '1k')};
 }
 export function galleryPayload(draft: GalleryDraft, maxInputs: number, referenceSize?: {width:number;height:number}, templatesEnabled=false): GenerationJobCreate {
   if (!draft.prompt.trim()) throw new Error('请先填写提示词');

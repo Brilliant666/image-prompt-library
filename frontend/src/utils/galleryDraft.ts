@@ -1,5 +1,6 @@
 import { emptyGalleryDraft, type GalleryDraft } from './galleryRecipe';
 import { readGenerationPreference } from './generationPreferences';
+import { pickCompatibleTransportOverrides } from './compatibleRecipe';
 // One optional composer buffer, never a task/image database. Opening it never submits.
 const DATABASE = 'image-prompt-library-workspace-draft';
 export function validateGalleryDraft(value: unknown): GalleryDraft | undefined {
@@ -7,7 +8,9 @@ export function validateGalleryDraft(value: unknown): GalleryDraft | undefined {
   const draft=value as Partial<GalleryDraft>;
   if(typeof draft.prompt!=='string'||draft.prompt.length>200000||!Array.isArray(draft.inputs)||draft.inputs.length>16||!['openai_compatible','openai_codex_oauth_native','xai_grok_oauth'].includes(draft.provider||''))return;
   const fallback=emptyGalleryDraft();
-  const recipe=readGenerationPreference({getItem:()=>JSON.stringify(draft.recipe),setItem:()=>undefined},'',draft.recipe?.model||'');
+  // Historical transport overrides belong to this current card only. The normal
+  // per-profile preference reader deliberately excludes them for future tasks.
+  const recipe={...readGenerationPreference({getItem:()=>JSON.stringify(draft.recipe),setItem:()=>undefined},'',draft.recipe?.model||''),...(draft.provider==='openai_compatible'?{...pickCompatibleTransportOverrides(draft.recipe),...(draft.recipe?.transportLegacyDerived===true?{transportLegacyDerived:true as const}:{})}:{})};
   const templateValues=draft.templateValues&&typeof draft.templateValues==='object'?Object.fromEntries(Object.entries(draft.templateValues).filter(([key,value])=>key.length<=200&&typeof value==='string'&&value.length<=200000)):undefined;
   const inputs:GalleryDraft['inputs']=[];
   for(const input of draft.inputs){
