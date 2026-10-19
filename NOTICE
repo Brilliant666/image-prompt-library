@@ -6,3 +6,8 @@ The core application code is licensed under AGPL-3.0-or-later. See LICENSE for t
 Commercial licenses are available from the copyright holder for organizations that need terms outside the AGPL.
 
 Sample data and third-party assets are licensed separately and retain their original attribution/license terms.
+
+Playground workspace components and interaction helpers are adapted from
+CookSleep/gpt_image_playground, commit 1e9d5af60aadd9117a835cc2da43908b8e3370dd.
+Copyright (c) 2026 CookSleep. Licensed under MIT; the complete license is in
+licenses/Playground-MIT.txt. See docs/PLAYGROUND.md for the adaptation scope.

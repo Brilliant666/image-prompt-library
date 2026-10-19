@@ -584,6 +584,7 @@ def test_real_release_package_extracts_with_hardened_windows_installer(tmp_path:
         "README.md",
         "LICENSE",
         "NOTICE",
+        "licenses",
         "SECURITY.md",
     ):
         source = ROOT / relative_path
@@ -639,6 +640,7 @@ Assert-VersionPayload -Root {powershell_literal(destination)} -ExpectedVersion '
     assert (destination / "VERSION").read_text(encoding="ascii").strip() == version
     assert (destination / "sample-data" / "manifests").is_dir()
     assert (destination / "LICENSE").is_file()
+    assert (destination / "licenses" / "Playground-MIT.txt").read_bytes() == (ROOT / "licenses" / "Playground-MIT.txt").read_bytes()
     assert not any(path.exists() for path in repo_artifacts)
 
 

@@ -30,7 +30,7 @@ def legacy_release_source(tmp_path_factory):
     if not index.is_file() or "/image-prompt-library/assets/" in index.read_text(encoding="utf-8"):
         pytest.fail("Legacy installer fixtures require local app assets; run npm run build before pytest.")
     target = tmp_path_factory.mktemp("legacy-release-source")
-    for name in ("backend", "scripts", "docs", "tests", "sample-data", ".github", "frontend"):
+    for name in ("backend", "scripts", "docs", "tests", "sample-data", ".github", "frontend", "licenses"):
         shutil.copytree(source / name, target / name, ignore=shutil.ignore_patterns("__pycache__", "node_modules", ".pytest_cache"))
     for name in ("pyproject.toml", "package.json", "package-lock.json", "uv.lock", "LICENSE", "NOTICE", "SECURITY.md", "README.md", "README_zh-CN.md", "README_zh-TW.md", "AGENTS.md", "CONTRIBUTING.md", "ROADMAP.md", ".gitignore", ".env.example", "tsconfig.json", "vite.config.ts"):
         shutil.copy2(source / name, target / name)

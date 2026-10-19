@@ -8,6 +8,8 @@ This project is independently maintained by [Brilliant666](https://github.com/Br
 
 **2026-10-09 local changes:** OpenAI-compatible image provider (including sub2api), credentials outside the asset library, original aspect-ratio controls, existing queue integration for 3/5/10-image batches, and actions for saved generation history. Existing ChatGPT/Codex and Grok OAuth providers are retained. This migration does not move private library data into Git.
 
+**2026-10-19 workspaces:** Explore and Library now sit beside Gallery and Agent, with one grouped settings dialog. Gallery uses the existing generation queue; Agent adds persistent conversations, branches and bounded Responses tool execution. Quick capture and the browser sidebar still work without a generation account. See [workspace usage, source attribution and compatibility](docs/PLAYGROUND.md) for implemented features and verification limits.
+
 [![CI](https://github.com/Brilliant666/image-prompt-library/workflows/CI/badge.svg)](https://github.com/Brilliant666/image-prompt-library/actions/workflows/ci.yml)
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue)](LICENSE)
 
@@ -65,10 +67,10 @@ image-prompt-library sample-data zh_hant awesome-gpt-image-2
 
 Generation is optional and requires a local install and an eligible provider account. **Grok OAuth is experimental.** Account access, usage limits, and charges are controlled by the provider; connecting does not guarantee free or unlimited generation. No API key is required by these OAuth connections.
 
-1. Open **Config → Providers**, choose **ChatGPT / Codex OAuth** or **Grok OAuth**, and complete the browser authorization. Return to the app and choose **Check authorization** if prompted.
+1. Open **Settings → API**, choose **ChatGPT / Codex OAuth** or **Grok OAuth**, and complete the browser authorization. Return to the app and choose **Check authorization** if prompted.
 2. Choose a **Default AI provider**. This is saved in the current browser. You can override it for a generation session without changing the default.
-3. Open **Generate**, enter a prompt, and optionally add reference images. Reusable prompts can include `{{variables}}`, such as `{{subject}}`; fill them before generating.
-4. Choose the available ratio, quality, and other controls. Generate one image or a set of 3, 5, or 10, then review completed results from the **Work queue**.
+3. Open **Gallery**, enter a prompt, and optionally add reference images. Reusable prompts can include `{{variables}}`, such as `{{subject}}`; fill them before generating when templates are enabled.
+4. Choose the available size, quality, and other controls. Generate one image or a set of 3, 5, or 10, then review current and historical tasks in **Gallery**.
 5. Use **Save as new item**, or attach a result to its unchanged source card. When reviewing a set, later results can join the card created from the first saved result, so the images stay together.
 
 Grok uses `grok-imagine-image-2.0`, with Low/Medium quality, 1K/2K resolution, and up to three reference images. ChatGPT supports up to four references and quality requests, without a chat-model selector. Switching provider updates the available controls.

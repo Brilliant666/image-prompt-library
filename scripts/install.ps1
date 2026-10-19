@@ -731,6 +731,7 @@ expected_files = {
 }
 expected_roots = {entry.split("/", 1)[0] for entry in expected_files} | {
     "license",
+    "licenses",
     "notice",
     "readme.md",
     "sample-data",
