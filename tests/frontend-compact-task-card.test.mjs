@@ -20,6 +20,7 @@ const recipe = evaluate(await compile('../frontend/src/utils/galleryRecipe.ts'),
   './compatibleRecipe': {}, './compatibleProfiles': {}, './promptTemplateVariables': {},
 });
 const gridMath = evaluate(await compile('../frontend/src/utils/playground/virtualGrid.ts'), {});
+const cardMeta = evaluate(await compile('../frontend/src/utils/galleryCardMeta.ts'), {});
 function descendants(node) {
   if (!node || typeof node !== 'object') return [];
   return [node, ...(Array.isArray(node.props?.children) ? node.props.children.flat(Infinity) : [node.props?.children]).flatMap(descendants)];
@@ -45,6 +46,7 @@ function render(t, job, selected = new Set(), copy = async () => true) {
     'lucide-react': new Proxy({}, { get: (_, key) => key }),
     '../../api/client': { mediaUrl: path => `/media/${path}` },
     '../../utils/galleryRecipe': recipe,
+    '../../utils/galleryCardMeta': cardMeta,
     '../../utils/playground/virtualGrid': gridMath,
     '../../utils/playground/useVirtualGrid': { useVirtualGrid: (_grid, count, scroll) => {
       assert.equal(scroll, scrollRef);
@@ -78,6 +80,7 @@ test('compact card retains actual dimensions, full model, exact prompt and origi
   assert.equal(h.find('p', () => true).children, prompt);
   assert.equal(h.find('p', () => true).title, prompt);
   assert.equal(h.find('span', props => props.title === '实际文件尺寸').children, '941 × 1676');
+  assert.equal(h.find('span', props => props.className === 'pg-image-ratio').children, '≈9:16');
   assert.equal(h.find('span', props => props.title === '请求质量').children, 'max');
   assert.equal(h.find('small', props => props.className === 'pg-card-model').children, job.model);
   assert.equal(h.find('small', props => props.className === 'pg-card-model').title, job.model);
@@ -107,13 +110,44 @@ test('compact card callbacks preserve inspect, full-recipe reuse, edit, exact co
 });
 
 test('failed compact card does not infer actual size from request and cannot edit a missing result', t => {
-  const h = render(t, { ...job, status: 'failed', result_path: undefined, result_width: undefined, result_height: undefined, model: undefined });
+  const h = render(t, { ...job, status: 'failed', result_path: undefined, result_width: undefined, result_height: undefined, model: undefined, started_at: '2026-01-01T10:01:00Z', completed_at: '2026-01-01T10:01:25Z', updated_at: '2026-02-01T12:00:00Z' });
   assert.equal(h.find('img', () => true), undefined);
   assert.equal(h.find('span', props => props.className === 'pg-status-tag failed').children, recipe.galleryStatus.failed);
   assert.equal(h.find('span', props => props.title === '实际文件尺寸').children, '尺寸未返回');
   assert.equal(h.find('small', props => props.className === 'pg-card-model').children, '模型未报告');
   assert.equal(h.find('button', props => props['aria-label'] === '使用结果继续编辑').disabled, true);
   assert.equal(h.find('a', props => props['aria-label'] === '下载原图'), undefined);
+  assert.ok(h.find('CircleAlert', props => props['aria-hidden'] === 'true'));
+  assert.equal(h.find('span', props => props['aria-label'] === '任务耗时 00:25').title, '任务耗时（不含排队）');
+  assert.equal(h.find('span', props => props.className === 'pg-image-ratio'), undefined);
+});
+
+test('actual image badges retain exact custom ratios and explicitly mark close approximations', () => {
+  const dimensions = (width, height) => cardMeta.galleryImageDimensions({ result_width: width, result_height: height, parameters: { size: '4096x4096' } });
+  assert.deepEqual(dimensions(1536, 1024), { pixels: '1536 × 1024', ratio: '3:2', exactRatio: '3:2' });
+  assert.equal(dimensions(941, 1672).ratio, '≈9:16');
+  assert.deepEqual(dimensions(1370, 1148), { pixels: '1370 × 1148', ratio: '≈6:5', exactRatio: '685:574' });
+  assert.equal(dimensions(1700, 1000).ratio, '17:10');
+  assert.equal(dimensions(317, 211).ratio, '≈3:2');
+  assert.equal(dimensions(1421, 1000).ratio, '1421:1000', 'do not force a familiar ratio outside the tolerance');
+  for (const invalid of [undefined, null, 0, -1, 1.5, NaN, Infinity, '1024']) assert.equal(dimensions(invalid, 1024), undefined);
+});
+
+test('task elapsed time excludes queue, acceptance and cleanup and handles hour boundaries', () => {
+  const timed = { status: 'succeeded', created_at: '2026-01-01T09:00:00Z', started_at: '2026-01-01T10:00:00Z', completed_at: '2026-01-01T10:01:05.900Z', accepted_at: '2026-02-01T00:00:00Z', updated_at: '2026-02-01T00:00:00Z' };
+  for (const status of ['succeeded', 'accepted', 'failed', 'cancelled', 'discarded']) assert.deepEqual(cardMeta.galleryTaskElapsed({ ...timed, status }), { label: '01:05', running: false });
+  assert.equal(cardMeta.galleryTaskElapsed({ ...timed, completed_at: '2026-01-01T11:02:03Z' }).label, '01:02:03');
+  assert.equal(cardMeta.galleryTaskElapsed({ ...timed, completed_at: timed.started_at }).label, '00:00');
+  assert.deepEqual(cardMeta.galleryTaskElapsed({ ...timed, status: 'running', completed_at: undefined }, Date.parse('2026-01-01T10:00:26Z')), { label: '00:26', running: true });
+  for (const patch of [{ status: 'queued' }, { started_at: undefined }, { started_at: 'invalid' }, { completed_at: undefined }, { completed_at: 'invalid' }, { completed_at: '2026-01-01T09:59:59Z' }]) assert.equal(cardMeta.galleryTaskElapsed({ ...timed, ...patch }), undefined);
+});
+
+test('unknown timing is omitted and cancelled or cleared records do not receive a failure icon', t => {
+  for (const status of ['succeeded', 'cancelled', 'discarded', 'queued']) {
+    const h = render(t, { ...job, status, started_at: undefined, completed_at: '2026-01-01T10:00:25Z' });
+    assert.equal(h.find('CircleAlert', () => true), undefined);
+    assert.equal(h.find('span', props => props.className?.startsWith('pg-task-duration')), undefined);
+  }
 });
 
 test('copy feedback expires locally and repeated copy renews its full lifetime', async t => {

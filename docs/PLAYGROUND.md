@@ -65,6 +65,12 @@ the chosen filter hides pending jobs.
 
 Compact horizontal task cards show the original image without stretching, the
 prompt, actual returned dimensions, state and existing task actions. The results
+preview also shows its actual aspect ratio; near-common ratios are marked `≈`
+while exact pixels remain visible. Failed tasks use a red alert icon and text.
+Task elapsed time runs from the recorded execution start to completion, excluding
+queue time and later acceptance or cleanup; running cards show elapsed execution
+time. Records without valid timing omit the badge rather than inventing a value.
+The selection checkbox sits in the lower-left corner, clear of these badges. The results
 list scrolls independently above the composer, so expanding a prompt
 or reference images does not cover result cards. Selecting tasks replaces the
 search controls within the same toolbar space; it does not move the cards.

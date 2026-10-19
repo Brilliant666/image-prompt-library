@@ -74,7 +74,7 @@ export default function GalleryWorkspace({active,queueOpen,onQueueOpenChange,t,p
     </div></header>
     <div className="pg-gallery-results" ref={resultsRef} tabIndex={0} role="region" aria-label="画廊结果列表">
     {batch&&<div className="pg-batch-scope"><span>生成批次 · {batch.jobs.length} / {batch.total} 个结果</span><button onClick={()=>{setBatch(undefined);setStatus(readGalleryFilter());setSelected(new Set());}}>返回全部历史</button></div>}
-    {loading?<div className="pg-empty">加载生成历史…</div>:filtered.length?<TaskGrid scrollRef={resultsRef} jobs={filtered} selected={selected} onSelection={setSelected} onOpen={job=>void openJob(job)} onReuse={reuse} onMessage={setError}/>:<div className="pg-empty"><h2>{jobs.length?'没有匹配的任务':'从一个想法开始'}</h2><p>{jobs.length?'试试其他关键词或状态。':'输入提示词，或从 Library 带入配方。快捷收录无需配置生成接口。'}</p></div>}
+    {loading?<div className="pg-empty">加载生成历史…</div>:filtered.length?<TaskGrid active={active} scrollRef={resultsRef} jobs={filtered} selected={selected} onSelection={setSelected} onOpen={job=>void openJob(job)} onReuse={reuse} onMessage={setError}/>:<div className="pg-empty"><h2>{jobs.length?'没有匹配的任务':'从一个想法开始'}</h2><p>{jobs.length?'试试其他关键词或状态。':'输入提示词，或从 Library 带入配方。快捷收录无需配置生成接口。'}</p></div>}
     {!batch&&jobs.length<total&&<button className="pg-load-more" disabled={refreshing} onClick={()=>{pageLimit.current+=48;void refresh();}}>已加载 {jobs.length} / {total} · 加载更多</button>}
     </div>
     {(error||loadError||message)&&<div className={`pg-gallery-feedback ${error||loadError?'is-error':''}`} role={error||loadError?'alert':'status'}><span>{error||(loadError?`${fromCache?'当前显示上次列表，历史更新失败：':''}${loadError}`:message)}</span><button aria-label="关闭画廊提示" onClick={()=>{setError('');setLoadError('');setMessage('');}}><X size={15}/></button></div>}
