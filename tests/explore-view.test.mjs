@@ -883,7 +883,7 @@ test('Explore wiring preserves Library management, semantic appearance, and rest
   assert.match(topBar, /className=\{`vista-button filter-button[\s\S]*?aria-label=\{t\('filters'\)\}/);
   assert.match(topBar, /className="logo-wordmark" lang="en"/);
   assert.match(topBar, /inert=\{modalOpen\} aria-hidden=\{modalOpen \|\| undefined\}/);
-  assert.match(app, /const blockingModalOpen = !hasChosenUiLanguage \|\| Boolean\(detailId \|\| editorOpen \|\| standaloneGenerationOpen \|\| batchActionDialog\)/);
+  assert.match(app, /const blockingModalOpen = !hasChosenUiLanguage \|\| Boolean\(detailId \|\| editorOpen \|\| quickCaptureOpen \|\| standaloneGenerationOpen \|\| batchActionDialog\)/);
   assert.match(app, /allowDelete=\{showManagementActions\}/);
   assert.match(editorModal, /allowDelete && persistedItem/);
   assert.match(editorModal, /if \(!allowDelete \|\| !persistedItem \|\| deleting \|\| saving\) return;/);

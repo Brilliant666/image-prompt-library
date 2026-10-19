@@ -1,6 +1,7 @@
 import type { TitleSuggestionProvider, OpenAICompatibleConfig, OpenAICompatibleProfiles, AppConfig, AppUpdateRequest, AppUpdateResult, AppUpdateStatus, CleanupApplyRequest, CleanupApplyResult, CleanupPreview, ClusterRecord, CodexNativeAuthPollRequest, CodexNativeAuthPollResponse, CodexNativeAuthStart, GenerationJobAcceptAsNewItemPayload, GenerationJobAcceptResult, GenerationJobCreate, GenerationJobList, GenerationJobRecord, GenerationJobRetryResult, GenerationJobSetCreate, GenerationJobSetRecord, GenerationProviderStatus, GrokOAuthPollRequest, ItemBatchRequest, ItemBatchResult, ItemCreate, ItemDetail, ItemImageUpdate, ItemList, ItemSortMode, ItemSummary, ProviderDeviceAuthStart, TagRecord, TitleSuggestionRequest, TitleSuggestionResponse, UploadImageRole } from '../types';
 import { readJson } from './readJson';
 import { DEFAULT_ITEM_SORT } from '../utils/searchSort';
+import { captureFormData, type CaptureLanguageResult, type CaptureRequest } from '../utils/quickCapture';
 
 const API = '';
 const isDemoMode = import.meta.env.VITE_DEMO_MODE === 'true';
@@ -123,6 +124,29 @@ export class TitleSuggestionRequestError extends Error {
   }
 }
 
+export class CaptureRequestError extends Error {
+  constructor(public readonly status: number, message: string) {
+    super(message);
+    this.name = 'CaptureRequestError';
+  }
+}
+
+async function createCaptureRequest(payload: CaptureRequest): Promise<ItemDetail> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 90_000);
+  try {
+    // A timeout does not establish that the write failed. The caller retains this
+    // exact payload and request_id for explicit retry; never retry a POST here.
+    const response = await fetch(`${API}/api/captures`, { method: 'POST', body: captureFormData(payload), signal: controller.signal });
+    if (!response.ok) throw new CaptureRequestError(response.status, await responseError(response));
+    const item = await response.json() as ItemDetail;
+    if (!item?.id || !Array.isArray(item.images) || !item.images.length || !Array.isArray(item.prompts)) throw new Error('Invalid capture response');
+    return item;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
 async function suggestTitleRequest(provider: TitleSuggestionProvider, payload: TitleSuggestionRequest): Promise<TitleSuggestionResponse> {
   const response = await fetch(`${API}/api/generation-providers/${encodeURIComponent(provider)}/suggest-title`, {
     method: 'POST',
@@ -158,6 +182,8 @@ export const api = isDemoMode ? {
   items: demoItemList,
   item: demoItem,
   createItem: (_payload: ItemCreate) => demoReadOnly(),
+  capture: (_payload: CaptureRequest) => demoReadOnly(),
+  detectCaptureLanguage: (_text: string, _signal?: AbortSignal): Promise<CaptureLanguageResult> => demoReadOnly(),
   updateItem: (_id: string, _payload: Partial<ItemCreate>) => demoReadOnly(),
   deleteItem: (_id: string) => demoReadOnly(),
   batchItems: (_payload: ItemBatchRequest) => demoReadOnly(),
@@ -265,6 +291,8 @@ export const api = isDemoMode ? {
   items: (params: Record<string, string | number | boolean | undefined>) => { const qs = new URLSearchParams(); Object.entries(params).forEach(([k,v]) => { if (v !== undefined && v !== '') qs.set(k, String(v)); }); return json<ItemList>(`/api/items?${qs}`); },
   item: (id: string) => json<ItemDetail>(`/api/items/${id}`),
   createItem: (payload: ItemCreate) => json<ItemDetail>('/api/items', { method: 'POST', body: JSON.stringify(payload) }),
+  capture: createCaptureRequest,
+  detectCaptureLanguage: (text: string, signal?: AbortSignal) => json<CaptureLanguageResult>('/api/captures/detect-language', { method: 'POST', body: JSON.stringify({ text }), signal }),
   updateItem: (id: string, payload: Partial<ItemCreate>) => json<ItemDetail>(`/api/items/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   deleteItem: (id: string) => json<ItemDetail>(`/api/items/${id}`, { method: 'DELETE' }),
   batchItems: (payload: ItemBatchRequest) => json<ItemBatchResult>('/api/items/batch', { method: 'POST', body: JSON.stringify(payload) }),
