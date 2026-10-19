@@ -26,6 +26,7 @@ const compatible = await loadTs('../frontend/src/utils/compatibleRecipe.ts');
 const references = await loadTs('../frontend/src/utils/recipeInputs.ts');
 const preferences = await loadTs('../frontend/src/utils/generationPreferences.ts');
 const templates = await loadTs('../frontend/src/utils/promptTemplateVariables.ts');
+const generationSiblings = await loadTs('../frontend/src/utils/generationSiblings.ts');
 const originalPrompt = '  原文\r\n\nB & <tag>\t ';
 const historicalJob = (change = {}) => ({
   id: 'historical', provider: 'openai_compatible', mode: 'text_to_image', prompt_text: originalPrompt,
@@ -213,6 +214,7 @@ function inputHarness(t, overrides = {}, apiOverrides = {}) {
     '../../utils/promptTemplateVariables': templates,
     '../../utils/galleryDraft': { readGalleryDraft: async () => undefined, saveGalleryDraft: async value => state.persisted.push(value) },
     './ReferencePicker': { __esModule: true, default: 'ReferencePicker' },
+    './InputBar.css': {},
   };
   const module = { exports: {} };
   new Function('require', 'module', 'exports', inputJs)(name => { assert.ok(name in deps, `unmocked component dependency: ${name}`); return deps[name]; }, module, module.exports);
@@ -234,6 +236,49 @@ test('actual InputBar submit callback locks two same-tick clicks and clears inpu
   assert.equal(harness.find('textarea', '画廊提示词').value, originalPrompt);
   pending.resolve(historicalJob()); await harness.flush();
   assert.equal(harness.find('textarea', '画廊提示词').value, ''); assert.equal(harness.state.created, 1);
+});
+
+test('parameter chips display complete model and exact pixels and preserve edits in a three-job request', async t => {
+  const model = 'gpt-image-2.5-sunburst-enterprise';
+  const job = historicalJob({ model, parameters: { ...historicalJob().parameters, model } });
+  const harness = inputHarness(t, { command: { id: 72, job } }); await harness.flush();
+  const text = value => typeof value === 'string' || typeof value === 'number' ? String(value) : Array.isArray(value) ? value.map(text).join('') : value?.props ? text(value.props.children) : '';
+  assert.ok(text(harness.find('button', `请求模型 ${model}`).children).includes(model));
+  assert.ok(text(harness.find('button', '请求尺寸 2560x3840').children).includes('2560 × 3840'));
+  harness.find('button', `请求模型 ${model}`).onClick(); await harness.flush();
+  harness.find('input', '请求模型完整 ID').onChange({ target: { value: 'image-model-custom' } }); await harness.flush();
+  harness.find('button', '请求尺寸 2560x3840').onClick(); await harness.flush();
+  harness.find('input', '自定义尺寸').onChange({ target: { value: '2048x3072' } }); await harness.flush();
+  harness.find('button', '应用尺寸').onClick(); await harness.flush();
+  harness.find('button', '质量 max').onClick(); await harness.flush();
+  children(harness.tree).find(node => node.type === 'button' && text(node.props.children) === '超高 · xhigh').props.onClick(); await harness.flush();
+  harness.find('button', '更多 WEBP · 不透明背景 · 压缩 0').onClick(); await harness.flush();
+  harness.find('select', '图片背景').onChange({ target: { value: 'transparent' } });
+  harness.find('select', '输出格式').onChange({ target: { value: 'webp' } });
+  harness.find('input', '输出压缩').onChange({ target: { value: '0' } });
+  harness.find('select', '生成数量').onChange({ target: { value: '3' } }); await harness.flush();
+  assert.deepEqual(harness.find('select', '生成数量').children.map(option => option.props.value), [1, 3, 5, 10]);
+  harness.find('button', '生成图片').onClick(); await harness.flush();
+  assert.equal(harness.state.posts.length, 1);
+  const request = harness.state.posts[0]; assert.equal(request.count, 3);
+  assert.equal(request.job.prompt_text, originalPrompt); assert.equal(request.job.model, 'image-model-custom');
+  assert.equal(request.job.parameters.size, '2048x3072'); assert.equal(request.job.parameters.quality, 'xhigh');
+  assert.equal(request.job.parameters.background, 'transparent'); assert.equal(request.job.parameters.output_format, 'webp'); assert.equal(request.job.parameters.output_compression, 0);
+});
+
+test('add-image menu opens original upload and Library/history paths without submitting', async t => {
+  const harness = inputHarness(t); await harness.flush();
+  let fileOpened = 0;
+  children(harness.tree).find(node => node.type === 'input' && node.props.type === 'file').props.ref.current = { click: () => fileOpened++ };
+  harness.find('button', '添加参考图').onClick(); await harness.flush();
+  assert.equal(harness.find('button', '添加参考图')['aria-expanded'], true);
+  harness.find('button', '上传参考图').onClick(); await harness.flush(); assert.equal(fileOpened, 1);
+  harness.find('button', '添加参考图').onClick(); await harness.flush();
+  harness.find('button', '从 Library 或画廊选择参考图').onClick(); await harness.flush();
+  const picker = children(harness.tree).find(node => node.type === 'ReferencePicker'); assert.ok(picker);
+  picker.props.onSelect(input('original-bytes')); await harness.flush();
+  assert.equal(children(harness.tree).find(node => node.type === 'img').props.src, 'data:image/png;base64,original-bytes');
+  assert.equal(harness.state.posts.length, 0);
 });
 
 test('actual InputBar failed POST preserves input, blocks retries, and does not send from ordinary Enter or IME', async t => {
@@ -298,7 +343,7 @@ test('actual late historical lookup failure cannot overwrite a more recently res
 
 const workspaceSource = await readFile(new URL('../frontend/src/components/gallery/GalleryWorkspace.tsx', import.meta.url), 'utf8');
 const workspaceJs = ts.transpileModule(workspaceSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
-function workspaceHarness(t, api, overrides = {}) {
+function workspaceHarness(t, api, overrides = {}, environment = {}) {
   const slots = [], effects = []; let cursor = 0, dirty = false, tree;
   const memo = (get, deps) => { const i = cursor++, old = slots[i]; if (!old || deps.some((value, index) => !Object.is(value, old.deps[index]))) slots[i] = { deps, value: get() }; return slots[i].value; };
   const hooks = {
@@ -309,12 +354,15 @@ function workspaceHarness(t, api, overrides = {}) {
   };
   const jsx = (type, props) => ({ type, props });
   const deps = { react: hooks, 'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'fragment' }, 'lucide-react': new Proxy({}, { get: (_, key) => key }),
-    fflate: { zipSync: () => { throw Error('download not part of this test'); } }, '../../api/client': { api, mediaUrl: path => `/media/${path}` },
+    fflate: { zipSync: environment.zipSync || (() => { throw Error('download not part of this test'); }) }, '../../api/client': { api, mediaUrl: path => `/media/${path}` },
     '../../utils/galleryRecipe': recipe, './InputBar': { __esModule: true, default: 'InputBar' }, './TaskGrid': { __esModule: true, default: 'TaskGrid' }, './DetailModal': { __esModule: true, default: 'DetailModal' }, './Lightbox': { __esModule: true, default: 'Lightbox' }, './GalleryWorkspace.css': {},
+    '../../utils/generationSiblings': generationSiblings,
+    // Grouping/retry collapsing has separate real-component coverage in explore-view.test.mjs.
+    '../GenerationQueueDrawer': { __esModule: true, default: 'GenerationQueueDrawer', groupGenerationQueueJobs: jobs => [...new Set(jobs.map(job => job.generation_group_id))].map(id => ({ generationGroupId: id, jobs: jobs.filter(job => job.generation_group_id === id) })) },
   };
   const module = { exports: {} };
-  new Function('require', 'module', 'exports', workspaceJs)(name => { assert.ok(name in deps, `unmocked workspace dependency: ${name}`); return deps[name]; }, module, module.exports);
-  const props = { active: true, t: key => key, preferences: {}, refreshKey: 0, configurationRevision: 0, onOpenSettings() {}, onAccepted() {}, onQueueChanged() {}, ...overrides };
+  new Function('require', 'module', 'exports', 'fetch', 'document', 'window', 'URL', 'setTimeout', workspaceJs)(name => { assert.ok(name in deps, `unmocked workspace dependency: ${name}`); return deps[name]; }, module, module.exports, environment.fetch || globalThis.fetch, environment.document || globalThis.document, environment.window || globalThis.window, environment.URL || globalThis.URL, environment.setTimeout || globalThis.setTimeout);
+  const props = { active: true, queueOpen: false, onQueueOpenChange() {}, t: key => key, preferences: {}, refreshKey: 0, configurationRevision: 0, onOpenSettings() {}, onAccepted() {}, onQueueChanged() {}, ...overrides };
   const render = () => { dirty = false; cursor = 0; tree = module.exports.default(props); effects.splice(0).forEach(effect => effect()); };
   const flush = async () => { for (let i = 0; i < 20; i++) { if (dirty) render(); await Promise.resolve(); } if (dirty) render(); };
   render(); t.after(() => slots.forEach(slot => slot?.cleanup?.()));
@@ -348,6 +396,105 @@ test('actual externally focused historical result opens its original image even 
   const harness = workspaceHarness(t, { generationJobs: async () => ({ jobs: [], total: 0 }), generationJob: async () => job }, { focusJobId: job.id });
   await harness.flush(); harness.node('DetailModal').onLightbox(); await harness.flush();
   assert.equal(harness.node('Lightbox')?.src, '/media/generation-results/original.webp');
+});
+
+test('queue callbacks close the queue, scope batch results and restore the complete loaded history', async t => {
+  const a = historicalJob({ id: 'a' }), b = historicalJob({ id: 'b' }), outsidePage = historicalJob({ id: 'older-batch-job' });
+  const queueStates = [], reads = [];
+  const harness = workspaceHarness(t, {
+    generationJobs: async () => ({ jobs: [a, b], total: 2 }),
+    generationJob: async id => { reads.push(id); return { ...outsidePage, id }; },
+    generationSet: async id => { assert.equal(id, 'old-batch'); return { jobs: [b, outsidePage], total: 2 }; },
+  }, { queueOpen: true, onQueueOpenChange: open => queueStates.push(open) });
+  await harness.flush();
+  harness.node('GenerationQueueDrawer').onOpenBatch([b, outsidePage], 2, 'old-batch'); await harness.flush();
+  assert.deepEqual(queueStates, [false]);
+  assert.deepEqual(harness.node('TaskGrid').jobs.map(job => job.id), ['b', 'older-batch-job']);
+  harness.node('button', props => props.children === '返回全部历史').onClick(); await harness.flush();
+  assert.deepEqual(harness.node('TaskGrid').jobs.map(job => job.id), ['a', 'b']);
+  harness.node('GenerationQueueDrawer').onOpenJob(outsidePage); await harness.flush();
+  assert.deepEqual(queueStates, [false, false]); assert.deepEqual(reads, ['older-batch-job']);
+  assert.equal(harness.node('DetailModal').job.id, 'older-batch-job');
+});
+
+test('an old queue batch refreshes outside the global page and uses its current original for download and cleanup', async t => {
+  const newer = historicalJob({ id: 'newer-global-job' });
+  let old = historicalJob({ id: 'old-slot', status: 'running', generation_group_id: 'old-batch', generation_group_index: 1, generation_group_size: 3 });
+  const calls = { sets: [], fetches: [], discarded: [], archives: [], clicks: 0, changed: 0, revoked: [] };
+  const bytes = Uint8Array.from([0, 12, 255, 24]);
+  const anchor = { click() { calls.clicks++; } };
+  const harness = workspaceHarness(t, {
+    generationJobs: async () => ({ jobs: [newer], total: 1 }),
+    generationSet: async id => { calls.sets.push(id); return { jobs: [{ ...old }], total: 3 }; },
+    discardGenerationJob: async id => { calls.discarded.push(id); old = { ...old, status: 'discarded', result_path: undefined }; },
+  }, { onQueueChanged: () => calls.changed++ }, {
+    fetch: async url => { calls.fetches.push(url); return { ok: true, arrayBuffer: async () => bytes.buffer }; },
+    zipSync: (files, options) => { calls.archives.push({ files, options }); return bytes; },
+    document: { createElement: tag => { assert.equal(tag, 'a'); return anchor; } },
+    window: { confirm: () => true },
+    URL: { createObjectURL: blob => { assert.equal(blob.type, 'application/zip'); return 'blob:isolated-download'; }, revokeObjectURL: url => calls.revoked.push(url) },
+    setTimeout: (callback, delay) => { assert.equal(delay, 60000); callback(); return 0; },
+  });
+  await harness.flush();
+  harness.node('GenerationQueueDrawer').onOpenBatch([old], 3, 'old-batch'); await harness.flush();
+  assert.deepEqual(harness.node('TaskGrid').jobs.map(job => [job.id, job.status]), [['old-slot', 'running']]);
+  assert.deepEqual(calls.sets, ['old-batch']);
+
+  old = { ...old, status: 'succeeded', result_path: 'generation-results/old-original.webp' };
+  harness.node('button', props => props['aria-label'] === '刷新生成历史').onClick(); await harness.flush();
+  assert.deepEqual(harness.node('TaskGrid').jobs.map(job => [job.id, job.status]), [['old-slot', 'succeeded']]);
+  harness.node('TaskGrid').onSelection(new Set(['old-slot'])); await harness.flush();
+  harness.node('button', props => Array.isArray(props.children) && props.children.includes('打包原图')).onClick(); await harness.flush();
+  assert.deepEqual(calls.fetches, ['/media/generation-results/old-original.webp']);
+  assert.deepEqual(calls.archives[0], { files: { 'old-slot.webp': bytes }, options: { level: 0 } });
+  assert.equal(calls.clicks, 1); assert.equal(anchor.download, 'generation-results.zip');
+  assert.deepEqual(calls.revoked, ['blob:isolated-download']);
+
+  harness.node('button', props => Array.isArray(props.children) && props.children.includes('清理结果')).onClick(); await harness.flush();
+  assert.deepEqual(calls.discarded, ['old-slot']);
+  assert.deepEqual(harness.node('TaskGrid').jobs.map(job => [job.id, job.status, job.result_path]), [['old-slot', 'discarded', undefined]]);
+  assert.equal(harness.node('TaskGrid').selected.size, 0); assert.equal(calls.changed, 1);
+  assert.equal(harness.node('p', props => props.role === 'alert'), undefined);
+  assert.deepEqual(calls.sets, ['old-batch', 'old-batch', 'old-batch']);
+  harness.node('button', props => props.children === '返回全部历史').onClick(); await harness.flush();
+  assert.deepEqual(harness.node('TaskGrid').jobs.map(job => job.id), ['newer-global-job']);
+});
+
+test('reopening the same batch focuses its results each time, while refresh does not steal focus', async t => {
+  const job = historicalJob({ id: 'old-job', generation_group_id: 'old-batch' });
+  let focusCount = 0;
+  const harness = workspaceHarness(t, {
+    generationJobs: async () => ({ jobs: [], total: 0 }),
+    generationSet: async () => ({ jobs: [job], total: 1 }),
+  });
+  await harness.flush();
+  harness.node('div', props => props.className === 'pg-gallery-results').ref.current = {
+    scrollTo() {}, focus() { focusCount++; },
+  };
+  harness.node('GenerationQueueDrawer').onOpenBatch([job], 1, 'old-batch'); await harness.flush();
+  assert.equal(focusCount, 1);
+  harness.node('button', props => props['aria-label'] === '刷新生成历史').onClick(); await harness.flush();
+  assert.equal(focusCount, 1);
+  harness.node('GenerationQueueDrawer').onOpenBatch([job], 1, 'old-batch'); await harness.flush();
+  assert.equal(focusCount, 2);
+});
+
+test('creating a task from an old batch returns to all history so the new task is visible', async t => {
+  const old = historicalJob({ id: 'old-job', generation_group_id: 'old-batch' });
+  const created = historicalJob({ id: 'new-job', status: 'queued' });
+  let rows = [old];
+  const harness = workspaceHarness(t, {
+    generationJobs: async () => ({ jobs: rows, total: rows.length }),
+    generationSet: async () => ({ jobs: [old], total: 1 }),
+  });
+  await harness.flush();
+  harness.node('GenerationQueueDrawer').onOpenBatch([old], 1, 'old-batch'); await harness.flush();
+  harness.node('TaskGrid').onSelection(new Set([old.id])); await harness.flush();
+  rows = [created, old];
+  harness.node('InputBar').onCreated(); await harness.flush();
+  assert.deepEqual(harness.node('TaskGrid').jobs.map(job => job.id), ['new-job', 'old-job']);
+  assert.equal(harness.node('TaskGrid').selected.size, 0);
+  assert.equal(harness.node('button', props => props.children === '返回全部历史'), undefined);
 });
 
 for (const provider of ['openai_codex_oauth_native', 'xai_grok_oauth']) test(`actual switch from compatible auto4k to ${provider} shows and sends its own ratio controls`, async t => {

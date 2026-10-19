@@ -46,6 +46,14 @@ an already accepted Library image. Protected Agent references remain usable.
 History loads in pages; search and status filters cover the loaded pages, and
 **Load more** makes older pages available.
 
+The results list scrolls independently above the composer, so expanding a prompt
+or reference images does not cover result cards. Compact parameter pills show
+the full model, size, quality and count; **More** groups background, format and
+compression. The **+** button opens image input options. The top-right history
+icon opens the existing work queue, including running tasks and older batches.
+Opening a batch scopes the results list to that batch; **Return to all history**
+restores the full loaded list. Neither action resubmits a generation request.
+
 Settings are grouped into API, General, Agent, Capture, Data and About. API
 profiles retain their stable IDs and independent keys. Copying a profile happens
 on the server; keys are never returned to the browser for copying. Reordering

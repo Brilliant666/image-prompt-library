@@ -11,7 +11,7 @@ export default function ReferencePicker({onSelect,onClose}:{onSelect:(input:Reci
   const alive=useRef(true),detailSequence=useRef(0),paging=useRef(false);
   const [loadingMore,setLoadingMore]=useState(false);
   const close=()=>{alive.current=false;detailSequence.current++;onClose();};
-  const {containerRef,handleModalKeyDown}=useModalFocus<HTMLDivElement>(close);
+  const {containerRef,handleModalKeyDown}=useModalFocus<HTMLDivElement>(close,{fallbackFocusSelector:'.pg-gallery:not([hidden]) .pg-add-image'});
   useEffect(()=>{alive.current=true;setLoading(true);setError('');Promise.all([api.items({limit:1000}),api.generationJobs({limit:1000})]).then(([list,history])=>{if(alive.current){setItems(list.items);setJobs(history.jobs);setItemTotal(list.total);setJobTotal(history.total);}}).catch(e=>alive.current&&setError(String(e))).finally(()=>alive.current&&setLoading(false));return()=>{alive.current=false;detailSequence.current++;};},[]);
   const changeTab=(next:'library'|'gallery')=>{detailSequence.current++;setTab(next);setDetail(undefined);setError('');};
   const openDetail=async(id:string)=>{const sequence=++detailSequence.current;setError('');try{const value=await api.item(id);if(alive.current&&sequence===detailSequence.current)setDetail(value);}catch(e){if(alive.current&&sequence===detailSequence.current)setError(String(e));}};

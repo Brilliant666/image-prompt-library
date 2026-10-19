@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { createPortal } from 'react-dom';
-import { CheckCircle2, Clock3, ImageOff, ImagePlus, ListTodo, Maximize2, Trash2, X, XCircle } from 'lucide-react';
+import { CheckCircle2, Clock3, History, ImageOff, ImagePlus, ListTodo, Maximize2, Trash2, X, XCircle } from 'lucide-react';
 import { api, mediaUrl } from '../api/client';
 import type { GenerationJobRecord, GenerationJobSetRecord, GenerationJobStatusCounts, GenerationProviderQueueState } from '../types';
 import { generationFailure, generationModerationGuidance } from '../utils/generationFailures';
@@ -274,6 +274,8 @@ export default function GenerationQueueDrawer({
   onClose,
   onOpenJob,
   onOpenProviders,
+  placement = 'floating',
+  onOpenBatch,
 }: {
   t: Translator;
   open: boolean;
@@ -282,6 +284,8 @@ export default function GenerationQueueDrawer({
   onClose: () => void;
   onOpenJob: (job: GenerationJobRecord) => void;
   onOpenProviders: () => void;
+  placement?: 'floating' | 'gallery';
+  onOpenBatch?: (jobs: GenerationJobRecord[], total: number, groupId: string) => void;
 }) {
   const [jobs, setJobs] = useState<GenerationJobRecord[]>([]);
   const [generationSets, setGenerationSets] = useState<GenerationJobSetRecord[]>([]);
@@ -567,7 +571,8 @@ export default function GenerationQueueDrawer({
         jobs: groupJobs,
       });
       setLoadError(expansionError instanceof Error ? expansionError.message : '');
-      onOpenJob(job);
+      if (onOpenBatch) onOpenBatch(groupJobs, group.total, group.generationGroupId);
+      else onOpenJob(job);
     } catch (error) {
       if (openSetRequestRef.current === requestId) setLoadError(error instanceof Error ? error.message : t('queueOpenBatchFailed'));
     } finally {
@@ -665,13 +670,14 @@ export default function GenerationQueueDrawer({
   const trigger = (
     <button
         ref={triggerRef}
-        className={`generation-queue-trigger ${hasSignal ? 'has-signal' : ''}`}
+        className={`generation-queue-trigger ${hasSignal ? 'has-signal' : ''}${placement === 'gallery' ? ' gallery-history-trigger' : ''}`}
         onClick={open ? () => closeDrawer() : onOpen}
-        aria-label={t('workQueue')}
+        aria-label={placement === 'gallery' ? `历史记录 · ${t('workQueue')}` : t('workQueue')}
+        title={placement === 'gallery' ? `历史记录 · ${t('workQueue')}` : t('workQueue')}
         aria-expanded={open}
         aria-controls="generation-work-queue"
       >
-        <ListTodo size={18} />
+        {placement === 'gallery' ? <History size={19} /> : <ListTodo size={18} />}
         {(counts.active > 0 || hasActiveGenerationSet) && <span className="queue-dot active" aria-label={t('queueActiveJobs')} />}
         {counts.ready > 0 && <span className="queue-dot ready" aria-label={t('queueReadyResults')} />}
         {counts.failed > 0 && <span className="queue-dot failed" aria-label={t('queueFailedJobs')} />}
@@ -683,7 +689,7 @@ export default function GenerationQueueDrawer({
       <aside
         id="generation-work-queue"
         ref={drawerRef}
-        className={`generation-queue-drawer${open ? ' open' : ''}`}
+        className={`generation-queue-drawer${open ? ' open' : ''}${placement === 'gallery' ? ' gallery-history-drawer' : ''}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby="generation-work-queue-title"

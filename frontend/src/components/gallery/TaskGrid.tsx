@@ -1,5 +1,5 @@
 // Adapted from Playground TaskGrid: measured virtual rows and rectangle selection.
-import { useRef, useState } from 'react';
+import { useRef, useState, type RefObject } from 'react';
 import { Check, Copy, Download, RotateCcw, ImagePlus } from 'lucide-react';
 import type { GenerationJobRecord } from '../../types';
 import { mediaUrl } from '../../api/client';
@@ -8,11 +8,11 @@ import { useVirtualGrid } from '../../utils/playground/useVirtualGrid';
 import { galleryJobPrompt, galleryStatus } from '../../utils/galleryRecipe';
 import { copyTextToClipboard } from '../../utils/clipboard';
 
-interface Props {jobs:GenerationJobRecord[];selected:Set<string>;onSelection:(ids:Set<string>)=>void;onOpen:(job:GenerationJobRecord)=>void;onReuse:(job:GenerationJobRecord,edit?:boolean)=>void;onMessage:(message:string)=>void}
-export default function TaskGrid({jobs,selected,onSelection,onOpen,onReuse,onMessage}:Props) {
+interface Props {jobs:GenerationJobRecord[];selected:Set<string>;onSelection:(ids:Set<string>)=>void;onOpen:(job:GenerationJobRecord)=>void;onReuse:(job:GenerationJobRecord,edit?:boolean)=>void;onMessage:(message:string)=>void;scrollRef?:RefObject<HTMLElement|null>}
+export default function TaskGrid({jobs,selected,onSelection,onOpen,onReuse,onMessage,scrollRef}:Props) {
   const gridRef=useRef<HTMLDivElement>(null),start=useRef<{x:number;y:number;initial:Set<string>}|null>(null);
   const [box,setBox]=useState<{left:number;top:number;width:number;height:number}>();
-  const {startIndex,endIndex,paddingTop,paddingBottom,metricsRef}=useVirtualGrid(gridRef,jobs.length);
+  const {startIndex,endIndex,paddingTop,paddingBottom,metricsRef}=useVirtualGrid(gridRef,jobs.length,scrollRef);
   return <div className="pg-task-grid" ref={gridRef} style={{paddingTop,paddingBottom}} onPointerDown={event=>{
     if(event.button!==0||(event.target as Element).closest('button,a,input'))return;
     const rect=event.currentTarget.getBoundingClientRect();start.current={x:event.clientX-rect.left,y:event.clientY-rect.top,initial:new Set(event.ctrlKey||event.metaKey?selected:[])};event.currentTarget.setPointerCapture(event.pointerId);

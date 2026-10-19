@@ -316,6 +316,22 @@ test('empty work queue uses one composed state instead of four empty sections', 
   }
 });
 
+test('gallery history opens the same accessible work queue with a header trigger', () => {
+  const render = open => renderToStaticMarkup(React.createElement(GenerationQueueDrawer, {
+    t, open, placement: 'gallery', refreshKey: 0,
+    onOpen: () => undefined, onClose: () => undefined,
+    onOpenJob: () => undefined, onOpenProviders: () => undefined,
+  }));
+  const opened = render(true), closed = render(false);
+  assert.match(opened, /gallery-history-trigger/);
+  assert.match(opened, /aria-label="历史记录 · Work queue"/);
+  assert.match(opened, /aria-controls="generation-work-queue"/);
+  assert.match(opened, /generation-queue-drawer open gallery-history-drawer/);
+  assert.match(closed, /aria-expanded="false"/);
+  assert.match(closed, /aria-hidden="true" inert=""/);
+  assert.equal((opened.match(/id="generation-work-queue"/g) || []).length, 1);
+});
+
 test('work queue batch cards use the loaded jobs page for capped previews and persistent counts', async () => {
   const [queueDrawer, styles] = await Promise.all([
     readFile(`${ROOT}/frontend/src/components/GenerationQueueDrawer.tsx`, 'utf8'),
@@ -892,7 +908,7 @@ test('Explore wiring preserves Library management, semantic appearance, and rest
   assert.match(topBar, /className=\{`vista-button filter-button[\s\S]*?aria-label=\{t\('filters'\)\}/);
   assert.match(topBar, /className="logo-wordmark" lang="en"/);
   assert.match(topBar, /inert=\{modalOpen\} aria-hidden=\{modalOpen \|\| undefined\}/);
-  assert.match(app, /const blockingModalOpen = !hasChosenUiLanguage \|\| Boolean\(detailId \|\| editorOpen \|\| quickCaptureOpen \|\| batchActionDialog\)/);
+  assert.match(app, /const blockingModalOpen = !hasChosenUiLanguage \|\| Boolean\(detailId \|\| editorOpen \|\| quickCaptureOpen \|\| batchActionDialog \|\| galleryQueueOpen\)/);
   assert.match(app, /allowDelete=\{showManagementActions\}/);
   assert.match(editorModal, /allowDelete && persistedItem/);
   assert.match(editorModal, /if \(!allowDelete \|\| !persistedItem \|\| deleting \|\| saving\) return;/);
@@ -1152,7 +1168,7 @@ test('redesign interaction guards keep overlays mutually exclusive and focus-saf
   assert.match(app, /\{detailId && <ItemDetailModal key=\{detailId\}/);
   assert.match(app, /<GalleryWorkspace active=\{view === 'gallery'\}[\s\S]*?command=\{galleryCommand\}[\s\S]*?onCloseDetail=\{\(\) => setFocusedGenerationJobId\(undefined\)\}/);
   assert.match(galleryWorkspace, /detail&&active&&!largeJob&&<DetailModal[\s\S]*?onClose=\{closeDetail\}/);
-  assert.match(galleryDetail, /useModalFocus<HTMLDivElement>\(onClose\)/);
+  assert.match(galleryDetail, /useModalFocus<HTMLDivElement>\(onClose,\{fallbackFocusSelector:'\.pg-gallery:not\(\[hidden\]\) \.gallery-history-trigger'\}\)/);
   assert.match(galleryDetail, /role="dialog" aria-modal="true"[\s\S]*?onKeyDown=\{handleModalKeyDown\}/);
   assert.match(app, /className="app-content" inert=\{drawerModalOpen\}/);
   assert.match(filters, /const selectCluster = \(cluster: ClusterRecord\) => \{[\s\S]*closePanel\(\);[\s\S]*onSelect\(cluster\)/);

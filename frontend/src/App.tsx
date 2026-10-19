@@ -132,6 +132,7 @@ export default function App() {
   const [toastClosing, setToastClosing] = useState(false);
   const toastTimerRef = useRef<number | undefined>(undefined);
   const [generationQueueRefreshKey, setGenerationQueueRefreshKey] = useState(0);
+  const [galleryQueueOpen, setGalleryQueueOpen] = useState(false);
   const [focusedGenerationJobId, setFocusedGenerationJobId] = useState<string>();
   const editItemRequestRef = useRef(0);
   const [editingItemId, setEditingItemId] = useState<string>();
@@ -328,6 +329,7 @@ export default function App() {
     viewScroll.current[view] = window.scrollY;
     const direction = nextView === 'explore' ? 'to-explore' : 'to-cards';
     const commitView = () => {
+      setGalleryQueueOpen(false);
       if (nextView === 'explore' || nextView === 'cards') {
         setBatchActionDialog(undefined);
         setSelectionActionsOpen(false);
@@ -486,7 +488,7 @@ export default function App() {
   };
   const showManagementActions = !isDemoMode && view === 'cards';
   const drawerModalOpen = filtersOpen || configOpen;
-  const blockingModalOpen = !hasChosenUiLanguage || Boolean(detailId || editorOpen || quickCaptureOpen || batchActionDialog);
+  const blockingModalOpen = !hasChosenUiLanguage || Boolean(detailId || editorOpen || quickCaptureOpen || batchActionDialog || galleryQueueOpen);
   const showFloatingActions = Boolean(hasChosenUiLanguage && !selectionMode && !filtersOpen && !configOpen && !detailId);
   const floatingActionsHidden = editorOpen || quickCaptureOpen;
   const updateBadgeLabel = restartRequiredVersion
@@ -535,7 +537,7 @@ export default function App() {
         : <CardsView t={t} items={localizedData.items} loading={contentLoading} emptyMode={emptyMode} total={localizedData.total} sort={activeSort} onSort={updateSort} clusterName={localizedClusterName(selectedCluster, uiLanguage)} hasActiveSearch={Boolean(parsedSearchQuery.q.trim())} onClearCluster={clearCluster} onOpen={setDetailId} onFavorite={isDemoMode ? undefined : favorite} onEdit={isDemoMode ? undefined : editSummary} editingItemId={editingItemId} onToggleSelection={selectionMode ? toggleSelectedItem : undefined} selectedIds={selectedItemIds} onCopyPrompt={copyPrompt} onAdd={isDemoMode ? undefined : openNewItemEditor} onOpenConfig={openConfig} />)}
     </main>
     {!isDemoMode && <>
-      <GalleryWorkspace active={view === 'gallery'} t={t} preferences={localPreferences} command={galleryCommand} focusJobId={focusedGenerationJobId} onCloseDetail={() => setFocusedGenerationJobId(undefined)} refreshKey={generationQueueRefreshKey} configurationRevision={configurationRevision} promptVariablesEnabled={Boolean(appConfig?.features?.camelot?.percival)} promptLanguage={preferredLanguage === 'origin' ? uiLanguage : preferredLanguage} preferredProvider={defaultAiProvider} onOpenAgent={id => {setAgentFocus({id,token:Date.now()}); updateView('agent');}} onOpenSettings={openProviders} onAccepted={id => { saved(); setDetailId(id); }} onQueueChanged={() => setGenerationQueueRefreshKey(value => value + 1)} />
+      <GalleryWorkspace active={view === 'gallery'} queueOpen={galleryQueueOpen} onQueueOpenChange={setGalleryQueueOpen} t={t} preferences={localPreferences} command={galleryCommand} focusJobId={focusedGenerationJobId} onCloseDetail={() => setFocusedGenerationJobId(undefined)} refreshKey={generationQueueRefreshKey} configurationRevision={configurationRevision} promptVariablesEnabled={Boolean(appConfig?.features?.camelot?.percival)} promptLanguage={preferredLanguage === 'origin' ? uiLanguage : preferredLanguage} preferredProvider={defaultAiProvider} onOpenAgent={id => {setAgentFocus({id,token:Date.now()}); updateView('agent');}} onOpenSettings={openProviders} onAccepted={id => { saved(); setDetailId(id); }} onQueueChanged={() => setGenerationQueueRefreshKey(value => value + 1)} />
       <AgentWorkspace focusConversationId={agentFocus?.id} focusToken={agentFocus?.token} active={view === 'agent'} onOpenSettings={() => { setFocusConfigProviders(false); setConfigSection('agent'); setConfigOpen(true); }} onOpenJob={id => {setFocusedGenerationJobId(id); updateView('gallery');}} onLibraryChanged={saved} onJobsChanged={() => setGenerationQueueRefreshKey(value => value + 1)} />
     </>}
     </div>
