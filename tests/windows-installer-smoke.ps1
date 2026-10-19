@@ -194,7 +194,7 @@ function Quote-Bash {
 
 function Copy-PackagerSource {
     New-Item -ItemType Directory -Path $packagerSource | Out-Null
-    foreach ($relative in @("backend", "scripts", "sample-data\manifests", "frontend\dist")) {
+    foreach ($relative in @("backend", "scripts", "sample-data\manifests", "frontend\dist", "licenses")) {
         $source = Join-Path $repoRoot $relative
         $destination = Join-Path $packagerSource $relative
         New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
@@ -236,7 +236,7 @@ function Get-ControlledSourceSha {
     $inputs = @(
         "backend", "frontend", "package.json", "package-lock.json", "pyproject.toml",
         "vite.config.ts", "tsconfig.json", "sample-data/manifests", "scripts",
-        "README.md", "LICENSE", "NOTICE", "SECURITY.md"
+        "README.md", "LICENSE", "licenses", "NOTICE", "SECURITY.md"
     )
     $inputArgs = (($inputs | ForEach-Object { Quote-Bash $_ }) -join " ")
     $statusCommand = "git -C $repo status --porcelain --untracked-files=normal -- $inputArgs"
