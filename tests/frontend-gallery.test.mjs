@@ -188,14 +188,16 @@ const inputSource = await readFile(new URL('../frontend/src/components/gallery/I
 const inputJs = ts.transpileModule(inputSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
 function children(node) { return !node || typeof node !== 'object' ? [] : [node, ...[node.props?.children].flat(Infinity).flatMap(children)]; }
 function deferred() { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
-function inputHarness(t, overrides = {}, apiOverrides = {}) {
+function inputHarness(t, overrides = {}, apiOverrides = {}, environment = {}) {
   const slots = [], effects = []; let cursor = 0, dirty = false, tree;
   const state = { created: 0, settings: 0, posts: [], persisted: [] };
   const store = new Map();
   const oldStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
   Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { getItem: key => store.get(key) ?? null, setItem: (key, value) => store.set(key, value), removeItem: key => store.delete(key) } });
   const OldImage = globalThis.Image;
-  globalThis.Image = class { naturalWidth = 1024; naturalHeight = 1024; async decode() {} };
+  const OldReader = globalThis.FileReader;
+  if (environment.readFile) globalThis.FileReader = class { readAsDataURL(file) { Promise.resolve(environment.readFile(file)).then(value => { this.result = value; this.onload?.(); }, () => this.onerror?.()); } };
+  globalThis.Image = class { naturalWidth = 1024; naturalHeight = 1024; async decode() { await environment.decode?.(this.src); } };
   const hooks = {
     useState(initial) { const i = cursor++; if (!(i in slots)) slots[i] = typeof initial === 'function' ? initial() : initial; return [slots[i], value => { slots[i] = typeof value === 'function' ? value(slots[i]) : value; dirty = true; }]; },
     useRef(initial) { const i = cursor++; if (!(i in slots)) slots[i] = { current: initial }; return slots[i]; },
@@ -215,7 +217,7 @@ function inputHarness(t, overrides = {}, apiOverrides = {}) {
     '../../utils/generationPreferences': preferences, '../../utils/recipeInputs': references, '../../utils/galleryRecipe': recipe,
     '../../utils/profileSettings': profileSettings,
     '../../utils/promptTemplateVariables': templates,
-    '../../utils/galleryDraft': { readGalleryDraft: async () => undefined, saveGalleryDraft: async value => state.persisted.push(value) },
+    '../../utils/galleryDraft': { readGalleryDraft: environment.readGalleryDraft || (async () => undefined), saveGalleryDraft: async value => state.persisted.push(value) },
     './ReferencePicker': { __esModule: true, default: 'ReferencePicker' },
     './SizeDialog': { __esModule: true, default: 'SizeDialog' },
     './InputBar.css': {},
@@ -228,7 +230,7 @@ function inputHarness(t, overrides = {}, apiOverrides = {}) {
   const flush = async () => { for (let i = 0; i < 15; i++) { if (dirty) render(); await Promise.resolve(); } if (dirty) render(); };
   const find = (type, label) => { const node = children(tree).find(node => node.type === type && (node.props['aria-label'] === label || node.props.children === label)); assert.ok(node, `${type} ${label} exists`); return node.props; };
   render();
-  t.after(() => { slots.forEach(slot => slot?.cleanup?.()); if (oldStorage) Object.defineProperty(globalThis, 'localStorage', oldStorage); else delete globalThis.localStorage; if (OldImage) globalThis.Image = OldImage; else delete globalThis.Image; });
+  t.after(() => { slots.forEach(slot => slot?.cleanup?.()); if (oldStorage) Object.defineProperty(globalThis, 'localStorage', oldStorage); else delete globalThis.localStorage; if (OldImage) globalThis.Image = OldImage; else delete globalThis.Image; if (OldReader) globalThis.FileReader = OldReader; else delete globalThis.FileReader; });
   return { state, flush, find, emitPreferenceReset: profileId => eventTarget.dispatchEvent(new CustomEvent('ipl:generation-preference-reset', { detail: { profileId } })), update: value => { props = { ...props, ...value }; render(); }, get tree() { return tree; } };
 }
 
@@ -360,6 +362,165 @@ test('actual late historical lookup failure cannot overwrite a more recently res
   lookup.reject(Error('old lookup missing')); await harness.flush();
   assert.equal(harness.find('textarea', '画廊提示词').value, 'newest recipe');
   assert.equal(harness.find('button', '生成图片').disabled, false);
+});
+
+test('pending historical metadata cannot overwrite newer typed prompt', async t => {
+  const lookup = deferred();
+  const item = { id: 'library-a', title: 'A', prompts: [{ text: 'old library prompt', is_original: true }], images: [{ id: 'image-a', role: 'reference_image', generation_provider: 'openai_compatible' }] };
+  const h = inputHarness(t, { command: { id: 1001, item, imageId: 'image-a' } }, { generationJobForImage: () => lookup.promise }); await h.flush();
+  h.find('textarea', '画廊提示词').onChange({ target: { value: 'new user prompt' } }); await h.flush();
+  lookup.resolve(historicalJob()); await h.flush();
+  assert.equal(h.find('textarea', '画廊提示词').value, 'new user prompt');
+  assert.equal(h.find('button', '生成图片').disabled, false);
+  assert.equal(h.state.posts.length, 0);
+});
+
+test('pending original reference restoration cannot overwrite newer model edits', async t => {
+  const decode = deferred();
+  const job = historicalJob({ parameters: { ...historicalJob().parameters, input_images: [{ id: 'ref', data_url: 'data:image/png;base64,original' }] } });
+  const h = inputHarness(t, { command: { id: 1002, job } }, {}, { decode: () => decode.promise }); await h.flush();
+  h.find('button', '请求模型 gateway-original-alias').onClick(); await h.flush();
+  h.find('input', '请求模型完整 ID').onChange({ target: { value: 'new-model' } }); await h.flush();
+  decode.resolve(); await h.flush();
+  assert.equal(h.find('input', '请求模型完整 ID').value, 'new-model');
+  assert.equal(h.state.posts.length, 0);
+});
+
+for (const phase of ['providers', 'stored-draft']) test(`late ${phase} initialization preserves user edits`, async t => {
+  const pending = deferred();
+  const profiles = { profiles: [{ id: 'original-api', display_name: 'Original API', model: 'gateway-original-alias', configured: true }], default_profile_id: 'original-api' };
+  const h = inputHarness(t, { preferences: { persistInputOnRestart: true } }, phase === 'providers' ? { openAICompatibleProfiles: () => pending.promise } : {}, { readGalleryDraft: () => phase === 'stored-draft' ? pending.promise : Promise.resolve(undefined) }); await h.flush();
+  h.find('textarea', '画廊提示词').onChange({ target: { value: 'typed during initialization' } }); await h.flush();
+  pending.resolve(phase === 'providers' ? profiles : { ...recipe.emptyGalleryDraft(), prompt: 'old persisted draft' }); await h.flush();
+  assert.equal(h.find('textarea', '画廊提示词').value, 'typed during initialization');
+  assert.equal(h.state.posts.length, 0);
+});
+
+const composerChip = (h, name) => children(h.tree).find(node => node.type === 'button' && node.props.className?.includes(`pg-param-${name}`)).props;
+const pendingEdits = {
+  'dropped prompt': async h => { h.find('textarea', '画廊提示词').onDrop({ preventDefault() {}, dataTransfer: { files: [], getData: type => type === 'text/plain' ? '\nnew text' : '' } }); return payload => assert.equal(payload.prompt_text, 'current {{subject}}\nnew text'); },
+  model: async h => { composerChip(h, 'model').onClick(); await h.flush(); h.find('input', '请求模型完整 ID').onChange({ target: { value: 'edited-model' } }); return payload => assert.equal(payload.model, 'edited-model'); },
+  profile: async h => { h.find('button', 'Original API').onClick(); await h.flush(); children(h.tree).find(node => node.type === 'button' && node.props.children?.[0] === 'Other API').props.onClick(); return payload => assert.equal(payload.parameters.compatible_profile_id, 'other-api'); },
+  size: async h => { composerChip(h, 'size').onClick(); await h.flush(); children(h.tree).find(node => node.type === 'SizeDialog').props.onApply({ size: '2048x3072' }); return payload => assert.equal(payload.parameters.size, '2048x3072'); },
+  quality: async h => { composerChip(h, 'quality').onClick(); await h.flush(); children(h.tree).find(node => node.type === 'button' && node.props.children?.at?.(-1) === 'high').props.onClick(); return payload => assert.equal(payload.parameters.quality, 'high'); },
+  format: async h => { composerChip(h, 'more').onClick(); await h.flush(); h.find('select', '输出格式').onChange({ target: { value: 'png' } }); return payload => assert.equal(payload.parameters.output_format, 'png'); },
+  count: async h => { h.find('select', '生成数量').onChange({ target: { value: '3' } }); return (_payload, posted) => assert.equal(posted.count, 3); },
+  template: async h => { const label = children(h.tree).find(node => node.type === 'label' && node.props.children?.[0] === 'subject'); children(label).find(node => node.type === 'input').props.onChange({ target: { value: 'new subject' } }); return payload => assert.equal(payload.parameters.prompt_template_values.subject, 'new subject'); },
+  'selected attachment': async h => { h.find('button', '添加参考图').onClick(); await h.flush(); h.find('button', '从 Library 或画廊选择参考图').onClick(); await h.flush(); children(h.tree).find(node => node.type === 'ReferencePicker').props.onSelect(input('new-reference')); return payload => assert.deepEqual(payload.parameters.input_images.map(value => value.id), ['keep', 'new-reference']); },
+  'removed attachment': async h => { h.find('button', '移除参考图 1').onClick(); return payload => assert.equal(payload.parameters.input_images.length, 0); },
+};
+for (const phase of ['metadata', 'reference']) for (const [label, edit] of Object.entries(pendingEdits)) test(`${phase} restore cannot replace newer ${label}`, async t => {
+  const pending = deferred();
+  const base = historicalJob({ prompt_text: 'current cat', parameters: { ...historicalJob().parameters, prompt_template: 'current {{subject}}', prompt_template_values: { subject: 'cat' }, input_images: [{ id: 'keep', data_url: 'data:image/png;base64,keep' }] } });
+  const stale = historicalJob({ prompt_text: 'stale recipe', parameters: { ...historicalJob().parameters, input_images: [{ id: 'stale', data_url: 'data:image/png;base64,pending' }] } });
+  const h = inputHarness(t, { command: { id: 1200, job: base }, promptVariablesEnabled: true }, {
+    generationJobForImage: () => pending.promise,
+    openAICompatibleProfiles: async () => ({ profiles: [{ id: 'original-api', display_name: 'Original API', model: 'gateway-original-alias', configured: true }, { id: 'other-api', display_name: 'Other API', model: 'other-model', configured: true }], default_profile_id: 'original-api' }),
+  }, { decode: src => src.endsWith(',pending') && phase === 'reference' ? pending.promise : undefined });
+  await h.flush();
+  const item = { id: 'stale-item', title: 'Old', prompts: [], images: [{ id: 'stale-image', role: 'reference_image', generation_provider: 'openai_compatible' }] };
+  h.update({ command: phase === 'metadata' ? { id: 1201, item } : { id: 1201, job: stale } }); await h.flush();
+  const verify = await edit(h); await h.flush();
+  pending.resolve(phase === 'metadata' ? stale : undefined); await h.flush();
+  assert.equal(h.state.posts.length, 0);
+  h.find('button', '生成图片').onClick(); await h.flush();
+  assert.equal(h.state.posts.length, 1, 'new user draft remains usable after the stale request finishes');
+  const posted = h.state.posts[0], payload = posted.job || posted;
+  assert.ok(payload.prompt_text.startsWith('current {{subject}}'));
+  verify(payload, posted);
+});
+
+test('hiding the composer invalidates a pending restore without replaying it when shown again', async t => {
+  const decode = deferred();
+  const h = inputHarness(t, { command: { id: 1300, job: historicalJob({ prompt_text: 'current prompt' }) } }, {}, { decode: () => decode.promise }); await h.flush();
+  h.update({ command: { id: 1301, job: historicalJob({ prompt_text: 'stale prompt', parameters: { ...historicalJob().parameters, input_images: [{ data_url: 'data:image/png;base64,pending' }] } }) } }); await h.flush();
+  h.update({ active: false }); await h.flush(); decode.resolve(); await h.flush();
+  h.update({ active: true }); await h.flush();
+  assert.equal(h.find('textarea', '画廊提示词').value, 'current prompt');
+  assert.equal(h.find('button', '生成图片').disabled, false);
+});
+
+test('settings refresh invalidates a pending history restore and leaves the current draft intact', async t => {
+  const lookup = deferred();
+  const h = inputHarness(t, { command: { id: 1400, job: historicalJob({ prompt_text: 'current prompt' }) } }, { generationJobForImage: () => lookup.promise }); await h.flush();
+  h.update({ command: { id: 1401, item: { id: 'old', title: 'Old', prompts: [], images: [{ id: 'old-image', role: 'reference_image', generation_provider: 'openai_compatible' }] } } }); await h.flush();
+  h.update({ configurationRevision: 1 }); await h.flush(); lookup.resolve(historicalJob()); await h.flush();
+  assert.equal(h.find('textarea', '画廊提示词').value, 'current prompt');
+  assert.equal(h.find('button', '生成图片').disabled, false);
+});
+
+test('interrupted first draft initialization can finish on the next settings revision', async t => {
+  const first = deferred(), second = deferred(); let reads = 0;
+  const h = inputHarness(t, { preferences: { persistInputOnRestart: true } }, {}, { readGalleryDraft: () => ++reads === 1 ? first.promise : second.promise }); await h.flush();
+  h.update({ configurationRevision: 1 }); await h.flush();
+  second.resolve({ ...recipe.emptyGalleryDraft(), profileId: 'original-api', prompt: 'latest disk draft' }); await h.flush();
+  first.resolve({ ...recipe.emptyGalleryDraft(), prompt: 'old disk draft' }); await h.flush();
+  assert.equal(reads, 2); assert.equal(h.find('textarea', '画廊提示词').value, 'latest disk draft');
+});
+
+test('missing restored references still block submission until the user explicitly removes them', async t => {
+  const h = inputHarness(t, { command: { id: 1500, job: historicalJob({ mode: 'image_edit', parameters: { ...historicalJob().parameters, input_images: [{ id: 'missing', data_url: 'data:image/png;base64,missing' }] } }) } }, {}, { decode: async () => { throw Error('missing'); } }); await h.flush();
+  assert.equal(h.find('button', '生成图片').disabled, true); h.find('button', '生成图片').onClick(); await h.flush(); assert.equal(h.state.posts.length, 0);
+  h.find('button', '移除参考图 1').onClick(); await h.flush(); h.find('button', '生成图片').onClick(); await h.flush();
+  assert.equal(h.state.posts.length, 1); assert.equal(h.state.posts[0].mode, 'text_to_image');
+});
+
+test('typing while a selected file is read preserves both inputs and blocks premature submission', async t => {
+  const file = deferred();
+  const h = inputHarness(t, {}, {}, { readFile: () => file.promise }); await h.flush();
+  h.find('textarea', '画廊提示词').onPaste({ preventDefault() {}, clipboardData: { files: [new File(['synthetic'], 'chosen.png', { type: 'image/png' })] } }); await h.flush();
+  h.find('textarea', '画廊提示词').onChange({ target: { value: 'typed while reading image' } }); await h.flush();
+  assert.equal(h.find('button', '生成图片').disabled, true); h.find('button', '生成图片').onClick(); await h.flush(); assert.equal(h.state.posts.length, 0);
+  file.resolve('data:image/png;base64,chosen-original'); await h.flush();
+  assert.equal(h.find('textarea', '画廊提示词').value, 'typed while reading image');
+  h.find('button', '生成图片').onClick(); await h.flush();
+  assert.equal(h.state.posts.length, 1); assert.equal(h.state.posts[0].parameters.input_images[0].data_url, 'data:image/png;base64,chosen-original');
+});
+
+for (const interruption of ['new-command', 'inactive']) test(`late selected file is ignored after ${interruption}`, async t => {
+  const file = deferred(); const h = inputHarness(t, {}, {}, { readFile: () => file.promise }); await h.flush();
+  const field = children(h.tree).find(node => node.type === 'input' && node.props.type === 'file');
+  field.props.onChange({ target: { files: [new File(['synthetic'], 'old.png', { type: 'image/png' })], value: 'old.png' } }); await h.flush();
+  h.update(interruption === 'new-command' ? { command: { id: 1600, job: historicalJob({ prompt_text: 'new draft' }) } } : { active: false }); await h.flush();
+  file.resolve('data:image/png;base64,old-original'); await h.flush();
+  assert.equal(children(h.tree).filter(node => node.type === 'img').length, 0);
+  assert.equal(h.find('textarea', '画廊提示词').value, interruption === 'new-command' ? 'new draft' : '');
+});
+
+test('pasting a selected image cancels old recipe recovery without losing the new file', async t => {
+  const lookup = deferred();
+  const h = inputHarness(t, { command: { id: 1700, item: { id: 'old', title: 'Old', prompts: [], images: [{ id: 'old-image', role: 'reference_image', generation_provider: 'openai_compatible' }] } } }, { generationJobForImage: () => lookup.promise }, { readFile: () => 'data:image/png;base64,new-original' }); await h.flush();
+  h.find('textarea', '画廊提示词').onPaste({ preventDefault() {}, clipboardData: { files: [new File(['synthetic'], 'new.png', { type: 'image/png' })] } }); await h.flush();
+  lookup.resolve(historicalJob()); await h.flush();
+  assert.equal(children(h.tree).find(node => node.type === 'img').props.src, 'data:image/png;base64,new-original');
+  assert.equal(h.find('textarea', '画廊提示词').value, ''); assert.equal(h.state.posts.length, 0);
+});
+
+const historicalTransport = { base_url_mode: 'custom', stream: true, partial_images: 2, response_format: 'b64_json' };
+test('actual restored submission keeps frozen transport through ordinary edits and settings refresh', async t => {
+  const h = inputHarness(t, { command: { id: 1800, job: historicalJob({ parameters: { ...historicalJob().parameters, ...historicalTransport }, metadata: { requested: { stream: false, partial_images: 0 } } }) } }); await h.flush();
+  h.find('textarea', '画廊提示词').onChange({ target: { value: 'edited history' } }); await h.flush();
+  h.update({ configurationRevision: 1 }); await h.flush(); h.find('button', '生成图片').onClick(); await h.flush();
+  assert.deepEqual(Object.fromEntries(Object.keys(historicalTransport).map(key => [key, h.state.posts[0].parameters[key]])), { ...historicalTransport, stream: false, partial_images: 0 });
+});
+
+for (const action of ['choose-profile', 'reset-profile', 'oauth']) test(`${action} clears frozen transport before a new API submission`, async t => {
+  const h = inputHarness(t, { command: { id: 1801, job: historicalJob({ parameters: { ...historicalJob().parameters, ...historicalTransport } }) } }, {
+    generationProviders: async () => [{ provider: 'openai_compatible', display_name: 'Compatible', max_input_images: 4, can_generate: true }, { provider: 'xai_grok_oauth', display_name: 'Grok OAuth', can_generate: true, default_image_model: 'grok-model' }],
+  }); await h.flush();
+  if (action === 'reset-profile') h.emitPreferenceReset('original-api');
+  else { h.find('button', 'Original API').onClick(); await h.flush(); children(h.tree).find(node => node.type === 'button' && node.props.children?.[0] === (action === 'oauth' ? 'Grok OAuth' : 'Original API')).props.onClick(); }
+  await h.flush(); h.find('button', '生成图片').onClick(); await h.flush();
+  assert.equal(h.state.posts.length, 1);
+  for (const key of Object.keys(historicalTransport)) assert.equal(h.state.posts[0].parameters[key], undefined, `${key} must use the explicitly chosen connection defaults`);
+});
+
+test('legacy history displays its transport fallback until the user explicitly chooses a profile', async t => {
+  const h = inputHarness(t, { command: { id: 1802, job: historicalJob() } }); await h.flush();
+  const message = () => children(h.tree).find(node => node.type === 'p' && node.props.children === '旧记录未保存传输选项，按旧版默认值恢复');
+  assert.ok(message()); h.find('button', 'Original API').onClick(); await h.flush();
+  children(h.tree).find(node => node.type === 'button' && node.props.children?.[0] === 'Original API').props.onClick(); await h.flush();
+  assert.equal(message(), undefined);
 });
 
 const workspaceSource = await readFile(new URL('../frontend/src/components/gallery/GalleryWorkspace.tsx', import.meta.url), 'utf8');
