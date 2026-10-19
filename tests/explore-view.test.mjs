@@ -14,6 +14,7 @@ let CardsView;
 let ItemCard;
 let GenerationQueueDrawer;
 let BatchActionDialog;
+let TopBar;
 let groupGenerationQueueJobs;
 let generationQueueBatchCounts;
 
@@ -150,10 +151,49 @@ before(async () => {
   ({ default: ItemCard } = await vite.ssrLoadModule('/src/components/ItemCard.tsx'));
   ({ default: GenerationQueueDrawer, groupGenerationQueueJobs, generationQueueBatchCounts } = await vite.ssrLoadModule('/src/components/GenerationQueueDrawer.tsx'));
   ({ default: BatchActionDialog } = await vite.ssrLoadModule('/src/components/BatchActionDialog.tsx'));
+  ({ default: TopBar } = await vite.ssrLoadModule('/src/components/TopBar.tsx'));
 });
 
 after(async () => {
   await vite?.close();
+});
+
+test('all workspaces keep the same main navigation and move Library search into a separate tool row', () => {
+  let mainHeader;
+  for (const view of ['explore', 'cards', 'gallery', 'agent']) {
+    const html = renderToStaticMarkup(React.createElement(TopBar, {
+      t, view, q: 'saved query', queryFilterChips: ['tag:portrait'],
+      onQ() {}, onView() {}, onFilters() {}, onConfig() {}, onCapture() {},
+    }));
+    const header = html.match(/<header\b[\s\S]*?<\/header>/)?.[0];
+    assert.ok(header);
+    assert.match(header, /logo-wordmark/);
+    assert.match(header, /class="view-dock"/);
+    assert.match(header, /class="header-actions"/);
+    assert.match(header, /workspace-capture/);
+    assert.match(header, /config-button/);
+    assert.doesNotMatch(header, /library-toolbar|toolbar-search|filter-button/);
+    const stableHeader = header.replaceAll('class="active"', 'class=""').replaceAll('aria-pressed="true"', 'aria-pressed="false"');
+    if (mainHeader) assert.equal(stableHeader, mainHeader, `header structure stays fixed for ${view}`);
+    else mainHeader = stableHeader;
+    const tools = html.slice(html.indexOf('</header>') + '</header>'.length);
+    assert.match(tools, /class="library-tools"/);
+    assert.match(tools, /value="saved query"/);
+    assert.match(tools, /aria-controls="filters-drawer"/);
+    if (view === 'gallery' || view === 'agent') {
+      assert.match(tools, /^<div class="library-tools" hidden="" aria-hidden="true">/);
+      assert.doesNotMatch(tools, /tag:portrait/);
+    } else {
+      assert.match(tools, /^<div class="library-tools">/);
+      assert.match(tools, /tag:portrait/);
+    }
+  }
+  const blocked = renderToStaticMarkup(React.createElement(TopBar, {
+    t, view: 'cards', q: '', queryFilterChips: [], modalOpen: true,
+    onQ() {}, onView() {}, onFilters() {}, onConfig() {},
+  }));
+  assert.match(blocked, /<header class="chrome" inert="" aria-hidden="true">/);
+  assert.match(blocked, /<div class="library-tools" inert="" aria-hidden="true">/);
 });
 
 test('batch tag and move actions use in-app searchable dialogs', async () => {
@@ -314,6 +354,22 @@ test('empty work queue uses one composed state instead of four empty sections', 
   for (const heading of ['In progress', 'Ready for review', 'Needs attention', 'Recent']) {
     assert.doesNotMatch(html, new RegExp(`<h3>${heading}<\\/h3>`));
   }
+});
+
+test('gallery history opens the same accessible work queue with a header trigger', () => {
+  const render = open => renderToStaticMarkup(React.createElement(GenerationQueueDrawer, {
+    t, open, placement: 'gallery', refreshKey: 0,
+    onOpen: () => undefined, onClose: () => undefined,
+    onOpenJob: () => undefined, onOpenProviders: () => undefined,
+  }));
+  const opened = render(true), closed = render(false);
+  assert.match(opened, /gallery-history-trigger/);
+  assert.match(opened, /aria-label="历史记录 · Work queue"/);
+  assert.match(opened, /aria-controls="generation-work-queue"/);
+  assert.match(opened, /generation-queue-drawer open gallery-history-drawer/);
+  assert.match(closed, /aria-expanded="false"/);
+  assert.match(closed, /aria-hidden="true" inert=""/);
+  assert.equal((opened.match(/id="generation-work-queue"/g) || []).length, 1);
 });
 
 test('work queue batch cards use the loaded jobs page for capped previews and persistent counts', async () => {
@@ -793,7 +849,7 @@ test('Config serializes OAuth actions across provider cards', async () => {
 });
 
 test('Explore wiring preserves Library management, semantic appearance, and restrained motion', async () => {
-  const [app, cards, explore, config, styles, translations, toggle, topBar, generationPanel, queueDrawer, editorModal, suggestedTitleField, modalFocus, appearance, itemCard] = await Promise.all([
+  const [app, cards, explore, config, styles, translations, toggle, topBar, generationPanel, queueDrawer, editorModal, suggestedTitleField, modalFocus, appearance, itemCard, galleryWorkspace] = await Promise.all([
     readFile(`${ROOT}/frontend/src/App.tsx`, 'utf8'),
     readFile(`${ROOT}/frontend/src/components/CardsView.tsx`, 'utf8'),
     readFile(`${ROOT}/frontend/src/components/ExploreView.tsx`, 'utf8'),
@@ -809,9 +865,13 @@ test('Explore wiring preserves Library management, semantic appearance, and rest
     readFile(`${ROOT}/frontend/src/hooks/useModalFocus.ts`, 'utf8'),
     readFile(`${ROOT}/frontend/src/utils/appearance.ts`, 'utf8'),
     readFile(`${ROOT}/frontend/src/components/ItemCard.tsx`, 'utf8'),
+    readFile(`${ROOT}/frontend/src/components/gallery/GalleryWorkspace.tsx`, 'utf8'),
   ]);
 
-  assert.match(app, /nextView !== 'cards'/);
+  const workspaceSwitch = app.slice(app.indexOf('const updateView ='), app.indexOf('const updateSort ='));
+  assert.doesNotMatch(workspaceSwitch, /exitSelectionMode\(|clearSelection\(|setClusterId\(undefined\)/, 'workspace navigation preserves Library selection and collection filter');
+  assert.match(workspaceSwitch, /viewScroll\.current\[view\] = window\.scrollY/);
+  assert.match(workspaceSwitch, /viewScroll\.current\[nextView\]/);
   assert.match(app, /view === 'cards' && selectionMode/);
   assert.match(app, /className="selection-toolbar-button selection-toolbar-more-trigger"[\s\S]*?aria-haspopup="menu"[\s\S]*?aria-expanded=\{selectionActionsOpen\}/);
   assert.match(app, /className="selection-toolbar-menu" role="menu"/);
@@ -821,7 +881,12 @@ test('Explore wiring preserves Library management, semantic appearance, and rest
   assert.match(styles, /\.selection-toolbar-secondary\{display:contents\}/);
   assert.doesNotMatch(styles, /\.selection-toolbar\{[^}]*flex-wrap:wrap/);
   assert.equal((translations.match(/batchMoreActions:/g) || []).length, 3);
-  assert.match(app, /app-command-dock[\s\S]*?<GenerationQueueDrawer[\s\S]*?className="floating-action-rail"/);
+  // Generation monitoring moved into the persistent Gallery workspace. The
+  // Library dock retains capture/generate actions and opens that same workspace.
+  assert.match(app, /app-command-dock[\s\S]*?className="floating-action-rail"[\s\S]*?onClick=\{openNewItemEditor\}[\s\S]*?onClick=\{openStandaloneGeneration\}/);
+  assert.match(app, /<GalleryWorkspace active=\{view === 'gallery'\}[\s\S]*?refreshKey=\{generationQueueRefreshKey\}[\s\S]*?onQueueChanged=\{/);
+  assert.match(galleryWorkspace, /api\.generationJobs\(/);
+  assert.match(galleryWorkspace, /<TaskGrid[\s\S]*?onOpen=/);
   assert.equal((app.match(/className="fab select-fab"/g) || []).length, 1);
   assert.match(app, /dataScopeMatches/);
   assert.match(app, /const \[viewTransition, setViewTransition\]/);
@@ -883,7 +948,7 @@ test('Explore wiring preserves Library management, semantic appearance, and rest
   assert.match(topBar, /className=\{`vista-button filter-button[\s\S]*?aria-label=\{t\('filters'\)\}/);
   assert.match(topBar, /className="logo-wordmark" lang="en"/);
   assert.match(topBar, /inert=\{modalOpen\} aria-hidden=\{modalOpen \|\| undefined\}/);
-  assert.match(app, /const blockingModalOpen = !hasChosenUiLanguage \|\| Boolean\(detailId \|\| editorOpen \|\| quickCaptureOpen \|\| standaloneGenerationOpen \|\| batchActionDialog\)/);
+  assert.match(app, /const blockingModalOpen = !hasChosenUiLanguage \|\| Boolean\(detailId \|\| editorOpen \|\| quickCaptureOpen \|\| batchActionDialog \|\| galleryQueueOpen\)/);
   assert.match(app, /allowDelete=\{showManagementActions\}/);
   assert.match(editorModal, /allowDelete && persistedItem/);
   assert.match(editorModal, /if \(!allowDelete \|\| !persistedItem \|\| deleting \|\| saving\) return;/);
@@ -935,22 +1000,31 @@ test('Explore wiring preserves Library management, semantic appearance, and rest
   assert.match(generationPanel, /secondaryFallbackFocusSelector: item \? '\.detail\.modal'/);
   assert.match(modalFocus, /\.\.\.fallbacks, \.\.\.secondaryFallbacks, appFallback/);
   assert.match(appearance, /image-prompt-library\.appearance\.v1/);
-  assert.match(appearance, /DEFAULT_APPEARANCE: AppearancePreset = 'gallery_vermilion'/);
+  assert.match(appearance, /DEFAULT_APPEARANCE: AppearancePreset = 'pure_white'/);
   assert.match(app, /applyAppearance\(appearance\)/);
-  for (const preset of ['gallery_vermilion', 'pine_archive', 'aubergine_ink']) {
+  for (const preset of ['pure_white', 'gallery_vermilion', 'pine_archive', 'aubergine_ink']) {
     assert.match(config, new RegExp(preset));
   }
-  const settingOrder = [
-    "t('uiLanguage')",
-    "t('promptCopyLanguage')",
-    "t('appearance')",
-    "t('appUpdate')",
-    "t('cleanupTitle')",
-    "t('providers')",
-    "t('systemInformation')",
-  ].map(marker => config.indexOf(marker));
-  assert.ok(settingOrder.every(index => index >= 0));
-  assert.deepEqual(settingOrder, [...settingOrder].sort((a, b) => a - b));
+  // Preserve every former settings control in its new named tab instead of
+  // requiring the old one-column drawer order across unrelated groups.
+  const settingsGroups = {
+    api: ['连接与配置', '<OpenAICompatibleSettings', 'startProviderAuth(provider.provider)', 'disconnectProviderAuth(provider.provider)'],
+    general: ['<GeneralSettings', "t('uiLanguage')", "t('promptCopyLanguage')", "t('appearance')"],
+    agent: ['<AgentSettings'],
+    capture: ['<BrowserCaptureSettings', '<CaptureOrganizerSettings'],
+    data: ["t('cleanupTitle')", 'onClick={loadCleanupPreview}', 'onClick={applyCleanup}'],
+    about: ["t('appUpdate')", "t('systemInformation')"],
+  };
+  for (const [section, markers] of Object.entries(settingsGroups)) {
+    const start = config.indexOf(`<div role="tabpanel" id="settings-panel-${section}"`);
+    assert.ok(start >= 0, `${section} settings panel exists`);
+    const next = config.indexOf('<div role="tabpanel"', start + 1);
+    const panel = config.slice(start, next < 0 ? config.indexOf('</aside>', start) : next);
+    assert.ok(panel.includes(`aria-labelledby="settings-tab-${section}"`));
+    const order = markers.map(marker => panel.indexOf(marker));
+    assert.ok(order.every(index => index >= 0), `${section} retains its controls`);
+    if (section === 'general' || section === 'about') assert.deepEqual(order, [...order].sort((a, b) => a - b));
+  }
   assert.equal((config.match(/cfg\?\.library_path/g) || []).length, 1);
   assert.equal((config.match(/cfg\?\.database_path/g) || []).length, 1);
   assert.match(config, /filter\(provider => provider\.provider !== 'manual_upload'\)/);
@@ -967,8 +1041,9 @@ test('Explore wiring preserves Library management, semantic appearance, and rest
   assert.match(queueDrawer, /cancelGenerationJob\(job\.id\)[\s\S]*?await refresh\(\)/);
   assert.match(queueDrawer, /loading="lazy" decoding="async"/);
   assert.match(app, /const showFloatingActions = Boolean\(hasChosenUiLanguage/);
-  assert.match(app, /const generationJobRequestRef = useRef\(0\)/);
-  assert.match(app, /if \(generationJobRequestRef\.current !== requestId\) return;/);
+  assert.match(galleryWorkspace, /detailSequence\s*=\s*useRef\(0\)/);
+  assert.match(galleryWorkspace, /sequence\s*===\s*detailSequence\.current[\s\S]*?setDetail/);
+  assert.match(galleryWorkspace, /const closeDetail\s*=\s*\(\)\s*=>\s*\{detailSequence\.current\+\+;setDetail\(undefined\)/);
   assert.match(app, /const clustersRequestRef = useRef\(0\)/);
   assert.match(app, /const libraryTotalRequestRef = useRef\(0\)/);
   assert.match(app, /if \(libraryTotalRequestRef\.current === requestId\) setLibraryTotal/);
@@ -976,7 +1051,7 @@ test('Explore wiring preserves Library management, semantic appearance, and rest
   assert.match(app, /const batchActionInFlightRef = useRef\(false\)/);
   assert.match(app, /if \(!selectedItemIds\.size \|\| batchActionInFlightRef\.current\) return false;/);
   assert.match(app, /const cancelPendingEdit = \(\) => \{/);
-  assert.match(app, /const openGenerationQueue = \(\) => \{[\s\S]*?cancelPendingEdit\(\)/);
+  assert.match(app, /const openStandaloneGeneration = \(\) => \{[\s\S]*?cancelPendingEdit\(\)[\s\S]*?updateView\('gallery'\)/);
   assert.match(app, /if \(result\.failed > 0\)/);
   assert.match(editorModal, /t\('savePartiallyCompleted'\)/);
   assert.match(editorModal, /await api\.deleteItem\(saved\.id\)/);
@@ -1114,7 +1189,7 @@ test('batch review closure keeps save, provenance, references, and mobile action
 });
 
 test('redesign interaction guards keep overlays mutually exclusive and focus-safe', async () => {
-  const [app, filters, config, detail, generation, focus, styles] = await Promise.all([
+  const [app, filters, config, detail, generation, focus, styles, galleryWorkspace, galleryDetail] = await Promise.all([
     readFile(`${ROOT}/frontend/src/App.tsx`, 'utf8'),
     readFile(`${ROOT}/frontend/src/components/FiltersPanel.tsx`, 'utf8'),
     readFile(`${ROOT}/frontend/src/components/ConfigPanel.tsx`, 'utf8'),
@@ -1122,14 +1197,19 @@ test('redesign interaction guards keep overlays mutually exclusive and focus-saf
     readFile(`${ROOT}/frontend/src/components/GenerationPanel.tsx`, 'utf8'),
     readFile(`${ROOT}/frontend/src/hooks/useModalFocus.ts`, 'utf8'),
     readFile(`${ROOT}/frontend/src/styles.css`, 'utf8'),
+    readFile(`${ROOT}/frontend/src/components/gallery/GalleryWorkspace.tsx`, 'utf8'),
+    readFile(`${ROOT}/frontend/src/components/gallery/DetailModal.tsx`, 'utf8'),
   ]);
 
-  assert.match(app, /setGenerationQueueOpen\(false\); setFiltersOpen\(true\)/);
-  assert.match(app, /setGenerationQueueOpen\(false\); setConfigOpen\(true\)/);
-  assert.match(app, /const openGenerationFromDetail = \(item: ItemDetail, imageId\?: string\) => \{[\s\S]*?setGenerationSourceItem\(item\);[\s\S]*?setStandaloneGenerationOpen\(true\)/);
-  assert.match(app, /const closeStandaloneGeneration = \(\) => \{[\s\S]*?setStandaloneGenerationOpen\(false\);[\s\S]*?setGenerationSourceItem\(undefined\);[\s\S]*?\};/);
-  assert.match(app, /\{!standaloneGenerationOpen && detailId && <ItemDetailModal key=\{detailId\}/);
-  assert.match(app, /\{standaloneGenerationOpen && <GenerationPanel item=\{generationSourceItem\}/);
+  assert.match(app, /const openFilters = \(\) => \{[^}]*setConfigOpen\(false\);[^}]*setFiltersOpen\(true\)/);
+  assert.match(app, /const openConfig = \(\) => \{[^}]*setFiltersOpen\(false\);[^}]*setConfigOpen\(true\)/);
+  assert.match(app, /const openGenerationFromDetail = \(item: ItemDetail, imageId\?: string\) => \{[\s\S]*?cancelPendingEdit\(\);[\s\S]*?setDetailId\(undefined\);[\s\S]*?setGalleryCommand\(\{id:Date\.now\(\),item,imageId\}\);[\s\S]*?updateView\('gallery'\)/);
+  assert.match(app, /const openStandaloneGeneration = \(\) => \{[\s\S]*?setDetailId\(undefined\);[\s\S]*?setFocusedGenerationJobId\(undefined\);[\s\S]*?updateView\('gallery'\)/);
+  assert.match(app, /\{detailId && <ItemDetailModal key=\{detailId\}/);
+  assert.match(app, /<GalleryWorkspace active=\{view === 'gallery'\}[\s\S]*?command=\{galleryCommand\}[\s\S]*?onCloseDetail=\{\(\) => setFocusedGenerationJobId\(undefined\)\}/);
+  assert.match(galleryWorkspace, /detail&&active&&!largeJob&&<DetailModal[\s\S]*?onClose=\{closeDetail\}/);
+  assert.match(galleryDetail, /useModalFocus<HTMLDivElement>\(onClose,\{fallbackFocusSelector:'\.pg-gallery:not\(\[hidden\]\) \.gallery-history-trigger'\}\)/);
+  assert.match(galleryDetail, /role="dialog" aria-modal="true"[\s\S]*?onKeyDown=\{handleModalKeyDown\}/);
   assert.match(app, /className="app-content" inert=\{drawerModalOpen\}/);
   assert.match(filters, /const selectCluster = \(cluster: ClusterRecord\) => \{[\s\S]*closePanel\(\);[\s\S]*onSelect\(cluster\)/);
   assert.match(filters, /const clearSelection = \(\) => \{[\s\S]*closePanel\(\);[\s\S]*onClear\(\)/);
@@ -1177,8 +1257,14 @@ test('redesign interaction guards keep overlays mutually exclusive and focus-saf
   assert.match(styles, /\.scope-sort-picker\{position:relative;display:flex;align-items:center;min-width:0\}/);
   assert.match(styles, /\.scope-sort-select\{[^}]*width:auto;[^}]*cursor:pointer;[^}]*appearance:none/);
   assert.doesNotMatch(styles, /\.scope-sort-select\{[^}]*position:absolute;[^}]*opacity:0/);
-  assert.match(styles, /main\{max-width:1600px[\s\S]*?@media\(min-width:1760px\)\{main,\.chrome \.nav-row,\.status-row\{max-width:1920px\}\}/);
-  assert.match(styles, /@media\(max-width:760px\)\{[\s\S]*?\.view-dock\{grid-column:1\/-1;grid-row:3;justify-self:stretch;width:100%;margin-top:1px\}[\s\S]*?\.view-dock \.toggle\{width:100%;height:44px;gap:0;padding:0;border:0;overflow:hidden\}[\s\S]*?\.view-dock \.toggle button\{flex:1 1 50%;min-height:44px;padding:0 13px;border-radius:0\}/);
+  assert.match(styles, /main\{max-width:1600px[\s\S]*?@media\(min-width:1760px\)\{main\{max-width:1920px\}\}/);
+  assert.match(styles, /\.library-tools\[hidden\]\{display:none!important\}/);
+  assert.match(styles, /--app-shell-width:1280px/);
+  assert.match(styles, /\.nav-row\{[^}]*grid-template-columns:minmax\(0,1fr\) auto minmax\(0,1fr\);[^}]*max-width:var\(--app-shell-width\)/);
+  assert.match(styles, /--app-header-height:calc\(65px \+ env\(safe-area-inset-top\)\)/);
+  assert.match(styles, /\.view-dock \.toggle\{display:grid;grid-auto-flow:column;grid-auto-columns:72px\}/, 'desktop navigation width is independent of the active label font weight');
+  assert.match(styles, /\.view-dock \.toggle\{width:100%;grid-auto-columns:minmax\(0,1fr\);min-height:44px/, 'mobile navigation divides its available width among the actual two or four items');
+  assert.match(styles, /@media\(max-width:760px\)\{\s*:root\{--app-header-height:calc\(115px \+ env\(safe-area-inset-top\)\)\}[\s\S]*?\.nav-row\{[^}]*grid-template-rows:44px 44px;gap:8px\}[\s\S]*?\.view-dock\{grid-column:1\/-1;grid-row:2;justify-self:stretch;width:100%\}[\s\S]*?\.view-dock \.toggle button\{flex:1 1 0;min-width:0;min-height:36px;padding:0 8px\}/);
   assert.match(styles, /@media\(max-width:760px\)\{[\s\S]*?\.scope-sort-control\{height:40px;max-width:min\(190px,48vw\);min-height:40px\}[\s\S]*?\.scope-sort-select\{height:38px;min-height:38px/);
   assert.match(styles, /\.generation-generating-block::after\{[\s\S]*?opacity:0[\s\S]*?transform:translateX\(-130%\)[\s\S]*?animation:generation-exposure-sweep 1\.45s/);
   assert.match(styles, /@keyframes generation-exposure-sweep/);
@@ -1341,9 +1427,13 @@ test('title suggestions are explicit, provider-aware, prompt-only, and shared by
   assert.match(defaultProvider, /image-prompt-library\.default_ai_provider/);
   assert.match(app, /readyProviders\.length !== 1/);
   assert.match(app, /window\.localStorage\.setItem\(DEFAULT_AI_PROVIDER_STORAGE_KEY, provider\)/);
-  assert.match(config, /role="radiogroup"/);
-  assert.match(config, /disabled=\{!enabled\}/);
-  assert.match(config, /defaultAiProvider === providerId/);
+  assert.doesNotMatch(config, /className="default-ai-provider-control"/);
+  assert.match(config, /onClick=\{\(\) => setConnectionType\('api'\)\}/);
+  assert.match(config, /onClick=\{\(\) => setConnectionType\('account'\)\}/);
+  assert.match(config, /onSetDefaultConnection=\{\(\) => onDefaultAiProvider\('openai_compatible'\)\}/);
+  assert.match(config, /disabled=\{!enabled \|\| providerActionPending\}/);
+  assert.match(config, /defaultAiProvider === provider\.provider/);
+  assert.match(config, /onClick=\{\(\) => onDefaultAiProvider\(provider\.provider as AiProvider\)\}/);
   assert.match(styles, /\.title-suggestion-meta\{[^}]*display:flex;[^}]*gap:6px/);
 });
 

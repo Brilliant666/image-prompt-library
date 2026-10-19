@@ -9,14 +9,17 @@ import CardsView from './components/CardsView';
 import ItemDetailModal from './components/ItemDetailModal';
 import ItemEditorModal from './components/ItemEditorModal';
 import QuickCaptureModal from './components/QuickCaptureModal';
-import GenerationPanel from './components/GenerationPanel';
-import GenerationQueueDrawer from './components/GenerationQueueDrawer';
+import GalleryWorkspace from './components/gallery/GalleryWorkspace';
+import AgentWorkspace from './components/agent/AgentWorkspace';
+import type { GalleryCommand } from './components/gallery/InputBar';
+import { readLocalPreferences, saveLocalPreferences } from './utils/localPreferences';
+
 import ConfigPanel from './components/ConfigPanel';
 import BatchActionDialog from './components/BatchActionDialog';
 import { useDebouncedValue } from './hooks/useDebouncedValue';
 import { useItemsQuery } from './hooks/useItemsQuery';
 import { useModalFocus } from './hooks/useModalFocus';
-import type { AppearancePreset, AppConfig, AppUpdateStatus, ClusterRecord, GenerationJobRecord, ItemBatchAction, ItemDetail, ItemSortMode, ItemSummary, TagRecord, AiProvider, ViewMode } from './types';
+import type { AppearancePreset, AppConfig, AppUpdateStatus, ClusterRecord, ItemBatchAction, ItemDetail, ItemSortMode, ItemSummary, TagRecord, AiProvider, ViewMode } from './types';
 import { copyTextToClipboard } from './utils/clipboard';
 import { DEFAULT_AI_PROVIDER_STORAGE_KEY, availableAiProviders, isAiProvider, resolveDefaultAiProvider } from './utils/defaultAiProvider';
 import { localizedDemoTitle } from './utils/demoTitles';
@@ -58,7 +61,7 @@ function loadHasChosenUiLanguage() {
 function loadPreferredView(): ViewMode {
   if (typeof window === 'undefined') return 'cards';
   const savedView = window.localStorage.getItem(VIEW_STORAGE_KEY);
-  if (savedView === 'explore' || savedView === 'cards') return savedView;
+  if (savedView === 'explore' || savedView === 'cards' || (!isDemoMode && (savedView === 'gallery' || savedView === 'agent'))) return savedView;
   return 'cards';
 }
 
@@ -91,6 +94,15 @@ export default function App() {
   const showingArchivedItems = /\barchived:true\b/i.test(q);
   const [clusterId, setClusterId] = useState<string>();
   const [view, setView] = useState<ViewMode>(loadPreferredView);
+  const libraryView = useRef<ViewMode>('cards');
+  if (view === 'explore' || view === 'cards') libraryView.current = view;
+  const viewScroll = useRef<Partial<Record<ViewMode, number>>>({});
+  const [localPreferences, setLocalPreferences] = useState(readLocalPreferences);
+  const [agentFocus,setAgentFocus]=useState<{id:string;token:number}>();
+  const [galleryCommand, setGalleryCommand] = useState<GalleryCommand>();
+  const [configSection, setConfigSection] = useState<'api'|'general'|'agent'|'capture'|'data'|'about'>();
+  const [configurationRevision, setConfigurationRevision] = useState(0);
+  useEffect(() => { const refresh = () => setConfigurationRevision(value => value + 1); window.addEventListener('ipl:agent-config-changed', refresh); return () => window.removeEventListener('ipl:agent-config-changed', refresh); }, []);
   const [viewTransition, setViewTransition] = useState<'to-explore' | 'to-cards'>();
   const viewTransitionTimerRef = useRef<number | undefined>(undefined);
   const viewTransitionRunRef = useRef(0);
@@ -119,13 +131,9 @@ export default function App() {
   const [toast, setToast] = useState<{ title: string; tone: 'success' | 'error'; duration?: number }>();
   const [toastClosing, setToastClosing] = useState(false);
   const toastTimerRef = useRef<number | undefined>(undefined);
-  const [standaloneGenerationOpen, setStandaloneGenerationOpen] = useState(false);
-  const [generationQueueOpen, setGenerationQueueOpen] = useState(false);
   const [generationQueueRefreshKey, setGenerationQueueRefreshKey] = useState(0);
+  const [galleryQueueOpen, setGalleryQueueOpen] = useState(false);
   const [focusedGenerationJobId, setFocusedGenerationJobId] = useState<string>();
-  const [generationSourceItem, setGenerationSourceItem] = useState<ItemDetail>();
-  const [generationSourceImageId, setGenerationSourceImageId] = useState<string>();
-  const generationJobRequestRef = useRef(0);
   const editItemRequestRef = useRef(0);
   const [editingItemId, setEditingItemId] = useState<string>();
   const [appConfig, setAppConfig] = useState<AppConfig>();
@@ -289,8 +297,7 @@ export default function App() {
   const saved = () => { refreshClusters(); refreshLibraryTotal(); refreshTags(); setItemsReloadKey(k => k + 1); };
   const clearSelection = () => setSelectedItemIds(new Set());
   const exitSelectionMode = () => { setBatchActionDialog(undefined); setSelectionActionsOpen(false); setSelectionMode(false); clearSelection(); };
-  const deleted = () => { setDetailId(undefined); setEditing(undefined); setFocusedGenerationJobId(undefined); setGenerationSourceItem(undefined);
-    setGenerationSourceImageId(undefined); exitSelectionMode(); refreshClusters(); refreshLibraryTotal(); refreshTags(); setItemsReloadKey(k => k + 1); };
+  const deleted = () => { setDetailId(undefined); setEditing(undefined); setFocusedGenerationJobId(undefined); exitSelectionMode(); refreshClusters(); refreshLibraryTotal(); refreshTags(); setItemsReloadKey(k => k + 1); };
   const refreshAfterBatch = () => { refreshClusters(); refreshLibraryTotal(); refreshTags(); setItemsReloadKey(k => k + 1); };
   const updatePreferredLanguage = (language: PromptCopyLanguage) => {
     setPreferredLanguage(language);
@@ -319,11 +326,16 @@ export default function App() {
   const updateView = (nextView: ViewMode) => {
     if (nextView === view) return;
     cancelPendingEdit();
+    viewScroll.current[view] = window.scrollY;
     const direction = nextView === 'explore' ? 'to-explore' : 'to-cards';
     const commitView = () => {
-      if (nextView !== 'cards') exitSelectionMode();
-      if (nextView === 'explore') setClusterId(undefined);
+      setGalleryQueueOpen(false);
+      if (nextView === 'explore' || nextView === 'cards') {
+        setBatchActionDialog(undefined);
+        setSelectionActionsOpen(false);
+      }
       setView(nextView);
+      requestAnimationFrame(() => window.scrollTo({top:viewScroll.current[nextView] || 0,behavior:'instant'}));
       window.localStorage.setItem(VIEW_STORAGE_KEY, nextView);
     };
     if (viewTransitionTimerRef.current !== undefined) window.clearTimeout(viewTransitionTimerRef.current);
@@ -374,73 +386,19 @@ export default function App() {
   const emptyMode = currentScopeSettled
     ? (!isDemoMode && localizedData.items.length === 0 && !q.trim() && !clusterId ? 'first-run' : 'no-results')
     : undefined;
-  const openNewItemEditor = () => { generationJobRequestRef.current += 1; cancelPendingEdit(); setQuickCaptureOpen(true); };
-  const openFilters = () => { generationJobRequestRef.current += 1; cancelPendingEdit(); setConfigOpen(false); setFocusConfigProviders(false); setGenerationQueueOpen(false); setFiltersOpen(true); };
-  const openConfig = () => { generationJobRequestRef.current += 1; cancelPendingEdit(); setFiltersOpen(false); setFocusConfigProviders(false); setGenerationQueueOpen(false); setConfigOpen(true); };
+  const openNewItemEditor = () => { cancelPendingEdit(); setQuickCaptureOpen(true); };
+  const openFilters = () => { cancelPendingEdit(); setConfigOpen(false); setFocusConfigProviders(false); setFiltersOpen(true); };
+  const openConfig = () => { cancelPendingEdit(); setFiltersOpen(false); setFocusConfigProviders(false); setConfigOpen(true); };
   const closeConfig = () => { setConfigOpen(false); setFocusConfigProviders(false); };
-  const openGenerationQueue = () => {
-    generationJobRequestRef.current += 1;
-    cancelPendingEdit();
-    setGenerationQueueOpen(true);
-  };
-  const closeGenerationQueue = () => { generationJobRequestRef.current += 1; setGenerationQueueOpen(false); };
   const openProviders = () => {
-    generationJobRequestRef.current += 1;
     cancelPendingEdit();
     setFiltersOpen(false);
-    setGenerationQueueOpen(false);
     setFocusConfigProviders(true);
     setConfigOpen(true);
   };
-  const openStandaloneGeneration = () => {
-    generationJobRequestRef.current += 1;
-    cancelPendingEdit();
-    setFocusedGenerationJobId(undefined);
-    setGenerationSourceItem(undefined);
-    setGenerationSourceImageId(undefined);
-    setStandaloneGenerationOpen(true);
-    setGenerationQueueOpen(false);
-  };
-  const openGenerationFromDetail = (item: ItemDetail, imageId?: string) => {
-    setGenerationSourceImageId(imageId);
-    generationJobRequestRef.current += 1;
-    cancelPendingEdit();
-    setFocusedGenerationJobId(undefined);
-    setGenerationSourceItem(item);
-    setStandaloneGenerationOpen(true);
-    setGenerationQueueOpen(false);
-  };
-  const closeStandaloneGeneration = () => {
-    generationJobRequestRef.current += 1;
-    setStandaloneGenerationOpen(false);
-    setFocusedGenerationJobId(undefined);
-    setGenerationSourceItem(undefined);
-    setGenerationSourceImageId(undefined);
-  };
-  const openGenerationJob = (job: GenerationJobRecord) => {
-    cancelPendingEdit();
-    const requestId = generationJobRequestRef.current + 1;
-    generationJobRequestRef.current = requestId;
-    setFocusedGenerationJobId(job.id);
-    if (job.source_item_id) {
-      api.item(job.source_item_id).then(item => {
-        if (generationJobRequestRef.current !== requestId) return;
-        setGenerationSourceItem(item);
-        setDetailId(undefined);
-        setGenerationQueueOpen(false);
-        setStandaloneGenerationOpen(true);
-      }).catch(() => {
-        if (generationJobRequestRef.current !== requestId) return;
-        setToast({ title: t('loadFailed'), tone: 'error' });
-      });
-      return;
-    }
-    setGenerationSourceItem(undefined);
-    setGenerationSourceImageId(undefined);
-    setDetailId(undefined);
-    setGenerationQueueOpen(false);
-    setStandaloneGenerationOpen(true);
-  };
+  const openStandaloneGeneration = () => { cancelPendingEdit(); setDetailId(undefined); setFocusedGenerationJobId(undefined); updateView('gallery'); };
+  const openGenerationFromDetail = (item: ItemDetail, imageId?: string) => { cancelPendingEdit(); setDetailId(undefined); setGalleryCommand({id:Date.now(),item,imageId}); updateView('gallery'); };
+
   const closeItemDetail = () => {
     setDetailId(undefined);
     setFocusedGenerationJobId(undefined);
@@ -529,16 +487,16 @@ export default function App() {
     }
   };
   const showManagementActions = !isDemoMode && view === 'cards';
-  const drawerModalOpen = filtersOpen || configOpen || generationQueueOpen;
-  const blockingModalOpen = !hasChosenUiLanguage || Boolean(detailId || editorOpen || quickCaptureOpen || standaloneGenerationOpen || batchActionDialog);
+  const drawerModalOpen = filtersOpen || configOpen;
+  const blockingModalOpen = !hasChosenUiLanguage || Boolean(detailId || editorOpen || quickCaptureOpen || batchActionDialog || galleryQueueOpen);
   const showFloatingActions = Boolean(hasChosenUiLanguage && !selectionMode && !filtersOpen && !configOpen && !detailId);
-  const floatingActionsHidden = editorOpen || quickCaptureOpen || standaloneGenerationOpen;
+  const floatingActionsHidden = editorOpen || quickCaptureOpen;
   const updateBadgeLabel = restartRequiredVersion
     ? t('restartRequired')
     : (updateStatus?.update_available && updateStatus.update_capability !== 'source' ? t('updateAvailable') : undefined);
   return <div className={`app ${view === 'explore' ? 'explore-mode' : 'cards-mode'}`}>
     <FiltersPanel t={t} open={filtersOpen} clusters={localizedClusters} total={libraryTotal} selected={clusterId} onSelect={handleFilterSelect} onClear={clearCluster} onClose={() => setFiltersOpen(false)} />
-    <ConfigPanel t={t} open={configOpen} focusProviders={focusConfigProviders} onClose={closeConfig} uiLanguage={uiLanguage} onUiLanguage={updateUiLanguage} preferredLanguage={preferredLanguage} onPreferredLanguage={updatePreferredLanguage} appearance={appearance} onAppearance={updateAppearance} defaultAiProvider={defaultAiProvider} onDefaultAiProvider={updateDefaultAiProvider} updateStatus={updateStatus} onRefreshUpdateStatus={refreshUpdateStatus} onUpdateInstalled={handleUpdateInstalled} onLibraryCleanup={saved} />
+    <ConfigPanel t={t} open={configOpen} focusProviders={focusConfigProviders} focusSection={configSection} localPreferences={localPreferences} onLocalPreferences={value => { setLocalPreferences(value); saveLocalPreferences(value); }} onClose={() => { closeConfig(); setConfigSection(undefined); setConfigurationRevision(value => value + 1); }} uiLanguage={uiLanguage} onUiLanguage={updateUiLanguage} preferredLanguage={preferredLanguage} onPreferredLanguage={updatePreferredLanguage} appearance={appearance} onAppearance={updateAppearance} defaultAiProvider={defaultAiProvider} onDefaultAiProvider={updateDefaultAiProvider} updateStatus={updateStatus} onRefreshUpdateStatus={refreshUpdateStatus} onUpdateInstalled={handleUpdateInstalled} onLibraryCleanup={saved} />
     <div className="app-content" inert={drawerModalOpen}>
     {!hasChosenUiLanguage && (
       <div ref={firstRunLanguageRef} className="first-run-language-overlay" role="dialog" aria-modal="true" aria-labelledby="first-run-language-title" tabIndex={-1} onKeyDown={handleFirstRunLanguageKeyDown}>
@@ -555,7 +513,7 @@ export default function App() {
         </section>
       </div>
     )}
-    <TopBar t={t} q={q} queryFilterChips={queryFilterChips} updateBadgeLabel={updateBadgeLabel} onQ={setQ} view={view} onView={updateView} onFilters={openFilters} onConfig={openConfig} filtersOpen={filtersOpen} configOpen={configOpen} hasActiveFilter={Boolean(selectedCluster)} modalOpen={blockingModalOpen} />
+    <TopBar t={t} q={q} queryFilterChips={queryFilterChips} updateBadgeLabel={updateBadgeLabel} onQ={setQ} view={view} onView={updateView} onFilters={openFilters} onConfig={openConfig} onCapture={isDemoMode ? undefined : openNewItemEditor} filtersOpen={filtersOpen} configOpen={configOpen} hasActiveFilter={Boolean(selectedCluster)} modalOpen={blockingModalOpen} />
     <div className={`content-plane${viewTransition ? ` ${viewTransition}` : ''}`} inert={blockingModalOpen} aria-hidden={blockingModalOpen || undefined}>
     {isDemoMode && (
       <div className="demo-banner" role="status">
@@ -566,7 +524,7 @@ export default function App() {
       </div>
     )}
     {/* Static-test compatibility marker: <main className="app-main"> */}
-    <main className={`app-main ${refreshing ? 'is-refreshing' : ''}${loading && !dataScopeMatches ? ' is-scope-loading' : ''}`} aria-busy={loading}>
+    <main className={`app-main ${refreshing ? 'is-refreshing' : ''}${loading && !dataScopeMatches ? ' is-scope-loading' : ''}`} aria-busy={loading} hidden={view === 'gallery' || view === 'agent'}>
       {refreshing && <div className="refresh-indicator" role="status">{t('loading')}</div>}
       {error && (
         <div className="error" role="alert">
@@ -574,10 +532,14 @@ export default function App() {
           <button type="button" className="secondary" onClick={() => setItemsReloadKey(key => key + 1)}>{t('retry')}</button>
         </div>
       )}
-      {(!error || localizedData.items.length > 0) && (view === 'explore'
+      {(!error || localizedData.items.length > 0) && (libraryView.current === 'explore'
         ? <ExploreView t={t} clusters={localizedClusters} items={localizedData.items} total={localizedData.total} hasActiveSearch={Boolean(parsedSearchQuery.q.trim())} searchQuery={parsedSearchQuery.q} loading={contentLoading} sort={activeSort} onSort={updateSort} onOpenCollection={selectCluster} onOpen={setDetailId} onCopyPrompt={copyPrompt} onAdd={isDemoMode ? undefined : openNewItemEditor} />
         : <CardsView t={t} items={localizedData.items} loading={contentLoading} emptyMode={emptyMode} total={localizedData.total} sort={activeSort} onSort={updateSort} clusterName={localizedClusterName(selectedCluster, uiLanguage)} hasActiveSearch={Boolean(parsedSearchQuery.q.trim())} onClearCluster={clearCluster} onOpen={setDetailId} onFavorite={isDemoMode ? undefined : favorite} onEdit={isDemoMode ? undefined : editSummary} editingItemId={editingItemId} onToggleSelection={selectionMode ? toggleSelectedItem : undefined} selectedIds={selectedItemIds} onCopyPrompt={copyPrompt} onAdd={isDemoMode ? undefined : openNewItemEditor} onOpenConfig={openConfig} />)}
     </main>
+    {!isDemoMode && <>
+      <GalleryWorkspace active={view === 'gallery'} queueOpen={galleryQueueOpen} onQueueOpenChange={setGalleryQueueOpen} t={t} preferences={localPreferences} libraryScope={appConfig?.library_path} command={galleryCommand} focusJobId={focusedGenerationJobId} onCloseDetail={() => setFocusedGenerationJobId(undefined)} refreshKey={generationQueueRefreshKey} configurationRevision={configurationRevision} promptVariablesEnabled={Boolean(appConfig?.features?.camelot?.percival)} promptLanguage={preferredLanguage === 'origin' ? uiLanguage : preferredLanguage} preferredProvider={defaultAiProvider} onOpenAgent={id => {setAgentFocus({id,token:Date.now()}); updateView('agent');}} onOpenSettings={openProviders} onAccepted={id => { saved(); setDetailId(id); }} onQueueChanged={() => setGenerationQueueRefreshKey(value => value + 1)} />
+      <AgentWorkspace focusConversationId={agentFocus?.id} focusToken={agentFocus?.token} active={view === 'agent'} onOpenSettings={() => { setFocusConfigProviders(false); setConfigSection('agent'); setConfigOpen(true); }} onOpenJob={id => {setFocusedGenerationJobId(id); updateView('gallery');}} onLibraryChanged={saved} onJobsChanged={() => setGenerationQueueRefreshKey(value => value + 1)} />
+    </>}
     </div>
     {view === 'cards' && selectionMode && !isDemoMode && (
       <div className="selection-toolbar" role="toolbar" aria-label={t('selectReferences')} aria-busy={batchBusy} inert={blockingModalOpen} aria-hidden={blockingModalOpen || undefined}>
@@ -635,9 +597,8 @@ export default function App() {
       />
     )}
     {/* Static-test compatibility marker: !isDemoMode && <button className="fab" */}
-    {!isDemoMode && showFloatingActions && (
+    {!isDemoMode && showFloatingActions && (view === 'explore' || view === 'cards') && (
       <div className={`app-command-dock${floatingActionsHidden ? ' is-hidden' : ''}`} aria-hidden={floatingActionsHidden} inert={floatingActionsHidden}>
-        <GenerationQueueDrawer t={t} open={generationQueueOpen} refreshKey={generationQueueRefreshKey} onOpen={openGenerationQueue} onClose={closeGenerationQueue} onOpenJob={openGenerationJob} onOpenProviders={openProviders} />
         <div className="floating-action-rail">
           {view === 'cards' && localizedData.items.length > 0 && <button className="fab select-fab" onClick={() => { setSelectionMode(true); clearSelection(); }}>{t('selectReferences')}</button>}
           <button className="fab add-fab" onClick={openNewItemEditor}><Plus/> {quickCaptureLabels(uiLanguage).heading}</button>
@@ -645,11 +606,10 @@ export default function App() {
         </div>
       </div>
     )}
-    {!standaloneGenerationOpen && detailId && <ItemDetailModal key={detailId} t={t} id={detailId} uiLanguage={uiLanguage} preferredLanguage={preferredLanguage} clusters={localizedClusters} tags={tags} onClose={closeItemDetail} onCopyPrompt={showCopyToast} onChanged={saved} onDelete={isDemoMode ? undefined : deleteDetail} onOpenItem={setDetailId} onGenerate={openGenerationFromDetail} onEdit={(item) => { closeItemDetail(); setEditing(item); setEditorOpen(true); }} showMutations={!isDemoMode} showManagementActions={showManagementActions} canGenerate={!isDemoMode} />}
+    {detailId && <ItemDetailModal key={detailId} t={t} id={detailId} uiLanguage={uiLanguage} preferredLanguage={preferredLanguage} clusters={localizedClusters} tags={tags} onClose={closeItemDetail} onCopyPrompt={showCopyToast} onChanged={saved} onDelete={isDemoMode ? undefined : deleteDetail} onOpenItem={setDetailId} onGenerate={openGenerationFromDetail} onEdit={(item) => { closeItemDetail(); setEditing(item); setEditorOpen(true); }} showMutations={!isDemoMode} showManagementActions={showManagementActions} canGenerate={!isDemoMode} />}
     {toast && <div className={`toast copy-toast elegant-toast ${toast.tone}${toastClosing ? ' is-closing' : ''}`} role="status"><span className="toast-icon">{toast.tone === 'success' ? <Check size={16} /> : <XCircle size={16} />}</span><span className="toast-title">{toast.title}</span></div>}
     {!isDemoMode && <QuickCaptureModal open={quickCaptureOpen} uiLanguage={uiLanguage} onClose={() => setQuickCaptureOpen(false)} onSaved={saved} onFullEditor={item => { setQuickCaptureOpen(false); setEditing(item); setEditorOpen(true); }} />}
     {editorOpen && <ItemEditorModal t={t} item={editing} clusters={localizedClusters} tags={tags} defaultAiProvider={defaultAiProvider} onClose={() => setEditorOpen(false)} onSaved={saved} onDeleted={deleted} allowDelete={showManagementActions} />}
-    {standaloneGenerationOpen && <GenerationPanel item={generationSourceItem} sourceImageId={generationSourceImageId} t={t} preferredLanguage={preferredLanguage} clusters={localizedClusters} tags={tags} defaultAiProvider={defaultAiProvider} promptVariablesEnabled={Boolean(appConfig?.features?.camelot?.percival)} initialJobId={focusedGenerationJobId} onClose={closeStandaloneGeneration} onOpenProviders={openProviders} onQueueChanged={() => setGenerationQueueRefreshKey(key => key + 1)} onAccepted={(item, message) => { saved(); setToast({ title: message || t('saveReference'), tone: 'success' }); if (item?.id) setDetailId(item.id); }} />}
     </div>
   </div>
 }

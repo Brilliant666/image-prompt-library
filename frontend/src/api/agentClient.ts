@@ -1,0 +1,128 @@
+import type { GenerationJobRecord, OpenAICompatibleProfile } from '../types';
+import type { AgentReference } from '../utils/playground/agentImageReferences';
+
+export interface AgentConfig {
+  apiConfigMode: 'off' | 'native' | 'hybrid';
+  textProfileId: string | null;
+  imageProfileId: string | null;
+  textModel: string;
+  imageModel: string;
+  reasoningEffort: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null;
+  stream: boolean;
+  partialImages: 0 | 1 | 2 | 3;
+  maxToolRounds: number;
+  maxImageJobs: number;
+  webSearch: boolean;
+  mathFormattingPrompt: boolean;
+}
+export interface AgentConfigResponse {
+  revision: number;
+  config: AgentConfig;
+  profiles: OpenAICompatibleProfile[];
+  capabilities: { modes: Array<AgentConfig['apiConfigMode']>; maxInputImages: number; maxToolRounds: number; maxImageJobs: number; webSearch: boolean; masks: boolean; progressTransport: 'poll' };
+  ready: boolean;
+  issues: Array<{ code: string; field: string | null; message: string }>;
+}
+export interface AgentImage {
+  id: string; source: AgentReference; status: 'available' | 'pending' | 'removed';
+  url: string | null; thumbnailUrl: string | null; mimeType: string | null;
+  width: number | null; height: number | null; sha256: string | null;
+}
+export interface AgentOutputItem {
+  id?: string; type: string; call_id?: string; name?: string; status?: string;
+  arguments?: string; content?: Array<{ type: string; text?: string; refusal?: string; annotations?: Array<{ type: string; url?: string; title?: string }> }>;
+}
+export interface AgentRound {
+  id: string; index: number; parentRoundId: string | null; userMessageId: string; assistantMessageId?: string;
+  prompt: string; inputImageIds: string[]; maskTargetImageId: string | null; maskImageId: string | null;
+  outputTaskIds: string[]; responseId?: string; responseOutput?: AgentOutputItem[];
+  status: 'running' | 'done' | 'error'; error: string | null; createdAt: number; finishedAt: number | null;
+  requestId: string; derivedFromRoundId?: string | null;
+}
+export interface AgentMessage {
+  id: string; role: 'user' | 'assistant'; content: string; roundId: string;
+  inputImageIds?: string[]; outputTaskIds?: string[]; createdAt: number;
+}
+export interface AgentConversation {
+  id: string; title: string; activeRoundId: string | null; createdAt: number; updatedAt: number;
+  rounds: AgentRound[]; messages: AgentMessage[];
+}
+export interface AgentConversationSummary {
+  id: string; title: string; activeRoundId: string | null; createdAt: number; updatedAt: number;
+  roundCount: number; runningRequestId: string | null; revision: number;
+}
+export interface AgentImageParams {
+  size: string; quality: string; output_format: 'png' | 'jpeg' | 'webp';
+  output_compression?: number | null; moderation?: string; background?: string;
+}
+export interface AgentRoundCreate {
+  requestId: string; expectedRevision: number; parentRoundId: string | null;
+  origin: 'send' | 'edit' | 'regenerate'; derivedFromRoundId?: string | null;
+  prompt: string; refs: AgentReference[]; mask?: { targetRefIndex: number; uploadId: string } | null;
+  configRevision: number; activeProfileId?: string | null; params: AgentImageParams;
+  authorization: { scope: 'this_request'; allowImageGeneration: boolean; allowWebSearch: boolean; maxToolRounds: number; maxImageJobs: number };
+}
+export interface AgentToolCall {
+  id: string; step: number; callId: string; name: string;
+  state: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+  itemIds: string[]; jobIds: string[]; error: string | null;
+}
+export interface AgentRequest {
+  id: string; conversationId: string; roundId: string;
+  params: AgentImageParams;
+  state: 'queued' | 'running' | 'waiting_for_jobs' | 'stop_requested' | 'completed' | 'stopped' | 'failed' | 'interrupted' | 'unknown';
+  frozenConfig: AgentConfig & { textProfileFingerprint: string; imageProfileFingerprint: string | null };
+  authorization: AgentRoundCreate['authorization'];
+  usage: { responseStepsStarted: number; imageJobsCreated: number };
+  toolCalls: AgentToolCall[];
+  canResume: boolean; recoveryReason: string | null; upstreamOutcome: 'not_sent' | 'known' | 'unknown';
+  stopRequested: boolean; upstreamMayContinue: boolean; error: { code: string; message: string } | null;
+}
+export interface AgentSnapshot {
+  schemaVersion: 1; revision: number; conversation: AgentConversation; request: AgentRequest | null;
+  jobs: GenerationJobRecord[]; images: AgentImage[];
+}
+
+export class AgentApiError extends Error {
+  constructor(public status: number, public code: string, message: string) { super(message); this.name = 'AgentApiError'; }
+}
+
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const timeout = new AbortController();
+  const timer = setTimeout(() => timeout.abort(), 30_000);
+  const signal = init.signal ? AbortSignal.any([init.signal, timeout.signal]) : timeout.signal;
+  try {
+    // No automatic retry, including after a timeout. Mutating submissions retain
+    // their original request ID in the workspace's uncertain-submission journal.
+    const response = await fetch(`/api/agent${path}`, {
+      ...init, signal, credentials: 'same-origin',
+      headers: init.body instanceof FormData ? init.headers : { 'Content-Type': 'application/json', ...init.headers },
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => null) as { detail?: unknown } | null;
+      const detail = data?.detail;
+      const value = typeof detail === 'object' && detail !== null ? detail as { code?: string; message?: string } : null;
+      throw new AgentApiError(response.status, value?.code || 'request_failed', value?.message || (typeof detail === 'string' ? detail : `请求未完成（HTTP ${response.status}）`));
+    }
+    return response.json() as Promise<T>;
+  } finally { clearTimeout(timer); }
+}
+
+export const getAgentConfig = (signal?: AbortSignal) => request<AgentConfigResponse>('/config', { signal });
+export const saveAgentConfig = (expectedRevision: number, config: AgentConfig, signal?: AbortSignal) => request<AgentConfigResponse>('/config', { method: 'PUT', signal, body: JSON.stringify({ expectedRevision, config }) });
+export const agentApi = {
+  conversations: (cursor?: string, signal?: AbortSignal) => request<{ conversations: AgentConversationSummary[]; nextCursor: string | null }>(`/conversations?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, { signal }),
+  createConversation: (id: string, title?: string) => request<AgentSnapshot>('/conversations', { method: 'POST', body: JSON.stringify({ id, title }) }),
+  conversation: (id: string, signal?: AbortSignal) => request<AgentSnapshot>(`/conversations/${encodeURIComponent(id)}`, { signal }),
+  updateConversation: (id: string, payload: { expectedRevision: number; title?: string; activeRoundId?: string | null }) => request<AgentSnapshot>(`/conversations/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+  deleteConversation: (id: string) => request<{ id: string; deleted: true }>(`/conversations/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  submit: (conversationId: string, payload: AgentRoundCreate) => request<AgentSnapshot>(`/conversations/${encodeURIComponent(conversationId)}/rounds`, { method: 'POST', body: JSON.stringify(payload) }),
+  deleteRound: (conversationId: string, roundId: string) => request<AgentSnapshot>(`/conversations/${encodeURIComponent(conversationId)}/rounds/${encodeURIComponent(roundId)}`, { method: 'DELETE' }),
+  request: (id: string, signal?: AbortSignal) => request<AgentSnapshot>(`/requests/${encodeURIComponent(id)}`, { signal }),
+  stop: (id: string) => request<AgentSnapshot>(`/requests/${encodeURIComponent(id)}/stop`, { method: 'POST', body: '{}' }),
+  resume: (id: string, resumeId: string) => request<AgentSnapshot>(`/requests/${encodeURIComponent(id)}/resume`, { method: 'POST', body: JSON.stringify({ resumeId }) }),
+  upload: (file: File, kind: 'reference' | 'mask' = 'reference') => {
+    const body = new FormData(); body.append('file', file); body.append('kind', kind);
+    return request<{ uploadId: string; image: AgentImage }>('/uploads', { method: 'POST', body });
+  },
+};

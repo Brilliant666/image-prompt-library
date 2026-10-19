@@ -35,7 +35,7 @@ if [ -z "$SOURCE_SHA" ]; then
   fi
   DIRTY_SOURCE="$(git status --porcelain --untracked-files=normal -- \
     backend frontend package.json package-lock.json pyproject.toml vite.config.ts tsconfig.json \
-    sample-data/manifests scripts README.md LICENSE NOTICE SECURITY.md)"
+    sample-data/manifests scripts README.md LICENSE licenses NOTICE SECURITY.md)"
   if [ -n "$DIRTY_SOURCE" ]; then
     echo "Packaged source inputs are dirty; commit them or set IMAGE_PROMPT_LIBRARY_SOURCE_SHA only for a controlled source snapshot." >&2
     exit 2
@@ -102,6 +102,7 @@ for path in \
   pyproject.toml \
   README.md \
   LICENSE \
+  licenses \
   NOTICE \
   SECURITY.md; do
   copy_path "$path"
@@ -157,6 +158,7 @@ rm -f "$RELEASE_DIR/$ARTIFACT" "$RELEASE_DIR/$CHECKSUM_FILE" "$RELEASE_DIR/$MANI
     "${maintenance_files[@]}" \
     frontend \
     LICENSE \
+    licenses \
     NOTICE \
     pyproject.toml \
     README.md \

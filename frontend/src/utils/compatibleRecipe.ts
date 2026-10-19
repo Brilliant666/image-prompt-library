@@ -7,15 +7,46 @@ export const IMAGE25_QUALITIES = ['auto', 'low', 'medium', 'high', 'xhigh', 'max
 export const COMPATIBLE_SIZE_OPTIONS = ['auto', '1024x1024', '1536x1024', '1024x1536', '2048x2048', '2048x1152', '1152x2048', '3840x2160', '2160x3840'];
 export const IMAGE_SIZES = COMPATIBLE_SIZE_OPTIONS;
 export const LEGACY_RATIO_SIZES: Record<string, string> = { auto: 'auto', '1:1': '1024x1024', '3:4': '864x1152', '9:16': '720x1280', '4:3': '1152x864', '16:9': '1280x720' };
-export interface CompatibleRecipe { model: string; quality: string; size: string; background: string; output_format: string; output_compression?: number; size_mode?: 'auto4k'; legacyDerived?: boolean }
+export interface CompatibleTransportOverrides {
+  base_url_mode?: 'versioned' | 'custom';
+  stream?: boolean;
+  partial_images?: number;
+  response_format?: 'auto' | 'b64_json';
+}
+export interface CompatibleRecipe extends CompatibleTransportOverrides { model: string; quality: string; size: string; background: string; output_format: string; output_compression?: number; moderation?: 'auto'|'low'; size_mode?: 'auto4k'; legacyDerived?: boolean; transportLegacyDerived?: true }
+const TRANSPORT_KEYS = ['base_url_mode', 'stream', 'partial_images', 'response_format'] as const;
+// Same defaults used by run_job for historical requests predating these options.
+// New composers intentionally omit these keys, allowing the selected API defaults.
+const LEGACY_TRANSPORT: Required<CompatibleTransportOverrides> = { base_url_mode: 'versioned', stream: false, partial_images: 0, response_format: 'auto' };
+/** Only safe request options may travel with a recipe or the current draft. */
+export function pickCompatibleTransportOverrides(value: unknown): CompatibleTransportOverrides {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const source = value as Record<string, unknown>;
+  return {
+    ...(source.base_url_mode === 'versioned' || source.base_url_mode === 'custom' ? { base_url_mode: source.base_url_mode } : {}),
+    ...(typeof source.stream === 'boolean' ? { stream: source.stream } : {}),
+    ...(typeof source.partial_images === 'number' && Number.isInteger(source.partial_images) && source.partial_images >= 0 && source.partial_images <= 3 ? { partial_images: source.partial_images } : {}),
+    ...(source.response_format === 'auto' || source.response_format === 'b64_json' ? { response_format: source.response_format } : {}),
+  };
+}
+/** An explicit connection switch returns to its current API defaults. */
+export function clearCompatibleTransportOverrides<T extends CompatibleRecipe>(recipe: T): T {
+  const result = { ...recipe };
+  for (const key of TRANSPORT_KEYS) delete result[key];
+  delete result.transportLegacyDerived;
+  return result;
+}
 // Compatible gateways may expose model aliases; names do not establish capabilities.
 // Keep all supported request values available and let the service validate them.
 export function imageQualities(_model: string) { return IMAGE25_QUALITIES; }
 export function restoreCompatibleRecipe(job: Pick<GenerationJobRecord, 'parameters' | 'metadata' | 'model'>): CompatibleRecipe {
   const requested = job.metadata?.requested;
   const values = { ...job.parameters, ...(requested && typeof requested === 'object' ? requested as Record<string, unknown> : {}) };
+  const recordedTransport = { ...pickCompatibleTransportOverrides(job.parameters), ...pickCompatibleTransportOverrides(requested) };
+  const transport = { ...LEGACY_TRANSPORT, ...recordedTransport };
+  const transportLegacyDerived = TRANSPORT_KEYS.some(key => recordedTransport[key] === undefined);
   const text = (key: string, fallback: string) => typeof values[key] === 'string' ? values[key] as string : fallback;
-  return { ...(values.size_mode === 'auto4k' ? { size_mode: 'auto4k' as const } : {}), model: text('model', job.model || ''), quality: text('quality', 'low'), size: text('size', LEGACY_RATIO_SIZES[String(values.requested_aspect_ratio || 'auto')] || 'auto'), background: text('background', 'auto'), output_format: text('output_format', 'png'), ...(typeof values.output_compression === 'number' ? { output_compression: values.output_compression } : {}), legacyDerived: !values.size };
+  return { ...transport, ...(transportLegacyDerived ? { transportLegacyDerived: true as const } : {}), ...(values.size_mode === 'auto4k' ? { size_mode: 'auto4k' as const } : {}), model: text('model', job.model || ''), quality: text('quality', 'low'), size: text('size', LEGACY_RATIO_SIZES[String(values.requested_aspect_ratio || 'auto')] || 'auto'), background: text('background', 'auto'), output_format: text('output_format', 'png'), ...(typeof values.output_compression === 'number' ? { output_compression: values.output_compression } : {}), ...(values.moderation === 'auto' || values.moderation === 'low' ? {moderation:values.moderation} : {}), legacyDerived: !values.size };
 }
 export function compatibleValidation(recipe: CompatibleRecipe): Parameters<Translator>[0] | undefined {
   if (!recipe.model.trim()) return 'imageModelRequired';
@@ -35,7 +66,10 @@ export function compatibleValidation(recipe: CompatibleRecipe): Parameters<Trans
 export function compatibleParameters(recipe: CompatibleRecipe) {
   const error = compatibleValidation(recipe);
   if (error) throw new Error(error);
-  return { model: recipe.model, quality: recipe.quality, size: recipe.size, background: recipe.background, output_format: recipe.output_format, ...(recipe.output_format !== 'png' && recipe.output_compression !== undefined ? { output_compression: recipe.output_compression } : {}), n: 1 };
+  if (recipe.moderation !== undefined && !['auto','low'].includes(recipe.moderation)) throw new Error('审核强度须为 auto 或 low');
+  const transport = pickCompatibleTransportOverrides(recipe);
+  if (TRANSPORT_KEYS.some(key => recipe[key] !== undefined && transport[key] === undefined)) throw new Error('历史请求的传输配置无效，请重新选择 API 配置');
+  return { model: recipe.model, quality: recipe.quality, size: recipe.size, background: recipe.background, output_format: recipe.output_format, ...(recipe.output_format !== 'png' && recipe.output_compression !== undefined ? { output_compression: recipe.output_compression } : {}), ...(recipe.moderation !== undefined ? {moderation:recipe.moderation} : {}), ...transport, n: 1 };
 }
 // 1% relative ratio error tolerates integer pixel rounding; shared with the backend.
 export const ASPECT_RATIO_RELATIVE_TOLERANCE = 0.01;

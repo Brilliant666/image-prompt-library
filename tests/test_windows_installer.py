@@ -81,14 +81,14 @@ def test_native_windows_smoke_and_ci_contract():
 
 
 @pytest.mark.parametrize("dirty_kind", ("tracked", "untracked"))
-def test_native_windows_smoke_refuses_dirty_packaged_source(tmp_path: Path, dirty_kind: str):
+@pytest.mark.parametrize("relative_path", ("backend/main.py", "licenses/Playground-MIT.txt"))
+def test_native_windows_smoke_refuses_dirty_packaged_source(tmp_path: Path, dirty_kind: str, relative_path: str):
     source_root = tmp_path / "source"
-    backend = source_root / "backend"
-    backend.mkdir(parents=True)
-    tracked = backend / "main.py"
+    tracked = source_root / relative_path
+    tracked.parent.mkdir(parents=True)
     tracked.write_text("clean = True\n", encoding="utf-8")
     subprocess.run(["git", "init"], cwd=source_root, check=True, capture_output=True)
-    subprocess.run(["git", "add", "backend/main.py"], cwd=source_root, check=True)
+    subprocess.run(["git", "add", relative_path], cwd=source_root, check=True)
     subprocess.run(
         ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "fixture"],
         cwd=source_root,
@@ -98,7 +98,7 @@ def test_native_windows_smoke_refuses_dirty_packaged_source(tmp_path: Path, dirt
     if dirty_kind == "tracked":
         tracked.write_text("clean = False\n", encoding="utf-8")
     else:
-        (backend / "source-canary.py").write_text("canary = True\n", encoding="utf-8")
+        (tracked.parent / "source-canary.txt").write_text("canary = True\n", encoding="utf-8")
 
     smoke = powershell_literal(ROOT / "tests" / "windows-installer-smoke.ps1")
     script = f"""
@@ -564,35 +564,19 @@ def test_real_release_package_extracts_with_hardened_windows_installer(tmp_path:
         pytest.skip("Git Bash is required for the real release package regression")
     assert not any(path.exists() for path in repo_artifacts)
     source_root = tmp_path / "package-source"
-    for relative_path in (
-        "backend",
-        "frontend/dist",
-        "sample-data/manifests",
-        "scripts/appctl.sh",
-        "scripts/library-archive.py",
-        "scripts/install.sh",
-        "scripts/load-env.sh",
-        "scripts/install-sample-data.sh",
-        "scripts/setup-runtime.sh",
-        "scripts/verify-release-assets.py",
-        "scripts/appctl.ps1",
-        "scripts/install.ps1",
-        "scripts/install-sample-data.ps1",
-        "scripts/setup-runtime.ps1",
-        "scripts/package-release.sh",
-        "pyproject.toml",
-        "README.md",
-        "LICENSE",
-        "NOTICE",
-        "SECURITY.md",
-    ):
-        source = ROOT / relative_path
-        target = source_root / relative_path
-        if source.is_dir():
-            shutil.copytree(source, target)
-        else:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
+    copied = run_powershell(
+        f"""
+$source = [IO.File]::ReadAllText({powershell_literal(ROOT / 'tests' / 'windows-installer-smoke.ps1')})
+$functionStart = $source.IndexOf('function Copy-PackagerSource')
+$functionEnd = $source.IndexOf('function Find-Python')
+if ($functionStart -lt 0 -or $functionEnd -lt 0) {{ throw 'Smoke source-copy function was not found.' }}
+$repoRoot = {powershell_literal(ROOT)}
+$packagerSource = {powershell_literal(source_root)}
+Invoke-Expression $source.Substring($functionStart, $functionEnd - $functionStart)
+Copy-PackagerSource
+"""
+    )
+    assert copied.returncode == 0, copied.stdout + copied.stderr
     bash_root = f"/{source_root.drive[0].lower()}{source_root.as_posix()[2:]}"
     python_path = Path(sys.executable)
     bash_python = f"/{python_path.drive[0].lower()}{python_path.as_posix()[2:]}"
@@ -639,6 +623,7 @@ Assert-VersionPayload -Root {powershell_literal(destination)} -ExpectedVersion '
     assert (destination / "VERSION").read_text(encoding="ascii").strip() == version
     assert (destination / "sample-data" / "manifests").is_dir()
     assert (destination / "LICENSE").is_file()
+    assert (destination / "licenses" / "Playground-MIT.txt").read_bytes() == (ROOT / "licenses" / "Playground-MIT.txt").read_bytes()
     assert not any(path.exists() for path in repo_artifacts)
 
 

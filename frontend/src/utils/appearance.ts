@@ -1,10 +1,10 @@
 import type { AppearancePreset } from '../types';
 
 export const APPEARANCE_STORAGE_KEY = 'image-prompt-library.appearance.v1';
-export const DEFAULT_APPEARANCE: AppearancePreset = 'gallery_vermilion';
+export const DEFAULT_APPEARANCE: AppearancePreset = 'pure_white';
 
 export function normalizeAppearance(value: string | null | undefined): AppearancePreset {
-  if (value === 'pine_archive' || value === 'aubergine_ink') return value;
+  if (value === 'pure_white' || value === 'gallery_vermilion' || value === 'pine_archive' || value === 'aubergine_ink') return value;
   return DEFAULT_APPEARANCE;
 }
 

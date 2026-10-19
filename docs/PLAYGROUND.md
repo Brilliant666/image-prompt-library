@@ -1,0 +1,227 @@
+# Playground workspaces
+
+Image Prompt Library remains the asset library and the only generation task store.
+The gallery, Agent workspace and grouped settings adapt interaction and source
+code from [CookSleep/gpt_image_playground](https://github.com/CookSleep/gpt_image_playground),
+pinned to `1e9d5af60aadd9117a835cc2da43908b8e3370dd` (2026-10-19).
+
+The source is MIT licensed, copyright 2026 CookSleep; its complete license is
+retained in [Playground-MIT.txt](../licenses/Playground-MIT.txt). The existing
+Image Prompt Library license and attribution remain in effect.
+
+Adaptations replace the source's browser database, credentials and direct provider
+requests with this project's server-side profiles, generation queue and library.
+No Playground installer, updater, remote announcement, sponsor configuration or
+preconfigured account is included.
+
+The source `virtualGrid.ts` and `useVirtualGrid.ts` are reused for virtual layout
+and rectangular selection. Lightbox wheel zoom, pan, pinch, double-tap and swipe
+handling comes from `src/components/Lightbox.tsx`, with scoped styles and this
+project's focus management. Image dragging outside these controls remains enabled.
+
+The new workspaces require a local backend; the static example site continues to
+offer Explore and Library without prompting for provider credentials.
+
+## Using the workspaces
+
+The navigation is **Explore / Library / 画廊 (Gallery) / Agent**. Quick capture and
+the settings button remain available without an image or text API account.
+Workspace navigation retains the composer, filters, selection and scroll position.
+Tasks and conversations live on the server; reopening a page never submits them.
+The shared navigation keeps the same layout in every workspace; Library search
+and filters sit in its own toolbar. Pure white is the default appearance for a
+new browser, while an explicitly saved vermilion, pine or aubergine theme remains
+selected. Appearance can be changed in General settings.
+
+In Gallery, enter a prompt, optionally choose Library/history images or upload,
+paste or drop image files, and select an API profile. Model ID, pixel size,
+quality, background, output format, compression and moderation are separate request settings.
+The existing 4K target resolver and prompt variables are retained. A target is
+not a promise of the returned resolution; the details view distinguishes the
+request, reported response and decoded file. Original image bytes are retained.
+URL-only browser drags need an actual downloaded/copied image; they are not
+treated as uploaded files.
+
+One submission creates one job or an existing 3/5/10-job generation set. Results
+can be selected, downloaded as originals in a ZIP, inspected in the zoomable
+lightbox, restored for another request, or saved as a new Library reference or
+attached to an existing reference. Clearing a generation result does not delete
+an already accepted Library image. Protected Agent references remain usable.
+History starts with 48 results. **Only successful** is the default, including
+results already saved to Library; choose **Success and failure**, **All states**
+or an individual state to inspect other jobs. The browser remembers this choice.
+Status filtering happens before server pagination. Text search covers loaded
+pages, and **Load more** makes older pages available. Failed jobs remain in the
+queue and database; filtering never deletes them.
+
+Refreshing the page can display the previous list while checking the server.
+This tab-local cache is scoped to the library and filter, expires after 30
+minutes and contains bounded display metadata only, without image bytes,
+credentials or complete recipes. A failed refresh leaves the cached cards visible
+with an error notice. Opening details or restoring a recipe fetches the full job;
+a cached card cannot submit a generation request by itself. Clearing/accepting
+results invalidates the cache, and submitting shows a queue receipt even when
+the chosen filter hides pending jobs.
+
+Compact horizontal task cards show the original image without stretching, the
+prompt, actual returned dimensions, state and existing task actions. The results
+preview also shows its actual aspect ratio; near-common ratios are marked `≈`
+while exact pixels remain visible. Failed tasks use a red alert icon and text.
+Task elapsed time runs from the recorded execution start to completion, excluding
+queue time and later acceptance or cleanup; running cards show elapsed execution
+time. Records without valid timing omit the badge rather than inventing a value.
+The selection checkbox sits in the lower-left corner, clear of these badges. The results
+list scrolls independently above the composer, so expanding a prompt
+or reference images does not cover result cards. Selecting tasks replaces the
+search controls within the same toolbar space; it does not move the cards.
+Copy success is confirmed briefly on the clicked button. Completion notices
+float without changing the list layout, while action errors remain dismissible.
+The details dialog separates the original image from the prompt and request
+settings, with its main actions at the bottom. Requested/actual output checks,
+mismatch warnings, reference images and full request provenance remain available.
+Compact parameter pills show
+the full model, size, quality and count; **More** groups format, transparency,
+moderation and applicable compression. Transparency maps to `auto`, `opaque`
+(`false`) or `transparent` (`true`); transparent output requires PNG or WebP.
+Moderation offers `auto` and `low`, as defined by the Images
+[generation](https://developers.openai.com/api/reference/resources/images/methods/generate)
+and [edit](https://developers.openai.com/api/reference/resources/images/methods/edit)
+APIs. Old recipes omit this optional parameter until explicitly selected. An API
+may reject or ignore a setting; selecting `low` does not guarantee acceptance.
+
+The single size button opens a dialog with **Auto / By ratio / Custom dimensions**.
+Auto includes both service-decided `size: auto` and the existing prompt-first 4K
+target. By ratio offers 1K/2K/4K presets and common or custom ratios, with a pixel
+preview before confirmation (for example, 4K at 2:3 requests 2304×3456). Explicit
+historical sizes remain unchanged when reopened; invalid custom dimensions are
+reported rather than silently rescaled. Cancel leaves the request unchanged.
+These presets only select request dimensions; they never stretch saved images.
+
+The **+** button opens image input options. The top-right history
+icon opens the existing work queue, including running tasks and older batches.
+Opening a batch scopes the results list to that batch; **Return to all history**
+restores the full loaded list. Neither action resubmits a generation request.
+
+Settings are grouped into API, Preferences, Agent, Capture, Data and About. API
+profiles retain their stable IDs and independent keys. Copying a profile happens
+on the server; keys are never returned to the browser for copying. Reordering
+does not change the default. Existing ChatGPT/Codex OAuth, Grok OAuth and the
+capture organizer keep their separate credentials and protocols. The organizer
+still uses Chat Completions; Agent uses Responses.
+
+The API page has two connection views: API Key profiles and Account connections.
+sub2api and other synchronous OpenAI-compatible services are named profiles of
+the same protocol; ChatGPT/Codex and Grok account connections retain their own
+login flows. Explicit default actions live inside the matching view; browsing
+the two views does not change the default. The always-visible profile list shows
+the current/default profile and configuration state. Selected fields are fully
+expanded: name, base URL and root mode, independent key, model list and default,
+timeout, Images streaming, intermediate preview count and optional Base64 request.
+The derived Images/Responses endpoint addresses and remembered browser parameters
+remain visible. See [API options and streaming](OPENAI_COMPATIBLE.md#optional-image-streaming).
+Saving or switching a profile does not test a paid endpoint. Empty key input
+preserves the existing key. A separate control can reset the selected profile's
+remembered image parameters in this browser without clearing the current prompt,
+reference images, other profiles or history.
+
+General preferences apply only to the Gallery and Agent composers, not the
+browser capture extension. Input persistence is opt-in and local to this browser.
+An unresolved Agent submission always retains its frozen request receipt so
+closing the page cannot accidentally turn it into a new paid request.
+
+## Agent requests and authorization
+
+Choose a full text model ID and a compatible API profile in Agent settings.
+Saving these settings does not test the endpoint or spend model credits.
+
+- **Hybrid**: Responses text/tool calls use the text profile. Validated
+  `generate_image`, `generate_image_batch` and `continue_generation` calls create
+  jobs in the existing image queue, using the separately selected image profile.
+- **Native**: Responses `image_generation` results enter the same image decoding,
+  task and Library acceptance flow. The application does not call Images again
+  after receiving a native result. Text and image-tool models remain separate.
+- **Current API / independent configuration off**: use the profile explicitly
+  selected in the Agent workspace for the native Responses route. A text model
+  is still required; an image-model name is not assumed to be a text model.
+
+Image generation is off for a new turn until **Allow images for this turn** is
+selected. The turn freezes its image limit and maximum Responses steps; web search
+also needs both its configuration switch and explicit turn authorization. These
+limits bound the application's dispatches, not a provider's price or billing.
+
+Only selected reference images and the selected conversation branch are sent.
+`@图1` addresses a current attachment; `@第2轮图1` addresses an output on the
+current branch. Editing or regenerating a message creates another branch and
+keeps the old one. A missing reference is reported rather than substituted.
+Model tool arguments cannot provide arbitrary file paths, URLs, shell commands,
+credential changes or asset-deletion instructions.
+
+Stop prevents new calls. An already submitted upstream request may still finish
+or be billed. HTTP failures, disconnections and unknown outcomes do not trigger
+automatic paid POST retries. Durable request IDs, step claims and tool/job
+associations prevent browser reconnection and duplicate events from creating the
+same job again. A known-safe interrupted continuation requires an explicit
+resume; changed profile identity, deleted conversation or unknown sent step blocks
+it. Native results restored from Gallery return to their Agent conversation,
+preserving the original route.
+
+The Responses parser accepts JSON and SSE. Text and partial-image events are
+progress only; they are not a final successful image. Final images still undergo
+real decoding. Empty image output, refusal and interrupted streams remain visible
+errors. Provider-origin diagnostics and persisted response fields are sanitized.
+
+## Source adaptation and capability status
+
+| Source area | Integration | Status |
+| --- | --- | --- |
+| `virtualGrid.ts`, `useVirtualGrid.ts` | Reused measured virtualization and rectangular selection; adapted for hidden workspaces | Local behavior and browser verification |
+| `TaskGrid`, `TaskCard`, `InputBar`, `DetailModal` | Adapted layout and operations to existing generation jobs, recipes, profiles and Library acceptance | Local HTTP mock and browser verification |
+| `SizePickerModal`, `size.ts` | Adapted three-tab size selection, ratio presets and bounded pixel calculations; retained existing auto-4K resolver | Local parameter tests and browser verification |
+| `Lightbox`, `clickSuppression` | Reused zoom, pan, pinch, double-tap, swipe and click suppression; scoped styles/focus handling | Desktop browser verification; physical touch gestures need device acceptance |
+| `AgentWorkspace`, conversation/reference/response helpers | Adapted branch, mention, message and tool-result semantics; server-owned request lifecycle | Local HTTP JSON/SSE and browser verification; real providers unverified |
+| `SettingsModal`, settings/profile interactions | Grouped dialog, list edit/copy/order, local workflow preferences | Local tests and browser verification |
+| Native Responses image tool | Shared result validation and storage, no second Images request | Implemented and mock-tested; real provider support unverified |
+| Streaming text / partial images | Server processes SSE and UI polls durable progress | Mock-tested; real provider streaming unverified |
+| Web search | Explicitly authorized Responses built-in tool and citation display | Implemented; no paid search performed |
+| Native transparency | Existing background/format parameters and alpha-preserving original/derived files | Local synthetic tests; real provider support unverified |
+| Mask editing | Native mask upload/target validation protocol | Backend tests only; source paint/mask editor UI not ported |
+| Canvas and comment annotations | — | Not ported in this iteration |
+| Multiple prompt batch editor | Existing identical-prompt generation sets; Agent batch tools | Source multi-prompt editor not ported |
+| Multiple Gallery favorites/groups | Existing Library Collections remain authoritative | Source separate favorites store not ported |
+| Local background removal | — | Not ported; no original is overwritten |
+| Asynchronous/custom HTTP providers | — | Not ported; no unsupported switch is exposed |
+
+The source browser IndexedDB asset database, direct provider-key handling and
+front-end scheduler are intentionally replaced by the existing backend contracts.
+No extra Node service or second asset library is introduced.
+
+## Persistence, backups and compatibility
+
+Migration `014_agent_workspaces.sql` incrementally adds Agent config, conversations,
+rounds, requests, steps, tool/job links, reference snapshots and resume receipts
+to the existing SQLite database. Agent images use the existing generation-reference
+and generation-result directories. Portable backups include these rows and files;
+restore validates their schema and paths. They do not include external provider,
+OAuth, pairing or organizer credentials.
+
+Use the existing `image-prompt-library backup`, `verify-backup` and `restore`
+commands. Stop the isolated/application instance before operations requiring its
+library lease. Restore to a separate directory first when checking a backup.
+Old databases upgrade in place; old application versions are not promised to
+understand a newer database or the separately stored multi-profile credential
+format. Preserve a pre-upgrade backup and compatible external configuration when
+planning a downgrade. Never copy a test library over a daily library.
+
+## Verification boundary
+
+Regression tests use isolated libraries, synthetic images and controllable local
+HTTP JSON/SSE responses. They exercise tool dispatch, real image decoding,
+idempotency, branch references, limits, stop/restart, archive restore and secret
+redaction. Frontend tests cover recipe preservation, draft restoration, navigation,
+late responses and submission duplication. Existing capture/extension and installer
+checks remain enabled. Test or CI success does not verify a commercial provider,
+its content moderation, charges, native image resolution or model identity.
+
+Changing source or merging a PR does not update an installed running application.
+Use a separate loopback preview and explicit isolated paths when evaluating these
+workspaces; deployment to a daily library is a separate operation.

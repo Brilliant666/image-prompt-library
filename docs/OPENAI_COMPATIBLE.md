@@ -4,7 +4,11 @@ This local extension adds `openai_compatible` alongside the upstream ChatGPT / C
 
 ## Configure
 
-Open Config → Third-party API and add an endpoint with its own name, Base URL, API key, optional default image model and timeout (1–1800 seconds). Register multiple endpoints, edit them independently, and choose a default for new drafts. The endpoint name appears in the generation provider menu; “Third-party API” identifies the connection type. The Base URL may include `/v1`; trailing duplicate `/v1` segments are normalized. Use HTTPS for remote providers. Saving settings does not send a generation request. An empty API key field preserves only the selected endpoint’s stored key; a new endpoint never inherits another key. The key is never returned by the settings API and is not saved in browser storage.
+Open Settings → API → API Key profiles and add an endpoint with its own name, Base URL, API key, image model list, optional default image model and timeout (1–1800 seconds). Register multiple endpoints, edit them independently, and choose a default for new drafts. The endpoint name appears in the generation provider menu. Account connections retain the separate ChatGPT/Codex and Grok OAuth flows. Switching the settings view does not change the default connection.
+
+The profile list and selected profile's fields remain expanded. In the default versioned URL mode, the Base URL may include `/v1`; trailing duplicate `/v1` segments are normalized. Custom-root mode preserves the supplied path without adding `/v1`. Both modes show the actual Images and Responses addresses before saving; a trailing slash alone never changes modes. Use HTTPS for remote providers. Existing profiles retain versioned URL behavior, non-streaming requests and automatic response transport unless explicitly changed.
+
+Saving settings does not send a generation request. An empty API key field preserves only the selected endpoint's stored key; a new endpoint never inherits another key. The key is never returned by the settings API and is not saved in browser storage.
 
 Settings live in `~/.image-prompt-library/openai-compatible.json`, outside the Library. `IMAGE_PROMPT_LIBRARY_OPENAI_COMPATIBLE_CONFIG_PATH` can override this location in the process environment. The application rejects paths inside the active Library. Library backups and exports do not include this file; protect it separately as a credential file.
 
@@ -12,7 +16,7 @@ Choose the connection type in Config and the named endpoint in the generation co
 
 ## Requests and results
 
-Text-only requests use synchronous `POST /v1/images/generations`; references use multipart `POST /v1/images/edits`. Each queue task sends `n=1`, with up to four references. New composer requests send the selected pixel dimensions or `size=auto`. Quality is independent of size and does not guarantee the returned dimensions. Historical explicit sizes remain unchanged until a new size is selected. Saved request snapshots take precedence.
+Text-only requests use `POST {base}/images/generations`; references use multipart `POST {base}/images/edits`. The default base ends in `/v1`; custom-root mode uses the configured path. Responses are JSON by default, or Images SSE when streaming is enabled. Each queue task sends `n=1`, with up to four references. New composer requests send the selected pixel dimensions or `size=auto`. Quality is independent of size and does not guarantee the returned dimensions. Historical explicit sizes remain unchanged until a new size is selected. Saved request snapshots take precedence.
 
 ### 4K target with automatic aspect ratio
 
@@ -27,6 +31,8 @@ Choose `gpt-image-2.5-flare` or `gpt-image-2.5-sunburst` by full name. Configure
 For an endpoint without remembered choices, the composer defaults to automatic size, quality and background, with PNG output. Explicit pixel sizes remain supported by the API and historical recipes. For Image 2.5 both dimensions must be positive multiples of 16, neither above 3840, longest/shortest ratio ≤3, and total pixels 655360–8294400 inclusive. `2160x3840` passes this validation; `2880x3840` does not. Local validation does not guarantee gateway support.
 
 Background supports `auto`, `opaque`, `transparent`; output supports PNG, JPEG and WebP. Transparent + JPEG is blocked without erasing the background choice. JPEG/WebP compression supports integers 0–100; PNG omits compression. Originals are saved byte-for-byte. Newly created transparent previews and thumbnails preserve alpha, with checkerboard only in CSS; existing assets are not rebuilt. Downloads use the original file.
+
+Gallery's **More** menu also exposes optional `moderation: auto | low`, supported by the OpenAI Images generation and edit contracts. An omitted historical setting stays omitted; an explicit selection is validated, forwarded in JSON or multipart, and retained in request history and per-profile preferences. This is a request setting, not the returned `moderation_details` diagnostic, and does not guarantee that a third-party service supports it or accepts the prompt.
 
 Settings follow single, batch, edit, history/draft and saved-image reuse. A queued batch freezes each request model/settings and endpoint ID before execution, so changing the default endpoint does not reroute queued jobs. History and saved-image drafts restore that endpoint; a deleted endpoint blocks execution and requires an explicit choice in a new draft. Credentials are resolved from that endpoint’s current configuration at execution time, so edit an existing endpoint’s URL only after its queue has finished, or add a new endpoint instead. Prompt text is preserved, including whitespace; variable expansion only applies when using an actual template.
 
@@ -83,7 +89,7 @@ The composer uses compact model, size, quality and output controls. Full model I
 
 ## Synchronous image response compatibility
 
-The provider accepts standard `data[0].b64_json` and `data[0].url` responses without hostname-specific rules. It leaves `response_format` unspecified so the service can use its default. `output_format` describes the image file encoding, not its transport. Base64 takes precedence when both fields exist; invalid Base64 is reported rather than silently replaced.
+The provider accepts standard `data[0].b64_json` and `data[0].url` responses without hostname-specific rules. By default it leaves `response_format` unspecified so the service can use its default. The optional **Return Base64 image data** switch explicitly sends `response_format: b64_json` for compatible gateways that require it. Official GPT Image models already return Base64 and do not support that legacy request parameter; leave the switch off for those endpoints. See the [Images API parameter reference](https://developers.openai.com/api/reference/python/resources/images/methods/generate). `output_format` describes the image file encoding, not its transport. Base64 takes precedence when both fields exist; invalid Base64 is reported rather than silently replaced.
 
 URL results are downloaded by the backend without API authorization, cookies or environment proxies, then passed through the same PNG/JPEG/WebP decoder, preview and save pipeline. Downloads are restricted to public HTTP(S) addresses on standard ports, with DNS address pinning, at most three redirects, no HTTPS downgrade, a 32 MiB limit and bounded DNS/network waits. Full signed URLs and response bodies are not persisted in diagnostics. Metadata records the transport and actual decoded dimensions/format/alpha separately from requested settings.
 
@@ -91,10 +97,20 @@ A download failure never resubmits a generation POST. It reports download, block
 
 The existing queue deliberately submits `n=1` per task, including batches; each response must contain exactly one image. This change does not introduce a second batching mechanism, asynchronous job protocols or vendor-private response shapes. Model/quality/size support remains service-dependent; no parameters are silently removed and no production provider configuration is changed.
 
+## Optional image streaming
+
+Each API profile can enable streaming and request 0–3 intermediate previews. Zero requests only the final image. Intermediate images are optional: a service may complete before sending all requested previews. These options require provider support and remain off by default; saving them performs no network test. Native transparency remains a generation parameter, without local background removal or automatic image re-encoding.
+
+The backend accepts bounded Images SSE generation/edit events and validates image bytes before exposing a preview. Gallery labels an intermediate image as a preview of a running task; it cannot be collected, reused as a final result or downloaded through the completed-result controls. Only the final completion event becomes the task result. A gateway that responds with ordinary JSON is handled within the same request. A disconnected stream without a final result remains a failure with an uncertain upstream outcome, without a second POST or automatic fallback request.
+
+The latest preview is transient task data, separate from the final original image. Terminal tasks clear the preview. Stream settings are retained with the task's safe request parameters. Old jobs without these settings retain their previous non-streaming behavior. New fields are read with defaults without rewriting existing external credential files on startup; after saving newer options, account for credential-file compatibility when downgrading.
+
 
 ## Single size control
 
 Third-party API generation uses one size menu: automatic, exact pixel presets with aspect-ratio labels, or a custom `WIDTHxHEIGHT`. Quality is independent and never derives or overwrites size. New drafts do not add a separate aspect-ratio parameter or composition hint. Historical composition ratios remain visible and preserved until the user explicitly selects or edits a size; existing stored dimensions remain authoritative. Other OAuth providers retain their original ratio controls.
+
+In Gallery this control opens a centered dialog: **Auto**, **By ratio** (1K/2K/4K and common/custom ratios), or **Custom dimensions**. It previews the exact pixels before applying; cancellation keeps the previous recipe. Image 2.5-specific custom-size bounds only apply to the model IDs already covered by the existing validator. Other model aliases retain their existing positive-integer dimension contract rather than inheriting a new model restriction.
 
 Custom dimensions are validated before submission. GPT Image 2.5 uses its documented edge, multiple-of-16, ratio and pixel-count constraints. Preset names describe requested pixels, not guaranteed provider billing tiers or returned dimensions.
 

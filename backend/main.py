@@ -11,11 +11,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from .config import APP_VERSION, resolve_hidden_features, resolve_library_path, resolve_library_storage_path, validate_app_owned_paths
 from .db import get_db_path, init_db
-from .routers import app_updates, capture_clients, capture_organizer, captures, cleanup, clusters, generation_jobs, generation_providers, images, import_drafts, items, tags
+from .routers import agent, app_updates, capture_clients, capture_organizer, captures, cleanup, clusters, generation_jobs, generation_providers, images, import_drafts, items, tags
 from .services.capture_clients import CAPTURE_HEADERS, CaptureClients, capture_route_allowed, local_target_origin
 from .services.library_archives import LibraryOperationLock
 from .services.capture_organizer import drain_jobs, recover_jobs
 from .services.generation_queue import AUTOMATED_PROVIDER_IDS, enqueue_generation_jobs, recover_interrupted_generation_jobs
+from .services.agent_execution import drain_agent_requests, recover_agent_requests
+from .services.agent_repository import AgentError
 
 DEFAULT_FRONTEND_DIST_PATH = Path(__file__).resolve().parents[1] / "frontend" / "dist"
 
@@ -132,14 +134,20 @@ def create_app(library_path: Path | str | None = None, frontend_dist_path: Path 
                 recover_jobs(library)
                 for provider in AUTOMATED_PROVIDER_IDS:
                     recover_interrupted_generation_jobs(library, provider=provider)
+                recover_agent_requests(library)
+                for provider in AUTOMATED_PROVIDER_IDS:
                     enqueue_generation_jobs(library, provider=provider)
                 yield
             finally:
+                await asyncio.to_thread(drain_agent_requests, library)
                 # No metadata worker may write after backup/restore can acquire
                 # the library lease. Pending jobs remain durable and unstarted.
                 await asyncio.to_thread(drain_jobs, library)
 
     app = FastAPI(title="Image Prompt Library", version=APP_VERSION, lifespan=lifespan)
+    @app.exception_handler(AgentError)
+    async def agent_error_handler(request: Request, exc: AgentError):
+        return JSONResponse(status_code=exc.status, content={"detail": {"code": exc.code, "message": exc.message}})
     app.state.library_path = library
     app.state.frontend_dist_path = frontend_dist
     app.state.capture_clients = CaptureClients(library)
@@ -205,6 +213,7 @@ def create_app(library_path: Path | str | None = None, frontend_dist_path: Path 
     app.include_router(import_drafts.router, prefix="/api")
     app.include_router(generation_jobs.router, prefix="/api")
     app.include_router(generation_providers.router, prefix="/api")
+    app.include_router(agent.router, prefix="/api")
     app.include_router(app_updates.router, prefix="/api")
     app.include_router(cleanup.router, prefix="/api")
     @app.get("/api/health")

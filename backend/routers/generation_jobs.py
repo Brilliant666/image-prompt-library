@@ -12,6 +12,7 @@ from backend.schemas import (
     GenerationJobRecord,
     GenerationJobSetCreate,
     GenerationJobSetRecord,
+    GenerationJobStatusCounts,
     GenerationJobRetryResult,
 )
 from backend.services.generation_jobs import (
@@ -139,14 +140,29 @@ def list_generation_jobs(
     source_item_id: str | None = None,
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
+    prepare_references: bool = True,
+    statuses: str | None = None,
 ):
+    selected_statuses = None
+    if statuses is not None:
+        if status is not None:
+            raise HTTPException(status_code=422, detail="Use either status or statuses, not both")
+        selected_statuses = list(dict.fromkeys(value.strip() for value in statuses.split(",")))
+        if any(value not in GenerationJobStatusCounts.model_fields for value in selected_statuses):
+            raise HTTPException(status_code=422, detail="statuses must contain valid generation job statuses")
+    repository = repo(request)
+    # Gallery/queue polling only needs stored metadata. Full recipe presentation
+    # may recover legacy inline images and verify their bytes, so keep that work
+    # on an explicit detail read instead of repeating it for every history row.
+    # Default to the existing contract for clients which reuse list recipes.
     return _sanitize_generation_job_list(
-        repo(request).list_jobs(
+        repository.list_jobs(
             status=status,
+            statuses=selected_statuses,
             source_item_id=source_item_id,
             limit=limit,
             offset=offset,
-        ), repo(request)
+        ), repository if prepare_references else None
     )
 
 

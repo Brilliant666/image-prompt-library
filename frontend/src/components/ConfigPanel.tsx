@@ -1,13 +1,19 @@
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
 import OpenAICompatibleSettings from './OpenAICompatibleSettings';
 import BrowserCaptureSettings from './BrowserCaptureSettings';
 import CaptureOrganizerSettings from './CaptureOrganizerSettings';
-import { X } from 'lucide-react';
+import { X, Settings2, KeyRound, SlidersHorizontal, Bot, ImagePlus, Database, Info } from 'lucide-react';
 import { api, isDemoMode } from '../api/client';
 import { restoreFocusAfterMotion } from '../hooks/useModalFocus';
 import type { AppearancePreset, AppConfig, AppUpdateStatus, CleanupPreview, GenerationProviderStatus, ProviderDeviceAuthStart, AiProvider } from '../types';
 import { UI_LANGUAGE_LABELS, type Translator, type UiLanguage } from '../utils/i18n';
 import { getPromptCopyLanguageLabel, type PromptCopyLanguage } from '../utils/prompts';
+import GeneralSettings from './settings/GeneralSettings';
+import AgentSettings from './settings/AgentSettings';
+import { readLocalPreferences, saveLocalPreferences, type LocalPreferences } from '../utils/localPreferences';
+import './ConfigPanel.css';
+
+export type SettingsSection = 'api' | 'general' | 'agent' | 'capture' | 'data' | 'about';
 
 const LANGUAGE_OPTIONS: PromptCopyLanguage[] = ['origin', 'en', 'zh_hant', 'zh_hans'];
 const UI_LANGUAGE_OPTIONS: UiLanguage[] = ['zh_hant', 'zh_hans', 'en'];
@@ -77,6 +83,9 @@ const providerFallback: GenerationProviderStatus[] = [
 export default function ConfigPanel({
   open,
   focusProviders = false,
+  focusSection,
+  localPreferences,
+  onLocalPreferences,
   t,
   onClose,
   uiLanguage,
@@ -94,6 +103,9 @@ export default function ConfigPanel({
 }: {
   open: boolean;
   focusProviders?: boolean;
+  focusSection?: SettingsSection;
+  localPreferences?: LocalPreferences;
+  onLocalPreferences?: (preferences: LocalPreferences) => void;
   t: Translator;
   onClose: () => void;
   uiLanguage: UiLanguage;
@@ -109,6 +121,49 @@ export default function ConfigPanel({
   onUpdateInstalled: (targetVersion: string, requiresManualRestart: boolean) => void;
   onLibraryCleanup?: () => void;
 }) {
+  const [activeSection, setActiveSection] = useState<SettingsSection>('api');
+  const [connectionType, setConnectionType] = useState<'api' | 'account'>('api');
+  const [browserPreferences, setBrowserPreferences] = useState(readLocalPreferences);
+  const [preferencesMessage, setPreferencesMessage] = useState('');
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const scrollPositions = useRef<Partial<Record<SettingsSection, number>>>({});
+  const en = uiLanguage === 'en';
+  const sections = [
+    { id: 'api', label: en ? 'API settings' : 'API 配置', icon: KeyRound },
+    { id: 'general', label: en ? 'Preferences' : '习惯配置', icon: SlidersHorizontal },
+    { id: 'agent', label: 'Agent', icon: Bot },
+    { id: 'capture', label: en ? 'Capture' : '采集与整理', icon: ImagePlus },
+    { id: 'data', label: en ? 'Data' : '数据管理', icon: Database },
+    { id: 'about', label: en ? 'About' : '关于', icon: Info },
+  ] as const;
+  const changePreferences = (value: LocalPreferences) => {
+    setBrowserPreferences(value);
+    const persisted = saveLocalPreferences(value);
+    onLocalPreferences?.(value);
+    setPreferencesMessage(persisted ? '' : en ? 'Browser storage is unavailable. These changes apply to this session only.' : '浏览器存储暂不可用，本次更改仅在当前会话生效。');
+  };
+  useLayoutEffect(() => {
+    if (!open) return;
+    const query = new URLSearchParams(location.search);
+    setActiveSection(focusSection || (focusProviders ? 'api' : query.has('capture_pair') || query.has('capture_organizer') ? 'capture' : 'api'));
+  }, [open, focusProviders, focusSection]);
+  useLayoutEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollPositions.current[activeSection] || 0;
+  }, [activeSection, open]);
+  useEffect(() => {
+    if (!open || activeSection !== 'capture') return;
+    const query = new URLSearchParams(location.search);
+    const selector = query.has('capture_organizer') ? '.capture-organizer-settings' : query.has('capture_pair') ? '.browser-capture-settings' : '';
+    if (!selector) return;
+    const frame = window.requestAnimationFrame(() => drawerRef.current?.querySelector(selector)?.scrollIntoView({ block: 'start' }));
+    return () => window.cancelAnimationFrame(frame);
+  }, [open, activeSection]);
+  useEffect(() => {
+    if (!open) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = previousOverflow; };
+  }, [open]);
   const [cfg, setCfg] = useState<AppConfig>();
   const [providers, setProviders] = useState<GenerationProviderStatus[]>([]);
   const [cleanupPreview, setCleanupPreview] = useState<CleanupPreview>();
@@ -187,7 +242,7 @@ export default function ConfigPanel({
       openerRef.current = activeElement;
     }
     const frame = window.requestAnimationFrame(() => {
-      if (focusProviders) {
+      if (focusProviders && !focusSection) {
         scrollIntoViewRespectingMotion(providersSectionRef.current);
         providersSectionRef.current?.focus({ preventScroll: true });
       } else {
@@ -195,7 +250,7 @@ export default function ConfigPanel({
       }
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [open, focusProviders]);
+  }, [open, focusProviders, focusSection]);
 
   useEffect(() => () => {
     providersRequestRef.current += 1;
@@ -385,33 +440,88 @@ export default function ConfigPanel({
   return (
     <>
       {open && <div className="drawer-scrim" aria-hidden="true" onClick={closePanel} />}
-      <aside
-      ref={drawerRef}
-      id="config-drawer"
-      className={`config drawer ${open ? 'open' : ''}`}
-      role="dialog"
-      aria-modal="true"
-      aria-label={t('config')}
-      aria-hidden={!open}
-      inert={!open}
-      onKeyDown={handleKeyDown}
-    >
-      <div className="drawer-head">
-        <h2>{t('config')}</h2>
-        <button
-          ref={closeButtonRef}
-          className="panel-close"
-          onClick={closePanel}
-          aria-label={t('closeConfig')}
-          tabIndex={open ? 0 : -1}
-        >
-          <X size={20} strokeWidth={2.25} />
-        </button>
-      </div>
+      <aside ref={drawerRef} id="config-drawer" className={`config-dialog ${open ? 'open' : ''}`}
+        role="dialog" aria-modal="true" aria-label={t('config')} aria-hidden={!open} inert={!open} onKeyDown={handleKeyDown}>
+        <header className="config-dialog-header">
+          <h2><Settings2 size={20} aria-hidden="true" />{t('config')}</h2>
+          <div><span className="config-version">{cfg?.version || updateStatus?.current_version || ''}</span>
+            <button ref={closeButtonRef} className="panel-close" onClick={closePanel} aria-label={t('closeConfig')} tabIndex={open ? 0 : -1}><X size={20} strokeWidth={2.25} /></button>
+          </div>
+        </header>
+        <div className="config-dialog-body">
+          <nav className="config-sidebar" role="tablist" aria-label={en ? 'Settings sections' : '设置分组'} onKeyDown={event => {
+            const keys = ['ArrowDown', 'ArrowRight', 'ArrowUp', 'ArrowLeft', 'Home', 'End'];
+            if (!keys.includes(event.key)) return;
+            event.preventDefault();
+            const current = sections.findIndex(section => section.id === activeSection);
+            const index = event.key === 'Home' ? 0 : event.key === 'End' ? sections.length - 1 : (current + (['ArrowDown', 'ArrowRight'].includes(event.key) ? 1 : -1) + sections.length) % sections.length;
+            const next = sections[index].id;
+            setActiveSection(next);
+            document.getElementById(`settings-tab-${next}`)?.focus();
+          }}>
+            {sections.map(({ id, label, icon: Icon }) => <button type="button" key={id} role="tab" id={`settings-tab-${id}`}
+              aria-controls={`settings-panel-${id}`} aria-selected={activeSection === id} tabIndex={activeSection === id ? 0 : -1}
+              className={activeSection === id ? 'active' : ''} onClick={() => setActiveSection(id)}><Icon size={17} aria-hidden="true" /><span>{label}</span></button>)}
+          </nav>
+          <div className="config-content" ref={scrollRef} onScroll={event => { scrollPositions.current[activeSection] = event.currentTarget.scrollTop; }}>
+            <div role="tabpanel" id="settings-panel-api" aria-labelledby="settings-tab-api" hidden={activeSection !== 'api'}>
+      <section ref={providersSectionRef} className="setting-group provider-section" tabIndex={-1} aria-labelledby="config-providers-title">
+        <h3 id="config-providers-title">{en ? 'Connections and profiles' : '连接与配置'}</h3>
+        <p className="muted">{en ? 'Choose a connection type, then manage its named profiles. API keys and account authorization are separate connection methods.' : '先区分连接方式，再管理各自的配置。API Key 接口与账号授权是不同的连接方式。'}</p>
+        <div className="settings-connection-tabs" role="group" aria-label={en ? 'Connection settings' : '管理连接配置'}>
+          <button type="button" aria-pressed={connectionType === 'api'} className={connectionType === 'api' ? 'active' : ''} onClick={() => setConnectionType('api')}>{en ? 'API key profiles' : 'API Key 配置'}<small>OpenAI Compatible{defaultAiProvider === 'openai_compatible' && <b className="settings-default-badge">{en ? 'Default' : '当前默认'}</b>}</small></button>
+          <button type="button" aria-pressed={connectionType === 'account'} className={connectionType === 'account' ? 'active' : ''} onClick={() => setConnectionType('account')}>{en ? 'Account connections' : '账号连接'}<small>ChatGPT / Grok · OAuth{defaultAiProvider !== 'openai_compatible' && <b className="settings-default-badge">{en ? 'Default' : '当前默认'}</b>}</small></button>
+        </div>
+        <div hidden={connectionType !== 'api'}>
+        {open && !isDemoMode && <OpenAICompatibleSettings onSaved={loadProviders} uiLanguage={uiLanguage} isDefaultConnection={defaultAiProvider === 'openai_compatible'} onSetDefaultConnection={() => onDefaultAiProvider('openai_compatible')} />}
+        </div>
+        <div hidden={connectionType !== 'account'}>
+        <p className="muted">{en ? 'The built-in ChatGPT / Codex and Grok connections use account authorization. These are not OpenAI API keys. Manage official or compatible API keys under API key profiles.' : '内置 ChatGPT / Codex 与 Grok 使用账号授权，保留各自的登录流程；它们不是官方 API Key。官方或第三方兼容接口的 Key 请在「API Key 配置」中添加。'}</p>
+        <div className="provider-list">
+          {providers.filter(provider => ['openai_codex_oauth_native', 'xai_grok_oauth'].includes(provider.provider)).map(provider => {
+            const authStart = authStarts[provider.provider];
+            const enabled = Boolean(provider.configured && provider.authenticated && provider.available && (provider.features.text_to_image || provider.features.title_suggestion));
+            return (
+            <article className={`provider-card state-${provider.state}`} key={provider.provider}>
+              <div className="provider-card-head">
+                <div>
+                  <strong>{provider.provider === 'openai_codex_oauth_native' ? 'ChatGPT / Codex OAuth' : provider.display_name}</strong>
+                  <span>{provider.optional ? t('providerOptional') : t('providerBuiltIn')}</span>
+                </div>
+                <b>{providerStateLabel(provider, t)}</b>
+              </div>
+              <p className="muted">{featureSummary(provider, t)}</p>
+              {['openai_codex_oauth_native', 'xai_grok_oauth'].includes(provider.provider) && (
+                <div className="provider-actions">
+                  {provider.state === 'not_configured' && (
+                    <p className="provider-help">{t('providerClientHelp')}</p>
+                  )}
+                  {provider.account_id && <p className="provider-help">{t('providerAccount')}: <code>{provider.account_id}</code></p>}
+                  {authStart && (
+                    <div className="provider-auth-box">
+                      <p><a href={authStart.verification_url || authStart.verification_uri_complete || authStart.verification_uri} target="_blank" rel="noreferrer">{t('providerVerification')}</a> <code>{authStart.user_code}</code></p>
+                      <button className="secondary" onClick={() => pollProviderAuth(provider.provider)} disabled={providerActionPending}>{t('checkAuthorization')}</button>
+                    </div>
+                  )}
+                  {!provider.authenticated && !authStart && (
+                    <button className="secondary" onClick={() => startProviderAuth(provider.provider)} disabled={isDemoMode || provider.state === 'not_configured' || providerActionPending}>{t('connect')}</button>
+                  )}
+                  {provider.authenticated && <button className="secondary" onClick={() => disconnectProviderAuth(provider.provider)} disabled={providerActionPending}>{t('disconnect')}</button>}
+                  {defaultAiProvider === provider.provider ? <span className="settings-default-badge">{en ? 'Current default connection' : '当前默认连接'}</span> : <button type="button" className="secondary" disabled={!enabled || providerActionPending} onClick={() => onDefaultAiProvider(provider.provider as AiProvider)}>{en ? 'Use as default connection' : '设为默认连接'}</button>}
+                  {providerActionMessages[provider.provider] && <p className="provider-message" role="status">{providerActionMessages[provider.provider]}</p>}
+                </div>
+              )}
+            </article>
+          );})}
+        </div>
+        </div>
+        {providerMessage && <p className="provider-message">{providerMessage}</p>}
+      </section>
 
-      {open && !isDemoMode && <BrowserCaptureSettings uiLanguage={uiLanguage} />}
-      {open && !isDemoMode && <CaptureOrganizerSettings uiLanguage={uiLanguage} />}
-
+            </div>
+            <div role="tabpanel" id="settings-panel-general" aria-labelledby="settings-tab-general" hidden={activeSection !== 'general'}>
+              <GeneralSettings value={localPreferences || browserPreferences} onChange={changePreferences} uiLanguage={uiLanguage} />
+              {preferencesMessage && <p className="provider-message" role="status">{preferencesMessage}</p>}
       <section className="setting-group">
         <h3>{t('uiLanguage')}</h3>
         <div className="segmented-control" aria-label={t('uiLanguage')}>
@@ -448,6 +558,7 @@ export default function ConfigPanel({
         <p className="muted">{t('appearanceHelp')}</p>
         <div className="appearance-control" role="radiogroup" aria-label={t('appearance')}>
           {([
+            ['pure_white', 'appearancePureWhite'],
             ['gallery_vermilion', 'appearanceGalleryVermilion'],
             ['pine_archive', 'appearancePineArchive'],
             ['aubergine_ink', 'appearanceAubergineInk'],
@@ -467,6 +578,50 @@ export default function ConfigPanel({
         </div>
       </section>
 
+            </div>
+            <div role="tabpanel" id="settings-panel-agent" aria-labelledby="settings-tab-agent" hidden={activeSection !== 'agent'}>
+              {open && !isDemoMode ? <AgentSettings uiLanguage={uiLanguage} active={activeSection === 'agent'} /> : <p className="muted">{en ? 'Agent settings are available in the local application.' : 'Agent 配置请在本机应用中使用。'}</p>}
+            </div>
+            <div role="tabpanel" id="settings-panel-capture" aria-labelledby="settings-tab-capture" hidden={activeSection !== 'capture'}>
+              {open && !isDemoMode && <BrowserCaptureSettings uiLanguage={uiLanguage} />}
+              {open && !isDemoMode && <CaptureOrganizerSettings uiLanguage={uiLanguage} />}
+              {isDemoMode && <p className="muted">{en ? 'Capture settings are available in the local application.' : '采集与整理配置请在本机应用中使用。'}</p>}
+            </div>
+            <div role="tabpanel" id="settings-panel-data" aria-labelledby="settings-tab-data" hidden={activeSection !== 'data'}>
+      {!isDemoMode && <section className="setting-group">
+        <h3>{en ? 'Library and portable backups' : '图库与可移植备份'}</h3>
+        <p className="muted">{en ? 'Library assets, generation history and Agent conversations share the same library. Provider credentials stay outside the backup.' : '正式资产、生成历史与 Agent 会话保存在同一图库。供应商凭据仍在图库之外，不进入备份。'}</p>
+        <p><code>{cfg?.library_path || '—'}</code></p>
+        <p className="muted">{en ? 'Use the existing local command to inspect backup and restore options:' : '使用现有本地命令查看备份、恢复选项：'}</p>
+        <code>image-prompt-library backup --help</code><br/><code>image-prompt-library restore --help</code>
+      </section>}
+      {!isDemoMode && (
+        <section className="setting-group cleanup-section">
+           <h3>{t('cleanupTitle')}</h3>
+           <p className="muted">{t('cleanupHelp')}</p>
+           {!cleanupPreview && <p className="cleanup-precheck-state" role="status">{t('cleanupPrecheck')}</p>}
+           {cleanupPreview && cleanupHasWork && (
+            <div className="cleanup-counts">
+              <span><strong>{brokenImageCount}</strong> {t('brokenImageRecords')}</span>
+              <span><strong>{unreferencedFileCount}</strong> {t('unreferencedFiles')}</span>
+            </div>
+          )}
+          {cleanupPreview && !cleanupHasWork && <p className="cleanup-empty-state" role="status">{t('cleanupNoWork')}</p>}
+          <div className="provider-actions">
+             <button className="secondary" onClick={loadCleanupPreview} disabled={cleanupBusy}>{cleanupBusy ? t('checking') : t('previewCleanup')}</button>
+             {cleanupPreview && cleanupHasWork && <button className="danger" onClick={applyCleanup} disabled={cleanupBusy}>{t('applyCleanup')}</button>}
+          </div>
+          {cleanupMessage && <p className="provider-message">{cleanupMessage}</p>}
+        </section>
+      )}
+
+            </div>
+            <div role="tabpanel" id="settings-panel-about" aria-labelledby="settings-tab-about" hidden={activeSection !== 'about'}>
+      <section className="setting-group"><h3>{en ? 'Source and licenses' : '来源与许可证'}</h3>
+        <p><a href="https://github.com/Brilliant666/image-prompt-library" target="_blank" rel="noreferrer">Brilliant666/image-prompt-library</a> · AGPL-3.0-or-later</p>
+        <p className="muted">{en ? 'Based on EddieTYP/image-prompt-library. Workspace interactions adapted from CookSleep/gpt_image_playground under MIT.' : '基于 EddieTYP/image-prompt-library；画廊、Agent 与分组设置交互适配自 CookSleep/gpt_image_playground（MIT）。'}</p>
+        <p className="muted">Playground: <code>1e9d5af60aadd9117a835cc2da43908b8e3370dd</code></p>
+      </section>
       <section className="setting-group app-update-section">
          <h3>{t('appUpdate')}</h3>
          {!updateStatus && <p className="muted">{t('updateChecking')}</p>}
@@ -523,91 +678,11 @@ export default function ConfigPanel({
       </section>
 
       {!isDemoMode && (
-        <section className="setting-group cleanup-section">
-           <h3>{t('cleanupTitle')}</h3>
-           <p className="muted">{t('cleanupHelp')}</p>
-           {!cleanupPreview && <p className="cleanup-precheck-state" role="status">{t('cleanupPrecheck')}</p>}
-           {cleanupPreview && cleanupHasWork && (
-            <div className="cleanup-counts">
-              <span><strong>{brokenImageCount}</strong> {t('brokenImageRecords')}</span>
-              <span><strong>{unreferencedFileCount}</strong> {t('unreferencedFiles')}</span>
-            </div>
-          )}
-          {cleanupPreview && !cleanupHasWork && <p className="cleanup-empty-state" role="status">{t('cleanupNoWork')}</p>}
-          <div className="provider-actions">
-             <button className="secondary" onClick={loadCleanupPreview} disabled={cleanupBusy}>{cleanupBusy ? t('checking') : t('previewCleanup')}</button>
-             {cleanupPreview && cleanupHasWork && <button className="danger" onClick={applyCleanup} disabled={cleanupBusy}>{t('applyCleanup')}</button>}
-          </div>
-          {cleanupMessage && <p className="provider-message">{cleanupMessage}</p>}
-        </section>
-      )}
-
-      <section ref={providersSectionRef} className="setting-group provider-section" tabIndex={-1} aria-labelledby="config-providers-title">
-        <h3 id="config-providers-title">{t('providers')}</h3>
-        <p className="muted">{t('providerSetupHelp')}</p>
-        <fieldset className="default-ai-provider-control">
-          <legend>{t('defaultAiProvider')}</legend>
-          <div className="segmented-control" role="radiogroup" aria-label={t('defaultAiProvider')}>
-            {([
-              ['openai_codex_oauth_native', 'ChatGPT'],
-              ['xai_grok_oauth', 'Grok'],
-              ['openai_compatible', uiLanguage === 'en' ? 'Third-party API' : '第三方 API'],
-            ] as const).map(([providerId, label]) => {
-              const status = providers.find(candidate => candidate.provider === providerId);
-              const enabled = Boolean(status?.configured && status.authenticated && status.available && (status.features.text_to_image || status.features.title_suggestion));
-              return (
-                <button type="button" key={providerId} role="radio" aria-checked={defaultAiProvider === providerId} className={defaultAiProvider === providerId ? 'active' : ''} disabled={!enabled} onClick={() => onDefaultAiProvider(providerId)}>{label}</button>
-              );
-            })}
-          </div>
-          <p className="muted">{t('defaultAiProviderHelp')}</p>
-        </fieldset>
-        {open && !isDemoMode && <OpenAICompatibleSettings onSaved={loadProviders} uiLanguage={uiLanguage} />}
-        <div className="provider-list">
-          {providers.filter(provider => provider.provider !== 'openai_compatible').map(provider => {
-            const authStart = authStarts[provider.provider];
-            return (
-            <article className={`provider-card state-${provider.state}`} key={provider.provider}>
-              <div className="provider-card-head">
-                <div>
-                  <strong>{provider.provider === 'openai_codex_oauth_native' ? 'ChatGPT / Codex OAuth' : provider.display_name}</strong>
-                  <span>{provider.optional ? t('providerOptional') : t('providerBuiltIn')}</span>
-                </div>
-                <b>{providerStateLabel(provider, t)}</b>
-              </div>
-              <p className="muted">{featureSummary(provider, t)}</p>
-              {['openai_codex_oauth_native', 'xai_grok_oauth'].includes(provider.provider) && (
-                <div className="provider-actions">
-                  {provider.state === 'not_configured' && (
-                    <p className="provider-help">{t('providerClientHelp')}</p>
-                  )}
-                  {provider.account_id && <p className="provider-help">{t('providerAccount')}: <code>{provider.account_id}</code></p>}
-                  {authStart && (
-                    <div className="provider-auth-box">
-                      <p><a href={authStart.verification_url || authStart.verification_uri_complete || authStart.verification_uri} target="_blank" rel="noreferrer">{t('providerVerification')}</a> <code>{authStart.user_code}</code></p>
-                      <button className="secondary" onClick={() => pollProviderAuth(provider.provider)} disabled={providerActionPending}>{t('checkAuthorization')}</button>
-                    </div>
-                  )}
-                  {!provider.authenticated && !authStart && (
-                    <button className="secondary" onClick={() => startProviderAuth(provider.provider)} disabled={isDemoMode || provider.state === 'not_configured' || providerActionPending}>{t('connect')}</button>
-                  )}
-                  {provider.authenticated && <button className="secondary" onClick={() => disconnectProviderAuth(provider.provider)} disabled={providerActionPending}>{t('disconnect')}</button>}
-                  {providerActionMessages[provider.provider] && <p className="provider-message" role="status">{providerActionMessages[provider.provider]}</p>}
-                </div>
-              )}
-            </article>
-          );})}
-        </div>
-        {providerMessage && <p className="provider-message">{providerMessage}</p>}
-      </section>
-
-      {!isDemoMode && (
         <section className="setting-group local-setup-section">
           <h3>{t('systemInformation')}</h3>
           <p className="muted">{t('localSetupHelp')}</p>
           <dl className="local-setup-list">
             <div><dt>{t('appVersion')}</dt><dd><code>{cfg?.version || updateStatus?.current_version || 'unknown'}</code></dd></div>
-            <div><dt>{t('libraryPath')}</dt><dd><code>{cfg?.library_path || 'unavailable'}</code></dd></div>
             <div><dt>{t('databasePath')}</dt><dd><code>{cfg?.database_path || 'unavailable'}</code></dd></div>
             <div><dt>{t('updateStatusLabel')}</dt><dd>{updateSetupLabel}</dd></div>
             <div><dt>{t('generationStatusLabel')}</dt><dd>{generationSetupLabel}</dd></div>
@@ -619,6 +694,9 @@ export default function ConfigPanel({
           </div>
         </section>
       )}
+            </div>
+          </div>
+        </div>
       </aside>
     </>
   );

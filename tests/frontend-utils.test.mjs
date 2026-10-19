@@ -22,7 +22,7 @@ const { generationFailure, generationModerationGuidance } = await importTypescri
 const { generationSetProgressText, providerPauseSeconds } = await importTypescript('../frontend/src/utils/generationSets.ts');
 const { generationAspectRatio } = await importTypescript('../frontend/src/utils/generationAspectRatio.ts');
 const { generationResultActions } = await importTypescript('../frontend/src/utils/generationResultActions.ts');
-const { APPEARANCE_STORAGE_KEY, DEFAULT_APPEARANCE, normalizeAppearance } = await importTypescript('../frontend/src/utils/appearance.ts');
+const { APPEARANCE_STORAGE_KEY, DEFAULT_APPEARANCE, normalizeAppearance, loadAppearance, applyStoredAppearance } = await importTypescript('../frontend/src/utils/appearance.ts');
 const { DEFAULT_AI_PROVIDER_STORAGE_KEY, resolveDefaultAiProvider } = await importTypescript('../frontend/src/utils/defaultAiProvider.ts');
 const {
   createGenerationReviewSession,
@@ -238,12 +238,38 @@ test('provider pause countdown derives from the authoritative deadline', () => {
 
 test('appearance presets stay browser-local and reject unknown values', () => {
   assert.equal(APPEARANCE_STORAGE_KEY, 'image-prompt-library.appearance.v1');
-  assert.equal(DEFAULT_APPEARANCE, 'gallery_vermilion');
+  assert.equal(DEFAULT_APPEARANCE, 'pure_white');
+  assert.equal(normalizeAppearance('pure_white'), 'pure_white');
   assert.equal(normalizeAppearance('gallery_vermilion'), 'gallery_vermilion');
   assert.equal(normalizeAppearance('pine_archive'), 'pine_archive');
   assert.equal(normalizeAppearance('aubergine_ink'), 'aubergine_ink');
-  assert.equal(normalizeAppearance('dark'), 'gallery_vermilion');
-  assert.equal(normalizeAppearance(null), 'gallery_vermilion');
+  assert.equal(normalizeAppearance('dark'), 'pure_white');
+  assert.equal(normalizeAppearance(null), 'pure_white');
+  assert.equal(normalizeAppearance(undefined), 'pure_white');
+});
+
+test('starting the app applies the saved appearance without overwriting an existing choice', t => {
+  const oldWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  const oldDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  let stored = null;
+  const writes = [];
+  const document = { documentElement: { dataset: {} } };
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: { localStorage: {
+    getItem(key) { assert.equal(key, APPEARANCE_STORAGE_KEY); return stored; },
+    setItem(...args) { writes.push(args); },
+  } } });
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: document });
+  t.after(() => {
+    if (oldWindow) Object.defineProperty(globalThis, 'window', oldWindow); else delete globalThis.window;
+    if (oldDocument) Object.defineProperty(globalThis, 'document', oldDocument); else delete globalThis.document;
+  });
+  for (const saved of [null, 'pure_white', 'gallery_vermilion', 'pine_archive', 'aubergine_ink']) {
+    stored = saved;
+    assert.equal(loadAppearance(), saved || 'pure_white');
+    applyStoredAppearance();
+    assert.equal(document.documentElement.dataset.appearance, saved || 'pure_white');
+  }
+  assert.deepEqual(writes, []);
 });
 
 test('default AI provider uses the sole available provider and preserves an explicit preference', () => {
@@ -276,16 +302,16 @@ test('appearance names are localized without changing preset identifiers', () =>
   const english = makeTranslator('en');
 
   assert.deepEqual(
-    ['appearanceGalleryVermilion', 'appearancePineArchive', 'appearanceAubergineInk'].map(key => traditional(key)),
-    ['朱紅', '松綠', '茄紫'],
+    ['appearancePureWhite', 'appearanceGalleryVermilion', 'appearancePineArchive', 'appearanceAubergineInk'].map(key => traditional(key)),
+    ['純白', '朱紅', '松綠', '茄紫'],
   );
   assert.deepEqual(
-    ['appearanceGalleryVermilion', 'appearancePineArchive', 'appearanceAubergineInk'].map(key => simplified(key)),
-    ['朱红', '松绿', '茄紫'],
+    ['appearancePureWhite', 'appearanceGalleryVermilion', 'appearancePineArchive', 'appearanceAubergineInk'].map(key => simplified(key)),
+    ['纯白', '朱红', '松绿', '茄紫'],
   );
   assert.deepEqual(
-    ['appearanceGalleryVermilion', 'appearancePineArchive', 'appearanceAubergineInk'].map(key => english(key)),
-    ['Red', 'Green', 'Purple'],
+    ['appearancePureWhite', 'appearanceGalleryVermilion', 'appearancePineArchive', 'appearanceAubergineInk'].map(key => english(key)),
+    ['Pure white', 'Red', 'Green', 'Purple'],
   );
 });
 
@@ -495,7 +521,7 @@ test('compatible recipes retain six qualities for snapshots and gateway model al
     const recipe = { model, quality, size: '2160x3840', background: 'opaque', output_format: 'png' };
     assert.equal(compatibleValidation(recipe), undefined);
     assert.deepEqual(compatibleParameters(recipe), { ...recipe, n: 1 });
-    assert.deepEqual(restoreCompatibleRecipe({ model: 'old-default', parameters: { quality: 'low' }, metadata: { requested: recipe } }), { ...recipe, legacyDerived: false });
+    assert.deepEqual(restoreCompatibleRecipe({ model: 'old-default', parameters: { quality: 'low' }, metadata: { requested: recipe } }), { ...recipe, base_url_mode: 'versioned', stream: false, partial_images: 0, response_format: 'auto', transportLegacyDerived: true, legacyDerived: false });
   }
   assert.equal(compatibleValidation(restoreCompatibleRecipe({ parameters: {} })), 'imageModelRequired');
   for (const model of ['gpt-image-2', 'custom-mapping']) for (const quality of IMAGE25_QUALITIES) {
@@ -674,6 +700,83 @@ test('metadata GETs share in-flight work and time out even when fetch ignores ab
     assert.deepEqual(await readJson('/bounded-test', 100), { recovered: true });
     globalThis.fetch = async () => ({ ok: true, json: () => new Promise(() => {}) });
     await assert.rejects(readJson('/body-timeout', 15), /timed out/);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('fresh metadata reads bypass an older in-flight response without losing newer sharing', async () => {
+  const { readJson } = await importTypescript('../frontend/src/api/readJson.ts');
+  const originalFetch = globalThis.fetch;
+  const pending = [];
+  globalThis.fetch = (url, init) => new Promise(resolve => pending.push({ url, init, resolve }));
+  try {
+    const beforeMutation = readJson('/fresh-history-test');
+    assert.equal(readJson('/fresh-history-test'), beforeMutation);
+    const afterMutation = readJson('/fresh-history-test', undefined, { fresh: true });
+    assert.notEqual(afterMutation, beforeMutation);
+    assert.equal(pending.length, 2);
+    pending[0].resolve({ ok: true, json: async () => ({ status: 'succeeded' }) });
+    assert.deepEqual(await beforeMutation, { status: 'succeeded' });
+    assert.equal(readJson('/fresh-history-test'), afterMutation, 'settling an older request must not remove the fresh pending entry');
+    assert.equal(pending.length, 2);
+    pending[1].resolve({ ok: true, json: async () => ({ status: 'discarded' }) });
+    assert.deepEqual(await afterMutation, { status: 'discarded' });
+    const later = readJson('/fresh-history-test');
+    assert.equal(pending.length, 3, 'the fresh request is removed after its own settlement');
+    pending[2].resolve({ ok: true, json: async () => ({ status: 'accepted' }) });
+    assert.deepEqual(await later, { status: 'accepted' });
+    assert.ok(pending.every(request => request.init.method === undefined), 'fresh reads never submit a mutation');
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('a rejected older metadata read cannot remove a fresh in-flight request', async () => {
+  const { readJson } = await importTypescript('../frontend/src/api/readJson.ts');
+  const originalFetch = globalThis.fetch;
+  const pending = [];
+  globalThis.fetch = () => new Promise((resolve, reject) => pending.push({ resolve, reject }));
+  try {
+    const older = readJson('/fresh-rejection-test');
+    const fresh = readJson('/fresh-rejection-test', undefined, { fresh: true });
+    const rejection = assert.rejects(older, /old request failed/);
+    pending[0].reject(Error('old request failed')); await rejection;
+    assert.equal(readJson('/fresh-rejection-test'), fresh);
+    pending[1].resolve({ ok: true, json: async () => ({ recovered: true }) });
+    assert.deepEqual(await fresh, { recovered: true });
+    assert.equal(pending.length, 2);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('history and batch API fresh reads retain filter parameters and bypass the pre-mutation response', async () => {
+  let source = await readFile(new URL('../frontend/src/api/client.ts', import.meta.url), 'utf8');
+  const readSource = await readFile(new URL('../frontend/src/api/readJson.ts', import.meta.url), 'utf8');
+  source = source.replace("import { readJson } from './readJson';", readSource.replaceAll('export ', ''));
+  const captureSource = await readFile(new URL('../frontend/src/utils/quickCapture.ts', import.meta.url), 'utf8');
+  source = source.replace("import { captureFormData, type CaptureLanguageResult, type CaptureRequest } from '../utils/quickCapture';", captureSource.replaceAll('export ', ''));
+  source = source.replace("import { DEFAULT_ITEM_SORT } from '../utils/searchSort';", "const DEFAULT_ITEM_SORT = 'updated_desc';").replaceAll('import.meta.env', '({})');
+  const javascript = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
+  const { api } = await import(`data:text/javascript;base64,${Buffer.from(javascript).toString('base64')}`);
+  const originalFetch = globalThis.fetch;
+  const pending = [];
+  globalThis.fetch = (url, init) => new Promise(resolve => pending.push({ url, init, resolve }));
+  try {
+    const params = { limit: 48, statuses: 'succeeded,accepted', prepare_references: false };
+    for (const read of [options => api.generationJobs(params, options), options => api.generationSet('test-batch', options)]) {
+      const start = pending.length;
+      const old = read();
+      assert.equal(read(), old);
+      const fresh = read({ fresh: true });
+      assert.equal(pending.length, start + 2);
+      assert.equal(pending[start].url, pending[start + 1].url);
+      pending[start].resolve({ ok: true, json: async () => ({ jobs: [{ id: 'old' }] }) });
+      await old;
+      assert.equal(read(), fresh);
+      pending[start + 1].resolve({ ok: true, json: async () => ({ jobs: [{ id: 'new' }] }) });
+      assert.deepEqual(await fresh, { jobs: [{ id: 'new' }] });
+    }
+    const query = new URL(pending[0].url, 'http://localhost').searchParams;
+    assert.equal(query.get('statuses'), 'succeeded,accepted');
+    assert.equal(query.get('prepare_references'), 'false');
+    assert.equal(query.get('fresh'), null, 'fresh is a client option, not a server query flag');
+    assert.ok(pending.every(request => request.init.method === undefined));
   } finally { globalThis.fetch = originalFetch; }
 });
 

@@ -364,6 +364,9 @@ def _validate_schema_contract(conn: sqlite3.Connection, ledger: list[str]) -> No
         required_tables.add("capture_requests")
     if migration_count >= 13:
         required_tables.add("capture_organizer_jobs")
+    if migration_count >= 14:
+        required_tables.update({"agent_config", "agent_conversations", "agent_rounds", "agent_requests",
+                                "agent_steps", "agent_tool_jobs", "agent_assets", "agent_resumes"})
     schema_objects = {
         str(row[0]): (str(row[1]), str(row[2] or ""))
         for row in conn.execute("SELECT name, type, sql FROM sqlite_master WHERE type IN ('table', 'view')")
@@ -511,6 +514,10 @@ def _validate_referenced_paths(conn: sqlite3.Connection, library: Path) -> None:
         if "result_path" in columns:
             for row in conn.execute("SELECT result_path FROM generation_jobs"):
                 validate(row[0], "generation_jobs.result_path")
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(agent_assets)")}
+        if "path" in columns:
+            for row in conn.execute("SELECT path FROM agent_assets"):
+                validate(row[0], "agent_assets.path", required=True)
     except sqlite3.Error as exc:
         raise _error("Could not validate database library references") from exc
 

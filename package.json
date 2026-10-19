@@ -7,16 +7,19 @@
     "build:extension": "node scripts/check-browser-extension.mjs",
     "test:extension": "node --test tests/browser-capture*.test.mjs",
     "build:demo": "tsc && vite build --mode demo --base /image-prompt-library/",
-    "test:frontend": "node --test tests/frontend-utils.test.mjs tests/explore-view.test.mjs tests/frontend-recipe-inputs.test.mjs tests/frontend-ratio-mismatch.test.mjs tests/frontend-compatible-profiles.test.mjs tests/frontend-quick-capture.test.mjs tests/frontend-capture-organizer.test.mjs",
+    "test:frontend": "node --test tests/frontend-utils.test.mjs tests/explore-view.test.mjs tests/frontend-recipe-inputs.test.mjs tests/frontend-ratio-mismatch.test.mjs tests/frontend-compatible-profiles.test.mjs tests/frontend-quick-capture.test.mjs tests/frontend-capture-organizer.test.mjs tests/frontend-agent.test.mjs tests/frontend-gallery.test.mjs tests/frontend-gallery-history.test.mjs tests/frontend-gallery-detail.test.mjs tests/frontend-lightbox.test.mjs tests/frontend-virtual-grid.test.mjs tests/frontend-compact-task-card.test.mjs tests/frontend-size-dialog.test.mjs tests/frontend-transport-recipe.test.mjs",
     "preview": "vite preview --host 127.0.0.1 --port 5177"
   },
   "dependencies": {
     "@vitejs/plugin-react": "6.0.1",
-    "vite": "8.2.2",
-    "typescript": "6.0.3",
+    "fflate": "^0.8.3",
+    "lucide-react": "1.11.0",
     "react": "19.2.5",
     "react-dom": "19.2.5",
-    "lucide-react": "1.11.0"
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "typescript": "6.0.3",
+    "vite": "8.2.2"
   },
   "devDependencies": {
     "@types/react": "19.2.14",

@@ -38,6 +38,7 @@ def test_http_batch_freezes_complete_recipe_and_preserves_prompt(setup, quality)
     assert len(jobs) == 3
     config = json.loads(path.read_text())
     config["model"] = "gpt-image-2.5-sunburst"
+    config.update(base_url_mode="custom", stream=True, partial_images=2, response_format="b64_json")
     path.write_text(json.dumps(config))
     output = BytesIO()
     Image.new("RGBA", (32, 32), (0, 0, 0, 0)).save(output, "PNG")
@@ -52,6 +53,8 @@ def test_http_batch_freezes_complete_recipe_and_preserves_prompt(setup, quality)
         stored = GenerationJobRepository(library).get_job(job["id"])
         assert stored.model == "gpt-image-2.5-flare"
         assert stored.parameters == {**settings, "model": stored.model,
+                                     "base_url_mode": "versioned", "stream": False,
+                                     "partial_images": 0, "response_format": "auto",
                                      "compatible_profile_id": "legacy", "compatible_profile_name": "Third-party API"}
         provider.run_job(library, stored.id)
     assert len(sent) == 3
@@ -99,3 +102,38 @@ def test_retry_uses_recorded_request_over_old_conflicting_parameters(setup):
     repo.mark_running(retry.id)
     with pytest.raises(GenerationJobConflict, match="Elapsed time alone"):
         repo.mark_stale_running_failed(retry.id)
+
+
+def test_legacy_retry_keeps_pre_transport_defaults_after_profile_changes(setup):
+    library, path, _ = setup
+    repo = GenerationJobRepository(library)
+    job = repo.create_job(GenerationJobCreate(provider="openai_compatible", prompt_text="synthetic"))
+    from backend.db import connect
+    parameters = dict(job.parameters)
+    defaults = {"base_url_mode": "versioned", "stream": False, "partial_images": 0, "response_format": "auto"}
+    for key in defaults:
+        parameters.pop(key)
+    with connect(library) as conn:
+        conn.execute("UPDATE generation_jobs SET parameters=? WHERE id=?", (json.dumps(parameters), job.id))
+        conn.commit()
+    repo.mark_failed(job.id, "synthetic failure")
+    config = json.loads(path.read_text())
+    config.update(base_url_mode="custom", stream=True, partial_images=2, response_format="b64_json")
+    path.write_text(json.dumps(config))
+    retry = repo.retry_failed_job(job.id)
+    assert not any(key in retry.parameters for key in defaults)
+    assert not repo.get_job(job.id).metadata.get("requested")
+    output = BytesIO()
+    Image.new("RGB", (8, 8), "blue").save(output, "PNG")
+    sent = []
+
+    def reply(request):
+        sent.append(json.loads(request.content))
+        assert request.url.path == "/v1/images/generations"
+        assert not any(key in sent[-1] for key in defaults)
+        return httpx.Response(200, json={"data": [{"b64_json": base64.b64encode(output.getvalue()).decode()}]})
+
+    with httpx.Client(transport=httpx.MockTransport(reply)) as http:
+        OpenAICompatibleProvider(OpenAICompatibleConfig(path), http).run_job(library, retry.id)
+    assert len(sent) == 1
+    assert {key: repo.get_job(retry.id).metadata["requested"][key] for key in defaults} == defaults

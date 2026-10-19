@@ -1,9 +1,9 @@
-export type ViewMode = 'explore' | 'cards';
-export type AppearancePreset = 'gallery_vermilion' | 'pine_archive' | 'aubergine_ink';
+export type ViewMode = 'explore' | 'cards' | 'gallery' | 'agent';
+export type AppearancePreset = 'pure_white' | 'gallery_vermilion' | 'pine_archive' | 'aubergine_ink';
 export type UploadImageRole = 'result_image' | 'reference_image';
 export type UiLanguage = 'zh_hant' | 'zh_hans' | 'en';
 export type AiProvider = TitleSuggestionProvider | 'openai_compatible';
-export interface OpenAICompatibleConfig { display_name: string; base_url: string; model: string; timeout: number; api_key_present: boolean }
+export interface OpenAICompatibleConfig { display_name: string; base_url: string; model: string; timeout: number; api_key_present: boolean; models?: string[]; base_url_mode?: 'versioned' | 'custom'; stream?: boolean; partial_images?: number; response_format?: 'auto' | 'b64_json' }
 export interface OpenAICompatibleProfile extends OpenAICompatibleConfig { id: string; configured: boolean }
 export interface OpenAICompatibleProfiles { profiles: OpenAICompatibleProfile[]; default_profile_id: string | null }
 export type TitleSuggestionProvider = 'openai_codex_oauth_native' | 'xai_grok_oauth';

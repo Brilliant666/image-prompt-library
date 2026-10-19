@@ -1,4 +1,4 @@
-import { Filter, Search, Settings } from 'lucide-react';
+import { Filter, Search, Settings, Plus } from 'lucide-react';
 import headerLogo from '../assets/header-logo.png';
 import type { ViewMode } from '../types';
 import type { Translator } from '../utils/i18n';
@@ -14,6 +14,7 @@ interface Props {
   onView: (v: ViewMode) => void;
   onFilters: () => void;
   onConfig: () => void;
+  onCapture?: () => void;
   filtersOpen?: boolean;
   configOpen?: boolean;
   hasActiveFilter?: boolean;
@@ -30,59 +31,71 @@ export default function TopBar({
   onView,
   onFilters,
   onConfig,
+  onCapture,
   filtersOpen = false,
   configOpen = false,
   hasActiveFilter = false,
   modalOpen = false,
 }: Props) {
   const hasActiveSearch = Boolean(queryFilterChips.length);
+  const isLibraryView = view === 'explore' || view === 'cards';
 
   return (
-    <header className="chrome" inert={modalOpen} aria-hidden={modalOpen || undefined}>
-      <nav className="nav-row" aria-label={t('primaryNavigation')}>
-        <div className="logo mobile-brand" aria-label={t('appHome')}>
-          <img className="logo-mark" src={headerLogo} alt="" aria-hidden="true" />
-          <b className="logo-wordmark" lang="en">Image Prompt Library</b>
-        </div>
-
-        <button
-          className={`vista-button filter-button${hasActiveFilter ? ' active' : ''}`}
-          onClick={onFilters}
-          aria-label={t('filters')}
-          aria-haspopup="dialog"
-          aria-expanded={filtersOpen}
-          aria-controls="filters-drawer"
-        >
-          <Filter size={18} />
-          <span className="filter-label">{t('filters')}</span>
-        </button>
-
-        <label className="search toolbar-search" aria-label={t('searchAria')}>
-          <Search size={20} />
-          <input
-            value={q}
-            onChange={event => onQ(event.target.value)}
-            placeholder={t('searchPlaceholder')}
-          />
-        </label>
-
-        <div className="view-dock">
-          <ViewToggle t={t} view={view} onView={onView} />
-        </div>
-
-        <button className="iconbtn config-button" onClick={onConfig} aria-label={t('config')} aria-haspopup="dialog" aria-expanded={configOpen} aria-controls="config-drawer">
-          <Settings size={19} />
-          {updateBadgeLabel && <span className="update-available-badge">{updateBadgeLabel}</span>}
-        </button>
-      </nav>
-
-      {hasActiveSearch && (
-        <div className="status-row mobile-status-view-row">
-          <div className="active-filter-strip" aria-label={t('currentFilters')}>
-            {queryFilterChips.map(chip => <span key={chip} className="chip query-filter-chip">{chip}</span>)}
+    <>
+      <header className="chrome" inert={modalOpen} aria-hidden={modalOpen || undefined}>
+        <nav className="nav-row" aria-label={t('primaryNavigation')}>
+          <div className="logo mobile-brand" aria-label={t('appHome')}>
+            <img className="logo-mark" src={headerLogo} alt="" aria-hidden="true" />
+            <b className="logo-wordmark" lang="en">Image Prompt Library</b>
           </div>
+
+          <div className="view-dock">
+            <ViewToggle t={t} view={view} onView={onView} />
+          </div>
+
+          <div className="header-actions">
+            {onCapture && <button className="iconbtn workspace-capture" onClick={onCapture} aria-label="快捷收录" title="快捷收录"><Plus size={18}/><span>收录</span></button>}
+
+            <button className="iconbtn config-button" onClick={onConfig} aria-label={t('config')} aria-haspopup="dialog" aria-expanded={configOpen} aria-controls="config-drawer">
+              <Settings size={19} />
+              {updateBadgeLabel && <span className="update-available-badge">{updateBadgeLabel}</span>}
+            </button>
+          </div>
+        </nav>
+      </header>
+
+      <div className="library-tools" hidden={!isLibraryView} inert={modalOpen} aria-hidden={!isLibraryView || modalOpen || undefined}>
+        <div className="library-toolbar">
+          <label className="search toolbar-search" aria-label={t('searchAria')}>
+            <Search size={20} />
+            <input
+              value={q}
+              onChange={event => onQ(event.target.value)}
+              placeholder={t('searchPlaceholder')}
+            />
+          </label>
+
+          <button
+            className={`vista-button filter-button${hasActiveFilter ? ' active' : ''}`}
+            onClick={onFilters}
+            aria-label={t('filters')}
+            aria-haspopup="dialog"
+            aria-expanded={filtersOpen}
+            aria-controls="filters-drawer"
+          >
+            <Filter size={18} />
+            <span className="filter-label">{t('filters')}</span>
+          </button>
         </div>
-      )}
-    </header>
+
+        {hasActiveSearch && isLibraryView && (
+          <div className="status-row mobile-status-view-row">
+            <div className="active-filter-strip" aria-label={t('currentFilters')}>
+              {queryFilterChips.map(chip => <span key={chip} className="chip query-filter-chip">{chip}</span>)}
+            </div>
+          </div>
+        )}
+      </div>
+    </>
   );
 }
