@@ -38,6 +38,7 @@ def test_http_batch_freezes_complete_recipe_and_preserves_prompt(setup, quality)
     assert len(jobs) == 3
     config = json.loads(path.read_text())
     config["model"] = "gpt-image-2.5-sunburst"
+    config.update(base_url_mode="custom", stream=True, partial_images=2, response_format="b64_json")
     path.write_text(json.dumps(config))
     output = BytesIO()
     Image.new("RGBA", (32, 32), (0, 0, 0, 0)).save(output, "PNG")
@@ -52,6 +53,8 @@ def test_http_batch_freezes_complete_recipe_and_preserves_prompt(setup, quality)
         stored = GenerationJobRepository(library).get_job(job["id"])
         assert stored.model == "gpt-image-2.5-flare"
         assert stored.parameters == {**settings, "model": stored.model,
+                                     "base_url_mode": "versioned", "stream": False,
+                                     "partial_images": 0, "response_format": "auto",
                                      "compatible_profile_id": "legacy", "compatible_profile_name": "Third-party API"}
         provider.run_job(library, stored.id)
     assert len(sent) == 3
