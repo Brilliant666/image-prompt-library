@@ -1202,7 +1202,8 @@ test('redesign interaction guards keep overlays mutually exclusive and focus-saf
   assert.match(styles, /\.scope-sort-select\{[^}]*width:auto;[^}]*cursor:pointer;[^}]*appearance:none/);
   assert.doesNotMatch(styles, /\.scope-sort-select\{[^}]*position:absolute;[^}]*opacity:0/);
   assert.match(styles, /main\{max-width:1600px[\s\S]*?@media\(min-width:1760px\)\{main,\.chrome \.nav-row,\.status-row\{max-width:1920px\}\}/);
-  assert.match(styles, /@media\(max-width:760px\)\{[\s\S]*?\.view-dock\{grid-column:1\/-1;grid-row:3;justify-self:stretch;width:100%;margin-top:1px\}[\s\S]*?\.view-dock \.toggle\{width:100%;height:44px;gap:0;padding:0;border:0;overflow:hidden\}[\s\S]*?\.view-dock \.toggle button\{flex:1 1 50%;min-height:44px;padding:0 13px;border-radius:0\}/);
+  assert.match(styles, /\.library-toolbar\[hidden\]\{display:none!important\}/);
+  assert.match(styles, /@media\(max-width:760px\)\{[\s\S]*?\.library-toolbar\{grid-column:1\/-1;grid-row:3\}[\s\S]*?\.view-dock\{grid-column:1\/-1;grid-row:2;justify-self:stretch;width:100%\}[\s\S]*?\.view-dock \.toggle button\{flex:1 1 0;min-width:0;min-height:36px;padding:0 8px\}/);
   assert.match(styles, /@media\(max-width:760px\)\{[\s\S]*?\.scope-sort-control\{height:40px;max-width:min\(190px,48vw\);min-height:40px\}[\s\S]*?\.scope-sort-select\{height:38px;min-height:38px/);
   assert.match(styles, /\.generation-generating-block::after\{[\s\S]*?opacity:0[\s\S]*?transform:translateX\(-130%\)[\s\S]*?animation:generation-exposure-sweep 1\.45s/);
   assert.match(styles, /@keyframes generation-exposure-sweep/);

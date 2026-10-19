@@ -47,38 +47,41 @@ export default function TopBar({
           <b className="logo-wordmark" lang="en">Image Prompt Library</b>
         </div>
 
-        <button
-          className={`vista-button filter-button${hasActiveFilter ? ' active' : ''}`}
-          onClick={onFilters}
-          aria-label={t('filters')}
-          aria-haspopup="dialog"
-          aria-expanded={filtersOpen}
-          aria-controls="filters-drawer"
-          hidden={view === 'gallery' || view === 'agent'}
-        >
-          <Filter size={18} />
-          <span className="filter-label">{t('filters')}</span>
-        </button>
-
-        <label className="search toolbar-search" aria-label={t('searchAria')} hidden={view === 'gallery' || view === 'agent'}>
-          <Search size={20} />
-          <input
-            value={q}
-            onChange={event => onQ(event.target.value)}
-            placeholder={t('searchPlaceholder')}
-          />
-        </label>
-
         <div className="view-dock">
           <ViewToggle t={t} view={view} onView={onView} />
         </div>
 
-        {onCapture && <button className="iconbtn workspace-capture" onClick={onCapture} aria-label="快捷收录" title="快捷收录"><Plus size={18}/><span>收录</span></button>}
+        <div className="library-toolbar" hidden={view === 'gallery' || view === 'agent'}>
+          <label className="search toolbar-search" aria-label={t('searchAria')}>
+            <Search size={20} />
+            <input
+              value={q}
+              onChange={event => onQ(event.target.value)}
+              placeholder={t('searchPlaceholder')}
+            />
+          </label>
 
-        <button className="iconbtn config-button" onClick={onConfig} aria-label={t('config')} aria-haspopup="dialog" aria-expanded={configOpen} aria-controls="config-drawer">
-          <Settings size={19} />
-          {updateBadgeLabel && <span className="update-available-badge">{updateBadgeLabel}</span>}
-        </button>
+          <button
+            className={`vista-button filter-button${hasActiveFilter ? ' active' : ''}`}
+            onClick={onFilters}
+            aria-label={t('filters')}
+            aria-haspopup="dialog"
+            aria-expanded={filtersOpen}
+            aria-controls="filters-drawer"
+          >
+            <Filter size={18} />
+            <span className="filter-label">{t('filters')}</span>
+          </button>
+        </div>
+
+        <div className="header-actions">
+          {onCapture && <button className="iconbtn workspace-capture" onClick={onCapture} aria-label="快捷收录" title="快捷收录"><Plus size={18}/><span>收录</span></button>}
+
+          <button className="iconbtn config-button" onClick={onConfig} aria-label={t('config')} aria-haspopup="dialog" aria-expanded={configOpen} aria-controls="config-drawer">
+            <Settings size={19} />
+            {updateBadgeLabel && <span className="update-available-badge">{updateBadgeLabel}</span>}
+          </button>
+        </div>
       </nav>
 
       {hasActiveSearch && (view === 'explore' || view === 'cards') && (

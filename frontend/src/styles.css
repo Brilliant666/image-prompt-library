@@ -664,8 +664,7 @@ html[data-view-transition="to-cards"]::view-transition-new(library-content){anim
 }
 .nav-row{
   display:grid;
-  grid-template-columns:auto auto minmax(260px,680px) auto auto;
-  justify-content:center;
+  grid-template-columns:auto auto minmax(0,1fr) auto;
   gap:12px;
   align-items:center;
   max-width:1600px;
@@ -675,18 +674,24 @@ html[data-view-transition="to-cards"]::view-transition-new(library-content){anim
 .logo-mark{width:36px;height:36px;display:block;object-fit:contain}
 .logo b{display:block;font-size:15px;font-weight:700;letter-spacing:-.025em}
 .logo-wordmark{font-family:var(--font-ui-latin)}
-.filter-button,.config-button{
+.library-toolbar{grid-column:3;grid-row:1;display:flex;align-items:center;gap:8px;min-width:0}
+.library-toolbar[hidden]{display:none!important}
+.header-actions{grid-column:4;grid-row:1;display:flex;align-items:center;gap:8px}
+.filter-button,.config-button,.workspace-capture{
   min-height:44px;
   border:1px solid var(--studio-hairline);
   border-radius:11px;
   background:rgb(var(--studio-surface-rgb) / .72);
   box-shadow:none;
 }
-.filter-button{position:relative;height:44px;padding:0 14px;font-size:14px;font-weight:700}
+.filter-button{position:relative;flex:0 0 auto;height:44px;padding:0 14px;font-size:14px;font-weight:700;white-space:nowrap}
 .filter-button.active{color:var(--accent-strong);background:var(--studio-accent-soft);box-shadow:none}
 .config-button{width:44px;height:44px}
-.chrome .filter-button:hover,.chrome .config-button:hover{transform:none;background:var(--studio-accent-soft)}
+.workspace-capture{display:inline-flex;gap:5px;align-items:center;justify-content:center;height:44px;min-width:76px;padding:0 12px;white-space:nowrap}
+.workspace-capture span{font-size:13px}
+.chrome .filter-button:hover,.chrome .config-button:hover,.chrome .workspace-capture:hover{transform:none;background:var(--studio-accent-soft)}
 .toolbar-search{
+  flex:1 1 0;
   height:44px;
   min-width:0;
   padding:0 15px;
@@ -695,11 +700,12 @@ html[data-view-transition="to-cards"]::view-transition-new(library-content){anim
   background:rgb(var(--studio-surface-rgb) / .86);
   box-shadow:none;
 }
-.search input{font-size:14px}
+.toolbar-search svg{flex-shrink:0}
+.search input{min-width:0;font-size:14px}
 .search input::placeholder{color:#938b85}
-.view-dock{min-width:0;flex:0 0 auto}
+.view-dock{grid-column:2;grid-row:1;min-width:0;width:max-content}
 .toggle{display:flex;gap:3px;padding:3px;border:1px solid var(--studio-hairline);border-radius:12px;background:rgba(235,229,218,.72)}
-.toggle button{min-height:36px;padding:0 14px;border-radius:9px;background:transparent;color:var(--muted);font-size:13px;font-weight:600}
+.toggle button{flex:0 0 auto;min-height:36px;padding:0 14px;border-radius:9px;background:transparent;color:var(--muted);font-size:13px;font-weight:600;white-space:nowrap}
 .toggle button:hover{transform:none;background:var(--studio-accent-soft)}
 .toggle .active{color:var(--accent-strong);background:var(--studio-accent-soft);box-shadow:none}
 .toggle .active:hover{color:var(--accent-strong);background:var(--studio-accent-soft)}
@@ -912,9 +918,9 @@ button.explore-collection-preview:focus-visible{outline:2px solid var(--studio-a
 .app-command-dock .floating-action-rail .add-fab:hover{color:var(--studio-accent-strong);background:var(--studio-accent-soft)}
 .app-command-dock .floating-action-rail .generate-fab,.app-command-dock .floating-action-rail .generate-fab:hover{color:var(--studio-surface);background:var(--studio-accent)}
 
-@media(min-width:761px) and (max-width:900px){
+@media(min-width:761px) and (max-width:1050px){
   .chrome{padding-left:16px;padding-right:16px}
-  .nav-row{grid-template-columns:36px 44px minmax(180px,1fr) auto 44px;gap:8px}
+  .nav-row{grid-template-columns:36px auto minmax(0,1fr) auto;gap:8px}
   .logo{min-width:0}
   .logo b,.filter-label{display:none}
   .filter-button{width:44px;padding:0}
@@ -923,17 +929,18 @@ button.explore-collection-preview:focus-visible{outline:2px solid var(--studio-a
 
 @media(max-width:760px){
   .chrome{padding:calc(10px + env(safe-area-inset-top)) calc(12px + env(safe-area-inset-right)) 8px calc(12px + env(safe-area-inset-left))}
-  .nav-row{grid-template-columns:44px minmax(0,1fr) 44px;gap:8px;justify-content:stretch}
-  .mobile-brand{grid-column:2;grid-row:1;justify-self:center;min-width:0;gap:6px}
+  .nav-row{grid-template-columns:minmax(0,1fr) auto;gap:8px}
+  .mobile-brand{grid-column:1;grid-row:1;min-width:0;gap:6px}
   .mobile-brand .logo-mark{width:28px;height:28px}
   .mobile-brand b{font-size:12px;letter-spacing:-.025em}
-  .filter-button{grid-column:1;grid-row:1;width:44px;padding:0}
+  .filter-button{width:44px;padding:0}
   .filter-label{display:none}
-  .config-button{grid-column:3;grid-row:1}
-  .toolbar-search{grid-column:1/-1;grid-row:2;order:initial;height:44px;border-radius:10px}
-  .view-dock{grid-column:1/-1;grid-row:3;justify-self:stretch;width:100%;margin-top:1px}
-  .view-dock .toggle{width:100%;height:44px;gap:0;padding:0;border:0;overflow:hidden}
-  .view-dock .toggle button{flex:1 1 50%;min-height:44px;padding:0 13px;border-radius:0}
+  .header-actions{grid-column:2;gap:6px}
+  .library-toolbar{grid-column:1/-1;grid-row:3}
+  .toolbar-search{height:44px;border-radius:10px}
+  .view-dock{grid-column:1/-1;grid-row:2;justify-self:stretch;width:100%}
+  .view-dock .toggle{width:100%;min-height:44px;gap:3px;padding:3px}
+  .view-dock .toggle button{flex:1 1 0;min-width:0;min-height:36px;padding:0 8px}
   .status-row{margin-top:7px}
   .active-filter-strip{width:100%;overflow:hidden;flex-wrap:nowrap}
   .active-filter-strip .chip{flex:0 1 auto;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -990,6 +997,8 @@ button.explore-collection-preview:focus-visible{outline:2px solid var(--studio-a
 }
 
 @media(max-width:400px){
+  .workspace-capture{min-width:44px;width:44px;padding:0}
+  .workspace-capture span{display:none}
   .responsive-cards-grid{column-count:1}
   .responsive-cards-grid.is-sparse{grid-template-columns:1fr}
   .responsive-cards-grid.is-sparse.sparse-count-2{grid-template-columns:1fr;gap:18px}
