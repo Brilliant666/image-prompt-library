@@ -103,9 +103,9 @@ def test_public_readme_explains_current_workflows_and_screenshots():
     assert "local image files" in readme
     assert "provider's servers" in readme
     for label in (
-        "Explore", "Library", "Config → Providers", "ChatGPT / Codex OAuth",
+        "Explore", "Library", "Settings → API", "ChatGPT / Codex OAuth",
         "Grok OAuth", "Default AI provider", "Suggest title", "Use title",
-        "via ChatGPT", "via Grok", "Work queue", "Save as new item",
+        "via ChatGPT", "via Grok", "Gallery", "Agent", "Save as new item",
     ):
         assert label in readme
     assert "copy public sample prompts" in readme
@@ -116,7 +116,8 @@ def test_public_readme_explains_current_workflows_and_screenshots():
     assert "**Move**" in readme
     assert "multiple images in one card" in readme
     assert "unchanged source card" in readme
-    assert "review completed results from the **work queue**" in readme.lower()
+    assert "review current and historical tasks in **gallery**" in readme.lower()
+    assert "docs/PLAYGROUND.md" in readme
     assert "online read-only demo" in readme.lower()
     assert "## Privacy" in readme
     assert "only prompt text" in readme
