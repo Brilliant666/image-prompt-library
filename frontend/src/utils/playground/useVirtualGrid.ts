@@ -18,7 +18,7 @@ export function useVirtualGrid(gridRef: RefObject<HTMLElement | null>, count: nu
 
   const update = useCallback(() => {
     const grid = gridRef.current
-    if (!grid) return
+    if (!grid || grid.getClientRects().length === 0) return
     const m = metricsRef.current
     const vh = window.innerHeight
     const viewTop = -grid.getBoundingClientRect().top
@@ -32,7 +32,7 @@ export function useVirtualGrid(gridRef: RefObject<HTMLElement | null>, count: nu
 
   const measure = useCallback(() => {
     const grid = gridRef.current
-    if (!grid) return
+    if (!grid || grid.getClientRects().length === 0) return
     const style = getComputedStyle(grid)
     const prev = metricsRef.current
     const next = {

@@ -687,7 +687,6 @@ export default function ConfigPanel({
           <p className="muted">{t('localSetupHelp')}</p>
           <dl className="local-setup-list">
             <div><dt>{t('appVersion')}</dt><dd><code>{cfg?.version || updateStatus?.current_version || 'unknown'}</code></dd></div>
-            <div><dt>{t('libraryPath')}</dt><dd><code>{cfg?.library_path || 'unavailable'}</code></dd></div>
             <div><dt>{t('databasePath')}</dt><dd><code>{cfg?.database_path || 'unavailable'}</code></dd></div>
             <div><dt>{t('updateStatusLabel')}</dt><dd>{updateSetupLabel}</dd></div>
             <div><dt>{t('generationStatusLabel')}</dt><dd>{generationSetupLabel}</dd></div>

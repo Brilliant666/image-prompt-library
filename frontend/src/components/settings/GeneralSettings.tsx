@@ -14,7 +14,7 @@ export default function GeneralSettings({ value, onChange, uiLanguage }: {
   ];
   return <section className="setting-group local-preferences-settings">
     <h3>{en ? 'Input and workflow' : '输入与使用习惯'}</h3>
-    <p className="muted">{en ? 'These preferences are saved only in this browser.' : '这些习惯设置仅保存在当前浏览器。'}</p>
+    <p className="muted">{en ? 'Saved only in this browser, for Gallery and Agent. Browser capture drafts are unaffected.' : '仅保存在当前浏览器，作用于画廊与 Agent；不会清空浏览器收录插件的草稿。'}</p>
     <label className="settings-field settings-field-row"><span>{en ? 'Submit shortcut' : '任务提交方式'}</span>
       <select value={value.enterSubmit ? 'enter' : 'ctrl-enter'} onChange={event => onChange({ ...value, enterSubmit: event.target.value === 'enter' })}>
         <option value="ctrl-enter">Ctrl / ⌘ + Enter</option><option value="enter">Enter</option>

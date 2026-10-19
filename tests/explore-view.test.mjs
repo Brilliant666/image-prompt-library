@@ -793,7 +793,7 @@ test('Config serializes OAuth actions across provider cards', async () => {
 });
 
 test('Explore wiring preserves Library management, semantic appearance, and restrained motion', async () => {
-  const [app, cards, explore, config, styles, translations, toggle, topBar, generationPanel, queueDrawer, editorModal, suggestedTitleField, modalFocus, appearance, itemCard] = await Promise.all([
+  const [app, cards, explore, config, styles, translations, toggle, topBar, generationPanel, queueDrawer, editorModal, suggestedTitleField, modalFocus, appearance, itemCard, galleryWorkspace] = await Promise.all([
     readFile(`${ROOT}/frontend/src/App.tsx`, 'utf8'),
     readFile(`${ROOT}/frontend/src/components/CardsView.tsx`, 'utf8'),
     readFile(`${ROOT}/frontend/src/components/ExploreView.tsx`, 'utf8'),
@@ -809,9 +809,13 @@ test('Explore wiring preserves Library management, semantic appearance, and rest
     readFile(`${ROOT}/frontend/src/hooks/useModalFocus.ts`, 'utf8'),
     readFile(`${ROOT}/frontend/src/utils/appearance.ts`, 'utf8'),
     readFile(`${ROOT}/frontend/src/components/ItemCard.tsx`, 'utf8'),
+    readFile(`${ROOT}/frontend/src/components/gallery/GalleryWorkspace.tsx`, 'utf8'),
   ]);
 
-  assert.match(app, /nextView !== 'cards'/);
+  const workspaceSwitch = app.slice(app.indexOf('const updateView ='), app.indexOf('const updateSort ='));
+  assert.doesNotMatch(workspaceSwitch, /exitSelectionMode\(|clearSelection\(|setClusterId\(undefined\)/, 'workspace navigation preserves Library selection and collection filter');
+  assert.match(workspaceSwitch, /viewScroll\.current\[view\] = window\.scrollY/);
+  assert.match(workspaceSwitch, /viewScroll\.current\[nextView\]/);
   assert.match(app, /view === 'cards' && selectionMode/);
   assert.match(app, /className="selection-toolbar-button selection-toolbar-more-trigger"[\s\S]*?aria-haspopup="menu"[\s\S]*?aria-expanded=\{selectionActionsOpen\}/);
   assert.match(app, /className="selection-toolbar-menu" role="menu"/);
@@ -821,7 +825,12 @@ test('Explore wiring preserves Library management, semantic appearance, and rest
   assert.match(styles, /\.selection-toolbar-secondary\{display:contents\}/);
   assert.doesNotMatch(styles, /\.selection-toolbar\{[^}]*flex-wrap:wrap/);
   assert.equal((translations.match(/batchMoreActions:/g) || []).length, 3);
-  assert.match(app, /app-command-dock[\s\S]*?<GenerationQueueDrawer[\s\S]*?className="floating-action-rail"/);
+  // Generation monitoring moved into the persistent Gallery workspace. The
+  // Library dock retains capture/generate actions and opens that same workspace.
+  assert.match(app, /app-command-dock[\s\S]*?className="floating-action-rail"[\s\S]*?onClick=\{openNewItemEditor\}[\s\S]*?onClick=\{openStandaloneGeneration\}/);
+  assert.match(app, /<GalleryWorkspace active=\{view === 'gallery'\}[\s\S]*?refreshKey=\{generationQueueRefreshKey\}[\s\S]*?onQueueChanged=\{/);
+  assert.match(galleryWorkspace, /api\.generationJobs\(/);
+  assert.match(galleryWorkspace, /<TaskGrid[\s\S]*?onOpen=/);
   assert.equal((app.match(/className="fab select-fab"/g) || []).length, 1);
   assert.match(app, /dataScopeMatches/);
   assert.match(app, /const \[viewTransition, setViewTransition\]/);
@@ -883,7 +892,7 @@ test('Explore wiring preserves Library management, semantic appearance, and rest
   assert.match(topBar, /className=\{`vista-button filter-button[\s\S]*?aria-label=\{t\('filters'\)\}/);
   assert.match(topBar, /className="logo-wordmark" lang="en"/);
   assert.match(topBar, /inert=\{modalOpen\} aria-hidden=\{modalOpen \|\| undefined\}/);
-  assert.match(app, /const blockingModalOpen = !hasChosenUiLanguage \|\| Boolean\(detailId \|\| editorOpen \|\| quickCaptureOpen \|\| standaloneGenerationOpen \|\| batchActionDialog\)/);
+  assert.match(app, /const blockingModalOpen = !hasChosenUiLanguage \|\| Boolean\(detailId \|\| editorOpen \|\| quickCaptureOpen \|\| batchActionDialog\)/);
   assert.match(app, /allowDelete=\{showManagementActions\}/);
   assert.match(editorModal, /allowDelete && persistedItem/);
   assert.match(editorModal, /if \(!allowDelete \|\| !persistedItem \|\| deleting \|\| saving\) return;/);
@@ -940,17 +949,26 @@ test('Explore wiring preserves Library management, semantic appearance, and rest
   for (const preset of ['gallery_vermilion', 'pine_archive', 'aubergine_ink']) {
     assert.match(config, new RegExp(preset));
   }
-  const settingOrder = [
-    "t('uiLanguage')",
-    "t('promptCopyLanguage')",
-    "t('appearance')",
-    "t('appUpdate')",
-    "t('cleanupTitle')",
-    "t('providers')",
-    "t('systemInformation')",
-  ].map(marker => config.indexOf(marker));
-  assert.ok(settingOrder.every(index => index >= 0));
-  assert.deepEqual(settingOrder, [...settingOrder].sort((a, b) => a - b));
+  // Preserve every former settings control in its new named tab instead of
+  // requiring the old one-column drawer order across unrelated groups.
+  const settingsGroups = {
+    api: ["t('providers')", '<OpenAICompatibleSettings', 'startProviderAuth(provider.provider)', 'disconnectProviderAuth(provider.provider)'],
+    general: ["t('uiLanguage')", "t('promptCopyLanguage')", "t('appearance')", '<GeneralSettings'],
+    agent: ['<AgentSettings'],
+    capture: ['<BrowserCaptureSettings', '<CaptureOrganizerSettings'],
+    data: ["t('cleanupTitle')", 'onClick={loadCleanupPreview}', 'onClick={applyCleanup}'],
+    about: ["t('appUpdate')", "t('systemInformation')"],
+  };
+  for (const [section, markers] of Object.entries(settingsGroups)) {
+    const start = config.indexOf(`<div role="tabpanel" id="settings-panel-${section}"`);
+    assert.ok(start >= 0, `${section} settings panel exists`);
+    const next = config.indexOf('<div role="tabpanel"', start + 1);
+    const panel = config.slice(start, next < 0 ? config.indexOf('</aside>', start) : next);
+    assert.ok(panel.includes(`aria-labelledby="settings-tab-${section}"`));
+    const order = markers.map(marker => panel.indexOf(marker));
+    assert.ok(order.every(index => index >= 0), `${section} retains its controls`);
+    if (section === 'general' || section === 'about') assert.deepEqual(order, [...order].sort((a, b) => a - b));
+  }
   assert.equal((config.match(/cfg\?\.library_path/g) || []).length, 1);
   assert.equal((config.match(/cfg\?\.database_path/g) || []).length, 1);
   assert.match(config, /filter\(provider => provider\.provider !== 'manual_upload'\)/);
@@ -967,8 +985,9 @@ test('Explore wiring preserves Library management, semantic appearance, and rest
   assert.match(queueDrawer, /cancelGenerationJob\(job\.id\)[\s\S]*?await refresh\(\)/);
   assert.match(queueDrawer, /loading="lazy" decoding="async"/);
   assert.match(app, /const showFloatingActions = Boolean\(hasChosenUiLanguage/);
-  assert.match(app, /const generationJobRequestRef = useRef\(0\)/);
-  assert.match(app, /if \(generationJobRequestRef\.current !== requestId\) return;/);
+  assert.match(galleryWorkspace, /detailSequence\s*=\s*useRef\(0\)/);
+  assert.match(galleryWorkspace, /sequence\s*===\s*detailSequence\.current[\s\S]*?setDetail/);
+  assert.match(galleryWorkspace, /const closeDetail\s*=\s*\(\)\s*=>\s*\{detailSequence\.current\+\+;setDetail\(undefined\)/);
   assert.match(app, /const clustersRequestRef = useRef\(0\)/);
   assert.match(app, /const libraryTotalRequestRef = useRef\(0\)/);
   assert.match(app, /if \(libraryTotalRequestRef\.current === requestId\) setLibraryTotal/);
@@ -976,7 +995,7 @@ test('Explore wiring preserves Library management, semantic appearance, and rest
   assert.match(app, /const batchActionInFlightRef = useRef\(false\)/);
   assert.match(app, /if \(!selectedItemIds\.size \|\| batchActionInFlightRef\.current\) return false;/);
   assert.match(app, /const cancelPendingEdit = \(\) => \{/);
-  assert.match(app, /const openGenerationQueue = \(\) => \{[\s\S]*?cancelPendingEdit\(\)/);
+  assert.match(app, /const openStandaloneGeneration = \(\) => \{[\s\S]*?cancelPendingEdit\(\)[\s\S]*?updateView\('gallery'\)/);
   assert.match(app, /if \(result\.failed > 0\)/);
   assert.match(editorModal, /t\('savePartiallyCompleted'\)/);
   assert.match(editorModal, /await api\.deleteItem\(saved\.id\)/);
@@ -1114,7 +1133,7 @@ test('batch review closure keeps save, provenance, references, and mobile action
 });
 
 test('redesign interaction guards keep overlays mutually exclusive and focus-safe', async () => {
-  const [app, filters, config, detail, generation, focus, styles] = await Promise.all([
+  const [app, filters, config, detail, generation, focus, styles, galleryWorkspace, galleryDetail] = await Promise.all([
     readFile(`${ROOT}/frontend/src/App.tsx`, 'utf8'),
     readFile(`${ROOT}/frontend/src/components/FiltersPanel.tsx`, 'utf8'),
     readFile(`${ROOT}/frontend/src/components/ConfigPanel.tsx`, 'utf8'),
@@ -1122,14 +1141,19 @@ test('redesign interaction guards keep overlays mutually exclusive and focus-saf
     readFile(`${ROOT}/frontend/src/components/GenerationPanel.tsx`, 'utf8'),
     readFile(`${ROOT}/frontend/src/hooks/useModalFocus.ts`, 'utf8'),
     readFile(`${ROOT}/frontend/src/styles.css`, 'utf8'),
+    readFile(`${ROOT}/frontend/src/components/gallery/GalleryWorkspace.tsx`, 'utf8'),
+    readFile(`${ROOT}/frontend/src/components/gallery/DetailModal.tsx`, 'utf8'),
   ]);
 
-  assert.match(app, /setGenerationQueueOpen\(false\); setFiltersOpen\(true\)/);
-  assert.match(app, /setGenerationQueueOpen\(false\); setConfigOpen\(true\)/);
-  assert.match(app, /const openGenerationFromDetail = \(item: ItemDetail, imageId\?: string\) => \{[\s\S]*?setGenerationSourceItem\(item\);[\s\S]*?setStandaloneGenerationOpen\(true\)/);
-  assert.match(app, /const closeStandaloneGeneration = \(\) => \{[\s\S]*?setStandaloneGenerationOpen\(false\);[\s\S]*?setGenerationSourceItem\(undefined\);[\s\S]*?\};/);
-  assert.match(app, /\{!standaloneGenerationOpen && detailId && <ItemDetailModal key=\{detailId\}/);
-  assert.match(app, /\{standaloneGenerationOpen && <GenerationPanel item=\{generationSourceItem\}/);
+  assert.match(app, /const openFilters = \(\) => \{[^}]*setConfigOpen\(false\);[^}]*setFiltersOpen\(true\)/);
+  assert.match(app, /const openConfig = \(\) => \{[^}]*setFiltersOpen\(false\);[^}]*setConfigOpen\(true\)/);
+  assert.match(app, /const openGenerationFromDetail = \(item: ItemDetail, imageId\?: string\) => \{[\s\S]*?cancelPendingEdit\(\);[\s\S]*?setDetailId\(undefined\);[\s\S]*?setGalleryCommand\(\{id:Date\.now\(\),item,imageId\}\);[\s\S]*?updateView\('gallery'\)/);
+  assert.match(app, /const openStandaloneGeneration = \(\) => \{[\s\S]*?setDetailId\(undefined\);[\s\S]*?setFocusedGenerationJobId\(undefined\);[\s\S]*?updateView\('gallery'\)/);
+  assert.match(app, /\{detailId && <ItemDetailModal key=\{detailId\}/);
+  assert.match(app, /<GalleryWorkspace active=\{view === 'gallery'\}[\s\S]*?command=\{galleryCommand\}[\s\S]*?onCloseDetail=\{\(\) => setFocusedGenerationJobId\(undefined\)\}/);
+  assert.match(galleryWorkspace, /detail&&active&&!largeJob&&<DetailModal[\s\S]*?onClose=\{closeDetail\}/);
+  assert.match(galleryDetail, /useModalFocus<HTMLDivElement>\(onClose\)/);
+  assert.match(galleryDetail, /role="dialog" aria-modal="true"[\s\S]*?onKeyDown=\{handleModalKeyDown\}/);
   assert.match(app, /className="app-content" inert=\{drawerModalOpen\}/);
   assert.match(filters, /const selectCluster = \(cluster: ClusterRecord\) => \{[\s\S]*closePanel\(\);[\s\S]*onSelect\(cluster\)/);
   assert.match(filters, /const clearSelection = \(\) => \{[\s\S]*closePanel\(\);[\s\S]*onClear\(\)/);

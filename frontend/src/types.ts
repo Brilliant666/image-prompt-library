@@ -1,4 +1,4 @@
-export type ViewMode = 'explore' | 'cards';
+export type ViewMode = 'explore' | 'cards' | 'gallery' | 'agent';
 export type AppearancePreset = 'gallery_vermilion' | 'pine_archive' | 'aubergine_ink';
 export type UploadImageRole = 'result_image' | 'reference_image';
 export type UiLanguage = 'zh_hant' | 'zh_hans' | 'en';

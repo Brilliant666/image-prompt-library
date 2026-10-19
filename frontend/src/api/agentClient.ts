@@ -30,7 +30,7 @@ export interface AgentImage {
 }
 export interface AgentOutputItem {
   id?: string; type: string; call_id?: string; name?: string; status?: string;
-  arguments?: string; content?: Array<{ type: string; text?: string; refusal?: string }>;
+  arguments?: string; content?: Array<{ type: string; text?: string; refusal?: string; annotations?: Array<{ type: string; url?: string; title?: string }> }>;
 }
 export interface AgentRound {
   id: string; index: number; parentRoundId: string | null; userMessageId: string; assistantMessageId?: string;

@@ -1,4 +1,4 @@
-import { Filter, Search, Settings } from 'lucide-react';
+import { Filter, Search, Settings, Plus } from 'lucide-react';
 import headerLogo from '../assets/header-logo.png';
 import type { ViewMode } from '../types';
 import type { Translator } from '../utils/i18n';
@@ -14,6 +14,7 @@ interface Props {
   onView: (v: ViewMode) => void;
   onFilters: () => void;
   onConfig: () => void;
+  onCapture?: () => void;
   filtersOpen?: boolean;
   configOpen?: boolean;
   hasActiveFilter?: boolean;
@@ -30,6 +31,7 @@ export default function TopBar({
   onView,
   onFilters,
   onConfig,
+  onCapture,
   filtersOpen = false,
   configOpen = false,
   hasActiveFilter = false,
@@ -52,12 +54,13 @@ export default function TopBar({
           aria-haspopup="dialog"
           aria-expanded={filtersOpen}
           aria-controls="filters-drawer"
+          hidden={view === 'gallery' || view === 'agent'}
         >
           <Filter size={18} />
           <span className="filter-label">{t('filters')}</span>
         </button>
 
-        <label className="search toolbar-search" aria-label={t('searchAria')}>
+        <label className="search toolbar-search" aria-label={t('searchAria')} hidden={view === 'gallery' || view === 'agent'}>
           <Search size={20} />
           <input
             value={q}
@@ -70,13 +73,15 @@ export default function TopBar({
           <ViewToggle t={t} view={view} onView={onView} />
         </div>
 
+        {onCapture && <button className="iconbtn workspace-capture" onClick={onCapture} aria-label="快捷收录" title="快捷收录"><Plus size={18}/><span>收录</span></button>}
+
         <button className="iconbtn config-button" onClick={onConfig} aria-label={t('config')} aria-haspopup="dialog" aria-expanded={configOpen} aria-controls="config-drawer">
           <Settings size={19} />
           {updateBadgeLabel && <span className="update-available-badge">{updateBadgeLabel}</span>}
         </button>
       </nav>
 
-      {hasActiveSearch && (
+      {hasActiveSearch && (view === 'explore' || view === 'cards') && (
         <div className="status-row mobile-status-view-row">
           <div className="active-filter-strip" aria-label={t('currentFilters')}>
             {queryFilterChips.map(chip => <span key={chip} className="chip query-filter-chip">{chip}</span>)}

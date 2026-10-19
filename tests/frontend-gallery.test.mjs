@@ -1,0 +1,429 @@
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import test from 'node:test';
+import ts from 'typescript';
+import { IDBFactory } from 'fake-indexeddb';
+
+const modules = new Map();
+async function loadTs(relative) {
+  const url = new URL(relative, import.meta.url);
+  if (modules.has(url.href)) return modules.get(url.href);
+  const source = await readFile(url, 'utf8');
+  const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+  const dependencies = new Map();
+  for (const match of js.matchAll(/require\("([^"]+)"\)/g)) {
+    const dependency = new URL(`${match[1]}.ts`, url);
+    dependencies.set(match[1], await loadTs(dependency.href));
+  }
+  const module = { exports: {} };
+  new Function('require', 'module', 'exports', js)(name => dependencies.get(name), module, module.exports);
+  modules.set(url.href, module.exports);
+  return module.exports;
+}
+const recipe = await loadTs('../frontend/src/utils/galleryRecipe.ts');
+const drafts = await loadTs('../frontend/src/utils/galleryDraft.ts');
+const compatible = await loadTs('../frontend/src/utils/compatibleRecipe.ts');
+const references = await loadTs('../frontend/src/utils/recipeInputs.ts');
+const preferences = await loadTs('../frontend/src/utils/generationPreferences.ts');
+const templates = await loadTs('../frontend/src/utils/promptTemplateVariables.ts');
+const originalPrompt = '  原文\r\n\nB & <tag>\t ';
+const historicalJob = (change = {}) => ({
+  id: 'historical', provider: 'openai_compatible', mode: 'text_to_image', prompt_text: originalPrompt,
+  status: 'succeeded', model: 'gateway-original-alias', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+  parameters: { compatible_profile_id: 'original-api', model: 'gateway-original-alias', quality: 'max', size: '2560x3840', background: 'opaque', output_format: 'webp', output_compression: 0 },
+  ...change,
+});
+const input = (id, extra = {}) => ({ id, name: id, source: 'uploaded', previewUrl: `data:image/png;base64,${id}`, dataUrl: `data:image/png;base64,${id}`, ...extra });
+
+test('history restoration and submission preserve original provider, exact prompt, custom pixels and zero compression', () => {
+  const job = historicalJob();
+  const frozen = [input('first'), input('second')];
+  const draft = recipe.draftFromJob(job, frozen);
+  const payload = recipe.galleryPayload(draft, 4);
+  assert.equal(payload.prompt_text, originalPrompt);
+  assert.equal(payload.provider, job.provider);
+  assert.equal(payload.parameters.compatible_profile_id, 'original-api');
+  assert.equal(payload.model, 'gateway-original-alias');
+  assert.equal(payload.parameters.size, '2560x3840');
+  assert.equal(payload.parameters.output_compression, 0);
+  assert.equal(payload.parameters.output_format, 'webp');
+  assert.equal(payload.parameters.quality, 'max');
+  assert.deepEqual(payload.parameters.input_images.map(image => image.id), ['first', 'second']);
+  assert.deepEqual(payload.parameters.input_images.map(image => image.data_url), frozen.map(image => image.dataUrl));
+  assert.equal(payload.mode, 'image_edit');
+  assert.equal(recipe.galleryJobPrompt({ ...job, edited_prompt_text: '' }), '');
+});
+
+test('recorded request metadata wins over newer defaults and a deleted API never follows another profile', () => {
+  const draft = recipe.draftFromJob(historicalJob({ metadata: { requested: { compatible_profile_id: 'deleted-original', model: 'full-model-original', size: '2048x1152', output_compression: 0 } } }), []);
+  const payload = recipe.galleryPayload(draft, 4);
+  assert.equal(draft.profileId, 'deleted-original');
+  assert.equal(payload.model, 'full-model-original');
+  assert.equal(payload.parameters.size, '2048x1152');
+  assert.equal(payload.parameters.output_compression, 0);
+  assert.equal(recipe.draftFromJob(historicalJob({ parameters: {} }), []).profileId, 'legacy');
+});
+
+test('missing and over-limit original references stop submission without dropping or reordering slots', () => {
+  const missing = [input('first', { missing: true }), input('second')];
+  const draft = recipe.draftFromJob(historicalJob(), missing);
+  assert.throws(() => recipe.galleryPayload(draft, 4), /参考图缺失/);
+  assert.deepEqual(draft.inputs, missing);
+  const tooMany = recipe.draftFromJob(historicalJob(), [input('a'), input('b'), input('c')]);
+  assert.throws(() => recipe.galleryPayload(tooMany, 2), /最多接受 2/);
+  assert.equal(tooMany.inputs.length, 3);
+});
+
+test('auto4k resolves before submission, conflicting ratios stop locally, PNG omits compression', () => {
+  const draft = recipe.draftFromJob(historicalJob(), []);
+  draft.prompt = '宽高比 9:16'; draft.recipe.size_mode = 'auto4k'; draft.recipe.output_format = 'png';
+  const payload = recipe.galleryPayload(draft, 4);
+  assert.equal(payload.parameters.size, '2160x3840');
+  assert.equal(payload.parameters.output_compression, undefined);
+  assert.equal(payload.parameters.size_mode, 'auto4k');
+  assert.equal(draft.recipe.size, '2560x3840', 'building a request must not mutate the saved recipe');
+  draft.prompt = '9:16 and 16:9';
+  assert.throws(() => recipe.galleryPayload(draft, 4), /冲突比例/);
+});
+
+test('history search respects edited prompt and exact status without mutating jobs', () => {
+  const job = historicalJob({ edited_prompt_text: '  New prompt\n' });
+  assert.equal(recipe.galleryMatches(job, 'NEW', 'succeeded'), true);
+  assert.equal(recipe.galleryMatches(job, '原文', ''), false);
+  assert.equal(recipe.galleryMatches(job, '', 'accepted'), false);
+  assert.equal(job.prompt_text, originalPrompt);
+});
+
+test('enabled templates retain exact source, language and values while resolving the request and auto4k ratio', () => {
+  const template = '  {{subject}}\r\n宽高比 {{ratio}}\t ';
+  const draft = recipe.draftFromJob(historicalJob(), []);
+  draft.prompt = template; draft.promptLanguage = 'zh_hans';
+  draft.templateValues = { subject: '  猫  ', ratio: '9:16', unused: 'not-a-variable' };
+  draft.recipe.size = 'auto'; draft.recipe.size_mode = 'auto4k';
+  const payload = recipe.galleryPayload(draft, 4, undefined, true);
+  const resolved = '    猫  \r\n宽高比 9:16\t ';
+  assert.equal(payload.prompt_text, template);
+  assert.equal(payload.edited_prompt_text, resolved);
+  assert.equal(payload.prompt_language, 'zh_hans');
+  assert.equal(payload.parameters.prompt_template, template);
+  assert.equal(payload.parameters.prompt_template_resolved_text, resolved);
+  assert.deepEqual(payload.parameters.prompt_template_values, { subject: '  猫  ', ratio: '9:16' });
+  assert.equal(payload.parameters.size, '2160x3840');
+  const restored = recipe.draftFromJob({ ...historicalJob(), ...payload }, []);
+  assert.equal(restored.prompt, template);
+  assert.equal(restored.promptLanguage, 'zh_hans');
+  assert.deepEqual(restored.templateValues, payload.parameters.prompt_template_values);
+  assert.equal(recipe.galleryJobPrompt({ ...historicalJob(), ...payload }), resolved);
+});
+
+test('disabled templates preserve literal braces and enabled empty variables block before submission', () => {
+  const draft = recipe.draftFromJob(historicalJob(), []);
+  draft.prompt = '\n {{subject}}\t ';
+  const literal = recipe.galleryPayload(draft, 4, undefined, false);
+  assert.equal(literal.prompt_text, draft.prompt);
+  assert.equal(literal.edited_prompt_text, undefined);
+  assert.equal(literal.parameters.prompt_template, undefined);
+  assert.throws(() => recipe.galleryPayload(draft, 4, undefined, true), /填写所有提示词变量/);
+  draft.templateValues = { subject: '   ' };
+  assert.throws(() => recipe.galleryPayload(draft, 4, undefined, true), /填写所有提示词变量/);
+});
+
+test('restored auto-size requests retain the recorded aspect ratio and prompt-injection policy', () => {
+  const job = historicalJob({ parameters: { ...historicalJob().parameters, size: 'auto', requested_aspect_ratio: '9:16', aspect_ratio_prompt_injection: true } });
+  const payload = recipe.galleryPayload(recipe.draftFromJob(job, []), 4);
+  assert.equal(payload.parameters.size, 'auto');
+  assert.equal(payload.parameters.requested_aspect_ratio, '9:16');
+  assert.equal(payload.parameters.aspect_ratio_prompt_injection, true);
+  const metadataJob = { ...job, metadata: { requested: { requested_aspect_ratio: '3:4', aspect_ratio_prompt_injection: false } } };
+  const recorded = recipe.galleryPayload(recipe.draftFromJob(metadataJob, []), 4);
+  assert.equal(recorded.parameters.requested_aspect_ratio, '3:4');
+  assert.equal(recorded.parameters.aspect_ratio_prompt_injection, false);
+});
+
+test('optional composer draft round-trips ordered references without making API requests, then can be cleared', async t => {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'indexedDB');
+  Object.defineProperty(globalThis, 'indexedDB', { configurable: true, value: new IDBFactory() });
+  t.after(() => { if (previous) Object.defineProperty(globalThis, 'indexedDB', previous); else delete globalThis.indexedDB; });
+  t.mock.method(globalThis, 'fetch', () => { throw Error('drafts must never call a service'); });
+  const draft = { ...recipe.draftFromJob(historicalJob(), [input('first'), input('second')]), aspectRatio: '9:16', aspectInjection: false };
+  draft.recipe.size = 'auto';
+  assert.equal(await drafts.readGalleryDraft(), undefined);
+  await drafts.saveGalleryDraft(draft);
+  const restored = await drafts.readGalleryDraft();
+  assert.deepEqual(JSON.parse(JSON.stringify(recipe.galleryPayload(restored, 4))), JSON.parse(JSON.stringify(recipe.galleryPayload(draft, 4))));
+  await drafts.saveGalleryDraft(undefined);
+  assert.equal(await drafts.readGalleryDraft(), undefined);
+});
+
+test('malformed stored drafts do not reach the composer and unknown fields are not restored', async t => {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'indexedDB');
+  Object.defineProperty(globalThis, 'indexedDB', { configurable: true, value: new IDBFactory() });
+  t.after(() => { if (previous) Object.defineProperty(globalThis, 'indexedDB', previous); else delete globalThis.indexedDB; });
+  // Simulate an old/corrupt value outside the application's typed write path.
+  await drafts.readGalleryDraft();
+  const db = await new Promise((resolve, reject) => { const request = indexedDB.open('image-prompt-library-workspace-draft', 1); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error); });
+  for (const value of [{}, { prompt: 'old', inputs: 'invalid' }, { ...recipe.emptyGalleryDraft(), recipe: null }]) {
+    await new Promise((resolve, reject) => { const tx = db.transaction('draft', 'readwrite'); tx.objectStore('draft').put(value, 'current'); tx.oncomplete = resolve; tx.onerror = () => reject(tx.error); });
+    const safe = await drafts.readGalleryDraft();
+    if (safe) {
+      assert.equal(typeof safe.prompt, 'string');
+      assert.equal(typeof safe.recipe.output_format, 'string');
+      assert.ok(Array.isArray(safe.inputs));
+    }
+  }
+  db.close();
+  await drafts.saveGalleryDraft({ ...recipe.emptyGalleryDraft(), prompt: originalPrompt, api_key: 'synthetic-secret', unrelated: 'not-a-draft-field' });
+  const restored = await drafts.readGalleryDraft();
+  assert.equal(restored.prompt, originalPrompt);
+  assert.equal(restored.api_key, undefined);
+  assert.equal(restored.unrelated, undefined);
+});
+
+// Exercise the actual component callbacks with mock hooks/API. This does not
+// replace the desktop/mobile browser checks; no DOM or provider is contacted.
+const inputSource = await readFile(new URL('../frontend/src/components/gallery/InputBar.tsx', import.meta.url), 'utf8');
+const inputJs = ts.transpileModule(inputSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
+function children(node) { return !node || typeof node !== 'object' ? [] : [node, ...[node.props?.children].flat(Infinity).flatMap(children)]; }
+function deferred() { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
+function inputHarness(t, overrides = {}, apiOverrides = {}) {
+  const slots = [], effects = []; let cursor = 0, dirty = false, tree;
+  const state = { created: 0, settings: 0, posts: [], persisted: [] };
+  const store = new Map();
+  const oldStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { getItem: key => store.get(key) ?? null, setItem: (key, value) => store.set(key, value) } });
+  const OldImage = globalThis.Image;
+  globalThis.Image = class { naturalWidth = 1024; naturalHeight = 1024; async decode() {} };
+  const hooks = {
+    useState(initial) { const i = cursor++; if (!(i in slots)) slots[i] = typeof initial === 'function' ? initial() : initial; return [slots[i], value => { slots[i] = typeof value === 'function' ? value(slots[i]) : value; dirty = true; }]; },
+    useRef(initial) { const i = cursor++; if (!(i in slots)) slots[i] = { current: initial }; return slots[i]; },
+    useEffect(effect, deps) { const i = cursor++, old = slots[i]; if (!old || !deps || deps.some((value, index) => !Object.is(value, old.deps[index]))) { effects.push(() => { old?.cleanup?.(); slots[i].cleanup = effect(); }); slots[i] = { deps, cleanup: undefined }; } },
+  };
+  const api = {
+    generationProviders: async () => [{ provider: 'openai_compatible', display_name: 'Compatible', max_input_images: 4, can_generate: true }],
+    openAICompatibleProfiles: async () => ({ profiles: [{ id: 'original-api', display_name: 'Original API', model: 'gateway-original-alias', configured: true }], default_profile_id: 'original-api' }),
+    createGenerationJob: async payload => { state.posts.push(payload); return historicalJob(); },
+    createGenerationSet: async payload => { state.posts.push(payload); return { jobs: [historicalJob()] }; },
+    ...apiOverrides,
+  };
+  const jsx = (type, props) => ({ type, props });
+  const deps = {
+    react: hooks, 'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'fragment' }, 'lucide-react': new Proxy({}, { get: (_, key) => key }),
+    '../../api/client': { api, mediaUrl: path => `/media/${path}` }, '../../utils/compatibleRecipe': compatible,
+    '../../utils/generationPreferences': preferences, '../../utils/recipeInputs': references, '../../utils/galleryRecipe': recipe,
+    '../../utils/promptTemplateVariables': templates,
+    '../../utils/galleryDraft': { readGalleryDraft: async () => undefined, saveGalleryDraft: async value => state.persisted.push(value) },
+    './ReferencePicker': { __esModule: true, default: 'ReferencePicker' },
+  };
+  const module = { exports: {} };
+  new Function('require', 'module', 'exports', inputJs)(name => { assert.ok(name in deps, `unmocked component dependency: ${name}`); return deps[name]; }, module, module.exports);
+  let props = { active: true, t: key => key, preferences: { enterSubmit: false, clearInputAfterSubmit: false, persistInputOnRestart: false, notifyOnCompletion: false }, onCreated: () => state.created++, onOpenSettings: () => state.settings++, configurationRevision: 0, ...overrides };
+  const render = () => { dirty = false; cursor = 0; tree = module.exports.default(props); effects.splice(0).forEach(effect => effect()); };
+  const flush = async () => { for (let i = 0; i < 15; i++) { if (dirty) render(); await Promise.resolve(); } if (dirty) render(); };
+  const find = (type, label) => { const node = children(tree).find(node => node.type === type && (node.props['aria-label'] === label || node.props.children === label)); assert.ok(node, `${type} ${label} exists`); return node.props; };
+  render();
+  t.after(() => { slots.forEach(slot => slot?.cleanup?.()); if (oldStorage) Object.defineProperty(globalThis, 'localStorage', oldStorage); else delete globalThis.localStorage; if (OldImage) globalThis.Image = OldImage; else delete globalThis.Image; });
+  return { state, flush, find, update: value => { props = { ...props, ...value }; render(); }, get tree() { return tree; } };
+}
+
+test('actual InputBar submit callback locks two same-tick clicks and clears input only after confirmed creation', async t => {
+  const pending = deferred(); const calls = [];
+  const harness = inputHarness(t, { preferences: { clearInputAfterSubmit: true } }, { createGenerationJob: payload => { calls.push(payload); return pending.promise; } });
+  await harness.flush(); harness.find('textarea', '画廊提示词').onChange({ target: { value: originalPrompt } }); await harness.flush();
+  const send = harness.find('button', '生成图片').onClick; send(); send(); await harness.flush();
+  assert.equal(calls.length, 1); assert.equal(calls[0].prompt_text, originalPrompt);
+  assert.equal(harness.find('textarea', '画廊提示词').value, originalPrompt);
+  pending.resolve(historicalJob()); await harness.flush();
+  assert.equal(harness.find('textarea', '画廊提示词').value, ''); assert.equal(harness.state.created, 1);
+});
+
+test('actual InputBar failed POST preserves input, blocks retries, and does not send from ordinary Enter or IME', async t => {
+  const calls = [];
+  const harness = inputHarness(t, {}, { createGenerationJob: async payload => { calls.push(payload); throw Error('uncertain network'); } });
+  await harness.flush(); harness.find('textarea', '画廊提示词').onChange({ target: { value: originalPrompt } }); await harness.flush();
+  const keyboard = { key: 'Enter', ctrlKey: false, metaKey: false, shiftKey: false, nativeEvent: { isComposing: false }, preventDefault() {} };
+  harness.find('textarea', '画廊提示词').onKeyDown(keyboard);
+  harness.find('textarea', '画廊提示词').onKeyDown({ ...keyboard, ctrlKey: true, nativeEvent: { isComposing: true } });
+  assert.equal(calls.length, 0);
+  harness.find('button', '生成图片').onClick(); await harness.flush();
+  assert.equal(calls.length, 1); assert.equal(harness.find('button', '生成图片').disabled, true);
+  harness.find('button', '生成图片').onClick(); await harness.flush();
+  assert.equal(calls.length, 1); assert.equal(harness.find('textarea', '画廊提示词').value, originalPrompt);
+});
+
+test('actual restored deleted-profile handler stays blocked instead of silently using the current default API', async t => {
+  const harness = inputHarness(t, { command: { id: 1, job: historicalJob({ parameters: { ...historicalJob().parameters, compatible_profile_id: 'removed-api' } }) } });
+  await harness.flush();
+  assert.equal(harness.find('textarea', '画廊提示词').value, originalPrompt);
+  assert.equal(harness.find('button', '生成图片').disabled, true);
+  harness.find('button', '生成图片').onClick(); await harness.flush();
+  assert.equal(harness.state.posts.length, 0);
+});
+
+test('actual settings navigation calls the settings callback without creating a generation task', async t => {
+  const harness = inputHarness(t); await harness.flush();
+  harness.find('button', 'Original API').onClick(); await harness.flush();
+  harness.find('button', '管理 API 配置').onClick();
+  assert.equal(harness.state.settings, 1); assert.equal(harness.state.posts.length, 0);
+});
+
+test('actual API refresh after settings does not replay an already consumed history command over new edits', async t => {
+  const harness = inputHarness(t, { command: { id: 17, job: historicalJob() } });
+  await harness.flush();
+  harness.find('textarea', '画廊提示词').onChange({ target: { value: '  changed after restore\n' } }); await harness.flush();
+  harness.update({ configurationRevision: 1 }); await harness.flush();
+  assert.equal(harness.find('textarea', '画廊提示词').value, '  changed after restore\n');
+  assert.equal(harness.state.posts.length, 0);
+});
+
+test('actual uncertain submission remains blocked across settings refresh for a restored recipe', async t => {
+  const calls = [];
+  const harness = inputHarness(t, { command: { id: 18, job: historicalJob() } }, { createGenerationJob: async value => { calls.push(value); throw Error('uncertain network'); } });
+  await harness.flush(); harness.find('button', '生成图片').onClick(); await harness.flush();
+  assert.equal(calls.length, 1); assert.equal(harness.find('button', '生成图片').disabled, true);
+  harness.update({ configurationRevision: 1 }); await harness.flush();
+  assert.equal(harness.find('button', '生成图片').disabled, true);
+  harness.find('button', '生成图片').onClick(); await harness.flush(); assert.equal(calls.length, 1);
+});
+
+test('actual late historical lookup failure cannot overwrite a more recently restored recipe', async t => {
+  const lookup = deferred();
+  const item = { id: 'library-a', title: 'A', prompts: [{ text: 'old library prompt', is_original: true }], images: [{ id: 'image-a', role: 'reference_image', generation_provider: 'openai_compatible' }] };
+  const harness = inputHarness(t, { command: { id: 30, item, imageId: 'image-a' } }, { generationJobForImage: () => lookup.promise });
+  await harness.flush();
+  harness.update({ command: { id: 31, job: historicalJob({ prompt_text: 'newest recipe' }) } }); await harness.flush();
+  lookup.reject(Error('old lookup missing')); await harness.flush();
+  assert.equal(harness.find('textarea', '画廊提示词').value, 'newest recipe');
+  assert.equal(harness.find('button', '生成图片').disabled, false);
+});
+
+const workspaceSource = await readFile(new URL('../frontend/src/components/gallery/GalleryWorkspace.tsx', import.meta.url), 'utf8');
+const workspaceJs = ts.transpileModule(workspaceSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
+function workspaceHarness(t, api, overrides = {}) {
+  const slots = [], effects = []; let cursor = 0, dirty = false, tree;
+  const memo = (get, deps) => { const i = cursor++, old = slots[i]; if (!old || deps.some((value, index) => !Object.is(value, old.deps[index]))) slots[i] = { deps, value: get() }; return slots[i].value; };
+  const hooks = {
+    useState(initial) { const i = cursor++; if (!(i in slots)) slots[i] = typeof initial === 'function' ? initial() : initial; return [slots[i], value => { slots[i] = typeof value === 'function' ? value(slots[i]) : value; dirty = true; }]; },
+    useRef(initial) { const i = cursor++; if (!(i in slots)) slots[i] = { current: initial }; return slots[i]; },
+    useEffect(effect, deps) { const i = cursor++, old = slots[i]; if (!old || !deps || deps.some((value, index) => !Object.is(value, old.deps[index]))) { effects.push(() => { old?.cleanup?.(); slots[i].cleanup = effect(); }); slots[i] = { deps, cleanup: undefined }; } },
+    useCallback: (callback, deps) => memo(() => callback, deps), useMemo: memo,
+  };
+  const jsx = (type, props) => ({ type, props });
+  const deps = { react: hooks, 'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'fragment' }, 'lucide-react': new Proxy({}, { get: (_, key) => key }),
+    fflate: { zipSync: () => { throw Error('download not part of this test'); } }, '../../api/client': { api, mediaUrl: path => `/media/${path}` },
+    '../../utils/galleryRecipe': recipe, './InputBar': { __esModule: true, default: 'InputBar' }, './TaskGrid': { __esModule: true, default: 'TaskGrid' }, './DetailModal': { __esModule: true, default: 'DetailModal' }, './Lightbox': { __esModule: true, default: 'Lightbox' }, './GalleryWorkspace.css': {},
+  };
+  const module = { exports: {} };
+  new Function('require', 'module', 'exports', workspaceJs)(name => { assert.ok(name in deps, `unmocked workspace dependency: ${name}`); return deps[name]; }, module, module.exports);
+  const props = { active: true, t: key => key, preferences: {}, refreshKey: 0, configurationRevision: 0, onOpenSettings() {}, onAccepted() {}, onQueueChanged() {}, ...overrides };
+  const render = () => { dirty = false; cursor = 0; tree = module.exports.default(props); effects.splice(0).forEach(effect => effect()); };
+  const flush = async () => { for (let i = 0; i < 20; i++) { if (dirty) render(); await Promise.resolve(); } if (dirty) render(); };
+  render(); t.after(() => slots.forEach(slot => slot?.cleanup?.()));
+  return { flush, node: (type, predicate = () => true) => children(tree).find(node => node.type === type && predicate(node.props))?.props };
+}
+
+test('actual history load-more callbacks can reach entries beyond 1000 through bounded API pages', async t => {
+  const all = Array.from({ length: 1201 }, (_, index) => historicalJob({ id: `job-${index}` }));
+  const calls = [];
+  const harness = workspaceHarness(t, { generationJobs: async ({ limit, offset = 0 }) => { calls.push({ limit, offset }); return { jobs: all.slice(offset, offset + limit), total: all.length }; } });
+  await harness.flush();
+  for (let i = 0; i < 6; i++) { const more = harness.node('button', props => props.className === 'pg-load-more'); assert.ok(more); assert.notEqual(more.disabled, true); more.onClick(); await harness.flush(); }
+  const jobs = harness.node('TaskGrid').jobs;
+  assert.equal(jobs.length, 1201); assert.equal(jobs.at(-1).id, 'job-1200');
+  assert.ok(calls.every(call => call.limit <= 1000)); assert.ok(calls.some(call => call.offset > 0));
+});
+
+test('actual late detail responses cannot replace a newer selection or reopen a closed detail', async t => {
+  const a = historicalJob({ id: 'a' }), b = historicalJob({ id: 'b' });
+  const first = deferred(), second = deferred(), third = deferred(); let count = 0;
+  const harness = workspaceHarness(t, { generationJobs: async () => ({ jobs: [a, b], total: 2 }), generationJob: () => [first, second, third][count++].promise });
+  await harness.flush(); harness.node('TaskGrid').onOpen(a); harness.node('TaskGrid').onOpen(b); await harness.flush();
+  second.resolve(b); await harness.flush(); first.resolve(a); await harness.flush();
+  assert.equal(harness.node('DetailModal').job.id, 'b');
+  harness.node('TaskGrid').onOpen(a); await harness.flush(); harness.node('DetailModal').onClose(); await harness.flush();
+  third.resolve(a); await harness.flush(); assert.equal(harness.node('DetailModal'), undefined);
+});
+
+test('actual externally focused historical result opens its original image even before its list page is loaded', async t => {
+  const job = historicalJob({ id: 'outside-current-page', result_path: 'generation-results/original.webp' });
+  const harness = workspaceHarness(t, { generationJobs: async () => ({ jobs: [], total: 0 }), generationJob: async () => job }, { focusJobId: job.id });
+  await harness.flush(); harness.node('DetailModal').onLightbox(); await harness.flush();
+  assert.equal(harness.node('Lightbox')?.src, '/media/generation-results/original.webp');
+});
+
+for (const provider of ['openai_codex_oauth_native', 'xai_grok_oauth']) test(`actual switch from compatible auto4k to ${provider} shows and sends its own ratio controls`, async t => {
+  const original = historicalJob({ parameters: { ...historicalJob().parameters, size_mode: 'auto4k', requested_aspect_ratio: '9:16' } });
+  const harness = inputHarness(t, { command: { id: 51, job: original } }, {
+    generationProviders: async () => [
+      { provider: 'openai_compatible', display_name: 'Compatible', max_input_images: 4, can_generate: true },
+      { provider, display_name: 'Other provider', max_input_images: 4, can_generate: true, default_image_model: 'other-image-model' },
+    ],
+  });
+  await harness.flush();
+  assert.ok(children(harness.tree).some(node => node.props?.['aria-label'] === '4K 自动比例'));
+  harness.find('button', 'Original API').onClick(); await harness.flush();
+  const other = children(harness.tree).find(node => node.type === 'button' && Array.isArray(node.props.children) && node.props.children[0] === 'Other provider');
+  assert.ok(other); other.props.onClick(); await harness.flush();
+  assert.equal(children(harness.tree).some(node => node.props?.['aria-label'] === '4K 自动比例'), false);
+  assert.equal(children(harness.tree).some(node => node.props?.className === 'pg-note' && String(node.props.children).includes('请求 ')), false);
+  harness.find('button', '9:16').onClick(); await harness.flush();
+  harness.find('select', '宽高比').onChange({ target: { value: '3:4' } });
+  if (provider === 'xai_grok_oauth') harness.find('select', 'Grok 分辨率').onChange({ target: { value: '2k' } });
+  await harness.flush(); harness.find('button', '生成图片').onClick(); await harness.flush();
+  assert.equal(harness.state.posts.length, 1);
+  const payload = harness.state.posts[0];
+  assert.equal(payload.provider, provider);
+  assert.equal(payload.model, 'other-image-model');
+  assert.equal(payload.parameters.requested_aspect_ratio, '3:4');
+  assert.equal(payload.parameters.size, undefined);
+  assert.equal(payload.parameters.size_mode, undefined);
+  if (provider === 'xai_grok_oauth') assert.equal(payload.parameters.resolution, '2k');
+});
+
+const pickerSource = await readFile(new URL('../frontend/src/components/gallery/ReferencePicker.tsx', import.meta.url), 'utf8');
+const pickerJs = ts.transpileModule(pickerSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
+function pickerHarness(t, api) {
+  const slots = [], effects = []; let cursor = 0, dirty = false, tree;
+  const selected = []; let closed = 0;
+  const hooks = {
+    useState(initial) { const i = cursor++; if (!(i in slots)) slots[i] = typeof initial === 'function' ? initial() : initial; return [slots[i], value => { slots[i] = typeof value === 'function' ? value(slots[i]) : value; dirty = true; }]; },
+    useRef(initial) { const i = cursor++; if (!(i in slots)) slots[i] = { current: initial }; return slots[i]; },
+    useEffect(effect, deps) { const i = cursor++, old = slots[i]; if (!old || !deps || deps.some((value, index) => !Object.is(value, old.deps[index]))) { effects.push(() => { old?.cleanup?.(); slots[i].cleanup = effect(); }); slots[i] = { deps, cleanup: undefined }; } },
+  };
+  const jsx = (type, props) => ({ type, props });
+  const deps = { react: hooks, 'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'fragment' }, '../../api/client': { api, mediaUrl: path => `/media/${path}` }, '../../hooks/useModalFocus': { useModalFocus: () => ({ containerRef: {}, handleModalKeyDown() {} }) } };
+  const module = { exports: {} };
+  new Function('require', 'module', 'exports', pickerJs)(name => { assert.ok(name in deps, `unmocked picker dependency: ${name}`); return deps[name]; }, module, module.exports);
+  const render = () => { dirty = false; cursor = 0; tree = module.exports.default({ onSelect: value => selected.push(value), onClose: () => closed++ }); effects.splice(0).forEach(effect => effect()); };
+  const flush = async () => { for (let i = 0; i < 20; i++) { if (dirty) render(); await Promise.resolve(); } if (dirty) render(); };
+  render(); t.after(() => slots.forEach(slot => slot?.cleanup?.()));
+  const button = label => { const node = children(tree).find(node => node.type === 'button' && (node.props.children === label || children(node).some(child => child.type === 'span' && child.props.children === label))); assert.ok(node, `picker button ${label}`); return node.props; };
+  return { flush, button, selected, get tree() { return tree; }, get closed() { return closed; } };
+}
+
+test('actual reference picker ignores out-of-order details and responses after tab switch or close', async t => {
+  const first = deferred(), second = deferred(), switched = deferred(), closing = deferred(); let count = 0;
+  const item = id => ({ id, title: id, images: [{ id: `${id}-image`, original_path: `originals/${id}.png`, role: 'reference_image' }] });
+  const harness = pickerHarness(t, { items: async () => ({ items: [item('A'), item('B')], total: 2 }), generationJobs: async () => ({ jobs: [], total: 0 }), item: () => [first, second, switched, closing][count++].promise });
+  await harness.flush(); harness.button('A').onClick(); harness.button('B').onClick();
+  second.resolve(item('B')); await harness.flush(); first.resolve(item('A')); await harness.flush();
+  assert.deepEqual(children(harness.tree).filter(node => node.type === 'img').map(node => node.props.alt), ['B']);
+  harness.button('返回参考列表').onClick(); await harness.flush(); harness.button('A').onClick();
+  harness.button('画廊').onClick(); await harness.flush(); switched.resolve(item('A')); await harness.flush();
+  harness.button('Library').onClick(); await harness.flush();
+  assert.equal(children(harness.tree).some(node => node.type === 'button' && node.props.children === '返回参考列表'), false);
+  harness.button('A').onClick(); harness.button('关闭').onClick(); closing.reject(Error('late closed lookup')); await harness.flush();
+  assert.equal(harness.closed, 1);
+  assert.equal(children(harness.tree).some(node => node.props?.role === 'alert'), false);
+  assert.equal(harness.selected.length, 0);
+});
+
+test('actual reference picker serializes repeated load-more clicks and appends one page', async t => {
+  const page = deferred(), calls = [];
+  const harness = pickerHarness(t, { items: async options => { calls.push(options); return options.offset ? page.promise : { items: [{ id: 'A', title: 'A' }], total: 2 }; }, generationJobs: async () => ({ jobs: [], total: 0 }) });
+  await harness.flush(); const more = harness.button('加载更多参考（搜索已加载结果）').onClick; more(); more(); await harness.flush();
+  assert.equal(calls.length, 2); assert.equal(calls[1].offset, 1);
+  assert.equal(harness.button('加载更多参考（搜索已加载结果）').disabled, true);
+  page.resolve({ items: [{ id: 'B', title: 'B' }], total: 2 }); await harness.flush();
+  assert.equal(children(harness.tree).filter(node => node.type === 'span' && node.props.children === 'B').length, 1);
+  assert.equal(children(harness.tree).some(node => node.type === 'button' && node.props.children === '加载更多参考（搜索已加载结果）'), false);
+});
