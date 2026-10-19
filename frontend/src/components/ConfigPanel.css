@@ -1,0 +1,50 @@
+.config-dialog{position:fixed;z-index:120;top:50%;left:50%;width:min(768px,calc(100vw - 32px));height:min(600px,calc(100dvh - 32px));display:flex;flex-direction:column;overflow:hidden;border:1px solid rgb(255 255 255 / .55);border-radius:24px;background:var(--studio-surface,#fff);color:var(--studio-ink,#20232a);box-shadow:0 30px 100px rgb(0 0 0 / .22),0 0 0 1px rgb(0 0 0 / .04);transform:translate(-50%,-48%) scale(.98);opacity:0;visibility:hidden;pointer-events:none;transition:opacity .16s ease,transform .16s ease,visibility .16s}
+.config-dialog.open{transform:translate(-50%,-50%) scale(1);opacity:1;visibility:visible;pointer-events:auto}
+.config-dialog-header{display:flex;align-items:center;justify-content:space-between;flex-shrink:0;gap:16px;padding:18px 20px;border-bottom:1px solid var(--studio-hairline,#eceef1)}
+.config-dialog-header h2{display:flex;align-items:center;gap:9px;margin:0;font-size:18px;font-weight:700;letter-spacing:0}
+.config-dialog-header h2 svg{color:#3b82f6}
+.config-dialog-header>div{display:flex;align-items:center;gap:14px;min-width:0}
+.config-version{font-size:11px;opacity:.48;font-family:monospace;overflow-wrap:anywhere}
+.config-dialog .panel-close{width:30px;height:30px;border:0;background:transparent;box-shadow:none;color:inherit;opacity:.65;flex-shrink:0}
+.config-dialog .panel-close:hover{background:rgb(127 127 127 / .1);transform:none;opacity:1;box-shadow:none}
+.config-dialog-body{display:flex;flex:1;min-height:0;min-width:0}
+.config-sidebar{width:192px;flex-shrink:0;display:flex;flex-direction:column;gap:4px;overflow-y:auto;padding:12px;border-right:1px solid var(--studio-hairline,#eceef1);background:rgb(127 127 127 / .035)}
+.config-sidebar button{display:flex;align-items:center;gap:10px;flex-shrink:0;width:100%;border:0;border-radius:12px;padding:11px 12px;text-align:left;font-size:13px;font-weight:500;white-space:nowrap;background:transparent;color:var(--studio-muted,#6b7280);cursor:pointer}
+.config-sidebar button:hover{background:rgb(127 127 127 / .07)}
+.config-sidebar button.active{background:var(--studio-surface,#fff);color:#2563eb;box-shadow:0 1px 4px rgb(0 0 0 / .07);font-weight:650}
+.config-sidebar button:focus-visible,.config-dialog button:focus-visible,.config-dialog input:focus-visible,.config-dialog select:focus-visible{outline:2px solid #3b82f6;outline-offset:2px}
+.config-content{flex:1;min-width:0;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:24px;scrollbar-width:thin}
+.config-content [hidden]{display:none!important}
+.config-content .setting-group{margin:0 0 26px;padding:0;border:0;border-radius:0;background:transparent}
+.config-content .setting-group:last-child{margin-bottom:0}
+.config-content .setting-group h3{font-size:14px;line-height:1.5;font-weight:700;margin:0 0 8px}
+.config-content .setting-group .muted{font-size:12px;line-height:1.65;color:var(--studio-muted,#6b7280)}
+.config-content .segmented-control{border-radius:12px;background:rgb(127 127 127 / .065);padding:4px}
+.config-content .segmented-control button{font-size:12px;font-weight:500;padding:8px 7px;border-radius:9px}
+.config-content .segmented-control button.active{font-weight:650;background:var(--studio-surface,#fff);box-shadow:0 1px 4px rgb(0 0 0 / .08)}
+.config-content .provider-card{background:var(--studio-surface,#fff);border:1px solid var(--studio-hairline,#eceef1);border-radius:14px;padding:14px;box-shadow:none}
+.config-content .provider-list{margin-top:20px}
+.config-content .provider-actions{flex-direction:row;flex-wrap:wrap;gap:8px}
+.config-content input:not([type=checkbox]),.config-content select,.config-content textarea{min-width:0;max-width:100%;color:inherit;background:rgb(127 127 127 / .055);border:1px solid transparent;border-radius:10px;padding:9px 11px;font:inherit;font-size:13px;outline-offset:2px;box-sizing:border-box}
+.config-content input:not([type=checkbox]):focus,.config-content select:focus,.config-content textarea:focus{border-color:#93c5fd}
+.config-content .primary,.config-content .secondary,.config-content .danger{font-size:12px;padding:9px 12px;border-radius:10px;min-height:34px}
+.config-content .default-ai-provider-control{margin:16px 0 20px;padding:0;border:0;min-width:0}
+.config-content .default-ai-provider-control legend{font-size:12px;font-weight:600;margin-bottom:8px}
+.config-content .appearance-control{display:grid;gap:7px;grid-template-columns:repeat(3,minmax(0,1fr))}
+.config-content .appearance-control button{font-size:11px;min-width:0}
+.settings-field{display:grid;gap:7px;min-width:0;margin-top:16px;font-size:13px;line-height:1.5}
+.settings-field-row,.settings-switch-row{display:flex;justify-content:space-between;align-items:center;gap:20px;font-size:13px;line-height:1.5}
+.settings-field-row select{flex-shrink:0;width:auto;max-width:55%}
+.settings-help{margin:7px 0 0;font-size:12px;line-height:1.65;color:var(--studio-muted,#6b7280)}
+.settings-preference{margin-top:20px}
+.settings-switch-row input{appearance:none;position:relative;width:30px;height:18px;flex-shrink:0;margin:0;border:0;border-radius:18px;background:#c9cdd4;cursor:pointer;transition:background .15s}
+.settings-switch-row input:before{content:'';position:absolute;left:3px;top:3px;width:12px;height:12px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgb(0 0 0 / .14);transition:transform .15s}
+.settings-switch-row input:checked{background:#3b82f6}
+.settings-switch-row input:checked:before{transform:translateX(12px)}
+.settings-status{padding:10px 12px;border:1px solid var(--studio-hairline,#eceef1);border-radius:10px;font-size:12px;line-height:1.65;background:rgb(127 127 127 / .035)}
+.settings-status p{margin:4px 0 0}
+.settings-field-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.agent-settings fieldset{padding:0;margin:0;border:0;min-width:0}
+.agent-settings-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:22px}
+@media(max-width:640px){.config-dialog{height:85dvh;max-height:calc(100dvh - 24px);width:calc(100vw - 24px);border-radius:22px}.config-dialog-body{flex-direction:column}.config-dialog-header{padding:16px 18px}.config-version{display:none}.config-sidebar{width:auto;flex-direction:row;overflow-x:auto;overflow-y:hidden;border-right:0;border-bottom:1px solid var(--studio-hairline,#eceef1);padding:10px;gap:4px}.config-sidebar button{width:auto;padding:10px}.config-content{padding:20px}.config-content .appearance-control{grid-template-columns:1fr}.settings-field-grid{grid-template-columns:1fr}.settings-field-row{gap:12px}}
+@media(prefers-reduced-motion:reduce){.config-dialog,.settings-switch-row input,.settings-switch-row input:before{transition:none}}

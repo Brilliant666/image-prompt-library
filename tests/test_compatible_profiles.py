@@ -140,3 +140,85 @@ def test_first_profile_becomes_default_without_phantom_legacy(tmp_path):
     assert config.public_profiles()['default_profile_id'] == 'first'
     assert [profile['id'] for profile in config.public_profiles()['profiles']] == ['first']
     assert config.status()['available'] is True
+
+
+def test_profile_copy_keeps_secret_server_side_and_independent(profiles):
+    library, config, _ = profiles
+    client = TestClient(create_app(library_path=library))
+    root = '/api/generation-providers/openai-compatible/profiles'
+    response = client.post(root + '/legacy/copy', json={'id': 'copy', 'display_name': 'Original Copy'})
+    assert response.status_code == 200
+    assert response.json()['default_profile_id'] == 'legacy'
+    assert [p['id'] for p in response.json()['profiles']] == ['legacy', 'copy', 'second']
+    assert 'test-first' not in response.text and 'api_key"' not in response.text
+    assert next(p for p in response.json()['profiles'] if p['id'] == 'copy')['api_key_present'] is True
+    assert config.read('copy')['api_key'] == config.read('legacy')['api_key']
+    assert config.read('copy')['base_url'] == config.read('legacy')['base_url']
+    config.save({'api_key': 'copied-fixture-key'}, profile_id='copy')
+    assert config.read('legacy')['api_key'] == 'test-first'
+    assert config.read('copy')['api_key'] == 'copied-fixture-key'
+    before = config.path.read_bytes()
+    assert client.post(root + '/legacy/copy', json={'id': 'copy'}).status_code == 409
+    assert config.path.read_bytes() == before
+
+
+def test_profile_order_survives_reload_save_and_delete_without_changing_default(profiles):
+    library, config, _ = profiles
+    client = TestClient(create_app(library_path=library))
+    root = '/api/generation-providers/openai-compatible/profiles'
+    response = client.post(root + '/reorder', json={'profile_ids': ['second', 'legacy']})
+    assert response.status_code == 200
+    assert [p['id'] for p in response.json()['profiles']] == ['second', 'legacy']
+    assert response.json()['default_profile_id'] == 'legacy'
+    assert 'test-first' not in response.text and 'test-second' not in response.text
+    config.save({'display_name': 'Renamed'}, profile_id='legacy')
+    reloaded = OpenAICompatibleConfig(config.path, library)
+    assert [p['id'] for p in reloaded.public_profiles()['profiles']] == ['second', 'legacy']
+    assert reloaded.read('legacy')['api_key'] == 'test-first'
+    assert reloaded.read('second')['api_key'] == 'test-second'
+    reloaded.delete('legacy')
+    assert reloaded.public_profiles()['default_profile_id'] == 'second'
+
+
+@pytest.mark.parametrize('order', [['legacy'], ['legacy', 'legacy'], ['legacy', 'second', 'missing'], {}, [None, 'second']])
+def test_invalid_or_stale_profile_order_never_loses_configuration(profiles, order):
+    library, config, _ = profiles
+    before = config.path.read_bytes()
+    client = TestClient(create_app(library_path=library))
+    response = client.post('/api/generation-providers/openai-compatible/profiles/reorder', json={'profile_ids': order})
+    assert response.status_code == 409
+    assert config.path.read_bytes() == before
+
+
+@pytest.mark.parametrize('payload', [{'id': '../outside'}, {'id': 'second'}, {'id': 'copy', 'api_key': 'must-not-echo'}, {'id': 'copy', 'display_name': 'x' * 101}])
+def test_invalid_profile_copy_never_overwrites_or_echoes_payload(profiles, payload):
+    library, config, _ = profiles
+    before = config.path.read_bytes()
+    client = TestClient(create_app(library_path=library))
+    response = client.post('/api/generation-providers/openai-compatible/profiles/legacy/copy', json=payload)
+    assert response.status_code == 409 and 'must-not-echo' not in response.text
+    assert config.path.read_bytes() == before
+
+
+def test_profile_mutations_reject_foreign_browser_origins_without_network(profiles, monkeypatch):
+    library, config, _ = profiles
+    monkeypatch.setattr(httpx.HTTPTransport, 'handle_request', lambda *a, **k: pytest.fail('profile actions must not call a provider'))
+    client = TestClient(create_app(library_path=library))
+    before = config.path.read_bytes()
+    for suffix, method, payload in [('legacy/copy', 'POST', {'id': 'copy'}), ('reorder', 'POST', {'profile_ids': ['second', 'legacy']})]:
+        response = client.request(method, '/api/generation-providers/openai-compatible/profiles/' + suffix,
+                                  json=payload, headers={'Origin': 'https://foreign.invalid'})
+        assert response.status_code == 403
+    assert config.path.read_bytes() == before
+    assert client.post('/api/generation-providers/openai-compatible/profiles/legacy/copy', json={'id': 'copy'}).status_code == 200
+    assert client.post('/api/generation-providers/openai-compatible/profiles/reorder', json={'profile_ids': ['copy', 'second', 'legacy']}).status_code == 200
+
+
+def test_profile_action_names_remain_valid_existing_profile_ids(profiles):
+    library, config, _ = profiles
+    client = TestClient(create_app(library_path=library))
+    root = '/api/generation-providers/openai-compatible/profiles'
+    for profile_id in ['order', 'reorder']:
+        response = client.put(root + '/' + profile_id, json={'base_url': 'https://example.invalid', 'display_name': profile_id})
+        assert response.status_code == 200
+        assert config.read(profile_id)['display_name'] == profile_id

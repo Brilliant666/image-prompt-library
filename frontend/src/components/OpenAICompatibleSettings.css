@@ -15,3 +15,17 @@
 .compatible-profile-actions .compatible-profile-delete{margin-inline-start:auto}
 .compatible-profile-confirm{padding:10px;border:1px solid var(--studio-hairline);border-radius:10px;font-size:12px;line-height:1.6}
 .compatible-profile-confirm p{margin:0 0 10px;overflow-wrap:anywhere}
+.compatible-profile-row{display:flex;align-items:center;gap:5px;min-width:0;border-radius:12px}
+.compatible-profile-row.dragging{opacity:.45}
+.compatible-profile-grip{flex-shrink:0;color:var(--studio-muted,#89909b);cursor:grab}
+.compatible-profiles .compatible-profile-row .compatible-profile-option{flex:1;min-width:0}
+.compatible-profile-option>svg{flex-shrink:0}
+.compatible-profile-order{display:flex;flex-direction:column;gap:3px;flex-shrink:0}
+.compatible-profile-order button{display:grid;place-items:center;width:26px;height:26px;border:0;border-radius:6px;background:transparent;color:inherit;cursor:pointer}
+.compatible-profile-order button:hover:not(:disabled){background:rgb(127 127 127 / .1)}
+.compatible-profile-order button:disabled{opacity:.25;cursor:default}
+.compatible-profile-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:12px}
+.compatible-profile-toolbar .secondary{display:inline-flex;align-items:center;gap:6px}
+.config-content .compatible-profiles{padding:0;border:0;border-radius:0}
+.config-content .compatible-profiles>header h4{margin:0 0 7px;font-size:14px}
+.config-content .compatible-profile-form label{font-weight:500}

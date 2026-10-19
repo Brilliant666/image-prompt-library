@@ -308,6 +308,42 @@ class OpenAICompatibleConfig:
             self._write(document)
         return self.public_profiles()
 
+    def copy_profile(self, profile_id, new_id, display_name=None):
+        """Copy credentials on the server; never round-trip a key through the UI."""
+        self._validate_id(profile_id)
+        self._validate_id(new_id)
+        with _config_lock:
+            document = self._document()
+            if profile_id not in document["profiles"] or new_id in document["profiles"]:
+                raise OpenAICompatibleError("Source profile is missing or destination already exists")
+            source = document["profiles"][profile_id]
+            name = display_name if display_name is not None else source["display_name"][:94] + " Copy"
+            if not isinstance(name, str) or not name.strip() or len(name.strip()) > 100:
+                raise OpenAICompatibleError("Display name must contain 1 to 100 characters")
+            copied = {**source, "display_name": name.strip()}
+            # Insert immediately after its source while preserving every other ID.
+            ordered = {}
+            for key, value in document["profiles"].items():
+                ordered[key] = value
+                if key == profile_id:
+                    ordered[new_id] = copied
+            document["profiles"] = ordered
+            self._write(document)
+            return self.public_profiles()
+
+    def reorder_profiles(self, profile_ids):
+        with _config_lock:
+            document = self._document()
+            if not isinstance(profile_ids, list):
+                raise OpenAICompatibleError("Profile order must be a complete list")
+            for profile_id in profile_ids:
+                self._validate_id(profile_id)
+            if len(profile_ids) != len(set(profile_ids)) or set(profile_ids) != set(document["profiles"]):
+                raise OpenAICompatibleError("Profile order must include every existing profile exactly once")
+            document["profiles"] = {key: document["profiles"][key] for key in profile_ids}
+            self._write(document)
+            return self.public_profiles()
+
     def set_default(self, profile_id):
         with _config_lock:
             document = self._document()

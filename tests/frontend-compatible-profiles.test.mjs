@@ -56,3 +56,62 @@ test('invalid or disabled preference storage falls back safely', () => {
   assert.equal(readGenerationPreference(denied, 'a').quality, 'auto');
   assert.doesNotThrow(() => writeGenerationPreference(denied, 'a', {}));
 });
+
+const localSource = await readFile(new URL('../frontend/src/utils/localPreferences.ts', import.meta.url), 'utf8');
+const localJs = ts.transpileModule(localSource, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
+const { readLocalPreferences, saveLocalPreferences, LOCAL_PREFERENCES_DEFAULTS } = await import(`data:text/javascript;base64,${Buffer.from(localJs).toString('base64')}`);
+test('local workflow preferences validate booleans and persist no prompts, keys or extra fields', t => {
+  const values = new Map();
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  const events = new EventTarget(); let changes = 0;
+  events.addEventListener('ipl:local-preferences-changed', () => { changes++; });
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: events });
+  t.after(() => { if (previousWindow) Object.defineProperty(globalThis, 'window', previousWindow); else delete globalThis.window; });
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: {
+    getItem: key => values.get(key), setItem: (key, value) => values.set(key, value),
+  } });
+  t.after(() => { if (previous) Object.defineProperty(globalThis, 'localStorage', previous); else delete globalThis.localStorage; });
+  assert.deepEqual(readLocalPreferences(), LOCAL_PREFERENCES_DEFAULTS);
+  assert.equal(saveLocalPreferences({ ...LOCAL_PREFERENCES_DEFAULTS, enterSubmit: true, persistInputOnRestart: true, api_key: 'private-key', prompt: 'private-prompt' }), true);
+  assert.equal(changes, 1, 'mounted workspaces can refresh draft behavior immediately after a saved preference change');
+  assert.equal(readLocalPreferences().enterSubmit, true);
+  assert.equal(readLocalPreferences().persistInputOnRestart, true);
+  assert.ok(!JSON.stringify([...values.values()]).includes('private-'));
+  const key = [...values.keys()][0];
+  values.set(key, '{"enterSubmit":"true","notifyOnCompletion":1}');
+  assert.deepEqual(readLocalPreferences(), LOCAL_PREFERENCES_DEFAULTS);
+  values.set(key, 'null');
+  assert.deepEqual(readLocalPreferences(), LOCAL_PREFERENCES_DEFAULTS);
+  values.set(key, '{');
+  assert.deepEqual(readLocalPreferences(), LOCAL_PREFERENCES_DEFAULTS);
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, get() { throw new Error('storage denied'); } });
+  assert.deepEqual(readLocalPreferences(), LOCAL_PREFERENCES_DEFAULTS);
+  assert.equal(saveLocalPreferences(LOCAL_PREFERENCES_DEFAULTS), false);
+  assert.equal(changes, 1, 'failed persistence must not announce a successful settings change');
+});
+
+const actionSource = await readFile(new URL('../frontend/src/api/profileActions.ts', import.meta.url), 'utf8');
+const actionJs = ts.transpileModule(actionSource, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
+const { copyApiProfile, reorderApiProfiles } = await import(`data:text/javascript;base64,${Buffer.from(actionJs).toString('base64')}`);
+test('profile copy and order send only identities to local routes and never retry a failed mutation', async t => {
+  const calls = [];
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    calls.push({ url, options });
+    return new Response(JSON.stringify({ profiles: [], default_profile_id: null }), { status: 200 });
+  });
+  await copyApiProfile('source', 'new-copy', 'Copy');
+  await reorderApiProfiles(['b', 'a']);
+  assert.equal(calls[0].url, '/api/generation-providers/openai-compatible/profiles/source/copy');
+  assert.deepEqual(JSON.parse(calls[0].options.body), { id: 'new-copy', display_name: 'Copy' });
+  assert.equal(calls[1].url, '/api/generation-providers/openai-compatible/profiles/reorder');
+  assert.equal(calls[1].options.method, 'POST');
+  assert.deepEqual(JSON.parse(calls[1].options.body), { profile_ids: ['b', 'a'] });
+  for (const { options } of calls) {
+    assert.equal(options.credentials, 'same-origin'); assert.equal(options.redirect, 'error');
+    assert.ok(!options.body.includes('api_key'));
+  }
+  t.mock.method(globalThis, 'fetch', async () => { calls.push({ failed: true }); return new Response('secret-diagnostics', { status: 409 }); });
+  await assert.rejects(copyApiProfile('source', 'new-copy', 'Copy'), error => error.message === 'profile_action_failed');
+  assert.equal(calls.length, 3);
+});

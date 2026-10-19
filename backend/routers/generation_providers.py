@@ -104,6 +104,29 @@ def openai_compatible_profiles(request: Request):
         raise HTTPException(status_code=409, detail="Could not read third-party API profiles.") from None
 
 
+@router.post("/openai-compatible/profiles/reorder")
+async def order_openai_compatible_profiles(request: Request):
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict) or set(payload) != {"profile_ids"}:
+            raise ValueError()
+        return OpenAICompatibleConfig(library_path=request.app.state.library_path).reorder_profiles(payload["profile_ids"])
+    except (ValueError, TypeError, OSError, OpenAICompatibleError):
+        raise HTTPException(status_code=409, detail="Could not reorder profiles. Refresh the list and try again.") from None
+
+
+@router.post("/openai-compatible/profiles/{profile_id}/copy")
+async def copy_openai_compatible_profile(profile_id: str, request: Request):
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict) or not {"id"}.issubset(payload) or set(payload) - {"id", "display_name"}:
+            raise ValueError()
+        return OpenAICompatibleConfig(library_path=request.app.state.library_path).copy_profile(
+            profile_id, payload["id"], payload.get("display_name"))
+    except (ValueError, TypeError, OSError, OpenAICompatibleError):
+        raise HTTPException(status_code=409, detail="Could not copy profile. Refresh the list before retrying.") from None
+
+
 @router.put("/openai-compatible/profiles/{profile_id}")
 async def save_openai_compatible_profile(profile_id: str, request: Request):
     try:
