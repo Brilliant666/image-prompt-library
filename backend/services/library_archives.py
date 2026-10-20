@@ -367,6 +367,8 @@ def _validate_schema_contract(conn: sqlite3.Connection, ledger: list[str]) -> No
     if migration_count >= 14:
         required_tables.update({"agent_config", "agent_conversations", "agent_rounds", "agent_requests",
                                 "agent_steps", "agent_tool_jobs", "agent_assets", "agent_resumes"})
+    if migration_count >= 16:
+        required_tables.add("gallery_title_jobs")
     schema_objects = {
         str(row[0]): (str(row[1]), str(row[2] or ""))
         for row in conn.execute("SELECT name, type, sql FROM sqlite_master WHERE type IN ('table', 'view')")
@@ -374,6 +376,12 @@ def _validate_schema_contract(conn: sqlite3.Connection, ledger: list[str]) -> No
     missing_tables = sorted(name for name in required_tables if schema_objects.get(name, (None,))[0] != "table")
     if missing_tables:
         raise _error(f"Library database schema is missing required table: {missing_tables[0]}")
+    if migration_count >= 15:
+        trigger = conn.execute(
+            "SELECT tbl_name FROM sqlite_master WHERE type='trigger' AND name='generation_image_deleted'"
+        ).fetchone()
+        if not trigger or trigger[0] != "images":
+            raise _error("Library database schema is missing required trigger: generation_image_deleted")
     for name in required_tables - {"item_search"}:
         if "CREATE VIRTUAL TABLE" in schema_objects[name][1].upper():
             raise _error(f"Library database schema has an invalid virtual table: {name}")
@@ -403,6 +411,10 @@ def _validate_schema_contract(conn: sqlite3.Connection, ledger: list[str]) -> No
         required_columns.setdefault("capture_organizer_jobs", set()).update({
             "request_id", "item_id", "status", "config_digest", "snapshot", "category", "collection", "created_at", "completed_at",
         })
+    if migration_count >= 16:
+        required_columns["gallery_title_jobs"] = {
+            "item_id", "image_id", "status", "config_digest", "snapshot", "category", "created_at", "completed_at",
+        }
     for table, expected in required_columns.items():
         actual = {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
         missing_columns = sorted(expected - actual)

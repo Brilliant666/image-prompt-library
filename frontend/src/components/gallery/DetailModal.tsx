@@ -15,7 +15,7 @@ interface Props {
   t: Translator;
   onClose: () => void;
   onChange: () => void;
-  onAccepted: (itemId: string) => void;
+  onAccepted: (itemId: string, autoTitle?: boolean) => void;
   onReuse: (job: GenerationJobRecord, edit?: boolean) => void;
   onLightbox: () => void;
 }
@@ -33,6 +33,7 @@ export default function DetailModal({ job, t, onClose, onChange, onAccepted, onR
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [title, setTitle] = useState('');
+  const [autoTitle, setAutoTitle] = useState(false);
   const [target, setTarget] = useState('');
   const [items, setItems] = useState<ItemSummary[]>([]);
   const [saveOpen, setSaveOpen] = useState(false);
@@ -109,9 +110,12 @@ export default function DetailModal({ job, t, onClose, onChange, onAccepted, onR
     try {
       const result = target
         ? await api.acceptGenerationJobIntoItem(job.id, target)
-        : await api.acceptGenerationJobAsNewItem(job.id, title.trim() ? { title: title.trim() } : {});
+        : await api.acceptGenerationJobAsNewItem(job.id, {
+          ...(title.trim() ? { title: title.trim() } : {}),
+          auto_title: autoTitle && !title.trim(),
+        });
       onChange();
-      onAccepted(result.item.id);
+      onAccepted(result.item.id, !target && autoTitle && !title.trim());
     } catch (e) {
       setError(String(e));
     } finally {
@@ -154,7 +158,19 @@ export default function DetailModal({ job, t, onClose, onChange, onAccepted, onR
           </div>
           <div className="pg-detail-bottom">
             {error && <p role="alert" className="pg-error">{error}</p>}
-            {saveOpen && !job.accepted_image_id && <div className="pg-save-form"><label>保存位置<select value={target} onChange={e => setTarget(e.target.value)}><option value="">新建参考</option>{items.map(item => <option key={item.id} value={item.id}>附加到：{item.title}</option>)}</select></label>{itemsLoading ? <span>正在加载保存位置…</span> : items.length < itemTotal && <button onClick={() => setItemLimit(value => value + 1000)}>加载更多参考（{items.length} / {itemTotal}）</button>}{!target && <label>名称（可选）<input value={title} onChange={e => setTitle(e.target.value)} placeholder="留空自动命名"/></label>}<button className="pg-detail-save-confirm" disabled={busy} onClick={() => void accept()}>{busy ? '保存中…' : '确认保存'}</button></div>}
+            {saveOpen && !job.accepted_image_id && <div className="pg-save-form">
+              <label>保存位置<select disabled={busy} value={target} onChange={e => setTarget(e.target.value)}><option value="">新建参考</option>{items.map(item => <option key={item.id} value={item.id}>附加到：{item.title}</option>)}</select></label>
+              {itemsLoading ? <span>正在加载保存位置…</span> : items.length < itemTotal && <button onClick={() => setItemLimit(value => value + 1000)}>加载更多参考（{items.length} / {itemTotal}）</button>}
+              {!target && <>
+                <label>名称（可选）<input disabled={busy} value={title} onChange={e => setTitle(e.target.value)} placeholder="留空使用默认名称"/></label>
+                <label className="pg-save-auto-title">
+                  <input type="checkbox" checked={autoTitle && !title.trim()} disabled={busy || Boolean(title.trim())} onChange={e => setAutoTitle(e.target.checked)}/>
+                  <span>使用采集的“看图与文字模型”自动命名</span>
+                </label>
+                <p className="pg-save-title-help">{title.trim() ? '将保留你填写的名称，不调用命名模型。' : '可选，可能产生模型费用。先保存原图与原始提示词，再后台命名；命名失败不影响收录。排队较久时，可稍后刷新 Library 查看名称。'}</p>
+              </>}
+              <button className="pg-detail-save-confirm" disabled={busy} onClick={() => void accept()}>{busy ? '保存中…' : '确认保存'}</button>
+            </div>}
             <div className="pg-detail-actions">
               <button className="pg-detail-reuse" onClick={() => onReuse(job)}><RotateCcw size={16}/>恢复配方</button>
               <button disabled={!canUse} onClick={() => onReuse(job, true)}><ImagePlus size={16}/>继续编辑</button>

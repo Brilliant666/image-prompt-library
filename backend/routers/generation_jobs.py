@@ -28,6 +28,7 @@ from backend.services.openai_codex_native import (
 )
 from backend.services.xai_grok_oauth import GrokOAuthError, GrokOAuthRateLimitError
 from backend.services.openai_compatible import OpenAICompatibleError
+from backend.services.capture_organizer import enqueue_jobs as enqueue_metadata_jobs
 
 router = APIRouter(prefix="/generation-jobs", tags=["generation-jobs"])
 
@@ -284,6 +285,7 @@ def accept_generation_job_into_item(job_id: str, payload: GenerationJobAcceptInt
 def accept_generation_job_as_new_item(job_id: str, request: Request, payload: GenerationJobAcceptAsNewItemRequest | None = None):
     try:
         result = repo(request).accept_result_as_new_item(job_id, payload)
+        enqueue_metadata_jobs(request.app.state.library_path)
         return GenerationJobAcceptResult(job=_sanitize_generation_job_record(result.job), item=result.item)
     except KeyError as exc:
         raise HTTPException(status_code=404) from exc

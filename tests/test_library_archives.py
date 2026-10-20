@@ -586,6 +586,20 @@ def test_backup_rejects_view_substituted_for_required_table(tmp_path):
         backup_library(library, tmp_path / "view-schema.tar.gz")
 
 
+@pytest.mark.parametrize(("mutation", "message"), [
+    ("DROP TABLE gallery_title_jobs", "missing required table: gallery_title_jobs"),
+    ("DROP TRIGGER generation_image_deleted", "missing required trigger: generation_image_deleted"),
+    ("ALTER TABLE gallery_title_jobs RENAME COLUMN image_id TO lost_image", "missing required column: gallery_title_jobs.image_id"),
+])
+def test_backup_rejects_incomplete_gallery_save_schema(tmp_path, mutation, message):
+    library = _library(tmp_path)
+    with db.connect(library) as conn:
+        conn.execute(mutation)
+        conn.commit()
+    with pytest.raises(LibraryArchiveError, match=message):
+        backup_library(library, tmp_path / "invalid-gallery-schema.tar.gz")
+
+
 def test_manifest_paths_are_canonical(tmp_path):
     library = _library(tmp_path)
     archive = backup_library(library, tmp_path / "backup.tar.gz")

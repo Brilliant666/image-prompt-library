@@ -262,6 +262,7 @@ class GenerationJobStatusCounts(BaseModel):
     cancelled: int = 0
 
 class GenerationJobAcceptAsNewItemRequest(BaseModel):
+    auto_title: bool = False
     title: Optional[str] = None
     cluster_name: Optional[str] = None
     tags: Optional[List[str]] = None

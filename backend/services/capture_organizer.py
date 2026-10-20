@@ -233,6 +233,92 @@ def connection_status(library):
         return {"enabled": False, "configured": False}
 
 
+def register_gallery_title(conn, library, item_id, image_id, *, auto_title=False, manual_title=False):
+    """Register alongside durable acceptance; explicit consent never renames a manual title."""
+    status, category, config_digest = "disabled", "", None
+    if auto_title:
+        if manual_title:
+            status, category = "skipped", "manual_title"
+        else:
+            try:
+                settings = OrganizerConfig(library).read()
+                if settings["enabled"] and _configured(settings):
+                    status, config_digest = "pending", _config_digest(settings)
+                else:
+                    status, category = "skipped", "configuration"
+            except OrganizerError:
+                status, category = "skipped", "configuration"
+    conn.execute(
+        "INSERT OR IGNORE INTO gallery_title_jobs(item_id,image_id,status,category,config_digest,snapshot,created_at) "
+        "VALUES(?,?,?,?,?,?,?)",
+        (item_id, image_id, status, category, config_digest, json.dumps(_snapshot(conn, item_id)), now()),
+    )
+
+
+def _finish_gallery_title(library, item_id, status, category):
+    with connect(library) as conn:
+        conn.execute("UPDATE gallery_title_jobs SET status=?,category=?,completed_at=? "
+                     "WHERE item_id=? AND status='running'", (status, category, now(), item_id))
+        conn.commit()
+
+
+def gallery_title_status(library, item_id):
+    with connect(library) as conn:
+        if conn.execute("SELECT 1 FROM items WHERE id=?", (item_id,)).fetchone() is None:
+            raise KeyError(item_id)
+        row = conn.execute("SELECT status,category FROM gallery_title_jobs WHERE item_id=?", (item_id,)).fetchone()
+    return dict(row) if row else {"status": "disabled", "category": "no_job"}
+
+
+def run_gallery_title(library, item_id):
+    with connect(library) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if not conn.execute("UPDATE gallery_title_jobs SET status='running' "
+                            "WHERE item_id=? AND status='pending'", (item_id,)).rowcount:
+            return
+        job = dict(conn.execute("SELECT * FROM gallery_title_jobs WHERE item_id=?", (item_id,)).fetchone())
+        conn.commit()
+    try:
+        settings = OrganizerConfig(library).read()
+        if not settings["enabled"] or not _configured(settings) or _config_digest(settings) != job["config_digest"]:
+            _finish_gallery_title(library, item_id, "skipped", "configuration_changed")
+            return
+        expected = json.loads(job["snapshot"])
+        with connect(library) as conn:
+            if not expected or _snapshot(conn, item_id) != expected:
+                _finish_gallery_title(library, item_id, "skipped", "content_changed")
+                return
+            prompt = conn.execute("SELECT text FROM prompts WHERE item_id=? AND is_original=1 ORDER BY id LIMIT 1",
+                                  (item_id,)).fetchone()
+            # An image-edit item can include references sorted before the result.
+            # Use the exact generated image recorded during acceptance.
+            image = conn.execute("SELECT original_path,file_sha256 FROM images WHERE id=? AND item_id=?",
+                                 (job["image_id"], item_id)).fetchone()
+        if prompt is None or image is None:
+            raise RemoteFailure("content_changed")
+        title_settings = {**settings, "_title_only": True, "allow_new_collections": False}
+        result = request_metadata(title_settings, prompt[0], expected["title"], _analysis_image(library, image), [])
+        with connect(library) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if _snapshot(conn, item_id) != expected:
+                status, category = "skipped", "content_changed"
+            elif _config_digest(OrganizerConfig(library).read()) != job["config_digest"]:
+                status, category = "skipped", "configuration_changed"
+            else:
+                conn.execute("UPDATE items SET title=?,updated_at=? WHERE id=?", (result["title"], now(), item_id))
+                ItemRepository(library).rebuild_search(conn, item_id)
+                status, category = "succeeded", ""
+            conn.execute("UPDATE gallery_title_jobs SET status=?,category=?,completed_at=? WHERE item_id=?",
+                         (status, category, now(), item_id))
+            conn.commit()
+    except RemoteFailure as exc:
+        _finish_gallery_title(library, item_id, "uncertain" if exc.category in {"network", "timeout"} else "failed", exc.category)
+    except OrganizerError:
+        _finish_gallery_title(library, item_id, "failed", "configuration")
+    except Exception:
+        _finish_gallery_title(library, item_id, "uncertain", "local_storage")
+
+
 def _analysis_image(library, image):
     path = resolve_library_storage_path(library, image["original_path"])
     data = path.read_bytes()
@@ -253,7 +339,9 @@ def request_metadata(settings, prompt, title, image_url, collections):
     instructions = {"original_prompt": prompt, "existing_title": title,
                     "existing_collections": collections, "allow_new_collections": settings["allow_new_collections"]}
     body = {"model": settings["model"], "messages": [
-        {"role": "system", "content": _SYSTEM},
+        {"role": "system", "content": _SYSTEM + (
+            "\nThis request is title-only. Always return collection=null; do not classify the image."
+            if settings.get("_title_only") else "")},
         {"role": "user", "content": [{"type": "text", "text": json.dumps(instructions, ensure_ascii=False)},
                                      {"type": "image_url", "image_url": {"url": image_url, "detail": "low"}}]},
     ], "max_completion_tokens": 512, "response_format": {"type": "json_object"}}
@@ -462,16 +550,23 @@ def enqueue_jobs(library):
         if key in _active or key in _paused:
             return
         with connect(library) as conn:
-            pending = conn.execute("SELECT request_id FROM capture_organizer_jobs WHERE status='pending' ORDER BY created_at LIMIT 1").fetchone()
+            pending = conn.execute(
+                "SELECT request_id,kind FROM ("
+                "SELECT request_id,'capture' AS kind,created_at FROM capture_organizer_jobs WHERE status='pending' "
+                "UNION ALL SELECT item_id,'gallery',created_at FROM gallery_title_jobs WHERE status='pending'"
+                ") ORDER BY created_at LIMIT 1").fetchone()
         if not pending:
             return
         _active.add(key)
-        _futures[key] = _executor.submit(_run_and_continue, library, pending[0], key)
+        _futures[key] = _executor.submit(_run_and_continue, library, pending[0], key, pending[1])
 
 
-def _run_and_continue(library, request_id, key):
+def _run_and_continue(library, request_id, key, kind="capture"):
     try:
-        run_job(library, request_id)
+        if kind == "gallery":
+            run_gallery_title(library, request_id)
+        else:
+            run_job(library, request_id)
     finally:
         with _lock:
             _active.discard(key)
@@ -484,6 +579,7 @@ def recover_jobs(library):
         _paused.discard(str(Path(library).resolve()))
     with connect(library) as conn:
         conn.execute("UPDATE capture_organizer_jobs SET status='uncertain',category='interrupted',completed_at=? WHERE status='running'", (now(),))
+        conn.execute("UPDATE gallery_title_jobs SET status='uncertain',category='interrupted',completed_at=? WHERE status='running'", (now(),))
         conn.commit()
     enqueue_jobs(library)
 

@@ -1651,3 +1651,48 @@ test('confirmed cleanup from execution history hides its gallery card even when 
   assert.equal(h.node('button',p=>p.className==='pg-load-more'),undefined);
   assert.match(h.node('div',p=>p.role==='alert').children[0].props.children,/temporarily unavailable/);
 });
+
+const appSourceForLibraryChanges = await readFile(new URL('../frontend/src/App.tsx', import.meta.url), 'utf8');
+const appAstForLibraryChanges = ts.createSourceFile('App.tsx', appSourceForLibraryChanges, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+const libraryMutationCallbacks = new Map();
+function findLibraryMutationCallbacks(node) {
+  if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && ['savedLibraryAssets', 'deleted', 'refreshAfterBatch'].includes(node.name.text) && node.initializer) {
+    libraryMutationCallbacks.set(node.name.text, node.initializer.getText(appAstForLibraryChanges));
+  }
+  ts.forEachChild(node, findLibraryMutationCallbacks);
+}
+findLibraryMutationCallbacks(appAstForLibraryChanges);
+for (const mutation of ['savedLibraryAssets', 'deleted', 'refreshAfterBatch']) test(`Library ${mutation} production callback invalidates accepted gallery snapshots and permits recollection`, async t => {
+  historyStorage(t);
+  let removed = false, revision = 0;
+  const row = historicalJob({ status: 'accepted', accepted_image_id: 'library-image', result_path: 'generation-results/result.png' });
+  const reads = [];
+  const h = workspaceHarness(t, { generationJobs: async (params, options) => {
+    reads.push(options);
+    return { jobs: [{ ...row, ...(removed ? { status: 'succeeded', accepted_image_id: null } : {}) }], total: 1 };
+  } }, { libraryScope: 'synthetic-library' });
+  await h.flush();
+  assert.equal(h.node('TaskGrid').jobs[0].accepted_image_id, 'library-image');
+  const dependencies = {
+    saved() {}, refreshClusters() {}, refreshLibraryTotal() {}, refreshTags() {}, setItemsReloadKey() {},
+    setDetailId() {}, setEditing() {}, setFocusedGenerationJobId() {}, exitSelectionMode() {},
+    setGenerationQueueRefreshKey: update => { revision = update(revision); },
+  };
+  const callback = new Function(...Object.keys(dependencies), `return (${libraryMutationCallbacks.get(mutation)});`)(...Object.values(dependencies));
+  removed = true; callback(); h.update({ refreshKey: revision }); await h.flush();
+  assert.equal(revision, 1);
+  assert.equal(reads.at(-1).fresh, true);
+  assert.equal(h.node('TaskGrid').jobs[0].status, 'succeeded');
+  assert.equal(h.node('TaskGrid').jobs[0].accepted_image_id, null);
+  assert.equal(h.node('TaskGrid').jobs[0].result_path, row.result_path);
+});
+
+test('gallery passes opt-in naming through collection to the application and closes the result detail', async t => {
+  historyStorage(t);
+  const row = historicalJob({ result_path: 'generation-results/result.png' }), accepted = [];
+  const h = workspaceHarness(t, { generationJobs: async () => ({ jobs: [row], total: 1 }), generationJob: async () => row }, { onAccepted: (...args) => accepted.push(args) });
+  await h.flush(); h.node('TaskGrid').onOpen(row); await h.flush();
+  h.node('DetailModal').onAccepted('new-library-item', true); await h.flush();
+  assert.deepEqual(accepted, [['new-library-item', true]]);
+  assert.equal(h.node('DetailModal'), undefined);
+});
