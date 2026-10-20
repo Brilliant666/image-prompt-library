@@ -612,13 +612,51 @@ test('returning to an initialized composer restores a new command through deferr
   assert.equal(profileCalls, 1, 'view activation alone does not reload profiles');
 });
 
-test('settings refresh invalidates a pending history restore and leaves the current draft intact', async t => {
+test('settings close refresh preserves pending historical lookup until it completes', async t => {
   const lookup = deferred();
   const h = inputHarness(t, { command: { id: 1400, job: historicalJob({ prompt_text: 'current prompt' }) } }, { generationJobForImage: () => lookup.promise }); await h.flush();
   h.update({ command: { id: 1401, item: { id: 'old', title: 'Old', prompts: [], images: [{ id: 'old-image', role: 'reference_image', generation_provider: 'openai_compatible' }] } } }); await h.flush();
-  h.update({ configurationRevision: 1 }); await h.flush(); lookup.resolve(historicalJob()); await h.flush();
+  h.update({ configurationRevision: 1 }); await h.flush();
   assert.equal(h.find('textarea', '画廊提示词').value, 'current prompt');
+  assert.equal(h.find('button', '生成图片').disabled, true);
+  lookup.resolve(historicalJob()); await h.flush();
+  assert.equal(h.find('textarea', '画廊提示词').value, originalPrompt);
   assert.equal(h.find('button', '生成图片').disabled, false);
+});
+
+for (const edited of [false,true]) test(`settings refresh preserves deferred original decoding and user edit ownership (${edited})`, async t=>{
+  const decode=deferred(), config=deferred();let calls=0;
+  const store={profiles:[{id:'original-api',display_name:'Original API',model:'gateway-original-alias',configured:true}],default_profile_id:'original-api'};
+  const h=inputHarness(t,{command:{id:2400,job:historicalJob({prompt_text:'existing draft'})}}, {openAICompatibleProfiles:()=>++calls===1?Promise.resolve(store):config.promise},{decode:()=>decode.promise});await h.flush();
+  h.update({command:{id:2401,job:historicalJob({parameters:{...historicalJob().parameters,input_images:[{id:'original',data_url:'data:image/png;base64,original'}],stream:false,partial_images:0,response_format:'auto'}})}});await h.flush();
+  if(edited){h.find('textarea','画廊提示词').onChange({target:{value:'accepted new draft'}});await h.flush();}
+  h.update({configurationRevision:1});await h.flush();
+  assert.equal(h.find('textarea','画廊提示词').value,edited?'accepted new draft':'existing draft');
+  assert.equal(h.find('button','生成图片').disabled,true,'configuration refresh blocks submission, not restoration');
+  decode.resolve();await h.flush();
+  assert.equal(h.find('textarea','画廊提示词').value,edited?'accepted new draft':originalPrompt);
+  assert.equal(h.find('button','生成图片').disabled,true,'still waiting for current provider availability');
+  h.find('button','生成图片').onClick();await h.flush();assert.equal(h.state.posts.length,0);
+  config.resolve(store);await h.flush();
+  assert.equal(h.find('button','生成图片').disabled,false);
+  assert.equal(children(h.tree).filter(n=>n.type==='img').length,edited?0:1);
+  assert.equal(h.state.posts.length,0);
+});
+
+for(const failed of [false,true]) test(`settings close preserves ordered pending attachments even when config refresh fails (${failed})`,async t=>{
+  const first=deferred(),second=deferred(),config=deferred();let calls=0;
+  const h=inputHarness(t,{promptVariablesEnabled:true},{openAICompatibleProfiles:()=>++calls===1?Promise.resolve({profiles:[{id:'original-api',display_name:'Original API',model:'gateway-original-alias',configured:true}],default_profile_id:'original-api'}):config.promise},{readFile:file=>file.name==='one.png'?first.promise:second.promise});await h.flush();
+  h.find('textarea','画廊提示词').onChange({target:{value:'  retain prompt\n{{subject}}  '}});await h.flush();
+  const variable=children(h.tree).find(n=>n.type==='input'&&n.props.onChange&&!n.props['aria-label']&&!n.props.type);variable.props.onChange({target:{value:'synthetic subject'}});await h.flush();
+  h.find('textarea','画廊提示词').onPaste({preventDefault(){},clipboardData:{files:['one.png','two.png'].map(name=>new File(['synthetic'],name,{type:'image/png'}))}});await h.flush();
+  h.update({configurationRevision:1});await h.flush();
+  if(failed)config.reject(new Error('local configuration temporarily unavailable'));else config.resolve({profiles:[{id:'original-api',display_name:'Original API updated',model:'new-default',configured:true}],default_profile_id:'original-api'});await h.flush();
+  assert.equal(h.find('button','生成图片').disabled,true,'pending attachments must retain their loading state');
+  second.resolve('data:image/png;base64,two');await h.flush();first.resolve('data:image/png;base64,one');await h.flush();
+  assert.deepEqual(children(h.tree).filter(n=>n.type==='img').map(n=>n.props.src),['data:image/png;base64,one','data:image/png;base64,two']);
+  assert.equal(h.find('textarea','画廊提示词').value,'  retain prompt\n{{subject}}  ');
+  assert.ok(children(h.tree).some(n=>n.type==='input'&&n.props.value==='synthetic subject'));
+  h.find('button','请求模型 gateway-original-alias');assert.equal(h.find('button','生成图片').disabled,false);assert.equal(h.state.posts.length,0);
 });
 
 test('interrupted first draft initialization can finish on the next settings revision', async t => {

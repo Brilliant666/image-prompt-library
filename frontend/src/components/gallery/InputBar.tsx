@@ -26,7 +26,7 @@ async function verifiedInput(input:RecipeInput) {
 }
 export default function InputBar({command,preferences,t,active,onCreated,onOpenSettings,configurationRevision,promptVariablesEnabled=false,promptLanguage,preferredProvider,onOpenAgent}:Props) {
   const [draft,setDraft]=useState<GalleryDraft>(emptyGalleryDraft),[providers,setProviders]=useState<GenerationProviderStatus[]>([]),[profiles,setProfiles]=useState<OpenAICompatibleProfile[]>([]);
-  const [loading,setLoading]=useState(true),[reading,setReading]=useState(false),[busy,setBusy]=useState(false),[error,setError]=useState(''),[uncertain,setUncertain]=useState(false),[count,setCount]=useState<GenerationSetCount>(1);
+  const [loading,setLoading]=useState(true),[refreshing,setRefreshing]=useState(false),[reading,setReading]=useState(false),[busy,setBusy]=useState(false),[error,setError]=useState(''),[uncertain,setUncertain]=useState(false),[count,setCount]=useState<GenerationSetCount>(1);
   const [referenceSize,setReferenceSize]=useState<{width:number;height:number}>();
   const [referenceStatus,setReferenceStatus]=useState<'loading'|'ready'|'error'>('loading');
   const referenceSource=useRef<RecipeInput|undefined>(undefined);
@@ -43,12 +43,14 @@ export default function InputBar({command,preferences,t,active,onCreated,onOpenS
   const beginEdit=()=>{editRevision.current++;readSequence.current++;consumedCommand.current=command?.id;setReading(pendingFiles.current);};
   const editDraft=(update:GalleryDraft|((current:GalleryDraft)=>GalleryDraft))=>{beginEdit();setDraft(update);};
   useEffect(()=>{mounted.current=true;return()=>{mounted.current=false;readSequence.current++;fileReadSequence.current++;};},[]);
-  useEffect(()=>{readSequence.current++;fileReadSequence.current++;pendingFiles.current=false;setReading(false);},[active,configurationRevision]);
+  useEffect(()=>{readSequence.current++;fileReadSequence.current++;pendingFiles.current=false;setReading(false);},[active]);
   useEffect(()=>{let current=true;setReferenceSize(undefined);setReferenceStatus('loading');if(draft.provider==='openai_compatible'&&(draft.recipe.size_mode==='auto4k'||panel==='size')&&draft.inputs[0])void verifiedInput(draft.inputs[0]).then(async data=>{const image=new Image();image.src=data;await image.decode();if(current){referenceSource.current=draft.inputs[0];setReferenceSize({width:image.naturalWidth,height:image.naturalHeight});setReferenceStatus('ready');}}).catch(()=>{if(current)setReferenceStatus('error');});return()=>{current=false;};},[draft.provider,draft.recipe.size_mode,draft.inputs[0],panel]);
   const provider=providers.find(p=>p.provider===draft.provider),limit=provider?.max_input_images||4;
   const profile=profiles.find(p=>p.id===draft.profileId);
   const ready=draft.provider==='openai_compatible'?Boolean(profile?.configured):Boolean(provider?.can_generate??provider?.available);
-  useEffect(()=>{let alive=true;catalogUpdates.current.clear();setLoading(true);Promise.all([api.generationProviders(),api.openAICompatibleProfiles()]).then(async([available,store])=>{
+  // Only first initialization gates history restoration. Refreshing configuration
+  // must not invalidate an accepted recipe command or an in-flight file read.
+  useEffect(()=>{let alive=true;catalogUpdates.current.clear();if(!initialized.current)setLoading(true);setRefreshing(true);Promise.all([api.generationProviders(),api.openAICompatibleProfiles()]).then(async([available,store])=>{
     if(!alive)return;setProviders(available.filter(p=>p.provider!=='manual_upload'));setProfiles(store.profiles.map(profile=>catalogUpdates.current.has(profile.id)?{...profile,model_catalog:catalogUpdates.current.get(profile.id)}:profile));
     if(!initialized.current){let restored:GalleryDraft|undefined;if(preferences.persistInputOnRestart&&editRevision.current===0){try{restored=await readGalleryDraft();}catch{if(alive&&editRevision.current===0)setError('无法恢复本地草稿；已保存的任务不受影响');}}if(!alive)return;initialized.current=true;if(editRevision.current!==0)return;
       const selected=store.profiles.find(p=>p.id===lastGenerationProfile(localStorage))||store.profiles.find(p=>p.id===store.default_profile_id);
@@ -56,7 +58,7 @@ export default function InputBar({command,preferences,t,active,onCreated,onOpenS
       const fallback=preferred?.provider||(selected?'openai_compatible':available.find(p=>p.can_generate)?.provider)||'openai_compatible';
       setDraft(restored || {...emptyGalleryDraft(),provider:fallback,profileId:selected?.id||'',recipe:fallback==='openai_compatible'&&selected?readGenerationPreference(localStorage,selected.id,selected.model):{...emptyGalleryDraft().recipe,model:available.find(p=>p.provider===fallback)?.default_image_model||'gpt-image-2',quality:'medium'}});
     }
-  }).catch(e=>alive&&setError(String(e))).finally(()=>alive&&setLoading(false));return()=>{alive=false;};},[configurationRevision]);
+  }).catch(e=>alive&&setError(String(e))).finally(()=>{if(alive){setLoading(false);setRefreshing(false);}});return()=>{alive=false;};},[configurationRevision]);
   useEffect(()=>{
     let alive=true;
     const requests=new Map<string,number>();
@@ -114,7 +116,7 @@ export default function InputBar({command,preferences,t,active,onCreated,onOpenS
     setReading(true);setError('');try{const added=await Promise.all(files.map(async file=>{if(!file.type.startsWith('image/')||file.size>30*1024*1024)throw new Error('请选择 30 MB 内的图片文件');const dataUrl=await imageDataUrl(file);const image=new Image();image.src=dataUrl;await image.decode();return{id:crypto.randomUUID(),name:file.name,source:'uploaded' as const,previewUrl:dataUrl,dataUrl};}));if(current())setDraft(current=>{const remaining=[...added];return{...current,inputs:[...current.inputs.map(input=>input.missing&&remaining.length?remaining.shift()!:input),...remaining]};});}catch(e){if(current())setError(String(e));}finally{if(current()){pendingFiles.current=false;setReading(false);}}
   }
   async function submit() {
-    if(submitLock.current||busy||reading||loading||uncertain||!ready)return;submitLock.current=true;setBusy(true);setError('');let posted=false;
+    if(submitLock.current||busy||reading||loading||refreshing||uncertain||!ready)return;submitLock.current=true;setBusy(true);setError('');let posted=false;
     try{let dimensions: {width:number;height:number}|undefined;if(draft.provider==='openai_compatible'&&draft.recipe.size_mode==='auto4k'&&draft.inputs[0]){const data=await verifiedInput(draft.inputs[0]);const image=new Image();image.src=data;await image.decode();dimensions={width:image.naturalWidth,height:image.naturalHeight};}
       const payload=galleryPayload({...draft,promptLanguage:draft.promptLanguage||promptLanguage},limit,dimensions,promptVariablesEnabled);posted=true;if(count===1)await api.createGenerationJob(payload);else await api.createGenerationSet({job:payload,count});onCreated();
       if(preferences.clearInputAfterSubmit)setDraft(current=>({...current,prompt:'',inputs:[],sourceItemId:undefined}));setPanel('');
@@ -154,7 +156,7 @@ export default function InputBar({command,preferences,t,active,onCreated,onOpenS
       </div>
       <div className="pg-composer-actions">
         <button type="button" className={`pg-add-image${panel==='add'?' active':''}`} title="添加参考图" aria-label="添加参考图" aria-expanded={panel==='add'} aria-controls="gallery-parameter-panel" disabled={busy} onClick={()=>setPanel(panel==='add'?'':'add')}><Plus size={21}/></button>
-        <button type="button" className="pg-submit" title={busy?'提交中':reading?'读取中':loading?'加载中':count===1?'生成图片':`生成 ${count} 张图片`} disabled={loading||reading||busy||uncertain||!ready||!draft.prompt.trim()||draft.inputs.some(i=>i.missing)} onClick={()=>void submit()} aria-label="生成图片">{busy||reading||loading?<LoaderCircle size={20} className="spin"/>:<ArrowRight size={21}/>}</button>
+        <button type="button" className="pg-submit" title={busy?'提交中':reading?'读取中':loading||refreshing?'加载中':count===1?'生成图片':`生成 ${count} 张图片`} disabled={loading||refreshing||reading||busy||uncertain||!ready||!draft.prompt.trim()||draft.inputs.some(i=>i.missing)} onClick={()=>void submit()} aria-label="生成图片">{busy||reading||loading||refreshing?<LoaderCircle size={20} className="spin"/>:<ArrowRight size={21}/>}</button>
       </div>
     </div>
     {panel&&!(panel==='size'&&draft.provider==='openai_compatible')&&<div id="gallery-parameter-panel" className="pg-control-popover pg-parameters-panel" data-panel={panel} role="region" aria-label="生成参数">
