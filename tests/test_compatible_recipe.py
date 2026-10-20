@@ -137,3 +137,75 @@ def test_legacy_retry_keeps_pre_transport_defaults_after_profile_changes(setup):
         OpenAICompatibleProvider(OpenAICompatibleConfig(path), http).run_job(library, retry.id)
     assert len(sent) == 1
     assert {key: repo.get_job(retry.id).metadata["requested"][key] for key in defaults} == defaults
+
+
+@pytest.mark.parametrize("count", [1, 3])
+def test_inline_references_are_persisted_before_credential_scanning(setup, monkeypatch, count):
+    """Submission cost must not include regex scans or DB copies of image Base64."""
+    from backend.services import credential_safety
+
+    library, config_path, client = setup
+    image = BytesIO()
+    Image.new("RGBA", (32, 24), (30, 90, 120, 80)).save(image, "PNG")
+    original = image.getvalue()
+    data_url = "data:image/png;base64," + base64.b64encode(original).decode()
+    original_scan = credential_safety.contains_embedded_credential
+    scanned = []
+
+    def scan_text(value):
+        assert value != data_url, "Image bytes must be validated, not scanned as credential prose"
+        scanned.append(value)
+        return original_scan(value)
+
+    monkeypatch.setattr(credential_safety, "contains_embedded_credential", scan_text)
+    payload = {"provider": "openai_compatible", "prompt_text": "  Synthetic\nprompt  ",
+               "parameters": {"input_images": [{"source": "uploaded", "name": "api_key=private-name",
+                                                "data_url": data_url, "api_key": "private-field"}],
+                              "notes": "api_key=private-value"}}
+    endpoint = "/api/generation-jobs" if count == 1 else "/api/generation-jobs/sets"
+    response = client.post(endpoint, json=payload if count == 1 else {"job": payload, "count": count})
+    assert response.status_code == 200, response.text
+    jobs = [response.json()] if count == 1 else response.json()["jobs"]
+    assert len(jobs) == count
+    assert all(secret not in response.text for secret in ("private-field", "private-value", "private-name"))
+    assert "api_key=private-value" in scanned
+    repository = GenerationJobRepository(library)
+    sent = []
+
+    def reply(request):
+        assert request.url.path == "/v1/images/edits"
+        assert original in request.content
+        sent.append(request)
+        return httpx.Response(200, json={"data": [{"b64_json": base64.b64encode(original).decode()}]})
+
+    with httpx.Client(transport=httpx.MockTransport(reply)) as http:
+        provider = OpenAICompatibleProvider(OpenAICompatibleConfig(config_path), http)
+        for job in jobs:
+            stored = repository.get_job(job["id"])
+            assert stored.prompt_text == payload["prompt_text"]
+            spec = stored.parameters["input_images"][0]
+            assert "data_url" not in spec and "api_key" not in spec
+            assert spec["name"] == "[redacted credential data]"
+            assert stored.parameters["notes"] == "[redacted credential data]"
+            assert (library / spec["result_path"]).read_bytes() == original
+            restored = client.get(f"/api/generation-jobs/{job['id']}").json()
+            assert restored["parameters"]["input_images"][0]["result_path"] == spec["result_path"]
+            provider.run_job(library, job["id"])
+    assert len(sent) == count
+
+
+@pytest.mark.parametrize("count", [1, 3])
+@pytest.mark.parametrize("data_url", [
+    "data:image/png;base64,api_key=private-value",
+    "data:image/png;base64," + base64.b64encode(b"api_key=private-value").decode(),
+    "https://example.invalid/image.png?api_key=private-value",
+])
+def test_invalid_inline_reference_never_enters_queue_or_exposes_credentials(setup, count, data_url):
+    library, _, client = setup
+    payload = {"provider": "openai_compatible", "prompt_text": "Synthetic",
+               "parameters": {"input_images": [{"source": "uploaded", "data_url": data_url}]}}
+    endpoint = "/api/generation-jobs" if count == 1 else "/api/generation-jobs/sets"
+    response = client.post(endpoint, json=payload if count == 1 else {"job": payload, "count": count})
+    assert response.status_code == 409
+    assert "private-value" not in response.text
+    assert GenerationJobRepository(library).list_jobs().total == 0

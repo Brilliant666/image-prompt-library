@@ -1367,3 +1367,34 @@ test('catalog update for another profile does not change the active candidates o
   assert.ok(catalogChoices(h).includes('gpt-image-other'));
   assert.equal(h.find('textarea','画廊提示词').value,'preserve me');assert.equal(h.state.posts.length,0);
 });
+
+for (const outcome of ['success', 'failure']) test(`pending submission reports immediately and clears on ${outcome} without clearing the draft early`, async t => {
+  const pending = deferred(), updates = [], confirmed = []; let calls = 0;
+  const h = inputHarness(t, { onSubmissionChange: value => updates.push(value), onCreated: value => confirmed.push(value), preferences: { clearInputAfterSubmit: true } }, {
+    createGenerationJob: () => { calls++; return pending.promise; },
+  });
+  await h.flush(); h.find('textarea', '画廊提示词').onChange({ target: { value: originalPrompt } }); await h.flush();
+  const click = h.find('button', '生成图片').onClick; click(); click(); await h.flush();
+  assert.equal(calls, 1);
+  assert.deepEqual(updates, [{ prompt: originalPrompt, model: 'gateway-original-alias', count: 1 }]);
+  assert.equal(confirmed.length, 0);
+  assert.equal(h.find('textarea', '画廊提示词').value, originalPrompt);
+  if (outcome === 'success') pending.resolve(historicalJob()); else pending.reject(Error('request not confirmed'));
+  await h.flush(); assert.equal(updates.at(-1), undefined);
+  assert.equal(confirmed.length, outcome === 'success' ? 1 : 0);
+  assert.equal(h.find('textarea', '画廊提示词').value, outcome === 'success' ? '' : originalPrompt);
+  if (outcome === 'failure') assert.equal(h.find('button', '生成图片').disabled, true);
+});
+
+test('workspace renders pending submission separately from selectable confirmed jobs and clears it on completion', async t => {
+  historyStorage(t); history.saveGalleryFilter('failed'); const old = historicalJob({ status: 'failed' });
+  const h = workspaceHarness(t, { generationJobs: async () => ({ jobs: [old], total: 1 }) }); await h.flush();
+  h.node('InputBar').onSubmissionChange({ prompt: 'new pending prompt', model: 'gpt-image-test', count: 3 }); await h.flush();
+  const pending = () => children(h.tree).find(node => node.props?.['aria-label'] === '正在提交生成请求');
+  assert.ok(pending());
+  assert.match(JSON.stringify(pending()), /正在提交/);
+  assert.deepEqual(h.node('TaskGrid').jobs.map(job => job.id), [old.id]);
+  assert.equal(children(pending()).some(node => node.type === 'button'), false, 'unconfirmed requests have no task actions');
+  h.node('InputBar').onSubmissionChange(undefined); await h.flush(); assert.equal(pending(), undefined);
+  assert.deepEqual(h.node('TaskGrid').jobs.map(job => job.id), [old.id]);
+});

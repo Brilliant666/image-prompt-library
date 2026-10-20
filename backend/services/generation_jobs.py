@@ -251,6 +251,32 @@ def sanitize_generation_parameters(parameters: object, *, redact_image_data: boo
     return sanitize_structured_credentials(parameters, redact_image_data=redact_image_data)
 
 
+def _sanitize_compatible_enqueue_parameters(parameters: dict) -> dict:
+    """Scan metadata first; stage inline images only until strict persistence.
+
+    The caller must pass these inputs through _prepare_reference_input_clones
+    with persist_inline=True, which validates their bytes and removes data_url
+    before any database write. Other strings and all reference metadata retain
+    the ordinary credential filtering.
+    """
+    prepared = dict(parameters)
+    images = prepared.get("input_images")
+    if not isinstance(images, list):
+        return sanitize_generation_parameters(prepared)
+    staged = {}
+    copied = []
+    for index, raw in enumerate(images):
+        spec = dict(raw) if isinstance(raw, dict) else raw
+        if isinstance(spec, dict) and spec.get("source") != "library" and isinstance(spec.get("data_url"), str):
+            staged[index] = spec.pop("data_url")
+        copied.append(spec)
+    prepared["input_images"] = copied
+    sanitized = sanitize_generation_parameters(prepared)
+    for index, data_url in staged.items():
+        sanitized["input_images"][index]["data_url"] = data_url
+    return sanitized
+
+
 def _generation_provenance_parameters(parameters: dict) -> dict:
     return sanitize_generation_parameters(parameters, redact_image_data=True)
 
@@ -369,7 +395,7 @@ class GenerationJobRepository:
         payload = self._freeze_compatible_request(payload)
         if payload.source_item_id:
             self.items.get_item(payload.source_item_id)
-        parameters = sanitize_generation_parameters(payload.parameters)
+        parameters = _sanitize_compatible_enqueue_parameters(payload.parameters) if payload.provider == "openai_compatible" else sanitize_generation_parameters(payload.parameters)
         input_images = parameters.get("input_images")
         input_limit = GENERATION_INPUT_LIMITS.get(payload.provider, MAX_GENERATION_INPUT_IMAGES)
         if isinstance(input_images, list) and len(input_images) > input_limit:
@@ -545,6 +571,7 @@ class GenerationJobRepository:
             if persist_inline and spec.get("source") != "library" and isinstance(spec.get("data_url"), str):
                 spec["result_path"] = self._persist_inline_reference(job_id, index, spec["data_url"])
                 spec["preview_path"] = spec["result_path"]
+                del spec["data_url"]
             result_path = spec.get("result_path")
             if isinstance(result_path, str) and result_path:
                 clone = self._clone_generation_result_input(job_id=job_id, result_path=result_path, name=str(spec.get("name") or ""))
@@ -2448,7 +2475,7 @@ class GenerationJobRepository:
             raise GenerationJobConflict("Manual result upload supports one image at a time")
         if payload.source_item_id:
             self.items.get_item(payload.source_item_id)
-        parameters = sanitize_generation_parameters(payload.parameters)
+        parameters = _sanitize_compatible_enqueue_parameters(payload.parameters) if payload.provider == "openai_compatible" else sanitize_generation_parameters(payload.parameters)
         input_images = parameters.get("input_images")
         input_limit = GENERATION_INPUT_LIMITS.get(payload.provider, MAX_GENERATION_INPUT_IMAGES)
         if isinstance(input_images, list) and len(input_images) > input_limit:

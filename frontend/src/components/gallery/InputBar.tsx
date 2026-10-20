@@ -17,14 +17,15 @@ import { extractPromptTemplateVariableRecords, resolvePromptTemplate } from '../
 import './InputBar.css';
 
 export interface GalleryCommand {id:number;item?:ItemDetail;imageId?:string;job?:GenerationJobRecord;editResult?:boolean}
-interface Props {command?:GalleryCommand;preferences:LocalPreferences;t:Translator;active:boolean;onCreated:(jobs?:GenerationJobRecord[])=>void;onOpenSettings:()=>void;configurationRevision:number;promptVariablesEnabled?:boolean;promptLanguage?:string;preferredProvider?:string;onOpenAgent?:(id:string)=>void}
+export interface GallerySubmission {prompt:string;model:string;count:number}
+interface Props {onSubmissionChange?:(submission:GallerySubmission|undefined)=>void;command?:GalleryCommand;preferences:LocalPreferences;t:Translator;active:boolean;onCreated:(jobs?:GenerationJobRecord[])=>void;onOpenSettings:()=>void;configurationRevision:number;promptVariablesEnabled?:boolean;promptLanguage?:string;preferredProvider?:string;onOpenAgent?:(id:string)=>void}
 export function imageDataUrl(blob: Blob): Promise<string> {return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result));reader.onerror=()=>reject(new Error('图片读取失败'));reader.readAsDataURL(blob);});}
 async function verifiedInput(input:RecipeInput) {
   let data=input.dataUrl;
   if(!data){let url=input.resultPath?mediaUrl(input.resultPath):'';if(!url&&input.sourceItemId&&input.imageId){const image=(await api.item(input.sourceItemId)).images.find(candidate=>candidate.id===input.imageId);if(image)url=mediaUrl(image.original_path);}if(!url)throw new Error('参考图缺失');const result=await fetch(url);if(!result.ok)throw new Error('参考图无法读取');data=await imageDataUrl(await result.blob());}
   const image=new Image();image.src=data;await image.decode();return data;
 }
-export default function InputBar({command,preferences,t,active,onCreated,onOpenSettings,configurationRevision,promptVariablesEnabled=false,promptLanguage,preferredProvider,onOpenAgent}:Props) {
+export default function InputBar({command,preferences,t,active,onCreated,onSubmissionChange,onOpenSettings,configurationRevision,promptVariablesEnabled=false,promptLanguage,preferredProvider,onOpenAgent}:Props) {
   const [draft,setDraft]=useState<GalleryDraft>(emptyGalleryDraft),[providers,setProviders]=useState<GenerationProviderStatus[]>([]),[profiles,setProfiles]=useState<OpenAICompatibleProfile[]>([]);
   const [loading,setLoading]=useState(true),[refreshing,setRefreshing]=useState(false),[reading,setReading]=useState(false),[busy,setBusy]=useState(false),[error,setError]=useState(''),[uncertain,setUncertain]=useState(false),[count,setCount]=useState<GenerationSetCount>(1);
   const [referenceSize,setReferenceSize]=useState<{width:number;height:number}>();
@@ -116,14 +117,14 @@ export default function InputBar({command,preferences,t,active,onCreated,onOpenS
     setReading(true);setError('');try{const added=await Promise.all(files.map(async file=>{if(!file.type.startsWith('image/')||file.size>30*1024*1024)throw new Error('请选择 30 MB 内的图片文件');const dataUrl=await imageDataUrl(file);const image=new Image();image.src=dataUrl;await image.decode();return{id:crypto.randomUUID(),name:file.name,source:'uploaded' as const,previewUrl:dataUrl,dataUrl};}));if(current())setDraft(current=>{const remaining=[...added];return{...current,inputs:[...current.inputs.map(input=>input.missing&&remaining.length?remaining.shift()!:input),...remaining]};});}catch(e){if(current())setError(String(e));}finally{if(current()){pendingFiles.current=false;setReading(false);}}
   }
   async function submit() {
-    if(submitLock.current||busy||reading||loading||refreshing||uncertain||!ready)return;submitLock.current=true;setBusy(true);setError('');let posted=false;
+    if(submitLock.current||busy||reading||loading||refreshing||uncertain||!ready)return;submitLock.current=true;setBusy(true);setError('');onSubmissionChange?.({prompt:draft.prompt,model:draft.recipe.model,count});let posted=false;
     try{let dimensions: {width:number;height:number}|undefined;if(draft.provider==='openai_compatible'&&draft.recipe.size_mode==='auto4k'&&draft.inputs[0]){const data=await verifiedInput(draft.inputs[0]);const image=new Image();image.src=data;await image.decode();dimensions={width:image.naturalWidth,height:image.naturalHeight};}
       const payload=galleryPayload({...draft,promptLanguage:draft.promptLanguage||promptLanguage},limit,dimensions,promptVariablesEnabled);posted=true;
       const created=count===1?[await api.createGenerationJob(payload)]:(await api.createGenerationSet({job:payload,count})).jobs;
       onCreated(created);
       if(preferences.clearInputAfterSubmit)setDraft(current=>({...current,prompt:'',inputs:[],sourceItemId:undefined}));setPanel('');
     }catch(e){setError(String(e));if(posted){setUncertain(true);setError(`${String(e)} · 未自动重试。先查看历史确认是否已创建任务，再决定是否再次提交。`);}}
-    finally{submitLock.current=false;setBusy(false);}
+    finally{submitLock.current=false;setBusy(false);onSubmissionChange?.(undefined);}
   }
   const variables=promptVariablesEnabled?extractPromptTemplateVariableRecords(draft.prompt):[];
   const sizePreview=draft.provider==='openai_compatible'&&draft.recipe.size_mode==='auto4k'?resolveAuto4k(variables.length?resolvePromptTemplate(draft.prompt,draft.templateValues||{}):draft.prompt,referenceSize):undefined;
