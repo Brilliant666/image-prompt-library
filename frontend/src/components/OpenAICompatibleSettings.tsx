@@ -39,12 +39,26 @@ export default function OpenAICompatibleSettings({ onSaved, uiLanguage, isDefaul
   const [catalogBusy, setCatalogBusy] = useState(false);
   const [showAllModels, setShowAllModels] = useState(false);
   const catalogEpoch = useRef(0);
+  const catalogReadSequence = useRef(0);
   const selectedProfile = useRef<string | undefined>(undefined);
   const selectedCatalog = useRef<ModelCatalog>(emptyCatalog());
   const catalogFlights = useRef(new Map<string, Promise<ModelCatalog | undefined>>());
   const epoch = useRef(0);
   const inFlight = useRef(false);
   const chinese = uiLanguage !== 'en';
+  const readCatalog = async (profileId: string) => {
+    const request = ++catalogReadSequence.current;
+    const selection = catalogEpoch.current;
+    try {
+      // Read the canonical local cache, never issue another upstream discovery.
+      const value = await api.openAICompatibleModels(profileId);
+      if (request !== catalogReadSequence.current || selection !== catalogEpoch.current || selectedProfile.current !== profileId) return;
+      selectedCatalog.current = value;
+      setCatalog(value);
+      setCollection(store => store ? { ...store, profiles: store.profiles.map(profile => profile.id === profileId ? { ...profile, model_catalog: value } : profile) } : store);
+      setConfig(profile => profile?.id === profileId ? { ...profile, model_catalog: value } : profile);
+    } catch { /* Keep the currently displayed cache and editable form on a local read failure. */ }
+  };
   const choose = (profile: OpenAICompatibleProfile) => {
     catalogEpoch.current += 1;
     selectedProfile.current = profile.id;
@@ -59,6 +73,7 @@ export default function OpenAICompatibleSettings({ onSaved, uiLanguage, isDefaul
     setResetPending(false);
     setModelsText((profile.models || []).join('\n'));
     try { setRemembered(readGenerationPreference(localStorage, profile.id, profile.model)); } catch { setRemembered(undefined); }
+    if (profile.configured) void readCatalog(profile.id);
   };
   const load = () => {
     if (inFlight.current) return;
@@ -74,8 +89,13 @@ export default function OpenAICompatibleSettings({ onSaved, uiLanguage, isDefaul
     }).finally(() => { if (request === epoch.current) { inFlight.current = false; setBusy(false); } });
   };
   useEffect(() => {
+    const catalogChanged = (event: Event) => {
+      const profileId = (event as CustomEvent<{ profileId?: string }>).detail?.profileId;
+      if (profileId && selectedProfile.current === profileId) void readCatalog(profileId);
+    };
+    window.addEventListener('ipl:model-catalog-changed', catalogChanged);
     load();
-    return () => { epoch.current += 1; inFlight.current = false; catalogEpoch.current += 1; selectedProfile.current = undefined; };
+    return () => { window.removeEventListener('ipl:model-catalog-changed', catalogChanged); epoch.current += 1; inFlight.current = false; catalogEpoch.current += 1; selectedProfile.current = undefined; };
   }, []);
 
   const refreshCatalog = async (profileId: string, afterSave = false) => {
@@ -101,9 +121,10 @@ export default function OpenAICompatibleSettings({ onSaved, uiLanguage, isDefaul
     };
     try {
       const value = await pending;
-      if (!value || !current()) return;
-      apply(value);
-      window.dispatchEvent(new Event('ipl:agent-config-changed'));
+      if (!value) return;
+      // Completion belongs to the saved profile, not the selected form's lifetime.
+      // Consumers re-read the canonical cache rather than trusting a late response.
+      window.dispatchEvent(new CustomEvent('ipl:model-catalog-changed', { detail: { profileId } }));
     } catch {
       // Display a local fixed message, never raw responses or credentials.
       apply({ ...previous, checked_at: new Date().toISOString(), error: 'model_catalog_refresh_failed' });

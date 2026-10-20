@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ArrowRight, Plus, ImagePlus, Settings2, X, Layers, ChevronDown, LoaderCircle } from 'lucide-react';
 import { api, mediaUrl } from '../../api/client';
-import type { GenerationJobRecord, GenerationProviderStatus, GenerationSetCount, ItemDetail, OpenAICompatibleProfile } from '../../types';
+import type { GenerationJobRecord, GenerationProviderStatus, GenerationSetCount, ItemDetail, ModelCatalog, OpenAICompatibleProfile } from '../../types';
 import type { Translator } from '../../utils/i18n';
 import type { LocalPreferences } from '../../utils/localPreferences';
 import { resolveAuto4k, clearCompatibleTransportOverrides, IMAGE25_QUALITIES } from '../../utils/compatibleRecipe';
@@ -37,6 +37,7 @@ export default function InputBar({command,preferences,t,active,onCreated,onOpenS
   const editRevision=useRef(0);
   const fileReadSequence=useRef(0),pendingFiles=useRef(false);
   const mounted=useRef(true);
+  const catalogUpdates=useRef(new Map<string,ModelCatalog>());
   // Every intentional edit owns the draft from this point onward. Pending history,
   // attachment and first-load callbacks may only write to their original epoch.
   const beginEdit=()=>{editRevision.current++;readSequence.current++;consumedCommand.current=command?.id;setReading(pendingFiles.current);};
@@ -47,8 +48,8 @@ export default function InputBar({command,preferences,t,active,onCreated,onOpenS
   const provider=providers.find(p=>p.provider===draft.provider),limit=provider?.max_input_images||4;
   const profile=profiles.find(p=>p.id===draft.profileId);
   const ready=draft.provider==='openai_compatible'?Boolean(profile?.configured):Boolean(provider?.can_generate??provider?.available);
-  useEffect(()=>{let alive=true;setLoading(true);Promise.all([api.generationProviders(),api.openAICompatibleProfiles()]).then(async([available,store])=>{
-    if(!alive)return;setProviders(available.filter(p=>p.provider!=='manual_upload'));setProfiles(store.profiles);
+  useEffect(()=>{let alive=true;catalogUpdates.current.clear();setLoading(true);Promise.all([api.generationProviders(),api.openAICompatibleProfiles()]).then(async([available,store])=>{
+    if(!alive)return;setProviders(available.filter(p=>p.provider!=='manual_upload'));setProfiles(store.profiles.map(profile=>catalogUpdates.current.has(profile.id)?{...profile,model_catalog:catalogUpdates.current.get(profile.id)}:profile));
     if(!initialized.current){let restored:GalleryDraft|undefined;if(preferences.persistInputOnRestart&&editRevision.current===0){try{restored=await readGalleryDraft();}catch{if(alive&&editRevision.current===0)setError('无法恢复本地草稿；已保存的任务不受影响');}}if(!alive)return;initialized.current=true;if(editRevision.current!==0)return;
       const selected=store.profiles.find(p=>p.id===lastGenerationProfile(localStorage))||store.profiles.find(p=>p.id===store.default_profile_id);
       const preferred=available.find(p=>p.provider===preferredProvider&&p.can_generate);
@@ -56,6 +57,24 @@ export default function InputBar({command,preferences,t,active,onCreated,onOpenS
       setDraft(restored || {...emptyGalleryDraft(),provider:fallback,profileId:selected?.id||'',recipe:fallback==='openai_compatible'&&selected?readGenerationPreference(localStorage,selected.id,selected.model):{...emptyGalleryDraft().recipe,model:available.find(p=>p.provider===fallback)?.default_image_model||'gpt-image-2',quality:'medium'}});
     }
   }).catch(e=>alive&&setError(String(e))).finally(()=>alive&&setLoading(false));return()=>{alive=false;};},[configurationRevision]);
+  useEffect(()=>{
+    let alive=true;
+    const requests=new Map<string,number>();
+    const changed=(event:Event)=>{
+      const id=(event as CustomEvent<{profileId?:string}>).detail?.profileId;
+      if(typeof id!=='string'||!id)return;
+      const sequence=(requests.get(id)||0)+1;requests.set(id,sequence);
+      // Read the current server cache, never a late refresh response's payload.
+      // Candidate updates do not own the draft or cancel attachment/history reads.
+      void api.openAICompatibleModels(id).then(catalog=>{
+        if(!alive||requests.get(id)!==sequence)return;
+        catalogUpdates.current.set(id,catalog);
+        setProfiles(current=>current.map(profile=>profile.id===id?{...profile,model_catalog:catalog}:profile));
+      }).catch(()=>{/* Keep the last candidates if the local cache is unavailable. */});
+    };
+    window.addEventListener('ipl:model-catalog-changed',changed);
+    return()=>{alive=false;window.removeEventListener('ipl:model-catalog-changed',changed);};
+  },[configurationRevision]);
   useEffect(()=>{if(loading||!initialized.current)return;const timer=setTimeout(()=>{persistSequence.current=persistSequence.current.then(()=>saveGalleryDraft(preferences.persistInputOnRestart?draft:undefined)).catch(()=>setError('草稿未能写入浏览器存储；请保持此页打开'));},300);return()=>clearTimeout(timer);},[draft,preferences.persistInputOnRestart,loading]);
   useEffect(()=>{if(!loading&&draft.provider==='openai_compatible'&&draft.profileId)writeGenerationPreference(localStorage,draft.profileId,draft.recipe);},[draft.profileId,draft.recipe,loading]);
   useEffect(()=>{

@@ -187,34 +187,42 @@ function settingsHarness(t, apiOverrides = {}, initial = {}) {
   ];
   const collection = { profiles, default_profile_id: 'a' }, calls = [], defaultCalls = [], events = [], values = new Map();
   profiles[0].model_catalog = initial.catalogA; profiles[1].model_catalog = initial.catalogB;
-  const catalogCalls = [];
+  const catalogCalls = [], cacheReads = [], listeners = new Map();
   const storage = { getItem: key => values.get(key), setItem: (key, value) => values.set(key, value), removeItem: key => values.delete(key) };
   const oldStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
   Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: storage });
   t.after(() => oldStorage ? Object.defineProperty(globalThis, 'localStorage', oldStorage) : delete globalThis.localStorage);
   writeGenerationPreference(storage, 'a', { model: 'remembered-a', quality: 'max', size: '2560x3840', background: 'transparent', output_format: 'png' });
-  const slots = [], effects = []; let cursor = 0, dirty = false, tree;
+  const slots = [], effects = []; let cursor = 0, dirty = false, tree, mounted = true, lateUpdates = 0;
   const hooks = {
-    useState(value) { const i = cursor++; if (!(i in slots)) slots[i] = value; return [slots[i], update => { slots[i] = typeof update === 'function' ? update(slots[i]) : update; dirty = true; }]; },
+    useState(value) { const i = cursor++; if (!(i in slots)) slots[i] = value; return [slots[i], update => { if (!mounted) { lateUpdates++; return; } slots[i] = typeof update === 'function' ? update(slots[i]) : update; dirty = true; }]; },
     useRef(value) { const i = cursor++; if (!(i in slots)) slots[i] = { current: value }; return slots[i]; },
     useEffect(effect, deps) { const i = cursor++; if (!slots[i] || deps.some((dep, index) => dep !== slots[i].deps[index])) { const old = slots[i]; slots[i] = { deps }; effects.push(() => { old?.cleanup?.(); slots[i].cleanup = effect(); }); } },
   };
   const jsx = (type, props) => ({ type, props });
+  const refresh = apiOverrides.refreshOpenAICompatibleModels || (async id => { catalogCalls.push(id); return { models: [], fetched_at: '2026-01-02T00:00:00Z', checked_at: '2026-01-02T00:00:00Z', error: null }; });
+  const backendRefresh = async id => {
+    const profile = profiles.find(item => item.id === id), connection = profile.base_url;
+    const value = await refresh(id);
+    // Emulate the backend's saved-connection guard and canonical cache.
+    if (profile.base_url === connection) profile.model_catalog = value;
+    return value;
+  };
   const dependencies = {
     react: hooks, 'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'fragment' }, 'lucide-react': new Proxy({}, { get: (_, key) => key }),
-    '../api/client': { api: { openAICompatibleProfiles: async () => collection, saveOpenAICompatibleProfile: async (id, fields) => { calls.push({ id, fields }); Object.assign(profiles.find(profile => profile.id === id), fields); return collection; }, defaultOpenAICompatibleProfile: async id => { defaultCalls.push(id); collection.default_profile_id = id; return collection; }, refreshOpenAICompatibleModels: async id => { catalogCalls.push(id); return { models: [], fetched_at: '2026-01-02T00:00:00Z', checked_at: '2026-01-02T00:00:00Z', error: null }; }, ...apiOverrides } },
+    '../api/client': { api: { openAICompatibleProfiles: async () => collection, openAICompatibleModels: async id => { cacheReads.push(id); return profiles.find(profile => profile.id === id)?.model_catalog || { models: [], fetched_at: null, checked_at: null, error: null }; }, saveOpenAICompatibleProfile: async (id, fields) => { calls.push({ id, fields }); Object.assign(profiles.find(profile => profile.id === id), fields); return collection; }, defaultOpenAICompatibleProfile: async id => { defaultCalls.push(id); collection.default_profile_id = id; return collection; }, ...apiOverrides, refreshOpenAICompatibleModels: backendRefresh } },
     '../api/profileActions': { copyApiProfile() { throw Error('unexpected copy'); }, reorderApiProfiles() { throw Error('unexpected reorder'); } },
     '../utils/profileSettings': { compatibleEndpointPreview, profileValidation, parseProfileModels },
     '../utils/generationPreferences': { readGenerationPreference, resetGenerationPreference, updateRememberedModel },
     '../utils/compatibleRecipe': { COMPATIBLE_ENTERPRISE_MODELS: [], IMAGE25_MODELS: [] }, './OpenAICompatibleSettings.css': {},
   };
   const mod = { exports: {} };
-  new Function('require', 'module', 'exports', 'window', settingsComponent)(name => { assert.ok(name in dependencies, name); return dependencies[name]; }, mod, mod.exports, { dispatchEvent: event => events.push(event) });
+  new Function('require', 'module', 'exports', 'window', settingsComponent)(name => { assert.ok(name in dependencies, name); return dependencies[name]; }, mod, mod.exports, { dispatchEvent: event => { events.push(event); for (const listener of listeners.get(event.type) || []) listener(event); }, addEventListener: (name, listener) => listeners.set(name, [...(listeners.get(name) || []), listener]), removeEventListener: (name, listener) => listeners.set(name, (listeners.get(name) || []).filter(item => item !== listener)) });
   function render() { cursor = 0; dirty = false; tree = mod.exports.default({ onSaved: async () => {}, uiLanguage: 'zh_hans', onSetDefaultConnection: () => defaultCalls.push('connection') }); effects.splice(0).forEach(effect => effect()); }
   async function flush() { for (let i = 0; i < 20; i++) { if (dirty) render(); await Promise.resolve(); } if (dirty) render(); }
   render(); t.after(() => slots.forEach(slot => slot?.cleanup?.()));
   const find = (type, predicate = () => true) => walk(tree).find(node => node.type === type && predicate(node.props))?.props;
-  return { find, flush, calls, defaultCalls, events, catalogCalls, storage, unmount: () => slots.forEach(slot => slot?.cleanup?.()), get tree() { return tree; } };
+  return { find, flush, calls, defaultCalls, events, catalogCalls, cacheReads, storage, unmount: () => { mounted = false; slots.forEach(slot => slot?.cleanup?.()); }, get lateUpdates() { return lateUpdates; }, get tree() { return tree; } };
 }
 
 const cachedCatalog = { models: [{ id: 'image-sounding-text-model', image_generation: false }, { id: 'mystery-model', image_generation: null }, { id: 'explicit-image-model', image_generation: true }], fetched_at: '2026-01-01T00:00:00Z', checked_at: '2026-01-01T00:00:00Z', error: null };
@@ -264,6 +272,8 @@ test('saving while an older catalog request is pending queues one fresh discover
   finishes[1]({ ...cachedCatalog, models: [{ id: 'new-connection-model', image_generation: true }] }); await h.flush();
   assert.deepEqual(catalogIds(h), ['new-connection-model']);
   assert.equal(h.find('button', props => props['aria-label'] === '刷新接口模型').disabled, false);
+  assert.equal(h.events.filter(event => event.type === 'ipl:model-catalog-changed').length, 2);
+  assert.equal(h.events.filter(event => event.type === 'ipl:agent-config-changed').length, 1, 'only the configuration save uses the broad event');
 });
 
 test('dirty and unsaved connections cannot refresh models or send an entered key', async t => {
@@ -327,8 +337,55 @@ for (const interruption of ['switch-profile', 'close']) test(`late model discove
   else h.unmount();
   await h.flush();
   finish({ ...cachedCatalog, models: [{ id: 'late-a-model', image_generation: true }] }); await h.flush();
-  assert.equal(h.events.length, 0);
+  assert.deepEqual(h.events.map(event => [event.type, event.detail]), [['ipl:model-catalog-changed', { profileId: 'a' }]], 'catalog invalidation outlives the selected form');
+  assert.equal(h.lateUpdates, 0);
   if (interruption === 'switch-profile') { assert.deepEqual(catalogIds(h), ['profile-b-model']); assert.equal(h.find('input', props => props.list === 'compatible-known-models').value, 'model-b'); }
+});
+test('automatic catalog refresh completes after settings close without local updates', async t => {
+  let finish;
+  const h = settingsHarness(t, { refreshOpenAICompatibleModels: () => new Promise(resolve => { finish = resolve; }) }, { catalogA: cachedCatalog }); await h.flush();
+  h.find('form').onSubmit({ preventDefault() {} }); await h.flush();
+  assert.equal(typeof finish, 'function');
+  const before = h.events.length;
+  h.unmount();
+  finish({ ...cachedCatalog, models: [{ id: 'gpt-image-new', image_generation: true }] }); await h.flush();
+  assert.deepEqual(h.events.slice(before).map(event => [event.type, event.detail]), [['ipl:model-catalog-changed', { profileId: 'a' }]]);
+  assert.equal(h.lateUpdates, 0);
+});
+for (const returnBeforeCompletion of [true, false]) test(`catalog refresh A to B to A refreshes cache when return-before-completion=${returnBeforeCompletion}`, async t => {
+  let finish; let upstreamReads = 0;
+  const h = settingsHarness(t, { refreshOpenAICompatibleModels: () => { upstreamReads++; return new Promise(resolve => { finish = resolve; }); } }, { catalogA: cachedCatalog }); await h.flush();
+  const choose = index => walk(h.tree).filter(node => node.type === 'button' && node.props.className?.includes('compatible-profile-option'))[index].props.onClick();
+  h.find('button', props => props['aria-label'] === '刷新接口模型').onClick(); await h.flush();
+  choose(1); await h.flush();
+  if (returnBeforeCompletion) { choose(0); await h.flush(); }
+  else { h.find('input', props => props.list === 'compatible-known-models').onChange({ target: { value: 'unsaved-b' } }); await h.flush(); }
+  finish({ ...cachedCatalog, models: [{ id: 'gpt-image-new', image_generation: true }] }); await h.flush();
+  if (!returnBeforeCompletion) {
+    assert.equal(h.find('input', props => props.list === 'compatible-known-models').value, 'unsaved-b');
+    h.find('input', props => props.list === 'compatible-known-models').onChange({ target: { value: 'model-b' } }); await h.flush();
+    choose(0); await h.flush();
+  }
+  assert.deepEqual(catalogIds(h), ['gpt-image-new']);
+  assert.equal(h.find('button', props => props['aria-label'] === '刷新接口模型').disabled, false);
+  assert.equal(upstreamReads, 1, 'navigation only reads the local cache');
+});
+test('late local cache reads cannot overwrite a newer catalog, changed profile, or closed form', async t => {
+  const reads = [], finishes = [];
+  const h = settingsHarness(t, { openAICompatibleModels: id => { reads.push(id); return new Promise(resolve => finishes.push(resolve)); } }, { catalogA: cachedCatalog }); await h.flush();
+  const choose = index => walk(h.tree).filter(node => node.type === 'button' && node.props.className?.includes('compatible-profile-option'))[index].props.onClick();
+  choose(1); await h.flush();
+  choose(0); await h.flush();
+  assert.deepEqual(reads, ['a', 'b', 'a']);
+  finishes[2]({ ...cachedCatalog, models: [{ id: 'gpt-image-current', image_generation: true }] }); await h.flush();
+  finishes[0]({ ...cachedCatalog, models: [{ id: 'gpt-image-stale', image_generation: true }] });
+  finishes[1]({ ...cachedCatalog, models: [{ id: 'gpt-image-b', image_generation: true }] }); await h.flush();
+  assert.deepEqual(catalogIds(h), ['gpt-image-current']);
+  choose(1); await h.flush();
+  h.unmount();
+  finishes[3](cachedCatalog); await h.flush();
+  assert.equal(h.lateUpdates, 0);
+  assert.deepEqual(h.catalogCalls, [], 'all cache reads stay local');
 });
 test('editing a named profile preserves the existing key and does not issue model or generation requests', async t => {
   const h = settingsHarness(t); await h.flush();
