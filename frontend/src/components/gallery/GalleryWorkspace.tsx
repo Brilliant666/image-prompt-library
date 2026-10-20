@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Download, Search, Trash2, RefreshCw, X, LoaderCircle } from 'lucide-react';
+import { Download, Search, Trash2, RefreshCw, X } from 'lucide-react';
 import { zipSync } from 'fflate';
 import { api, mediaUrl } from '../../api/client';
 import type { GenerationJobRecord } from '../../types';
@@ -7,7 +7,7 @@ import type { Translator } from '../../utils/i18n';
 import type { LocalPreferences } from '../../utils/localPreferences';
 import { galleryMatches } from '../../utils/galleryRecipe';
 import { readGalleryFilter, saveGalleryFilter, galleryFilterStatuses, readGalleryHistory, saveGalleryHistory, clearGalleryHistory } from '../../utils/galleryHistory';
-import InputBar, { type GalleryCommand, type GallerySubmission } from './InputBar';
+import InputBar, { type GalleryCommand } from './InputBar';
 import TaskGrid from './TaskGrid';
 import DetailModal from './DetailModal';
 import Lightbox from './Lightbox';
@@ -19,7 +19,6 @@ interface Props {active:boolean;queueOpen:boolean;onQueueOpenChange:(open:boolea
 export default function GalleryWorkspace({active,queueOpen,onQueueOpenChange,t,preferences,libraryScope,command,focusJobId,refreshKey,configurationRevision,promptVariablesEnabled,promptLanguage,preferredProvider,onOpenAgent,onOpenSettings,onAccepted,onQueueChanged,onCloseDetail}:Props) {
   const [jobs,setJobs]=useState<GenerationJobRecord[]>([]),[total,setTotal]=useState(0),[loading,setLoading]=useState(true),[error,setError]=useState(''),[loadError,setLoadError]=useState(''),[message,setMessage]=useState('');
   const [query,setQuery]=useState(''),[status,setStatus]=useState(readGalleryFilter),[selected,setSelected]=useState<Set<string>>(new Set()),[detail,setDetail]=useState<GenerationJobRecord>(),[lightbox,setLightbox]=useState<string>(),[localCommand,setLocalCommand]=useState<GalleryCommand>(),[busy,setBusy]=useState(false);
-  const [submission,setSubmission]=useState<GallerySubmission>();
   const [refreshing,setRefreshing]=useState(false),[fromCache,setFromCache]=useState(false);
   const pageLimit=useRef(48),readLock=useRef<string|undefined>(undefined),readSequence=useRef(0),previous=useRef(new Map<string,string>()),completionCount=useRef<number|undefined>(undefined),alive=useRef(true),detailSequence=useRef(0);
   const resultsRef=useRef<HTMLDivElement>(null);
@@ -36,7 +35,7 @@ export default function GalleryWorkspace({active,queueOpen,onQueueOpenChange,t,p
     if(firstRead||scopeChanged){
       forceFresh.current=scopeChanged;
       setJobs(cached?.jobs||[]);setTotal(cached?.total||0);setLoading(!cached);setFromCache(Boolean(cached));
-      if(scopeChanged){setSubmission(undefined);setBatch(undefined);setDetail(undefined);setLightbox(undefined);detailSequence.current++;}
+      if(scopeChanged){setBatch(undefined);setDetail(undefined);setLightbox(undefined);detailSequence.current++;}
       previous.current=new Map();completionCount.current=undefined;
     }else{
       forceFresh.current=true;
@@ -90,12 +89,11 @@ export default function GalleryWorkspace({active,queueOpen,onQueueOpenChange,t,p
     </div></header>
     <div className="pg-gallery-results" ref={resultsRef} tabIndex={0} role="region" aria-label="画廊结果列表">
     {batch&&<div className="pg-batch-scope"><span>生成批次 · {batch.jobs.length} / {batch.total} 个结果</span><button onClick={()=>{setBatch(undefined);setStatus(readGalleryFilter());setSelected(new Set());}}>返回全部历史</button></div>}
-    {submission&&<div className="pg-submission" role="status" aria-label="正在提交生成请求"><div className="pg-submission-state"><LoaderCircle size={24} className="spin" aria-hidden="true"/><span>正在提交</span></div><div className="pg-submission-copy"><p>{submission.prompt}</p><small>{submission.model} · {submission.count} 张</small><span>正在准备请求，等待入队确认…</span></div></div>}
-    {loading?<div className="pg-empty">加载生成历史…</div>:filtered.length?<TaskGrid active={active} scrollRef={resultsRef} jobs={filtered} selected={selected} onSelection={setSelected} onOpen={job=>void openJob(job)} onReuse={reuse} onMessage={setError}/>:submission?null:<div className="pg-empty"><h2>{jobs.length?'没有匹配的任务':'从一个想法开始'}</h2><p>{jobs.length?'试试其他关键词或状态。':'输入提示词，或从 Library 带入配方。快捷收录无需配置生成接口。'}</p></div>}
+    {loading?<div className="pg-empty">加载生成历史…</div>:filtered.length?<TaskGrid active={active} scrollRef={resultsRef} jobs={filtered} selected={selected} onSelection={setSelected} onOpen={job=>void openJob(job)} onReuse={reuse} onMessage={setError}/>:<div className="pg-empty"><h2>{jobs.length?'没有匹配的任务':'从一个想法开始'}</h2><p>{jobs.length?'试试其他关键词或状态。':'输入提示词，或从 Library 带入配方。快捷收录无需配置生成接口。'}</p></div>}
     {!batch&&jobs.length<total&&<button className="pg-load-more" disabled={refreshing} onClick={()=>{pageLimit.current+=48;void refresh();}}>已加载 {jobs.length} / {total} · 加载更多</button>}
     </div>
     {(error||loadError||message)&&<div className={`pg-gallery-feedback ${error||loadError?'is-error':''}`} role={error||loadError?'alert':'status'}><span>{error||(loadError?`${fromCache?'当前显示上次列表，历史更新失败：':''}${loadError}`:message)}</span><button aria-label="关闭画廊提示" onClick={()=>{setError('');setLoadError('');setMessage('');}}><X size={15}/></button></div>}
-    <InputBar onSubmissionChange={value=>{setSubmission(value);if(value)resultsRef.current?.scrollTo({top:0});}} active={active} command={localCommand} preferences={preferences} t={t} onCreated={(created?:GenerationJobRecord[])=>{
+    <InputBar active={active} command={localCommand} preferences={preferences} t={t} onCreated={(created?:GenerationJobRecord[])=>{
       clearGalleryHistory();readSequence.current++;readLock.current=undefined;forceFresh.current=true;
       if(created?.length){
         const ids=new Set(created.map(job=>job.id));
@@ -103,7 +101,7 @@ export default function GalleryWorkspace({active,queueOpen,onQueueOpenChange,t,p
         setTotal(current=>current+created.filter(job=>!jobs.some(existing=>existing.id===job.id)).length);
         setLoading(false);setFromCache(false);setStatus('');saveGalleryFilter('');setQuery('');
       }
-      setBatch(undefined);setSelected(new Set());setMessage('已加入工作队列，可通过右上角历史记录查看进度。');resultsRef.current?.scrollTo({top:0});setMutationRevision(value=>value+1);onQueueChanged();
+      setBatch(undefined);setSelected(new Set());setMessage('');resultsRef.current?.scrollTo({top:0});setMutationRevision(value=>value+1);onQueueChanged();
     }} onOpenSettings={onOpenSettings} configurationRevision={configurationRevision} promptVariablesEnabled={promptVariablesEnabled} promptLanguage={promptLanguage} preferredProvider={preferredProvider} onOpenAgent={onOpenAgent}/>
     {detail&&active&&!largeJob&&<DetailModal key={detail.id} job={detail} t={t} onClose={closeDetail} onChange={()=>void refreshAfterChange()} onAccepted={id=>{clearGalleryHistory();closeDetail();onAccepted(id);}} onReuse={reuse} onLightbox={()=>setLightbox(detail.id)}/ >}
     {largeJob&&active&&<Lightbox src={mediaUrl(largeJob.result_path!)} currentIndex={largeIndex} total={resultJobs.length} onClose={()=>setLightbox(undefined)} onPrev={()=>setLightbox(resultJobs[(largeIndex-1+resultJobs.length)%resultJobs.length].id)} onNext={()=>setLightbox(resultJobs[(largeIndex+1)%resultJobs.length].id)}/>}

@@ -17,15 +17,14 @@ import { extractPromptTemplateVariableRecords, resolvePromptTemplate } from '../
 import './InputBar.css';
 
 export interface GalleryCommand {id:number;item?:ItemDetail;imageId?:string;job?:GenerationJobRecord;editResult?:boolean}
-export interface GallerySubmission {prompt:string;model:string;count:number}
-interface Props {onSubmissionChange?:(submission:GallerySubmission|undefined)=>void;command?:GalleryCommand;preferences:LocalPreferences;t:Translator;active:boolean;onCreated:(jobs?:GenerationJobRecord[])=>void;onOpenSettings:()=>void;configurationRevision:number;promptVariablesEnabled?:boolean;promptLanguage?:string;preferredProvider?:string;onOpenAgent?:(id:string)=>void}
+interface Props {command?:GalleryCommand;preferences:LocalPreferences;t:Translator;active:boolean;onCreated:(jobs?:GenerationJobRecord[])=>void;onOpenSettings:()=>void;configurationRevision:number;promptVariablesEnabled?:boolean;promptLanguage?:string;preferredProvider?:string;onOpenAgent?:(id:string)=>void}
 export function imageDataUrl(blob: Blob): Promise<string> {return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result));reader.onerror=()=>reject(new Error('图片读取失败'));reader.readAsDataURL(blob);});}
 async function verifiedInput(input:RecipeInput) {
   let data=input.dataUrl;
   if(!data){let url=input.resultPath?mediaUrl(input.resultPath):'';if(!url&&input.sourceItemId&&input.imageId){const image=(await api.item(input.sourceItemId)).images.find(candidate=>candidate.id===input.imageId);if(image)url=mediaUrl(image.original_path);}if(!url)throw new Error('参考图缺失');const result=await fetch(url);if(!result.ok)throw new Error('参考图无法读取');data=await imageDataUrl(await result.blob());}
   const image=new Image();image.src=data;await image.decode();return data;
 }
-export default function InputBar({command,preferences,t,active,onCreated,onSubmissionChange,onOpenSettings,configurationRevision,promptVariablesEnabled=false,promptLanguage,preferredProvider,onOpenAgent}:Props) {
+export default function InputBar({command,preferences,t,active,onCreated,onOpenSettings,configurationRevision,promptVariablesEnabled=false,promptLanguage,preferredProvider,onOpenAgent}:Props) {
   const [draft,setDraft]=useState<GalleryDraft>(emptyGalleryDraft),[providers,setProviders]=useState<GenerationProviderStatus[]>([]),[profiles,setProfiles]=useState<OpenAICompatibleProfile[]>([]);
   const [loading,setLoading]=useState(true),[refreshing,setRefreshing]=useState(false),[reading,setReading]=useState(false),[busy,setBusy]=useState(false),[error,setError]=useState(''),[uncertain,setUncertain]=useState(false),[count,setCount]=useState<GenerationSetCount>(1);
   const [referenceSize,setReferenceSize]=useState<{width:number;height:number}>();
@@ -117,14 +116,14 @@ export default function InputBar({command,preferences,t,active,onCreated,onSubmi
     setReading(true);setError('');try{const added=await Promise.all(files.map(async file=>{if(!file.type.startsWith('image/')||file.size>30*1024*1024)throw new Error('请选择 30 MB 内的图片文件');const dataUrl=await imageDataUrl(file);const image=new Image();image.src=dataUrl;await image.decode();return{id:crypto.randomUUID(),name:file.name,source:'uploaded' as const,previewUrl:dataUrl,dataUrl};}));if(current())setDraft(current=>{const remaining=[...added];return{...current,inputs:[...current.inputs.map(input=>input.missing&&remaining.length?remaining.shift()!:input),...remaining]};});}catch(e){if(current())setError(String(e));}finally{if(current()){pendingFiles.current=false;setReading(false);}}
   }
   async function submit() {
-    if(submitLock.current||busy||reading||loading||refreshing||uncertain||!ready)return;submitLock.current=true;setBusy(true);setError('');onSubmissionChange?.({prompt:draft.prompt,model:draft.recipe.model,count});let posted=false;
+    if(submitLock.current||busy||reading||loading||refreshing||uncertain||!ready)return;submitLock.current=true;setBusy(true);setError('');let posted=false;
     try{let dimensions: {width:number;height:number}|undefined;if(draft.provider==='openai_compatible'&&draft.recipe.size_mode==='auto4k'&&draft.inputs[0]){const data=await verifiedInput(draft.inputs[0]);const image=new Image();image.src=data;await image.decode();dimensions={width:image.naturalWidth,height:image.naturalHeight};}
       const payload=galleryPayload({...draft,promptLanguage:draft.promptLanguage||promptLanguage},limit,dimensions,promptVariablesEnabled);posted=true;
       const created=count===1?[await api.createGenerationJob(payload)]:(await api.createGenerationSet({job:payload,count})).jobs;
       onCreated(created);
       if(preferences.clearInputAfterSubmit)setDraft(current=>({...current,prompt:'',inputs:[],sourceItemId:undefined}));setPanel('');
     }catch(e){setError(String(e));if(posted){setUncertain(true);setError(`${String(e)} · 未自动重试。先查看历史确认是否已创建任务，再决定是否再次提交。`);}}
-    finally{submitLock.current=false;setBusy(false);onSubmissionChange?.(undefined);}
+    finally{submitLock.current=false;setBusy(false);}
   }
   const variables=promptVariablesEnabled?extractPromptTemplateVariableRecords(draft.prompt):[];
   const sizePreview=draft.provider==='openai_compatible'&&draft.recipe.size_mode==='auto4k'?resolveAuto4k(variables.length?resolvePromptTemplate(draft.prompt,draft.templateValues||{}):draft.prompt,referenceSize):undefined;
@@ -159,13 +158,13 @@ export default function InputBar({command,preferences,t,active,onCreated,onSubmi
       </div>
       <div className="pg-composer-actions">
         <button type="button" className={`pg-add-image${panel==='add'?' active':''}`} title="添加参考图" aria-label="添加参考图" aria-expanded={panel==='add'} aria-controls="gallery-parameter-panel" disabled={busy} onClick={()=>setPanel(panel==='add'?'':'add')}><Plus size={21}/></button>
-        <button type="button" className="pg-submit" title={busy?'提交中':reading?'读取中':loading||refreshing?'加载中':count===1?'生成图片':`生成 ${count} 张图片`} disabled={loading||refreshing||reading||busy||uncertain||!ready||!draft.prompt.trim()||draft.inputs.some(i=>i.missing)} onClick={()=>void submit()} aria-label="生成图片">{busy||reading||loading||refreshing?<LoaderCircle size={20} className="spin"/>:<ArrowRight size={21}/>}</button>
+        <button type="button" className="pg-submit" aria-busy={busy} title={busy?'提交中':reading?'读取中':loading||refreshing?'加载中':count===1?'生成图片':`生成 ${count} 张图片`} disabled={loading||refreshing||reading||busy||uncertain||!ready||!draft.prompt.trim()||draft.inputs.some(i=>i.missing)} onClick={()=>void submit()} aria-label="生成图片">{busy||reading||loading||refreshing?<LoaderCircle size={20} className="spin"/>:<ArrowRight size={21}/>}</button>
       </div>
     </div>
     {panel&&!(panel==='size'&&draft.provider==='openai_compatible')&&<div id="gallery-parameter-panel" className="pg-control-popover pg-parameters-panel" data-panel={panel} role="region" aria-label="生成参数">
       <header><b>{{provider:'API 配置',model:'请求模型',size:'请求尺寸',quality:'图片质量',more:'输出设置',add:'添加参考图'}[panel]}</b><button aria-label="关闭参数" onClick={()=>setPanel('')}><X size={16}/></button></header>
       {panel==='add'&&<div className="pg-add-options"><button type="button" aria-label="上传参考图" onClick={()=>{setPanel('');fileRef.current?.click();}}><ImagePlus size={18}/><span>上传图片文件</span></button><button type="button" aria-label="从 Library 或画廊选择参考图" onClick={()=>{setPanel('');setPicker(true);}}><Layers size={18}/><span>从 Library 或画廊选择</span></button><small>也可以粘贴图片或拖入文件，保留原图。</small></div>}
-      {panel==='provider'&&<><div className="pg-option-list">{profiles.map(p=><button key={p.id} aria-pressed={draft.provider==='openai_compatible'&&draft.profileId===p.id} onClick={()=>{editDraft(current=>({...current,provider:'openai_compatible',profileId:p.id,recipe:clearCompatibleTransportOverrides(readGenerationPreference(localStorage,p.id,p.model))}));setPanel('');}}>{p.display_name}<small>{p.configured?'已配置 · 调用能力以实际响应为准':'未完成配置'}</small></button>)}{providers.filter(p=>p.provider!=='openai_compatible').map(p=><button key={p.provider} onClick={()=>{editDraft(current=>({...current,provider:p.provider,recipe:{...clearCompatibleTransportOverrides(current.recipe),model:p.default_image_model||p.model||'',quality:'medium'}}));setPanel('');}}>{p.display_name}<small>{p.can_generate?'可用':'未连接'}</small></button>)}</div><button onClick={onOpenSettings}>管理 API 配置</button></>}
+      {panel==='provider'&&<><div className="pg-option-list">{profiles.map(p=><button key={p.id} aria-pressed={draft.provider==='openai_compatible'&&draft.profileId===p.id} onClick={()=>{editDraft(current=>({...current,provider:'openai_compatible',profileId:p.id,recipe:clearCompatibleTransportOverrides(readGenerationPreference(localStorage,p.id,p.model))}));setPanel('');}}>{p.display_name}<small>{p.configured?'已配置 · 调用能力以实际响应为准':'未完成配置'}</small></button>)}{providers.filter(p=>p.provider!=='openai_compatible'&&(!['openai_codex_oauth_native','xai_grok_oauth'].includes(p.provider)||p.authenticated===true)).map(p=><button key={p.provider} onClick={()=>{editDraft(current=>({...current,provider:p.provider,recipe:{...clearCompatibleTransportOverrides(current.recipe),model:p.default_image_model||p.model||'',quality:'medium'}}));setPanel('');}}>{p.display_name}<small>{p.can_generate?'可用':'未连接'}</small></button>)}</div><button onClick={onOpenSettings}>管理 API 配置</button></>}
       {panel==='model'&&<>
         <input className="pg-model-input" aria-label="请求模型完整 ID" value={draft.recipe.model} spellCheck={false} onChange={e=>recipe({model:e.target.value})}/>
         <div className="pg-option-list pg-model-options" aria-label="此配置的模型">{models.map(model=>{

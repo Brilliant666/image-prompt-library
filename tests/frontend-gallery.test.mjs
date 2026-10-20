@@ -752,7 +752,7 @@ test('actual restored submission keeps frozen transport through ordinary edits a
 
 for (const action of ['choose-profile', 'reset-profile', 'oauth']) test(`${action} clears frozen transport before a new API submission`, async t => {
   const h = inputHarness(t, { command: { id: 1801, job: historicalJob({ parameters: { ...historicalJob().parameters, ...historicalTransport } }) } }, {
-    generationProviders: async () => [{ provider: 'openai_compatible', display_name: 'Compatible', max_input_images: 4, can_generate: true }, { provider: 'xai_grok_oauth', display_name: 'Grok OAuth', can_generate: true, default_image_model: 'grok-model' }],
+    generationProviders: async () => [{ provider: 'openai_compatible', display_name: 'Compatible', max_input_images: 4, can_generate: true }, { provider: 'xai_grok_oauth', display_name: 'Grok OAuth', authenticated: true, can_generate: true, default_image_model: 'grok-model' }],
   }); await h.flush();
   if (action === 'reset-profile') h.emitPreferenceReset('original-api');
   else { h.find('button', 'Original API').onClick(); await h.flush(); children(h.tree).find(node => node.type === 'button' && node.props.children?.[0] === (action === 'oauth' ? 'Grok OAuth' : 'Original API')).props.onClick(); }
@@ -913,7 +913,7 @@ test('successful-only gallery returns to all states to show newly submitted jobs
   assert.equal(history.readGalleryFilter(), '');
   assert.equal(harness.node('input', props => props['aria-label'] === '搜索生成历史').value, '');
   assert.deepEqual(harness.node('TaskGrid').jobs.map(job => job.id), [created.id]);
-  assert.ok(children(harness.tree).some(node => node.props?.children === '已加入工作队列，可通过右上角历史记录查看进度。'));
+  assert.equal(children(harness.tree).some(node => node.props?.className?.includes('pg-gallery-feedback')), false, 'confirmed cards provide feedback without another toast');
   assert.equal(calls.at(-1).options.fresh, true);
   assert.equal(calls.at(-1).params.statuses, undefined);
   assert.equal(queueChanged, 1);
@@ -1204,7 +1204,7 @@ for (const provider of ['openai_codex_oauth_native', 'xai_grok_oauth']) test(`ac
   const harness = inputHarness(t, { command: { id: 51, job: original } }, {
     generationProviders: async () => [
       { provider: 'openai_compatible', display_name: 'Compatible', max_input_images: 4, can_generate: true },
-      { provider, display_name: 'Other provider', max_input_images: 4, can_generate: true, default_image_model: 'other-image-model' },
+      { provider, display_name: 'Other provider', authenticated: true, max_input_images: 4, can_generate: true, default_image_model: 'other-image-model' },
     ],
   });
   await harness.flush();
@@ -1368,33 +1368,53 @@ test('catalog update for another profile does not change the active candidates o
   assert.equal(h.find('textarea','画廊提示词').value,'preserve me');assert.equal(h.state.posts.length,0);
 });
 
-for (const outcome of ['success', 'failure']) test(`pending submission reports immediately and clears on ${outcome} without clearing the draft early`, async t => {
-  const pending = deferred(), updates = [], confirmed = []; let calls = 0;
-  const h = inputHarness(t, { onSubmissionChange: value => updates.push(value), onCreated: value => confirmed.push(value), preferences: { clearInputAfterSubmit: true } }, {
+
+for (const outcome of ['success', 'failure']) test(`submission feedback stays in the button until ${outcome} without clearing the draft early`, async t => {
+  const pending = deferred(), confirmed = []; let calls = 0;
+  const h = inputHarness(t, { onCreated: value => confirmed.push(value), preferences: { clearInputAfterSubmit: true } }, {
     createGenerationJob: () => { calls++; return pending.promise; },
   });
   await h.flush(); h.find('textarea', '画廊提示词').onChange({ target: { value: originalPrompt } }); await h.flush();
   const click = h.find('button', '生成图片').onClick; click(); click(); await h.flush();
   assert.equal(calls, 1);
-  assert.deepEqual(updates, [{ prompt: originalPrompt, model: 'gateway-original-alias', count: 1 }]);
+  assert.equal(h.find('button', '生成图片')['aria-busy'], true);
+  assert.equal(h.find('button', '生成图片').title, '提交中');
   assert.equal(confirmed.length, 0);
   assert.equal(h.find('textarea', '画廊提示词').value, originalPrompt);
   if (outcome === 'success') pending.resolve(historicalJob()); else pending.reject(Error('request not confirmed'));
-  await h.flush(); assert.equal(updates.at(-1), undefined);
+  await h.flush(); assert.equal(h.find('button', '生成图片')['aria-busy'], false);
   assert.equal(confirmed.length, outcome === 'success' ? 1 : 0);
   assert.equal(h.find('textarea', '画廊提示词').value, outcome === 'success' ? '' : originalPrompt);
   if (outcome === 'failure') assert.equal(h.find('button', '生成图片').disabled, true);
 });
 
-test('workspace renders pending submission separately from selectable confirmed jobs and clears it on completion', async t => {
-  historyStorage(t); history.saveGalleryFilter('failed'); const old = historicalJob({ status: 'failed' });
-  const h = workspaceHarness(t, { generationJobs: async () => ({ jobs: [old], total: 1 }) }); await h.flush();
-  h.node('InputBar').onSubmissionChange({ prompt: 'new pending prompt', model: 'gpt-image-test', count: 3 }); await h.flush();
-  const pending = () => children(h.tree).find(node => node.props?.['aria-label'] === '正在提交生成请求');
-  assert.ok(pending());
-  assert.match(JSON.stringify(pending()), /正在提交/);
-  assert.deepEqual(h.node('TaskGrid').jobs.map(job => job.id), [old.id]);
-  assert.equal(children(pending()).some(node => node.type === 'button'), false, 'unconfirmed requests have no task actions');
-  h.node('InputBar').onSubmissionChange(undefined); await h.flush(); assert.equal(pending(), undefined);
-  assert.deepEqual(h.node('TaskGrid').jobs.map(job => job.id), [old.id]);
+test('confirmed submissions add real cards without a success toast or temporary submission row', async t => {
+  historyStorage(t); const old = historicalJob({ status: 'failed' }), pending = deferred(); let reads=0;
+  const h = workspaceHarness(t, { generationJobs: () => ++reads===1?Promise.resolve({ jobs: [old], total: 1 }):pending.promise }); await h.flush();
+  const noTransient=()=>{
+    assert.equal(children(h.tree).some(node=>node.props?.['aria-label']==='正在提交生成请求'),false);
+    assert.equal(children(h.tree).some(node=>node.props?.className?.includes('pg-gallery-feedback')),false);
+  };
+  noTransient(); assert.equal(h.node('InputBar').onSubmissionChange,undefined);
+  const created=historicalJob({id:'confirmed',status:'queued'});
+  h.node('InputBar').onCreated([created]); await h.flush(); noTransient();
+  assert.deepEqual(h.node('TaskGrid').jobs.map(job=>job.id),[created.id,old.id]);
+  pending.resolve({jobs:[created,old],total:2}); await h.flush(); noTransient();
+});
+
+for (const authenticated of [false,true]) test(`provider chooser only offers authenticated OAuth accounts (${authenticated})`,async t=>{
+  const h=inputHarness(t,{}, {generationProviders:async()=>[
+    {provider:'openai_compatible',display_name:'Compatible',can_generate:true},
+    {provider:'openai_codex_oauth_native',display_name:'ChatGPT account',authenticated,can_generate:authenticated},
+    {provider:'xai_grok_oauth',display_name:'Grok account',authenticated,can_generate:authenticated},
+  ]});
+  await h.flush(); h.find('textarea','画廊提示词').onChange({target:{value:originalPrompt}}); await h.flush();
+  h.find('button','Original API').onClick();await h.flush();
+  const labels=children(h.tree).filter(node=>node.type==='button').map(node=>node.props.children?.[0]);
+  assert.equal(labels.includes('ChatGPT account'),authenticated);
+  assert.equal(labels.includes('Grok account'),authenticated);
+  assert.ok(labels.includes('Original API'));
+  h.find('button','管理 API 配置');
+  assert.equal(h.find('textarea','画廊提示词').value,originalPrompt);
+  assert.equal(h.state.posts.length,0);
 });
