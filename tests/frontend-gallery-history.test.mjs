@@ -25,17 +25,20 @@ function installStorage(t, overrides = {}) {
   return { local, session, saved: () => JSON.parse([...session.values()][0]), replace: value => session.set([...session.keys()][0], JSON.stringify(value)) };
 }
 
-test('filter defaults to successful and persists only recognized exact values', t => {
+test('filter defaults to all, remembers five choices and migrates legacy states', t => {
   const { local } = installStorage(t);
-  assert.equal(history.readGalleryFilter(), 'successful');
-  for (const value of ['', 'successful', 'completed', 'queued', 'running', 'succeeded', 'accepted', 'failed', 'cancelled', 'discarded']) {
+  assert.equal(history.readGalleryFilter(), '');
+  for (const value of ['', 'active', 'successful', 'accepted', 'failed']) {
     history.saveGalleryFilter(value);
     assert.equal(history.readGalleryFilter(), value);
   }
   history.saveGalleryFilter(' successful ');
-  assert.equal(history.readGalleryFilter(), 'discarded');
-  local.set([...local.keys()][0], '{"filter":"failed"}');
-  assert.equal(history.readGalleryFilter(), 'successful');
+  assert.equal(history.readGalleryFilter(), 'failed');
+  const key = [...local.keys()][0];
+  for (const [old, expected] of [['queued', 'active'], ['running', 'active'], ['succeeded', 'successful'], ['accepted', 'accepted'], ['completed', ''], ['cancelled', ''], ['discarded', ''], ['garbage', '']]) {
+    local.set(key, old); assert.equal(history.readGalleryFilter(), expected);
+  }
+  assert.equal(history.galleryFilterStatuses('active'), 'queued,running');
   assert.equal(history.galleryFilterStatuses('successful'), 'succeeded,accepted');
   assert.equal(history.galleryFilterStatuses('completed'), 'succeeded,accepted,failed');
   assert.equal(history.galleryFilterStatuses('failed'), 'failed');
@@ -139,7 +142,7 @@ test('storage errors and quota failures never block gallery loading or make a ne
   let fetches = 0;
   const denied = { getItem: () => { throw Error('denied'); }, setItem: () => { throw Error('quota'); }, removeItem: () => { throw Error('denied'); } };
   installStorage(t, { localStorage: denied, sessionStorage: denied, fetch: () => { fetches++; throw Error('unexpected network'); } });
-  assert.equal(history.readGalleryFilter(), 'successful');
+  assert.equal(history.readGalleryFilter(), '');
   assert.equal(history.readGalleryHistory('/library', 'successful'), undefined);
   assert.doesNotThrow(() => history.saveGalleryFilter('failed'));
   assert.doesNotThrow(() => history.saveGalleryHistory('/library', 'successful', { jobs: [job()], total: 1 }));

@@ -1,6 +1,6 @@
 // Playground InputBar layout adapted to the existing backend queue and recipe contract.
 import { useEffect, useRef, useState } from 'react';
-import { ArrowRight, Plus, ImagePlus, Settings2, X, Layers, ChevronDown, LoaderCircle } from 'lucide-react';
+import { ArrowRight, Plus, ImagePlus, Settings2, X, Layers, ChevronDown, LoaderCircle, Check } from 'lucide-react';
 import { api, mediaUrl } from '../../api/client';
 import type { GenerationJobRecord, GenerationProviderStatus, GenerationSetCount, ItemDetail, ModelCatalog, OpenAICompatibleProfile } from '../../types';
 import type { Translator } from '../../utils/i18n';
@@ -17,7 +17,7 @@ import { extractPromptTemplateVariableRecords, resolvePromptTemplate } from '../
 import './InputBar.css';
 
 export interface GalleryCommand {id:number;item?:ItemDetail;imageId?:string;job?:GenerationJobRecord;editResult?:boolean}
-interface Props {command?:GalleryCommand;preferences:LocalPreferences;t:Translator;active:boolean;onCreated:()=>void;onOpenSettings:()=>void;configurationRevision:number;promptVariablesEnabled?:boolean;promptLanguage?:string;preferredProvider?:string;onOpenAgent?:(id:string)=>void}
+interface Props {command?:GalleryCommand;preferences:LocalPreferences;t:Translator;active:boolean;onCreated:(jobs?:GenerationJobRecord[])=>void;onOpenSettings:()=>void;configurationRevision:number;promptVariablesEnabled?:boolean;promptLanguage?:string;preferredProvider?:string;onOpenAgent?:(id:string)=>void}
 export function imageDataUrl(blob: Blob): Promise<string> {return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result));reader.onerror=()=>reject(new Error('图片读取失败'));reader.readAsDataURL(blob);});}
 async function verifiedInput(input:RecipeInput) {
   let data=input.dataUrl;
@@ -118,7 +118,9 @@ export default function InputBar({command,preferences,t,active,onCreated,onOpenS
   async function submit() {
     if(submitLock.current||busy||reading||loading||refreshing||uncertain||!ready)return;submitLock.current=true;setBusy(true);setError('');let posted=false;
     try{let dimensions: {width:number;height:number}|undefined;if(draft.provider==='openai_compatible'&&draft.recipe.size_mode==='auto4k'&&draft.inputs[0]){const data=await verifiedInput(draft.inputs[0]);const image=new Image();image.src=data;await image.decode();dimensions={width:image.naturalWidth,height:image.naturalHeight};}
-      const payload=galleryPayload({...draft,promptLanguage:draft.promptLanguage||promptLanguage},limit,dimensions,promptVariablesEnabled);posted=true;if(count===1)await api.createGenerationJob(payload);else await api.createGenerationSet({job:payload,count});onCreated();
+      const payload=galleryPayload({...draft,promptLanguage:draft.promptLanguage||promptLanguage},limit,dimensions,promptVariablesEnabled);posted=true;
+      const created=count===1?[await api.createGenerationJob(payload)]:(await api.createGenerationSet({job:payload,count})).jobs;
+      onCreated(created);
       if(preferences.clearInputAfterSubmit)setDraft(current=>({...current,prompt:'',inputs:[],sourceItemId:undefined}));setPanel('');
     }catch(e){setError(String(e));if(posted){setUncertain(true);setError(`${String(e)} · 未自动重试。先查看历史确认是否已创建任务，再决定是否再次提交。`);}}
     finally{submitLock.current=false;setBusy(false);}
@@ -163,7 +165,22 @@ export default function InputBar({command,preferences,t,active,onCreated,onOpenS
       <header><b>{{provider:'API 配置',model:'请求模型',size:'请求尺寸',quality:'图片质量',more:'输出设置',add:'添加参考图'}[panel]}</b><button aria-label="关闭参数" onClick={()=>setPanel('')}><X size={16}/></button></header>
       {panel==='add'&&<div className="pg-add-options"><button type="button" aria-label="上传参考图" onClick={()=>{setPanel('');fileRef.current?.click();}}><ImagePlus size={18}/><span>上传图片文件</span></button><button type="button" aria-label="从 Library 或画廊选择参考图" onClick={()=>{setPanel('');setPicker(true);}}><Layers size={18}/><span>从 Library 或画廊选择</span></button><small>也可以粘贴图片或拖入文件，保留原图。</small></div>}
       {panel==='provider'&&<><div className="pg-option-list">{profiles.map(p=><button key={p.id} aria-pressed={draft.provider==='openai_compatible'&&draft.profileId===p.id} onClick={()=>{editDraft(current=>({...current,provider:'openai_compatible',profileId:p.id,recipe:clearCompatibleTransportOverrides(readGenerationPreference(localStorage,p.id,p.model))}));setPanel('');}}>{p.display_name}<small>{p.configured?'已配置 · 调用能力以实际响应为准':'未完成配置'}</small></button>)}{providers.filter(p=>p.provider!=='openai_compatible').map(p=><button key={p.provider} onClick={()=>{editDraft(current=>({...current,provider:p.provider,recipe:{...clearCompatibleTransportOverrides(current.recipe),model:p.default_image_model||p.model||'',quality:'medium'}}));setPanel('');}}>{p.display_name}<small>{p.can_generate?'可用':'未连接'}</small></button>)}</div><button onClick={onOpenSettings}>管理 API 配置</button></>}
-      {panel==='model'&&<><input aria-label="请求模型完整 ID" value={draft.recipe.model} spellCheck={false} onChange={e=>recipe({model:e.target.value})}/><small>{draft.provider==='openai_compatible'?'画廊仅推荐 gpt-image 系列，保留当前选择。可直接填写完整模型 ID；全部接口模型可在设置中查看。':'保留当前选择和账号提供的图片模型；可直接填写完整模型 ID。'}</small>{absentFromCatalog&&<small role="status">上次读取的接口列表中未找到当前模型，已保留本次选择。可在设置中刷新列表。</small>}{catalog?.error&&<small role="status">最近读取模型列表失败，继续显示上次成功读取的结果。</small>}<div className="pg-option-list pg-model-options" aria-label="此配置的模型">{models.map(model=>{const detected=catalog?.models.find(entry=>entry.id===model);return <button type="button" key={model} data-model-id={model} aria-pressed={draft.recipe.model===model} onClick={()=>{recipe({model});setPanel('');}}>{model}{model===profile?.model&&<small>配置默认</small>}{detected&&<small>{detected.image_generation===true?'接口标注：图片输出':detected.image_generation===false?'接口标注：非图片输出':isGptImageModelName(model)?'名称匹配：生图候选（未验证）':'接口未标注图片生成能力'}</small>}</button>;})}</div>{draft.provider==='openai_compatible'&&profile?.model&&models.includes(profile.model)&&draft.recipe.model!==profile.model&&<button type="button" onClick={()=>{recipe({model:profile.model});setPanel('');}}>使用此配置的默认模型</button>}</>}
+      {panel==='model'&&<>
+        <input className="pg-model-input" aria-label="请求模型完整 ID" value={draft.recipe.model} spellCheck={false} onChange={e=>recipe({model:e.target.value})}/>
+        <div className="pg-option-list pg-model-options" aria-label="此配置的模型">{models.map(model=>{
+          const detected=catalog?.models.find(entry=>entry.id===model);
+          const capability=detected?(detected.image_generation===true?'接口标注：图片输出':detected.image_generation===false?'接口标注：非图片输出':isGptImageModelName(model)?'名称匹配：生图候选（未验证）':'接口未标注图片生成能力'):'';
+          return <button type="button" key={model} data-model-id={model} aria-label={model} title={capability?`${model} · ${capability}`:model} aria-pressed={draft.recipe.model===model} onClick={()=>{recipe({model});setPanel('');}}>
+            <span className="pg-model-name">{model}</span>
+            {model===profile?.model&&<span className="pg-model-default">默认</span>}
+            <span className="pg-model-check" aria-hidden="true">{draft.recipe.model===model&&<Check size={16}/>}</span>
+          </button>;
+        })}</div>
+        <small className="pg-model-hint">{draft.provider==='openai_compatible'?'仅推荐 gpt-image 系列；支持手填完整 ID，接口是否支持以实际响应为准。':'可选择账号提供的图片模型，或填写完整模型 ID。'}</small>
+        {absentFromCatalog&&<small role="status">上次读取的接口列表中未找到当前模型，已保留本次选择。可在设置中刷新列表。</small>}
+        {catalog?.error&&<small role="status">最近读取模型列表失败，继续显示上次成功读取的结果。</small>}
+        {draft.provider==='openai_compatible'&&profile?.model&&models.includes(profile.model)&&draft.recipe.model!==profile.model&&<button type="button" className="pg-model-reset" onClick={()=>{recipe({model:profile.model});setPanel('');}}>使用此配置的默认模型</button>}
+      </>}
       {panel==='size'&&draft.provider!=='openai_compatible'&&<><select aria-label="宽高比" value={draft.aspectRatio} onChange={e=>editDraft(current=>({...current,aspectRatio:e.target.value}))}>{['auto','1:1','2:3','3:4','9:16','4:3','16:9'].map(r=><option key={r}>{r}</option>)}</select>{draft.provider==='xai_grok_oauth'&&<select aria-label="Grok 分辨率" value={draft.resolution} onChange={e=>editDraft(current=>({...current,resolution:e.target.value}))}><option>1k</option><option>2k</option></select>}</>}
       {panel==='quality'&&<div className="pg-option-list">{(draft.provider==='openai_compatible'?IMAGE25_QUALITIES:draft.provider==='xai_grok_oauth'?['low','medium']:['low','medium','high']).map(quality=><button key={quality} aria-pressed={draft.recipe.quality===quality} onClick={()=>{recipe({quality});setPanel('');}}>{({auto:'自动',low:'低',medium:'中',high:'高',xhigh:'超高',max:'最高'} as Record<string,string>)[quality]} · {quality}</button>)}</div>}
       {panel==='more'&&(draft.provider==='openai_compatible'?<div className="pg-more-fields"><label><span>格式</span><select aria-label="输出格式" value={draft.recipe.output_format} onChange={e=>recipe({output_format:e.target.value})}>{['png','jpeg','webp'].map(value=><option key={value} value={value}>{value.toUpperCase()}</option>)}</select></label><label><span>透明</span><select aria-label="图片背景" value={draft.recipe.background} onChange={e=>recipe({background:e.target.value})}><option value="auto">auto</option><option value="opaque">false</option><option value="transparent">true</option></select></label><label><span>审核</span><select aria-label="审核强度" value={draft.recipe.moderation||'auto'} onChange={e=>recipe({moderation:e.target.value as 'auto'|'low'})}><option value="auto">auto</option><option value="low">low</option></select></label>{draft.recipe.output_format!=='png'&&<label><span>压缩 <small>0–100</small></span><input aria-label="输出压缩" type="number" min={0} max={100} placeholder="默认" value={draft.recipe.output_compression??''} onChange={e=>recipe({output_compression:e.target.value===''?undefined:Number(e.target.value)})}/></label>}<small>透明 auto 由服务决定；参数按当前接口支持情况发送。</small></div>:<p>此供应商使用其原有输出格式。</p>)}

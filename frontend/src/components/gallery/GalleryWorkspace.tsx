@@ -5,7 +5,7 @@ import { api, mediaUrl } from '../../api/client';
 import type { GenerationJobRecord } from '../../types';
 import type { Translator } from '../../utils/i18n';
 import type { LocalPreferences } from '../../utils/localPreferences';
-import { galleryMatches, galleryStatus } from '../../utils/galleryRecipe';
+import { galleryMatches } from '../../utils/galleryRecipe';
 import { readGalleryFilter, saveGalleryFilter, galleryFilterStatuses, readGalleryHistory, saveGalleryHistory, clearGalleryHistory } from '../../utils/galleryHistory';
 import InputBar, { type GalleryCommand } from './InputBar';
 import TaskGrid from './TaskGrid';
@@ -22,21 +22,36 @@ export default function GalleryWorkspace({active,queueOpen,onQueueOpenChange,t,p
   const [refreshing,setRefreshing]=useState(false),[fromCache,setFromCache]=useState(false);
   const pageLimit=useRef(48),readLock=useRef<string|undefined>(undefined),readSequence=useRef(0),previous=useRef(new Map<string,string>()),completionCount=useRef<number|undefined>(undefined),alive=useRef(true),detailSequence=useRef(0);
   const resultsRef=useRef<HTMLDivElement>(null);
-  const [batchOpenVersion,setBatchOpenVersion]=useState(0);
+  const [batchOpenVersion,setBatchOpenVersion]=useState(0),[mutationRevision,setMutationRevision]=useState(0);
+  const displayedScope=useRef<{value:string|undefined}|undefined>(undefined),forceFresh=useRef(false);
   const [batch,setBatch]=useState<{id:string;jobs:GenerationJobRecord[];total:number}>();
   useEffect(()=>{alive.current=true;return()=>{alive.current=false;};},[]);
   useEffect(()=>{
     readSequence.current++;readLock.current=undefined;pageLimit.current=48;
+    const scopeChanged=displayedScope.current?.value!==libraryScope;
+    const firstRead=!displayedScope.current;
+    displayedScope.current={value:libraryScope};
     const cached=libraryScope?readGalleryHistory(libraryScope,status):undefined;
-    setJobs(cached?.jobs||[]);setTotal(cached?.total||0);setLoading(!cached);setFromCache(Boolean(cached));setSelected(new Set());setLoadError('');
-    previous.current=new Map();completionCount.current=undefined;
+    if(firstRead||scopeChanged){
+      forceFresh.current=scopeChanged;
+      setJobs(cached?.jobs||[]);setTotal(cached?.total||0);setLoading(!cached);setFromCache(Boolean(cached));
+      if(scopeChanged){setBatch(undefined);setDetail(undefined);setLightbox(undefined);detailSequence.current++;}
+      previous.current=new Map();completionCount.current=undefined;
+    }else{
+      forceFresh.current=true;
+      // Filter the cards already on screen immediately; refresh the authoritative page in the background.
+      if(cached){setJobs(cached.jobs);setTotal(cached.total);setFromCache(true);}
+      else setTotal(0);
+      setLoading(false);
+    }
+    setSelected(new Set());setLoadError('');
   },[libraryScope,status]);
   const refresh=useCallback(async(fresh=false)=>{
     const key=JSON.stringify([libraryScope,status,batch?.id]);if(readLock.current===key)return;
-    readLock.current=key;const sequence=++readSequence.current;setRefreshing(true);
+    readLock.current=key;const sequence=++readSequence.current;fresh=fresh||forceFresh.current;forceFresh.current=false;setRefreshing(true);
     const current=()=>alive.current&&sequence===readSequence.current;
     try{const params={statuses:galleryFilterStatuses(status),prepare_references:false};
-    const result=await api.generationJobs({...params,limit:Math.min(1000,pageLimit.current)},{fresh});for(let offset=result.jobs.length;offset<Math.min(result.total,pageLimit.current);){if(!current())return;const page=await api.generationJobs({...params,limit:Math.min(1000,pageLimit.current-offset),offset},{fresh});if(!page.jobs.length)break;result.jobs.push(...page.jobs);offset+=page.jobs.length;}if(!current())return;
+    const firstPage=await api.generationJobs({...params,limit:Math.min(1000,pageLimit.current)},{fresh});const result={...firstPage,jobs:[...firstPage.jobs]};for(let offset=result.jobs.length;offset<Math.min(result.total,pageLimit.current);){if(!current())return;const page=await api.generationJobs({...params,limit:Math.min(1000,pageLimit.current-offset),offset},{fresh});if(!page.jobs.length)break;result.jobs.push(...page.jobs);offset+=page.jobs.length;}if(!current())return;
     const completed=result.status_counts?result.status_counts.succeeded+result.status_counts.accepted+result.status_counts.failed:undefined;
     if(preferences.notifyOnCompletion&&(result.jobs.some(job=>previous.current.get(job.id)==='running'&&['succeeded','failed'].includes(job.status))||(completed!==undefined&&completionCount.current!==undefined&&completed>completionCount.current)))setMessage('生成任务已有新结果');
     completionCount.current=completed;
@@ -45,7 +60,7 @@ export default function GalleryWorkspace({active,queueOpen,onQueueOpenChange,t,p
     if(batch?.id){const expanded=await api.generationSet(batch.id,{fresh});if(!current())return;const mapped=expanded.jobs.map(mapGenerationRetryJob);const group=groupGenerationQueueJobs(mapped).find(candidate=>candidate.generationGroupId===batch.id);const updated=group?.jobs||mapped;setBatch(current=>current?.id===batch.id?{id:batch.id,jobs:updated,total:expanded.total}:current);setDetail(current=>{const fresh=updated.find(job=>job.id===current?.id);return current&&fresh?{...fresh,parameters:current.parameters}:current;});}
   }catch(e){if(current())setLoadError(String(e));}finally{if(current()){readLock.current=undefined;setLoading(false);setRefreshing(false);}}},[preferences.notifyOnCompletion,batch?.id,status,libraryScope]);
   const refreshAfterChange=()=>{clearGalleryHistory();readSequence.current++;readLock.current=undefined;return refresh(true);};
-  useEffect(()=>{if(!active)return;void refresh();const timer=setInterval(()=>{if(document.visibilityState==='visible')void refresh();},4000);return()=>clearInterval(timer);},[active,refresh,refreshKey]);
+  useEffect(()=>{if(!active)return;void refresh();const timer=setInterval(()=>{if(document.visibilityState==='visible')void refresh();},4000);return()=>clearInterval(timer);},[active,refresh,refreshKey,mutationRevision]);
   useEffect(()=>{if(!focusJobId)return;const sequence=++detailSequence.current;void api.generationJob(focusJobId).then(job=>alive.current&&sequence===detailSequence.current&&setDetail(job)).catch(e=>alive.current&&sequence===detailSequence.current&&setError(String(e)));return()=>{detailSequence.current++;};},[focusJobId]);
   useEffect(()=>{if(command)setLocalCommand(command);},[command?.id]);
   useEffect(()=>{if(!message)return;const timer=setTimeout(()=>setMessage(''),3500);return()=>clearTimeout(timer);},[message]);
@@ -65,7 +80,7 @@ export default function GalleryWorkspace({active,queueOpen,onQueueOpenChange,t,p
   async function downloadSelected(){if(busy)return;setBusy(true);setError('');try{const files:Record<string,Uint8Array>={};let bytes=0;for(const job of visibleJobs.filter(job=>selected.has(job.id)&&job.result_path&&['succeeded','accepted'].includes(job.status))){const result=await fetch(mediaUrl(job.result_path!));if(!result.ok)throw new Error(`无法下载 ${job.id}`);const data=new Uint8Array(await result.arrayBuffer());bytes+=data.byteLength;if(bytes>300*1024*1024)throw new Error('本次下载超过 300 MB，请减少选择后重试');files[`${job.id}.${job.result_path!.split('.').pop()}`]=data;}if(!Object.keys(files).length)throw new Error('没有可下载的结果');const archive=zipSync(files,{level:0});const url=URL.createObjectURL(new Blob([archive as BlobPart],{type:'application/zip'}));const link=document.createElement('a');link.href=url;link.download='generation-results.zip';link.click();setTimeout(()=>URL.revokeObjectURL(url),60000);}catch(e){setError(String(e));}finally{setBusy(false);}}
   async function cleanup(){if(busy||!selected.size)return;if(!window.confirm('清理选中的生成结果？已收录的 Library 资产将保留；被其他任务或 Agent 引用的结果会受到保护。'))return;setBusy(true);const failures:string[]=[];for(const id of selected){try{await api.discardGenerationJob(id);}catch(e){failures.push(String(e));}}setSelected(new Set());await refreshAfterChange();setBusy(false);if(failures.length)setError(failures.join('\n'));onQueueChanged();}
   return <section className="pg-gallery" hidden={!active} aria-label="画廊工作区">
-    <header className="pg-gallery-header"><div className={`pg-gallery-filters ${selected.size?'is-inactive':''}`} inert={selected.size>0} aria-hidden={selected.size>0||undefined}><select aria-label="任务状态筛选" value={status} onChange={e=>{setStatus(e.target.value);saveGalleryFilter(e.target.value);setSelected(new Set());}}><option value="successful">仅成功</option><option value="completed">成功与失败</option><option value="">全部状态</option>{Object.entries(galleryStatus).map(([value,label])=><option key={value} value={value}>{label}</option>)}</select><label><Search size={17}/><input aria-label="搜索生成历史" placeholder="搜索提示词、模型或任务…" value={query} onChange={e=>setQuery(e.target.value)}/></label><button aria-label="刷新生成历史" title={fromCache?'上次列表 · 正在后台更新':refreshing?'正在更新生成历史':'刷新生成历史'} aria-busy={refreshing} onClick={()=>void refresh()}><RefreshCw size={17} className={refreshing?'pg-history-refreshing':undefined}/></button>
+    <header className="pg-gallery-header"><div className={`pg-gallery-filters ${selected.size?'is-inactive':''}`} inert={selected.size>0} aria-hidden={selected.size>0||undefined}><select aria-label="任务状态筛选" value={status} onChange={e=>{setStatus(e.target.value);saveGalleryFilter(e.target.value);setSelected(new Set());}}><option value="">全部状态</option><option value="active">进行中</option><option value="successful">成功</option><option value="accepted">已收录</option><option value="failed">失败</option></select><label><Search size={17}/><input aria-label="搜索生成历史" placeholder="搜索提示词、模型或任务…" value={query} onChange={e=>setQuery(e.target.value)}/></label><button aria-label="刷新生成历史" title={fromCache?'上次列表 · 正在后台更新':refreshing?'正在更新生成历史':'刷新生成历史'} aria-busy={refreshing} onClick={()=>void refresh()}><RefreshCw size={17} className={refreshing?'pg-history-refreshing':undefined}/></button>
       {active&&<GenerationQueueDrawer t={t} placement="gallery" open={queueOpen} refreshKey={refreshKey} onOpen={()=>onQueueOpenChange(true)} onClose={()=>{onQueueOpenChange(false);void refresh();}} onOpenJob={job=>{onQueueOpenChange(false);void openJob(job);}} onOpenBatch={(batchJobs,batchTotal,groupId)=>{onQueueOpenChange(false);closeDetail();setBatch({id:groupId,jobs:batchJobs,total:batchTotal});setBatchOpenVersion(value=>value+1);setSelected(new Set());setQuery('');setStatus('');resultsRef.current?.scrollTo({top:0});}} onOpenProviders={()=>{onQueueOpenChange(false);onOpenSettings();}}/>}
     </div>
     <div className={`pg-selection-toolbar ${selected.size?'is-active':''}`} role="group" aria-label="批量操作" aria-hidden={!selected.size||undefined} inert={!selected.size}>
@@ -78,7 +93,16 @@ export default function GalleryWorkspace({active,queueOpen,onQueueOpenChange,t,p
     {!batch&&jobs.length<total&&<button className="pg-load-more" disabled={refreshing} onClick={()=>{pageLimit.current+=48;void refresh();}}>已加载 {jobs.length} / {total} · 加载更多</button>}
     </div>
     {(error||loadError||message)&&<div className={`pg-gallery-feedback ${error||loadError?'is-error':''}`} role={error||loadError?'alert':'status'}><span>{error||(loadError?`${fromCache?'当前显示上次列表，历史更新失败：':''}${loadError}`:message)}</span><button aria-label="关闭画廊提示" onClick={()=>{setError('');setLoadError('');setMessage('');}}><X size={15}/></button></div>}
-    <InputBar active={active} command={localCommand} preferences={preferences} t={t} onCreated={()=>{setBatch(undefined);setSelected(new Set());setMessage('已加入工作队列，可通过右上角历史记录查看进度。');resultsRef.current?.scrollTo({top:0});void refreshAfterChange();onQueueChanged();}} onOpenSettings={onOpenSettings} configurationRevision={configurationRevision} promptVariablesEnabled={promptVariablesEnabled} promptLanguage={promptLanguage} preferredProvider={preferredProvider} onOpenAgent={onOpenAgent}/>
+    <InputBar active={active} command={localCommand} preferences={preferences} t={t} onCreated={(created?:GenerationJobRecord[])=>{
+      clearGalleryHistory();readSequence.current++;readLock.current=undefined;forceFresh.current=true;
+      if(created?.length){
+        const ids=new Set(created.map(job=>job.id));
+        setJobs(current=>[...created,...current.filter(job=>!ids.has(job.id))]);
+        setTotal(current=>current+created.filter(job=>!jobs.some(existing=>existing.id===job.id)).length);
+        setLoading(false);setFromCache(false);setStatus('');saveGalleryFilter('');setQuery('');
+      }
+      setBatch(undefined);setSelected(new Set());setMessage('已加入工作队列，可通过右上角历史记录查看进度。');resultsRef.current?.scrollTo({top:0});setMutationRevision(value=>value+1);onQueueChanged();
+    }} onOpenSettings={onOpenSettings} configurationRevision={configurationRevision} promptVariablesEnabled={promptVariablesEnabled} promptLanguage={promptLanguage} preferredProvider={preferredProvider} onOpenAgent={onOpenAgent}/>
     {detail&&active&&!largeJob&&<DetailModal key={detail.id} job={detail} t={t} onClose={closeDetail} onChange={()=>void refreshAfterChange()} onAccepted={id=>{clearGalleryHistory();closeDetail();onAccepted(id);}} onReuse={reuse} onLightbox={()=>setLightbox(detail.id)}/ >}
     {largeJob&&active&&<Lightbox src={mediaUrl(largeJob.result_path!)} currentIndex={largeIndex} total={resultJobs.length} onClose={()=>setLightbox(undefined)} onPrev={()=>setLightbox(resultJobs[(largeIndex-1+resultJobs.length)%resultJobs.length].id)} onNext={()=>setLightbox(resultJobs[(largeIndex+1)%resultJobs.length].id)}/>}
   </section>;

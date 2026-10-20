@@ -1,5 +1,16 @@
 /* Playground-style parameter chips; the workspace owns composer placement. */
-.pg-composer .pg-model-options{max-height:240px;overflow-y:auto}.pg-composer .pg-model-options button{white-space:normal;overflow-wrap:anywhere;text-align:left}.pg-model-options button small{display:block}
+.pg-composer .pg-parameters-panel[data-panel=model]{display:flex;flex-direction:column;gap:8px;overflow-y:auto}
+.pg-composer .pg-parameters-panel[data-panel=model]>header{margin-bottom:2px}
+.pg-composer .pg-model-input{flex:none;min-height:38px;margin:0;padding:9px 11px;border:0;border-radius:9px;background:color-mix(in srgb,var(--ink) 5%,transparent);font-size:13px;line-height:1.5}
+.pg-composer .pg-model-options{flex:1 1 auto;min-height:80px;max-height:240px;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable;gap:3px}
+.pg-composer .pg-model-options button{display:flex;flex-direction:row;align-items:center;gap:8px;min-height:40px;margin:0;padding:10px;border:0;border-radius:9px;background:transparent;font-size:13px;line-height:1.5;white-space:normal;text-align:left}
+.pg-composer .pg-model-options button:hover{background:color-mix(in srgb,var(--ink) 5%,transparent)}
+.pg-composer .pg-model-options button[aria-pressed=true]{background:color-mix(in srgb,var(--accent) 12%,transparent);color:var(--accent-strong)}
+.pg-model-name{flex:1;min-width:0;overflow-wrap:anywhere}
+.pg-model-default{flex:none;padding:1px 5px;border-radius:5px;background:color-mix(in srgb,var(--ink) 6%,transparent);color:var(--muted);font-size:10px;line-height:1.5}
+.pg-model-check{display:flex;align-items:center;justify-content:center;flex:0 0 16px;color:var(--accent-strong)}
+.pg-composer .pg-parameters-panel[data-panel=model]>small{flex:none;margin:0;font-size:11px;line-height:1.6}
+.pg-composer .pg-model-reset{flex:none;align-self:flex-start;margin:0;padding:5px 0;border:0;border-radius:5px;background:transparent;color:var(--accent-strong);font-size:12px}
 .pg-composer .pg-composer-body{min-height:0;max-height:30dvh;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;scrollbar-gutter:stable}
 .pg-composer .pg-composer-body>.pg-note{margin:5px 4px;font-size:11px;line-height:1.5}
 .pg-composer .pg-provider-line{display:flex;align-items:center;gap:6px;min-width:0;padding:5px 3px 7px;color:var(--muted);font-size:11px}
