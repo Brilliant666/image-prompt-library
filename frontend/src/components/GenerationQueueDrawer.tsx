@@ -6,6 +6,7 @@ import type { GenerationJobRecord, GenerationJobSetRecord, GenerationJobStatusCo
 import { generationFailure, generationModerationGuidance } from '../utils/generationFailures';
 import { providerPauseSeconds } from '../utils/generationSets';
 import { mapGenerationRetryJob, rememberGenerationReviewOpenContext, resolveGenerationRetryGroup } from '../utils/generationSiblings';
+import { readGenerationQueueHistory, saveGenerationQueueHistory, clearGenerationQueueHistory, beginGenerationQueueMutation, generationQueueMutationPending, subscribeGenerationQueueMutation } from '../utils/generationQueueHistory';
 import type { Translator } from '../utils/i18n';
 
 function isActive(job: GenerationJobRecord) {
@@ -273,6 +274,7 @@ export default function GenerationQueueDrawer({
   placement = 'floating',
   onOpenBatch,
   onChanged,
+  libraryScope,
 }: {
   t: Translator;
   open: boolean;
@@ -284,12 +286,14 @@ export default function GenerationQueueDrawer({
   placement?: 'floating' | 'gallery';
   onOpenBatch?: (jobs: GenerationJobRecord[], total: number, groupId: string) => void;
   onChanged?: (job?: GenerationJobRecord) => void;
+  libraryScope?: string;
 }) {
-  const [jobs, setJobs] = useState<GenerationJobRecord[]>([]);
-  const [generationSets, setGenerationSets] = useState<GenerationJobSetRecord[]>([]);
+  const [initialHistory] = useState(() => readGenerationQueueHistory(libraryScope));
+  const [jobs, setJobs] = useState<GenerationJobRecord[]>(initialHistory?.jobs || []);
+  const [generationSets, setGenerationSets] = useState<GenerationJobSetRecord[]>(initialHistory?.generationSets || []);
   const [providerQueueStates, setProviderQueueStates] = useState<GenerationProviderQueueState[]>([]);
-  const [statusCounts, setStatusCounts] = useState<GenerationJobStatusCounts>();
-  const [jobTotal, setJobTotal] = useState(0);
+  const [statusCounts, setStatusCounts] = useState<GenerationJobStatusCounts | undefined>(initialHistory?.statusCounts);
+  const [jobTotal, setJobTotal] = useState(initialHistory?.total || 0);
   const [loadError, setLoadError] = useState('');
   const [cancelBusyIds, setCancelBusyIds] = useState<Set<string>>(() => new Set());
   const [retryBusyIds, setRetryBusyIds] = useState<Set<string>>(() => new Set());
@@ -297,11 +301,18 @@ export default function GenerationQueueDrawer({
   const [discardBusyIds, setDiscardBusyIds] = useState<Set<string>>(() => new Set());
   const [cancelSetBusyIds, setCancelSetBusyIds] = useState<Set<string>>(() => new Set());
   const [openingSetId, setOpeningSetId] = useState<string>();
-  const [windowLimit, setWindowLimit] = useState(QUEUE_PAGE_SIZE);
+  const [windowLimit, setWindowLimit] = useState(Math.max(QUEUE_PAGE_SIZE, initialHistory?.jobs.length || 0));
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [queueClock, setQueueClock] = useState(() => Date.now());
-  const [hasLoaded, setHasLoaded] = useState(false);
-  const windowLimitRef = useRef(QUEUE_PAGE_SIZE);
+  const [hasLoaded, setHasLoaded] = useState(Boolean(initialHistory));
+  const [detailFresh, setDetailFresh] = useState(false);
+  const detailFreshRef = useRef(false);
+  const scopeRef = useRef(libraryScope);
+  const lifecycleRef = useRef(0);
+  const mutationOwner = useRef(Symbol('queue-drawer'));
+  const invalidationKeyRef = useRef(refreshKey);
+  const windowLimitRef = useRef(Math.max(QUEUE_PAGE_SIZE, initialHistory?.jobs.length || 0));
+  const mutationPendingRef = useRef(false);
   const refreshRequestRef = useRef(0);
   const hasActiveWorkRef = useRef(false);
   const openSetRequestRef = useRef(0);
@@ -309,13 +320,54 @@ export default function GenerationQueueDrawer({
   const drawerRef = useRef<HTMLElement | null>(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+  const onChangedRef = useRef(onChanged);
+  onChangedRef.current = onChanged;
+
+  const invalidateDetail = () => {
+    clearGenerationQueueHistory(libraryScope);
+    detailFreshRef.current = false;
+    setDetailFresh(false);
+    refreshRequestRef.current += 1;
+  };
+
+  useEffect(() => {
+    if (scopeRef.current !== libraryScope) {
+      scopeRef.current = libraryScope;
+      lifecycleRef.current += 1;
+      mutationOwner.current = Symbol('queue-library');
+      refreshRequestRef.current += 1;
+      openSetRequestRef.current += 1;
+      const cached = readGenerationQueueHistory(libraryScope);
+      setJobs(cached?.jobs || []);
+      setGenerationSets(cached?.generationSets || []);
+      setStatusCounts(cached?.statusCounts);
+      setJobTotal(cached?.total || 0);
+      setHasLoaded(Boolean(cached));
+      detailFreshRef.current = false;
+      setDetailFresh(false);
+      setLoadError('');
+      setProviderQueueStates([]);
+      setOpeningSetId(undefined);
+      setLoadingOlder(false);
+      mutationPendingRef.current = false;
+      setCancelBusyIds(new Set()); setRetryBusyIds(new Set()); setMarkFailedBusyIds(new Set());
+      setDiscardBusyIds(new Set()); setCancelSetBusyIds(new Set());
+      windowLimitRef.current = Math.max(QUEUE_PAGE_SIZE, cached?.jobs.length || 0);
+      setWindowLimit(windowLimitRef.current);
+    }
+    if (invalidationKeyRef.current !== refreshKey) {
+      invalidationKeyRef.current = refreshKey;
+      invalidateDetail();
+    }
+  }, [libraryScope, refreshKey]);
 
   const refresh = useCallback(async (limit = windowLimitRef.current) => {
+    if (mutationPendingRef.current || generationQueueMutationPending(libraryScope)) return;
     const requestId = refreshRequestRef.current + 1;
     refreshRequestRef.current = requestId;
     try {
       const result = await api.generationJobs({ limit: open ? limit : 1, prepare_references: false }, { fresh: true });
-      if (refreshRequestRef.current !== requestId) return;
+      if (refreshRequestRef.current !== requestId || generationQueueMutationPending(libraryScope)) return;
       setJobTotal(result.total);
       setStatusCounts(result.status_counts);
       setProviderQueueStates(result.provider_queue_states || []);
@@ -327,6 +379,12 @@ export default function GenerationQueueDrawer({
         + (result.generation_sets || []).reduce((total, set) => total + set.remaining, 0),
       );
       if (open) {
+        detailFreshRef.current = true;
+        setDetailFresh(true);
+        saveGenerationQueueHistory(libraryScope, {
+          jobs: result.jobs, generationSets: result.generation_sets || [],
+          statusCounts: result.status_counts, total: result.total,
+        });
         setJobs(result.jobs);
         setGenerationSets(result.generation_sets || []);
         setLoadError('');
@@ -339,7 +397,13 @@ export default function GenerationQueueDrawer({
         setHasLoaded(true);
       }
     }
-  }, [t, open]);
+  }, [t, open, libraryScope]);
+
+  useEffect(() => subscribeGenerationQueueMutation(libraryScope, mutationOwner.current, (confirmed) => {
+    invalidateDetail();
+    if (confirmed) onChangedRef.current?.(confirmed === true ? undefined : confirmed);
+    void refresh();
+  }), [libraryScope, refresh]);
 
   useEffect(() => {
     let cancelled = false;
@@ -374,6 +438,7 @@ export default function GenerationQueueDrawer({
   }, [open]);
 
   useEffect(() => () => {
+    lifecycleRef.current += 1;
     openSetRequestRef.current += 1;
   }, []);
 
@@ -429,17 +494,29 @@ export default function GenerationQueueDrawer({
   };
 
   const cancelJob = async (job: GenerationJobRecord) => {
-    if (!isActive(job) || cancelBusyIds.has(job.id)) return;
+    if (!detailFreshRef.current || !isActive(job) || cancelBusyIds.has(job.id)) return;
+    const lifecycle = lifecycleRef.current;
+    const finishMutation = beginGenerationQueueMutation(libraryScope, mutationOwner.current);
+    mutationPendingRef.current = true;
+    invalidateDetail();
     setCancelBusyIds(current => new Set(current).add(job.id));
     try {
       const updated = await api.cancelGenerationJob(job.id);
+      finishMutation(true);
+      if (lifecycleRef.current !== lifecycle) return;
+      mutationPendingRef.current = false;
+      clearGenerationQueueHistory(libraryScope);
       setJobs(current => current.map(candidate => candidate.id === updated.id ? updated : candidate));
       onChanged?.();
       setLoadError('');
       await refresh();
     } catch (error) {
+      finishMutation();
+      if (lifecycleRef.current !== lifecycle) return;
+      mutationPendingRef.current = false;
       setLoadError(error instanceof Error ? error.message : t('queueCancelFailed'));
     } finally {
+      if (lifecycleRef.current !== lifecycle) return;
       setCancelBusyIds(current => {
         const next = new Set(current);
         next.delete(job.id);
@@ -449,17 +526,29 @@ export default function GenerationQueueDrawer({
   };
 
   const retryJob = async (job: GenerationJobRecord) => {
-    if (!canRetryFailedJob(job) || retryBusyIds.has(job.id)) return;
+    if (!detailFreshRef.current || !canRetryFailedJob(job) || retryBusyIds.has(job.id)) return;
+    const lifecycle = lifecycleRef.current;
+    const finishMutation = beginGenerationQueueMutation(libraryScope, mutationOwner.current);
+    mutationPendingRef.current = true;
+    invalidateDetail();
     setRetryBusyIds(current => new Set(current).add(job.id));
     try {
       const retry = await api.retryGenerationJob(job.id);
+      finishMutation(true);
+      if (lifecycleRef.current !== lifecycle) return;
+      mutationPendingRef.current = false;
+      clearGenerationQueueHistory(libraryScope);
       setJobs(current => [retry, ...current.filter(candidate => candidate.id !== retry.id)]);
       onChanged?.();
       setLoadError('');
       await refresh();
     } catch (error) {
+      finishMutation();
+      if (lifecycleRef.current !== lifecycle) return;
+      mutationPendingRef.current = false;
       setLoadError(error instanceof Error ? error.message : t('queueRetryFailedError'));
     } finally {
+      if (lifecycleRef.current !== lifecycle) return;
       setRetryBusyIds(current => {
         const next = new Set(current);
         next.delete(job.id);
@@ -469,17 +558,29 @@ export default function GenerationQueueDrawer({
   };
 
   const markFailedJob = async (job: GenerationJobRecord) => {
-    if (!isStaleRunningJob(job) || markFailedBusyIds.has(job.id)) return;
+    if (!detailFreshRef.current || !isStaleRunningJob(job) || markFailedBusyIds.has(job.id)) return;
+    const lifecycle = lifecycleRef.current;
+    const finishMutation = beginGenerationQueueMutation(libraryScope, mutationOwner.current);
+    mutationPendingRef.current = true;
+    invalidateDetail();
     setMarkFailedBusyIds(current => new Set(current).add(job.id));
     try {
       const updated = await api.markGenerationJobFailed(job.id);
+      finishMutation(true);
+      if (lifecycleRef.current !== lifecycle) return;
+      mutationPendingRef.current = false;
+      clearGenerationQueueHistory(libraryScope);
       setJobs(current => current.map(candidate => candidate.id === updated.id ? updated : candidate));
       onChanged?.();
       setLoadError('');
       await refresh();
     } catch (error) {
+      finishMutation();
+      if (lifecycleRef.current !== lifecycle) return;
+      mutationPendingRef.current = false;
       setLoadError(error instanceof Error ? error.message : t('queueMarkFailedError'));
     } finally {
+      if (lifecycleRef.current !== lifecycle) return;
       setMarkFailedBusyIds(current => {
         const next = new Set(current);
         next.delete(job.id);
@@ -489,8 +590,12 @@ export default function GenerationQueueDrawer({
   };
 
   const discardJob = async (job: GenerationJobRecord) => {
-    if (!canDiscardTransientResult(job) || discardBusyIds.has(job.id)) return;
+    if (!detailFreshRef.current || !canDiscardTransientResult(job) || discardBusyIds.has(job.id)) return;
     if (!window.confirm(t('queueCleanupConfirm'))) return;
+    const lifecycle = lifecycleRef.current;
+    const finishMutation = beginGenerationQueueMutation(libraryScope, mutationOwner.current);
+    mutationPendingRef.current = true;
+    invalidateDetail();
     const timestamp = new Date().toISOString();
     const optimisticDiscardedJob: GenerationJobRecord = {
       ...job,
@@ -510,14 +615,22 @@ export default function GenerationQueueDrawer({
     setJobs(current => current.map(candidate => candidate.id === job.id ? optimisticDiscardedJob : candidate));
     try {
       const updated = await api.discardGenerationJob(job.id);
+      finishMutation(updated);
+      if (lifecycleRef.current !== lifecycle) return;
+      mutationPendingRef.current = false;
+      clearGenerationQueueHistory(libraryScope);
       setJobs(current => current.map(candidate => candidate.id === updated.id ? updated : candidate));
       onChanged?.(updated);
       setLoadError('');
       void refresh();
     } catch (error) {
+      finishMutation();
+      if (lifecycleRef.current !== lifecycle) return;
+      mutationPendingRef.current = false;
       setJobs(current => current.map(candidate => candidate.id === job.id ? job : candidate));
       setLoadError(error instanceof Error ? error.message : t('queueDiscardFailed'));
     } finally {
+      if (lifecycleRef.current !== lifecycle) return;
       setDiscardBusyIds(current => {
         const next = new Set(current);
         next.delete(job.id);
@@ -527,18 +640,30 @@ export default function GenerationQueueDrawer({
   };
 
   const cancelRemainingGenerationSet = async (set: GenerationJobSetRecord) => {
-    if (!set.remaining || cancelSetBusyIds.has(set.generation_group_id)) return;
+    if (!detailFreshRef.current || !set.remaining || cancelSetBusyIds.has(set.generation_group_id)) return;
+    const lifecycle = lifecycleRef.current;
+    const finishMutation = beginGenerationQueueMutation(libraryScope, mutationOwner.current);
+    mutationPendingRef.current = true;
+    invalidateDetail();
     setCancelSetBusyIds(current => new Set(current).add(set.generation_group_id));
     try {
       const updated = await api.cancelRemainingGenerationSet(set.generation_group_id);
+      finishMutation(true);
+      if (lifecycleRef.current !== lifecycle) return;
+      mutationPendingRef.current = false;
+      clearGenerationQueueHistory(libraryScope);
       setGenerationSets(current => current.map(candidate => candidate.generation_group_id === updated.generation_group_id ? updated : candidate));
       setJobs(current => mergeGenerationJobs(current, updated.jobs));
       onChanged?.();
       setLoadError('');
       void refresh();
     } catch (error) {
+      finishMutation();
+      if (lifecycleRef.current !== lifecycle) return;
+      mutationPendingRef.current = false;
       setLoadError(error instanceof Error ? error.message : t('queueCancelSetFailed'));
     } finally {
+      if (lifecycleRef.current !== lifecycle) return;
       setCancelSetBusyIds(current => {
         const next = new Set(current);
         next.delete(set.generation_group_id);
@@ -548,7 +673,7 @@ export default function GenerationQueueDrawer({
   };
 
   const openGenerationSet = async (group: GenerationQueueBatchCard) => {
-    if (openingSetId) return;
+    if (!detailFreshRef.current || openingSetId) return;
     const requestId = openSetRequestRef.current + 1;
     openSetRequestRef.current = requestId;
     setOpeningSetId(group.generationGroupId);
@@ -629,7 +754,7 @@ export default function GenerationQueueDrawer({
               type="button"
               className={failure.kind === 'auth_required' ? 'secondary' : 'primary'}
               onClick={() => retryJob(job).catch(() => undefined)}
-              disabled={retryBusyIds.has(job.id)}
+              disabled={!detailFresh || retryBusyIds.has(job.id)}
             >{t('queueRetry')}</button>
           )}
           {retryId && (
@@ -716,6 +841,7 @@ export default function GenerationQueueDrawer({
             <button className="modal-icon-button" onClick={() => closeDrawer()} aria-label={t('close')}><X size={20} strokeWidth={2.25} /></button>
           </div>
           <p className="muted queue-history-help">{t('queueCleanupHelp')}</p>
+          {hasLoaded && !detailFresh && <p className="muted queue-cache-status" role="status">{t(loadError ? 'queueCachedUnavailable' : 'queueCachedRefreshing')}</p>}
           {!hasLoaded && !loadError && <p className="muted queue-loading" role="status">{t('queueLoading')}</p>}
           {loadError && <p className="error" role="alert">{loadError}</p>}
           {hasLoaded && hasQueueContent && queueStatusItems.length > 0 && (
@@ -784,14 +910,14 @@ export default function GenerationQueueDrawer({
                       type="button"
                       className="generation-open-set"
                       onClick={() => openGenerationSet(group).catch(() => undefined)}
-                      disabled={openingSetId === group.generationGroupId}
+                      disabled={!detailFresh || openingSetId === group.generationGroupId}
                     >{t('queueOpenBatch')}</button>
                     {set && set.remaining > 0 && (
                       <button
                         type="button"
                         className="generation-cancel-remaining"
                         onClick={() => cancelRemainingGenerationSet(set).catch(() => undefined)}
-                        disabled={cancelSetBusyIds.has(set.generation_group_id)}
+                        disabled={!detailFresh || cancelSetBusyIds.has(set.generation_group_id)}
                       >{t('queueCancelRemaining').replace('${remaining}', String(set.remaining))}</button>
                     )}
                   </div>
@@ -834,7 +960,7 @@ export default function GenerationQueueDrawer({
                           type="button"
                           className="generation-queue-quick-discard"
                           onClick={() => discardJob(job).catch(() => undefined)}
-                          disabled={discardBusyIds.has(job.id)}
+                          disabled={!detailFresh || discardBusyIds.has(job.id)}
                           aria-label={t('queueDiscardResult')}
                           title={t('queueDiscardResult')}
                         >
@@ -873,7 +999,7 @@ export default function GenerationQueueDrawer({
                             event.stopPropagation();
                             cancelJob(job).catch(() => undefined);
                           }}
-                          disabled={cancelBusyIds.has(job.id)}
+                          disabled={!detailFresh || cancelBusyIds.has(job.id)}
                         >{job.status === 'running' ? t('queueStopSaving') : t('cancel')}</button>
                       )}
                       {isStaleRunningJob(job) && (
@@ -884,7 +1010,7 @@ export default function GenerationQueueDrawer({
                             event.stopPropagation();
                             markFailedJob(job).catch(() => undefined);
                           }}
-                          disabled={markFailedBusyIds.has(job.id)}
+                          disabled={!detailFresh || markFailedBusyIds.has(job.id)}
                           aria-label={t('queueMarkFailed')}
                           title={t('queueMarkFailed')}
                         >{t('queueMarkFailed')}</button>
@@ -897,7 +1023,7 @@ export default function GenerationQueueDrawer({
                             event.stopPropagation();
                             retryJob(job).catch(() => undefined);
                           }}
-                          disabled={retryBusyIds.has(job.id)}
+                          disabled={!detailFresh || retryBusyIds.has(job.id)}
                           aria-label={t('queueRetryFailed')}
                           title={t('queueRetryFailed')}
                         >{t('queueRetry')}</button>

@@ -29,6 +29,7 @@ const profileSettings = await loadTs('../frontend/src/utils/profileSettings.ts')
 const templates = await loadTs('../frontend/src/utils/promptTemplateVariables.ts');
 const generationSiblings = await loadTs('../frontend/src/utils/generationSiblings.ts');
 const history = await loadTs('../frontend/src/utils/galleryHistory.ts');
+const queueHistory = await loadTs('../frontend/src/utils/generationQueueHistory.ts');
 const allGalleryStatuses = 'queued,running,succeeded,accepted,failed,cancelled';
 const isAllGallery = params => params.statuses === allGalleryStatuses;
 const originalPrompt = '  原文\r\n\nB & <tag>\t ';
@@ -788,6 +789,7 @@ function workspaceHarness(t, api, overrides = {}, environment = {}) {
     '../../utils/galleryRecipe': recipe, './InputBar': { __esModule: true, default: 'InputBar' }, './TaskGrid': { __esModule: true, default: 'TaskGrid' }, './DetailModal': { __esModule: true, default: 'DetailModal' }, './Lightbox': { __esModule: true, default: 'Lightbox' }, './GalleryWorkspace.css': {},
     '../../utils/generationSiblings': generationSiblings,
     '../../utils/galleryHistory': history,
+    '../../utils/generationQueueHistory': queueHistory,
     // Grouping/retry collapsing has separate real-component coverage in explore-view.test.mjs.
     '../GenerationQueueDrawer': { __esModule: true, default: 'GenerationQueueDrawer', groupGenerationQueueJobs: jobs => [...new Set(jobs.map(job => job.generation_group_id))].map(id => ({ generationGroupId: id, jobs: jobs.filter(job => job.generation_group_id === id) })) },
   };

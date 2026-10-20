@@ -20,7 +20,7 @@ async function utility(url) {
   return module.exports;
 }
 const utilities = {};
-for (const name of ['generationFailures', 'generationSets', 'generationSiblings']) {
+for (const name of ['generationFailures', 'generationSets', 'generationSiblings', 'generationQueueHistory']) {
   utilities[`../utils/${name}`] = await utility(new URL(`../utils/${name}.ts`, sourceUrl));
 }
 function nodes(value) {
@@ -34,14 +34,19 @@ function deferred() {
   return { promise, resolve, reject };
 }
 const job = (id, extra = {}) => ({
-  id, status: 'running', prompt_text: `Synthetic ${id}`, parameters: {}, metadata: {}, ...extra,
+  id, provider: 'openai_compatible', created_at: '2026-10-20T00:00:00Z', updated_at: '2026-10-20T00:00:00Z', status: 'running', prompt_text: `Synthetic ${id}`, parameters: {}, metadata: {}, ...extra,
 });
 const result = (jobs, extra = {}) => ({
   jobs, total: 270, status_counts: { queued: 0, running: 4, succeeded: 94, accepted: 14, failed: 155, discarded: 3, cancelled: 0 },
   generation_sets: [], provider_queue_states: [], ...extra,
 });
 
+function storage() {
+  const items = new Map();
+  return { getItem: key => items.get(key) ?? null, setItem: (key, value) => items.set(key, value), removeItem: key => items.delete(key), items };
+}
 function harness(t, apiOverrides = {}, propOverrides = {}, environment = {}) {
+  globalThis.sessionStorage = environment.storage || storage();
   const slots = [], effects = [], calls = [], timers = new Map();
   let cursor = 0, dirty = false, tree, nextTimer = 0;
   const same = (a, b) => a && b && a.length === b.length && a.every((value, i) => Object.is(value, b[i]));
@@ -111,6 +116,7 @@ function harness(t, apiOverrides = {}, propOverrides = {}, environment = {}) {
     loading: () => Boolean(node(props => props.className === 'muted queue-loading')),
     activeSignal: () => Boolean(node(props => props['aria-label'] === 'queueActiveJobs')),
     button: label => node((props, type) => type === 'button' && (props['aria-label'] === label || props.children === label)),
+    cached: () => node(props => props.className === 'muted queue-cache-status')?.children,
     alert: () => node(props => props.role === 'alert')?.children,
     async poll() { const [id, callback] = timers.entries().next().value; timers.delete(id); await callback(); },
   };
@@ -252,6 +258,197 @@ const mutations = [
   { method: 'discardGenerationJob', button: 'queueDiscardResult', original: job('discard', { status: 'succeeded', result_path: 'generation-results/discard/result.png' }), updated: job('discard', { status: 'discarded' }) },
   { method: 'cancelRemainingGenerationSet', button: 'queueCancelRemaining', original: job('batch-member', { generation_group_id: 'batch', generation_group_index: 1, generation_group_size: 2 }), updated: { ...batch, remaining: 0, jobs: [] }, sets: [batch] },
 ];
+const history = utilities['../utils/generationQueueHistory'];
+async function seedQueue(t, cache, jobs = [job('remembered')]) {
+  const h = harness(t, {}, { libraryScope: 'library-a', open: true }, { storage: cache });
+  h.calls[0].resolve(result(jobs)); await h.flush(); h.dispose();
+}
+test('page reload restores the full page before pending detail read, and a summary cannot overwrite it', async t => {
+  const cache = storage();
+  await seedQueue(t, cache, Array.from({ length: 100 }, (_, i) => job(`remembered-${i}`)));
+  const h = harness(t, {}, { libraryScope: 'library-a' }, { storage: cache });
+  assert.equal(h.rows().length, 100);
+  assert.equal(h.cached(), 'queueCachedRefreshing');
+  h.calls[0].resolve(result([job('summary-only')], { status_counts: { queued: 0, running: 0, succeeded: 2, accepted: 0, failed: 0, discarded: 0, cancelled: 0 } }));
+  await h.flush();
+  assert.equal(h.activeSignal(), false, 'latest counts replace cached indicators');
+  assert.equal(history.readGenerationQueueHistory('library-a').jobs.length, 100);
+  h.open(); await h.flush();
+  assert.equal(h.rows().length, 100);
+  assert.equal(h.loading(), false);
+  const staleAction = h.button('queueStopSaving');
+  assert.equal(staleAction.disabled, true);
+  h.calls.at(-1).resolve(result([job('fresh')])); await h.flush();
+  assert.equal(h.cached(), undefined);
+  assert.equal(h.button('queueStopSaving').disabled, false);
+  assert.equal(history.readGenerationQueueHistory('library-a').jobs[0].id, 'fresh');
+});
+
+test('unknown scope waits; scope discovery hydrates, and scope changes reject old reads', async t => {
+  const cache = storage(); await seedQueue(t, cache);
+  const h = harness(t, {}, { open: true }, { storage: cache });
+  assert.equal(h.rows().length, 0);
+  const unknownRead = h.calls[0];
+  h.update({ libraryScope: 'library-a' }); await h.flush();
+  assert.equal(h.rows().length, 1);
+  const aRead = h.calls.at(-1);
+  h.update({ libraryScope: 'library-b' }); await h.flush();
+  assert.equal(h.rows().length, 0);
+  unknownRead.resolve(result([job('unknown-late')]));
+  aRead.resolve(result([job('a-late')])); await h.flush();
+  assert.equal(h.rows().length, 0);
+  assert.equal(history.readGenerationQueueHistory('library-b'), undefined);
+  h.calls.at(-1).resolve(result([job('b-current')])); await h.flush();
+  assert.equal(history.readGenerationQueueHistory('library-b').jobs[0].id, 'b-current');
+});
+
+test('failed refresh retains cached rows with explicit stale label; cached callbacks cannot mutate', async t => {
+  const cache = storage(); await seedQueue(t, cache);
+  let cancelled = 0;
+  const h = harness(t, { cancelGenerationJob: async () => { cancelled++; } }, { libraryScope: 'library-a', open: true }, { storage: cache });
+  h.button('queueStopSaving').onClick({ stopPropagation() {} }); await h.flush();
+  assert.equal(cancelled, 0, 'callback guard protects even if disabled DOM control is bypassed');
+  h.calls[0].reject(Error('Synthetic failure')); await h.flush();
+  assert.equal(h.rows().length, 1);
+  assert.equal(h.cached(), 'queueCachedUnavailable');
+  assert.equal(h.button('queueStopSaving').disabled, true);
+});
+
+test('mutation invalidates persisted rows immediately and failed refresh cannot restore stale actions', async t => {
+  const cache = storage(), pending = deferred();
+  const h = harness(t, { cancelGenerationJob: () => pending.promise }, { libraryScope: 'library-a', open: true }, { storage: cache });
+  h.calls[0].resolve(result([job('to-cancel')])); await h.flush();
+  assert.ok(history.readGenerationQueueHistory('library-a'));
+  h.button('queueStopSaving').onClick({ stopPropagation() {} }); await h.flush();
+  assert.equal(history.readGenerationQueueHistory('library-a'), undefined);
+  const readCount = h.calls.length;
+  await h.poll(); await h.flush();
+  assert.equal(h.calls.length, readCount, 'poll cannot cache pre-mutation data while mutation is pending');
+  pending.resolve(job('to-cancel', { status: 'cancelled' })); await h.flush();
+  h.calls.at(-1).reject(Error('Synthetic failure')); await h.flush();
+  assert.equal(history.readGenerationQueueHistory('library-a'), undefined);
+  const reload = harness(t, {}, { libraryScope: 'library-a', open: true }, { storage: cache });
+  assert.equal(reload.rows().length, 0);
+});
+
+test('external refresh invalidates persistence, and unmount prevents a late read from saving', async t => {
+  const cache = storage();
+  const h = harness(t, {}, { libraryScope: 'library-a', open: true }, { storage: cache });
+  h.calls[0].resolve(result([job('before-change')])); await h.flush();
+  h.update({ refreshKey: 1 }); await h.flush();
+  assert.equal(history.readGenerationQueueHistory('library-a'), undefined);
+  h.dispose();
+  h.calls.at(-1).resolve(result([job('after-unmount')])); await h.flush();
+  assert.equal(history.readGenerationQueueHistory('library-a'), undefined);
+});
+
+test('late mutation completion cannot update a different library or resurrect its old cache', async t => {
+  const cache = storage(), pending = deferred();
+  let changed = 0;
+  const h = harness(t, { cancelGenerationJob: () => pending.promise },
+    { libraryScope: 'library-a', open: true, onChanged: () => changed++ }, { storage: cache });
+  h.calls[0].resolve(result([job('a')])); await h.flush();
+  h.button('queueStopSaving').onClick({ stopPropagation() {} }); await h.flush();
+  h.update({ libraryScope: 'library-b' }); await h.flush();
+  h.calls.at(-1).resolve(result([job('b')])); await h.flush();
+  pending.resolve(job('a', { status: 'cancelled' })); await h.flush();
+  assert.equal(changed, 0);
+  assert.equal(h.rows()[0].props.children[0].props.children[1].props.children, 'Synthetic b');
+  assert.equal(history.readGenerationQueueHistory('library-b').jobs[0].id, 'b');
+});
+
+test('mutation survives initiating drawer unmount and refreshes a remounted drawer only after completion', async t => {
+  const cache = storage(), pending = deferred();
+  const a = harness(t, { discardGenerationJob: () => pending.promise },
+    { libraryScope: 'library-a', open: true }, { storage: cache });
+  a.calls[0].resolve(result([job('clearing', { status: 'succeeded', result_path: 'generation-results/clearing/result.png' })]));
+  await a.flush();
+  a.button('queueDiscardResult').onClick(); await a.flush();
+  a.dispose();
+  const changed = [];
+  const b = harness(t, {}, { libraryScope: 'library-a', open: true, onChanged: updated => changed.push(updated) }, { storage: cache });
+  await b.flush();
+  assert.equal(b.calls.length, 0, 'do not read and authorize a pre-mutation snapshot');
+  assert.equal(history.readGenerationQueueHistory('library-a'), undefined);
+  pending.resolve(job('clearing', { status: 'discarded' })); await a.flush(); await b.flush();
+  assert.equal(b.calls.length, 1, 'server completion refreshes the new drawer despite old unmount');
+  assert.equal(changed.length, 1);
+  assert.equal(changed[0].status, 'discarded', 'current gallery receives confirmed clear so its card can disappear');
+  b.calls[0].resolve(result([job('clearing', { status: 'discarded' })])); await b.flush();
+  assert.equal(b.rows()[0].props.className, 'generation-queue-row status-discarded');
+  assert.equal(b.button('queueDiscardResult'), undefined);
+  assert.equal(history.readGenerationQueueHistory('library-a').jobs[0].status, 'discarded');
+});
+
+test('A to B to A while mutation is pending receives completion in the new A lifecycle', async t => {
+  const cache = storage(), pending = deferred(), changed = [];
+  const h = harness(t, { cancelGenerationJob: () => pending.promise },
+    { libraryScope: 'library-a', open: true, onChanged: value => changed.push(value) }, { storage: cache });
+  h.calls[0].resolve(result([job('a')])); await h.flush();
+  h.button('queueStopSaving').onClick({ stopPropagation() {} }); await h.flush();
+  h.update({ libraryScope: 'library-b' }); await h.flush();
+  h.calls.at(-1).resolve(result([job('b')])); await h.flush();
+  h.update({ libraryScope: 'library-a' }); await h.flush();
+  const reads = h.calls.length;
+  pending.resolve(job('a', { status: 'cancelled' })); await h.flush();
+  assert.equal(h.calls.length, reads + 1);
+  assert.equal(changed.length, 1);
+  h.calls.at(-1).resolve(result([job('a', { status: 'cancelled' })])); await h.flush();
+  assert.equal(h.cached(), undefined);
+  assert.equal(h.rows()[0].props.className, 'generation-queue-row status-cancelled');
+});
+
+test('batch summaries survive reload without persisting embedded recipes or provider backoff state', async t => {
+  const cache = storage();
+  const h = harness(t, {}, { libraryScope: 'library-a', open: true }, { storage: cache });
+  const member = job('member', { generation_group_id: 'batch', generation_group_index: 1, generation_group_size: 3 });
+  h.calls[0].resolve(result([member], { generation_sets: [{
+    ...batch, provider: 'openai_compatible', created_at: member.created_at, total: 3,
+    succeeded: 1, failed: 0, accepted: 0, discarded: 0, cancelled: 0, completed: 1,
+    jobs: [job('PRIVATE-embedded', { parameters: { api_key: 'PRIVATE' } })],
+  }] })); await h.flush(); h.dispose();
+  const next = harness(t, {}, { libraryScope: 'library-a', open: true }, { storage: cache });
+  assert.ok(next.node(p => p.className === 'generation-set-card generation-queue-batch-card'));
+  assert.equal(next.button('queueCancelRemaining').disabled, true);
+  assert.equal(next.button('queueOpenBatch').disabled, true);
+  assert.equal(history.readGenerationQueueHistory('library-a').generationSets[0].total, 3);
+  assert.ok(![...cache.items.values()][0].includes('PRIVATE'));
+});
+
+test('cache projection is bounded, excludes recipes and secrets, and retains retry/group display mapping', () => {
+  globalThis.sessionStorage = storage();
+  const source = job('retry', {
+    result_path: 'generation-results/retry/result.png',
+    generation_group_id: 'set', generation_group_index: 2, generation_group_size: 3,
+    parameters: { quality: 'max', requested_aspect_ratio: '9:16', input_images: [{ data: 'data:image/png;base64,PRIVATE' }], api_key: 'PRIVATE' },
+    metadata: { retry_of_generation_job_id: 'previous', retried_by_generation_job_id: 'next', retry_reason: 'failed_retry', requested: { api_key: 'PRIVATE' }, error: 'PRIVATE' },
+    error: 'PRIVATE', arbitrary: 'PRIVATE',
+  });
+  history.saveGenerationQueueHistory('library-a', { jobs: [source], total: 1, generationSets: [] });
+  const raw = [...sessionStorage.items.values()][0];
+  assert.ok(!raw.includes('PRIVATE'));
+  const restored = history.readGenerationQueueHistory('library-a').jobs[0];
+  assert.equal(restored.generation_group_index, 2);
+  assert.equal(restored.metadata.retry_of_generation_job_id, 'previous');
+  assert.equal(restored.metadata.retried_by_generation_job_id, 'next');
+  assert.equal(restored.parameters.requested_aspect_ratio, '9:16');
+  history.saveGenerationQueueHistory('library-a', { jobs: Array.from({ length: 250 }, (_, i) => job(String(i))), total: 250, generationSets: [] });
+  assert.equal(history.readGenerationQueueHistory('library-a').jobs.length, 200);
+});
+
+test('corrupt, expired, oversized and unavailable session storage never block the queue', async t => {
+  for (const value of ['{', JSON.stringify({ version: 1, scope: 'library-a', jobs: [], generationSets: [], total: 0, savedAt: Date.now() - 31 * 60 * 1000 }), 'x'.repeat(1024 * 1024 + 1)]) {
+    const cache = storage(); cache.setItem('image-prompt-library:generation-queue-history:v1', value);
+    const h = harness(t, {}, { libraryScope: 'library-a', open: true }, { storage: cache });
+    assert.equal(h.rows().length, 0);
+    h.calls[0].resolve(result([job('fresh')])); await h.flush();
+    assert.equal(h.rows().length, 1);
+  }
+  const unavailable = { getItem() { throw Error('blocked'); }, setItem() { throw Error('quota'); }, removeItem() { throw Error('blocked'); } };
+  const h = harness(t, {}, { libraryScope: 'library-a', open: true }, { storage: unavailable });
+  h.calls[0].resolve(result([job('fresh')])); await h.flush();
+  assert.equal(h.rows().length, 1);
+});
 for (const mutation of mutations) for (const succeeds of [true, false]) {
   test(`${mutation.method} notifies the gallery only after server-confirmed success (${succeeds ? 'success' : 'failure'})`, async t => {
     const pending = deferred(), requests = [];
