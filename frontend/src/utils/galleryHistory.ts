@@ -3,7 +3,8 @@ import type { GenerationJobRecord } from '../types';
 const FILTER_KEY = 'image-prompt-library:gallery-filter:v1';
 const HISTORY_KEY = 'image-prompt-library:gallery-history:v1';
 const STATUSES = ['queued', 'running', 'succeeded', 'accepted', 'failed', 'cancelled', 'discarded'];
-const FILTERS = ['', 'successful', 'completed', ...STATUSES];
+const FILTERS = ['', 'active', 'successful', 'completed', ...STATUSES];
+const VISIBLE_FILTERS = ['', 'active', 'successful', 'accepted', 'failed'];
 const MAX_JOBS = 200;
 const MAX_BYTES = 2 * 1024 * 1024;
 const MAX_AGE = 30 * 60 * 1000;
@@ -13,17 +14,20 @@ export interface GalleryHistory { jobs: GenerationJobRecord[]; total: number; sa
 export function readGalleryFilter(): string {
   try {
     const value = localStorage.getItem(FILTER_KEY);
-    if (value !== null && FILTERS.includes(value)) return value;
+    if (value !== null && VISIBLE_FILTERS.includes(value)) return value;
+    if (value === 'queued' || value === 'running') return 'active';
+    if (value === 'succeeded') return 'successful';
   } catch { /* Browser storage may be unavailable. */ }
-  return 'successful';
+  return '';
 }
 
 export function saveGalleryFilter(value: string): void {
-  if (!FILTERS.includes(value)) return;
+  if (!VISIBLE_FILTERS.includes(value)) return;
   try { localStorage.setItem(FILTER_KEY, value); } catch { /* Filtering still works without persistence. */ }
 }
 
 export function galleryFilterStatuses(filter: string): string | undefined {
+  if (filter === 'active') return 'queued,running';
   if (filter === 'successful') return 'succeeded,accepted';
   if (filter === 'completed') return 'succeeded,accepted,failed';
   return STATUSES.includes(filter) ? filter : undefined;
