@@ -2,13 +2,27 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Plus, Trash2, Server, Copy, GripVertical, ArrowUp, ArrowDown, RefreshCw, KeyRound } from 'lucide-react';
 import { api } from '../api/client';
 import { copyApiProfile, reorderApiProfiles } from '../api/profileActions';
-import type { OpenAICompatibleProfile, OpenAICompatibleProfiles, UiLanguage } from '../types';
+import type { ModelCatalog, OpenAICompatibleProfile, OpenAICompatibleProfiles, UiLanguage } from '../types';
 import { compatibleEndpointPreview, parseProfileModels, profileValidation } from '../utils/profileSettings';
-import { readGenerationPreference, resetGenerationPreference } from '../utils/generationPreferences';
-import { COMPATIBLE_ENTERPRISE_MODELS, IMAGE25_MODELS, type CompatibleRecipe } from '../utils/compatibleRecipe';
+import { readGenerationPreference, resetGenerationPreference, updateRememberedModel } from '../utils/generationPreferences';
+import type { CompatibleRecipe } from '../utils/compatibleRecipe';
 import './OpenAICompatibleSettings.css';
 
 const newProfile = (): OpenAICompatibleProfile => ({ id: crypto.randomUUID(), display_name: '', base_url: '', model: '', models: [], base_url_mode: 'versioned', stream: false, partial_images: 0, response_format: 'auto', timeout: 300, api_key_present: false, configured: false });
+const emptyCatalog = (): ModelCatalog => ({ models: [], fetched_at: null, checked_at: null, error: null });
+const catalogErrorReasons: Record<string, string> = {
+  'Save an API URL and API key before refreshing models.': '请先保存接口地址和密钥。',
+  'The provider denied access to its model list. Check the saved API key and permissions.': '接口拒绝读取模型，请检查已保存密钥及权限。',
+  'The model list request timed out. Try refreshing again later.': '读取模型列表超时，请稍后重试。',
+  'Could not connect to the model list endpoint.': '无法连接模型列表接口，请检查地址和网络。',
+  'The provider could not return its model list. Check that this connection supports GET /models.': '接口未能返回模型列表，请确认支持 GET /models。',
+  'The provider returned an invalid model list.': '接口返回的模型列表格式无效。',
+  'The provider model list exceeded the supported size limit.': '接口返回的模型列表超过大小限制。',
+  'The provider returned no models. Any previously fetched models have been kept.': '接口返回了空模型列表，旧清单已保留。',
+  'The saved connection changed during refresh. Refresh the current connection again.': '读取期间连接配置发生变化，请刷新当前连接。',
+  'A newer model refresh has started. The older response was discarded.': '已有更新的模型请求，旧响应已忽略。',
+  'The saved model cache could not be read. Refresh the model list again.': '无法读取模型缓存，请重新刷新。',
+};
 
 export default function OpenAICompatibleSettings({ onSaved, uiLanguage, isDefaultConnection = false, onSetDefaultConnection }: { onSaved: () => Promise<void>; uiLanguage: UiLanguage; isDefaultConnection?: boolean; onSetDefaultConnection?: () => void }) {
   const [collection, setCollection] = useState<OpenAICompatibleProfiles>();
@@ -21,10 +35,23 @@ export default function OpenAICompatibleSettings({ onSaved, uiLanguage, isDefaul
   const [modelsText, setModelsText] = useState('');
   const [remembered, setRemembered] = useState<CompatibleRecipe>();
   const [resetPending, setResetPending] = useState(false);
+  const [catalog, setCatalog] = useState<ModelCatalog>(emptyCatalog());
+  const [catalogBusy, setCatalogBusy] = useState(false);
+  const [showAllModels, setShowAllModels] = useState(false);
+  const catalogEpoch = useRef(0);
+  const selectedProfile = useRef<string | undefined>(undefined);
+  const selectedCatalog = useRef<ModelCatalog>(emptyCatalog());
+  const catalogFlights = useRef(new Map<string, Promise<ModelCatalog | undefined>>());
   const epoch = useRef(0);
   const inFlight = useRef(false);
   const chinese = uiLanguage !== 'en';
   const choose = (profile: OpenAICompatibleProfile) => {
+    catalogEpoch.current += 1;
+    selectedProfile.current = profile.id;
+    selectedCatalog.current = profile.model_catalog || emptyCatalog();
+    setCatalog(selectedCatalog.current);
+    setCatalogBusy(catalogFlights.current.has(profile.id));
+    setShowAllModels(false);
     setConfig({ ...profile });
     setApiKey('');
     setMessage('');
@@ -48,10 +75,47 @@ export default function OpenAICompatibleSettings({ onSaved, uiLanguage, isDefaul
   };
   useEffect(() => {
     load();
-    return () => { epoch.current += 1; inFlight.current = false; };
+    return () => { epoch.current += 1; inFlight.current = false; catalogEpoch.current += 1; selectedProfile.current = undefined; };
   }, []);
 
-  const mutate = async (operation: () => Promise<OpenAICompatibleProfiles>, nextId?: string) => {
+  const refreshCatalog = async (profileId: string, afterSave = false) => {
+    const existing = catalogFlights.current.get(profileId);
+    if (existing && !afterSave) return;
+    const request = ++catalogEpoch.current;
+    const previous = selectedCatalog.current;
+    const current = () => request === catalogEpoch.current && selectedProfile.current === profileId;
+    const pending = (async () => {
+      // A saved connection gets one fresh request after any older request ends.
+      if (existing) await existing.catch(() => undefined);
+      if (!current()) return;
+      return api.refreshOpenAICompatibleModels(profileId);
+    })();
+    catalogFlights.current.set(profileId, pending);
+    setCatalogBusy(true);
+    const apply = (value: ModelCatalog) => {
+      if (!current()) return;
+      selectedCatalog.current = value;
+      setCatalog(value);
+      setCollection(store => store ? { ...store, profiles: store.profiles.map(profile => profile.id === profileId ? { ...profile, model_catalog: value } : profile) } : store);
+      setConfig(profile => profile?.id === profileId ? { ...profile, model_catalog: value } : profile);
+    };
+    try {
+      const value = await pending;
+      if (!value || !current()) return;
+      apply(value);
+      window.dispatchEvent(new Event('ipl:agent-config-changed'));
+    } catch {
+      // Display a local fixed message, never raw responses or credentials.
+      apply({ ...previous, checked_at: new Date().toISOString(), error: 'model_catalog_refresh_failed' });
+    } finally {
+      if (catalogFlights.current.get(profileId) === pending) {
+        catalogFlights.current.delete(profileId);
+        if (selectedProfile.current === profileId) setCatalogBusy(false);
+      }
+    }
+  };
+
+  const mutate = async (operation: () => Promise<OpenAICompatibleProfiles>, nextId?: string, onConfirmed?: (value: OpenAICompatibleProfiles) => void) => {
     if (inFlight.current) return;
     inFlight.current = true;
     const request = ++epoch.current;
@@ -61,6 +125,7 @@ export default function OpenAICompatibleSettings({ onSaved, uiLanguage, isDefaul
     try {
       const value = await operation();
       if (request !== epoch.current) return;
+      onConfirmed?.(value);
       setCollection(value);
       choose(value.profiles.find(p => p.id === nextId) || value.profiles.find(p => p.id === value.default_profile_id) || value.profiles[0] || newProfile());
       window.dispatchEvent(new Event('ipl:agent-config-changed'));
@@ -84,12 +149,23 @@ export default function OpenAICompatibleSettings({ onSaved, uiLanguage, isDefaul
       setMessage(issue === 'name' ? (chinese ? '请填写配置名称。' : 'Enter a profile name.') : issue === 'url' ? (chinese ? '请填写 HTTP(S) Base URL，不包含密钥、查询参数、片段或 /images/ 接口路径。' : 'Enter an HTTP(S) Base URL without credentials, query parameters, fragments or an /images/ endpoint.') : issue === 'models' ? (chinese ? '最多 100 个模型，每个 ID 不超过 200 字符，不含控制字符。' : 'Use up to 100 model IDs, each at most 200 characters and without control characters.') : issue === 'partial_images' ? (chinese ? '中间预览图数量必须是 0–3 的整数。' : 'Partial images must be a whole number from 0 to 3.') : (chinese ? '超时必须是 1–1800 之间的整数秒。' : 'Timeout must be a whole number from 1 to 1800 seconds.'));
       return;
     }
-    const { id, api_key_present: _present, configured: _configured, ...fields } = config;
-    void mutate(() => api.saveOpenAICompatibleProfile(id, { ...fields, models, ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}) }), id);
+    const { id, api_key_present: _present, configured: _configured, model_catalog: _catalog, ...fields } = config;
+    catalogEpoch.current += 1;
+    const previousModel = collection?.profiles.find(profile => profile.id === id)?.model || '';
+    void mutate(() => api.saveOpenAICompatibleProfile(id, { ...fields, models, ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}) }), id, value => {
+      const saved = value.profiles.find(profile => profile.id === id);
+      if (!saved || saved.model === previousModel) return;
+      try { updateRememberedModel(localStorage, id, saved.model); } catch { /* A saved profile still applies to the open composer if browser storage is unavailable. */ }
+      window.dispatchEvent(new CustomEvent('ipl:profile-model-saved', { detail: { profileId: id, model: saved.model } }));
+    }).then(saved => { if (saved && selectedProfile.current === id) void refreshCatalog(id, true); });
   };
   const stored = collection?.profiles.some(p => p.id === config?.id);
   const storedProfile = collection?.profiles.find(p => p.id === config?.id);
   const dirty = Boolean(apiKey || (config && (storedProfile ? JSON.stringify(config) !== JSON.stringify(storedProfile) || JSON.stringify(parseProfileModels(modelsText)) !== JSON.stringify(storedProfile.models || []) : JSON.stringify({ ...config, id: '' }) !== JSON.stringify({ ...newProfile(), id: '' }) || modelsText.trim())));
+  const discoveredModels = [...catalog.models].filter(model => showAllModels || model.image_generation !== false).sort((a, b) => (a.image_generation === true ? 0 : a.image_generation === null ? 1 : 2) - (b.image_generation === true ? 0 : b.image_generation === null ? 1 : 2));
+  const modelSuggestions = [...new Set([...parseProfileModels(modelsText), ...catalog.models.map(model => model.id)])];
+  const catalogErrorReason = catalog.error && Object.prototype.hasOwnProperty.call(catalogErrorReasons, catalog.error) ? (chinese ? catalogErrorReasons[catalog.error] : catalog.error) : '';
+  const timeLabel = (value: string) => { const date = new Date(value); return Number.isNaN(date.getTime()) ? value : date.toLocaleString(chinese ? 'zh-CN' : 'en-US'); };
   const move = (sourceId: string, targetId: string) => {
     if (!collection || sourceId === targetId || dirty) return;
     const ids = collection.profiles.map(profile => profile.id);
@@ -159,8 +235,15 @@ export default function OpenAICompatibleSettings({ onSaved, uiLanguage, isDefaul
         <label>API Key<input type="password" autoComplete="new-password" spellCheck={false} value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder={config.api_key_present ? (chinese ? '已保存；留空保留此接口的密钥' : 'Saved; leave blank to keep this API key') : (chinese ? '输入此接口的 API Key' : 'Enter this API key')} /><small className="compatible-key-status"><KeyRound size={12} aria-hidden="true" />{config.api_key_present ? (chinese ? '密钥已保存在服务端，页面不会读取原值' : 'Key saved on the server; its value is never read by this page') : (chinese ? '尚未保存密钥' : 'No saved key')}</small></label>
         <div className="compatible-request-settings">
           <h5>{chinese ? '模型与请求' : 'Model and request'}</h5>
-          <label>{chinese ? '可用图片模型' : 'Available image models'}<textarea aria-label={chinese ? '可用图片模型' : 'Available image models'} rows={3} spellCheck={false} value={modelsText} onChange={e => setModelsText(e.target.value)} placeholder={'gpt-image-2\ngpt-image-2.5-sunburst'} /><small>{chinese ? '每行一个完整模型 ID，也可用逗号分隔。画廊仅推荐此列表；留空沿用现有推荐。默认模型会一并保留。' : 'One exact model ID per line, or separated by commas. Gallery suggests this list; leave empty to keep existing suggestions. The default model is also retained.'}</small></label>
-          <label>{chinese ? '默认图片模型（可选）' : 'Default image model (optional)'}<input list="compatible-known-models" value={config.model} spellCheck={false} onChange={e => setConfig({ ...config, model: e.target.value })} placeholder="gpt-image-2.5-sunburst" /><datalist id="compatible-known-models">{['gpt-image-2', ...IMAGE25_MODELS, ...COMPATIBLE_ENTERPRISE_MODELS].map(model => <option key={model} value={model} />)}</datalist><small>{chinese ? '填写接口支持的完整模型 ID，也可输入自定义名称。已有浏览器参数记忆优先；Agent 文本与图片模型在 Agent 配置中分别设置。' : 'Use an exact supported model ID, including custom aliases. Remembered browser parameters take precedence. Agent text and image models are configured separately in Agent settings.'}</small></label>
+          <section className="compatible-model-catalog" aria-label={chinese ? '接口模型清单' : 'API model catalog'}>
+            <header><h5>{chinese ? '接口模型清单' : 'API model catalog'}</h5><button type="button" className="secondary" aria-label={chinese ? '刷新接口模型' : 'Refresh API models'} disabled={busy || dirty || !stored || !config.configured || catalogBusy} onClick={() => { if (!busy && !dirty && stored && config.configured && !catalogBusy) void refreshCatalog(config.id); }}><RefreshCw size={14} aria-hidden="true" />{catalogBusy ? (chinese ? '读取中…' : 'Loading…') : (chinese ? '刷新模型' : 'Refresh models')}</button></header>
+            <p>{chinese ? '保存配置后自动读取一次。清单使用服务端已保存的连接；能力标签来自接口声明，不代表已完成生图验证。' : 'Fetched once after saving. Uses the saved server connection. Capability labels come from the service and do not verify image generation.'}</p>
+            <div className="compatible-catalog-times">{catalog.fetched_at && <span>{chinese ? '上次成功：' : 'Last success: '}<time dateTime={catalog.fetched_at}>{timeLabel(catalog.fetched_at)}</time></span>}{catalog.checked_at && <span>{chinese ? '本次尝试：' : 'Last attempt: '}<time dateTime={catalog.checked_at}>{timeLabel(catalog.checked_at)}</time></span>}</div>
+            {catalog.error && <div role="status" className="compatible-catalog-error">{catalog.models.length ? (chinese ? '模型清单刷新失败，保留上次成功清单。仍可手动填写模型。' : 'Refresh failed; the last successful catalog is retained. You can still enter a model manually.') : (chinese ? '暂未获取模型清单，仍可手动填写模型。' : 'No model catalog is available. You can still enter a model manually.')}{catalogErrorReason && <span>{catalogErrorReason}</span>}</div>}
+            {catalog.models.length > 0 ? <><div className="compatible-catalog-filters"><button type="button" aria-pressed={!showAllModels} onClick={() => setShowAllModels(false)}>{chinese ? '图片 / 未知' : 'Image / unknown'}</button><button type="button" aria-label={chinese ? '显示全部接口模型' : 'Show all API models'} aria-pressed={showAllModels} onClick={() => setShowAllModels(true)}>{chinese ? `全部 (${catalog.models.length})` : `All (${catalog.models.length})`}</button></div><div className="compatible-catalog-list">{discoveredModels.map(model => <button type="button" key={model.id} data-catalog-model={model.id} aria-pressed={config.model === model.id} onClick={() => setConfig(current => current ? { ...current, model: model.id } : current)}><span>{model.id}</span><small className={model.image_generation === true ? 'is-image' : ''}>{model.image_generation === true ? (chinese ? '声明支持生图' : 'Image output declared') : model.image_generation === false ? (chinese ? '声明不支持生图' : 'No image output declared') : (chinese ? '能力未知' : 'Capability unknown')}</small></button>)}</div>{!discoveredModels.length && <p>{chinese ? '接口未声明图片模型，可查看全部模型或手动填写。' : 'No image-capable or unknown models were listed. View all models or enter one manually.'}</p>}</> : !catalogBusy && !catalog.error && <p>{stored ? (chinese ? '尚未读取模型清单，可刷新或手动填写。' : 'No catalog has been fetched. Refresh it or enter a model manually.') : (chinese ? '先保存连接后读取模型清单。' : 'Save this connection before fetching its models.')}</p>}
+          </section>
+          <label>{chinese ? '可用图片模型' : 'Available image models'}<textarea aria-label={chinese ? '可用图片模型' : 'Available image models'} rows={3} spellCheck={false} value={modelsText} onChange={e => setModelsText(e.target.value)} placeholder={chinese ? '手动补充模型 ID，每行一个' : 'Additional model IDs, one per line'} /><small>{chinese ? '手动补充清单，每行一个完整模型 ID，也可用逗号分隔。接口发现不会覆盖此列表或默认模型；画廊会合并显示。' : 'Add model IDs manually, one per line or separated by commas. Discovery never overwrites this list or the default model; Gallery combines the choices.'}</small></label>
+          <label>{chinese ? '默认图片模型（可选）' : 'Default image model (optional)'}<input list="compatible-known-models" value={config.model} spellCheck={false} onChange={e => setConfig({ ...config, model: e.target.value })} placeholder={chinese ? '填写此接口的默认模型 ID' : 'Default model ID for this API'} /><datalist id="compatible-known-models">{modelSuggestions.map(model => <option key={model} value={model} />)}</datalist><small>{chinese ? '填写接口支持的完整模型 ID，也可输入自定义名称。保存新的默认模型会同步本浏览器记忆；画廊仍可单独选择本次模型。Agent 模型在 Agent 配置中分别设置。' : 'Use an exact model ID supported by your service, including custom aliases. Saving a new default also updates this browser’s remembered model; Gallery can still choose a different model for a request. Agent models are configured separately.'}</small></label>
           <label>{chinese ? '请求超时（秒）' : 'Request timeout (seconds)'}<input required type="number" min="1" max="1800" step="1" value={config.timeout} onChange={e => setConfig({ ...config, timeout: Number(e.target.value) })} /><small>{chinese ? '1–1800 秒。超时不会自动重新发送付费请求，也不代表上游已取消任务。' : '1–1800 seconds. A timeout does not automatically resubmit a paid request or confirm upstream cancellation.'}</small></label>
         </div>
         <div className="compatible-request-settings compatible-transport-settings">
@@ -175,7 +258,7 @@ export default function OpenAICompatibleSettings({ onSaved, uiLanguage, isDefaul
           {endpoints ? <dl>{[[chinese ? '文生图' : 'Generate', endpoints.generate], [chinese ? '参考图 / 编辑' : 'Reference / edit', endpoints.edit], ['Agent', endpoints.responses]].map(([label, url]) => <div key={label}><dt>{label}</dt><dd><code>POST {url}</code></dd></div>)}</dl> : <p>{chinese ? '填写有效 Base URL 后显示实际请求路径。' : 'Enter a valid Base URL to preview request paths.'}</p>}
           <p>{chinese ? '多张生成由本地队列拆为单图任务；并发由现有队列统一管理，当前没有每配置的并发开关。' : 'Multiple images are queued as individual jobs. Concurrency is managed by the local queue; no per-profile concurrency setting is available.'}</p>
         </section>
-        <p className="muted compatible-provider-note">{chinese ? '密钥仅存于服务端，不进入图库备份。保存配置只进行本地校验，不代表远端调用成功。' : 'Keys stay on the server, outside library backups. Saving validates the configuration locally and does not verify a remote call.'}</p>
+        <p className="muted compatible-provider-note">{chinese ? '密钥仅存于服务端，不进入图库备份。保存后会读取模型清单，不发送生图请求；读取成功不代表已验证生图能力。' : 'Keys stay on the server, outside library backups. Saving reads the model list without generating images; a successful list request does not verify image generation.'}</p>
         <div className="compatible-profile-actions">
           <button type="submit" className="primary">{chinese ? (busy ? '保存中…' : '保存配置') : (busy ? 'Saving…' : 'Save profile')}</button>
           {dirty && <button type="button" className="secondary" onClick={() => choose(storedProfile || newProfile())}>{chinese ? '放弃修改' : 'Discard changes'}</button>}
@@ -187,7 +270,7 @@ export default function OpenAICompatibleSettings({ onSaved, uiLanguage, isDefaul
       </fieldset>
     </form>}
     {stored && remembered && <section className="compatible-remembered"><h5>{chinese ? '此配置在本浏览器的生成参数' : 'Remembered generation parameters'}</h5>
-      <p>{chinese ? '画廊会分别记住每个配置的参数，优先于上方默认图片模型；下次选择此配置时继续使用。' : 'Gallery remembers parameters for each profile and uses them when you select it again. They take precedence over the default model above.'}</p>
+      <p>{chinese ? '画廊会分别记住每个配置的参数，下次选择此配置时继续使用。保存新的默认模型只更新记忆中的模型，其余参数保留。' : 'Gallery remembers parameters for each profile and uses them when you select it again. Saving a new default model updates only the remembered model and keeps the other parameters.'}</p>
       <dl>{[[chinese ? '模型' : 'Model', remembered.model || (chinese ? '未选择' : 'Not selected')], [chinese ? '尺寸' : 'Size', remembered.size_mode === 'auto4k' ? (chinese ? '4K 自动比例' : '4K automatic ratio') : remembered.size], [chinese ? '质量' : 'Quality', remembered.quality], [chinese ? '格式' : 'Format', remembered.output_format.toUpperCase()], [chinese ? '背景' : 'Background', remembered.background], [chinese ? '审核' : 'Moderation', remembered.moderation || 'auto'], ...(remembered.output_format !== 'png' && remembered.output_compression !== undefined ? [[chinese ? '压缩质量' : 'Compression', String(remembered.output_compression)]] : [])].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>
       <button type="button" className="secondary" disabled={busy || dirty} onClick={() => setResetPending(true)}>{chinese ? '重置本浏览器参数' : 'Reset browser parameters'}</button>
       {resetPending && <div className="compatible-profile-confirm"><p>{chinese ? '恢复为此配置的默认模型、自动尺寸与质量、PNG；当前画廊输入框中的此配置也会同步更新。提示词和参考图保留。' : 'Restore the profile’s default model, automatic size and quality, and PNG, including the current Gallery composer for this profile. Keep the prompt and references.'}</p><div className="compatible-profile-actions"><button type="button" className="secondary" onClick={() => setResetPending(false)}>{chinese ? '取消' : 'Cancel'}</button><button type="button" className="secondary" disabled={busy || dirty} onClick={resetRecipe}>{chinese ? '确认重置' : 'Reset parameters'}</button></div></div>}

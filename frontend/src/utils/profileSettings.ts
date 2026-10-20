@@ -26,7 +26,8 @@ export function parseProfileModels(value: string): string[] {
 }
 
 /** The selected historical/custom model remains available after a profile changes. */
-export function profileModelChoices(profile: Pick<OpenAICompatibleProfile, 'models' | 'model'> | undefined, selected: string, fallback: string[] = []): string[] {
+export function profileModelChoices(profile: Pick<OpenAICompatibleProfile, 'models' | 'model' | 'model_catalog'> | undefined, selected: string, fallback: string[] = []): string[] {
   const configured = profile?.models?.length ? profile.models : fallback;
-  return [...new Set([selected, profile?.model || '', ...configured].map(model => model.trim()).filter(Boolean))];
+  const discovered = [...(profile?.model_catalog?.models || [])].sort((a,b) => Number(b.image_generation === true) - Number(a.image_generation === true));
+  return [...new Set([selected, profile?.model || '', ...configured, ...discovered.map(model => model.id)].map(model => model.trim()).filter(Boolean))];
 }

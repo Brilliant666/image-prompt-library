@@ -21,6 +21,10 @@ from backend.services.generation_jobs import GenerationJobConflict, GenerationJo
 from backend.services.image_store import MAX_IMAGE_PIXELS
 from backend.services.image_download import download_image, ImageDownloadError, MAX_IMAGE_BYTES
 from backend.services.image_api_stream import ImageStreamError, iter_image_events, read_json_response
+from backend.services.model_catalog import (
+    ERRORS as CATALOG_ERRORS, ModelCatalogCache, ModelCatalogError,
+    connection_fingerprint, empty_catalog, fetch_models,
+)
 
 PROVIDER_ID = "openai_compatible"
 AUTH_MODE = "api_key"
@@ -30,6 +34,7 @@ ASPECT_RATIO_SIZES = {
     "9:16": "720x1280", "4:3": "1152x864", "16:9": "1280x720",
 }
 _config_lock = Lock()
+_catalog_refreshes = {}
 IMAGE_25_MODELS = tuple(f"gpt-image-2.5-{variant}{snapshot}" for variant in ("flare", "sunburst") for snapshot in ("", "-2026-09-08"))
 
 
@@ -56,6 +61,10 @@ class OpenAICompatibleError(RuntimeError):
     def __init__(self, message, diagnostics=None):
         super().__init__(message)
         self.diagnostics = diagnostics or {"category": "local_validation"}
+
+
+class ModelCatalogProfileNotFound(OpenAICompatibleError):
+    pass
 
 
 def requested_image_size(parameters):
@@ -265,11 +274,79 @@ class OpenAICompatibleConfig:
             raise OpenAICompatibleError("Selected third-party API profile no longer exists; choose a profile before generating")
         return {**document["profiles"][selected], "id": selected}
 
-    @staticmethod
-    def _public(value):
+    def _public(self, value):
+        catalog = self._cached_model_catalog(value)
         value = dict(value)
         present = bool(value.pop("api_key", ""))
-        return {**value, "api_key_present": present, "configured": bool(value["base_url"] and present)}
+        return {**value, "api_key_present": present, "configured": bool(value["base_url"] and present),
+                "model_catalog": catalog}
+
+    def _cached_model_catalog(self, settings):
+        if not settings["base_url"] or not settings["api_key"]:
+            return empty_catalog()
+        try:
+            root = normalize_base_url(settings["base_url"], settings["base_url_mode"])
+        except OpenAICompatibleError:
+            return empty_catalog()
+        return ModelCatalogCache(self.path).read(
+            settings["id"], connection_fingerprint(settings, root), settings["api_key"])
+
+    def _catalog_profile(self, profile_id):
+        self._validate_id(profile_id)
+        document = self._document()
+        if profile_id not in document["profiles"]:
+            raise ModelCatalogProfileNotFound("Selected third-party API profile no longer exists")
+        return {**document["profiles"][profile_id], "id": profile_id}
+
+    def model_catalog(self, profile_id):
+        """A local read only, including when called by provider/status endpoints."""
+        return self._cached_model_catalog(self._catalog_profile(profile_id))
+
+    def refresh_model_catalog(self, profile_id, http_client=None):
+        """Fetch saved credentials only; stale in-flight responses never change the cache."""
+        with _config_lock:
+            settings = self._catalog_profile(profile_id)
+            if not settings["base_url"] or not settings["api_key"]:
+                return {**empty_catalog(), "error": CATALOG_ERRORS["not_configured"]}
+            root = normalize_base_url(settings["base_url"], settings["base_url_mode"])
+            fingerprint = connection_fingerprint(settings, root)
+            initial_stat = self.path.stat()
+            revision = (initial_stat.st_mtime_ns, initial_stat.st_size, initial_stat.st_ino)
+            refresh_key = (str(self.path.resolve()), profile_id)
+            token = object()
+            _catalog_refreshes[refresh_key] = token
+        try:
+            models, error = None, None
+            try:
+                models = fetch_models(root, settings["api_key"], http_client)
+            except ModelCatalogError as exc:
+                error = CATALOG_ERRORS[exc.code]
+            checked_at = datetime.now(timezone.utc).isoformat()
+            with _config_lock:
+                current = self._catalog_profile(profile_id)
+                current_stat = self.path.stat()
+                current_root = normalize_base_url(current["base_url"], current["base_url_mode"])
+                if (revision != (current_stat.st_mtime_ns, current_stat.st_size, current_stat.st_ino)
+                        or fingerprint != connection_fingerprint(current, current_root)):
+                    return {**self._cached_model_catalog(current), "error": CATALOG_ERRORS["changed"]}
+                if _catalog_refreshes.get(refresh_key) is not token:
+                    return {**self._cached_model_catalog(current), "error": CATALOG_ERRORS["superseded"]}
+                cache = ModelCatalogCache(self.path)
+                catalog = cache.read(profile_id, fingerprint, settings["api_key"])
+                catalog.update(checked_at=checked_at, error=error)
+                if models is not None:
+                    catalog.update(models=models, fetched_at=checked_at)
+                if self.library_path is None:
+                    raise OpenAICompatibleError("Active library path is required to save model cache")
+                try:
+                    cache.write(profile_id, fingerprint, catalog, self._document()["profiles"], self.library_path)
+                except (OSError, ValueError, TypeError):
+                    raise OpenAICompatibleError("Could not save model catalog") from None
+                return catalog
+        finally:
+            with _config_lock:
+                if _catalog_refreshes.get(refresh_key) is token:
+                    del _catalog_refreshes[refresh_key]
 
     def public(self, profile_id=None):
         return self._public(self.read(profile_id))

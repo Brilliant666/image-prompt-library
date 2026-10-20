@@ -63,4 +63,21 @@
 .compatible-toggle input:checked::before{transform:translateX(16px)}
 .compatible-toggle input:focus-visible{outline:2px solid var(--studio-accent);outline-offset:3px}
 .compatible-default-status{align-self:center;color:var(--studio-accent);font-size:12px}
+.compatible-model-catalog{min-width:0;padding:12px;border:1px solid var(--studio-hairline);border-radius:12px;background:rgb(127 127 127 / .025)}
+.compatible-model-catalog>header{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.compatible-model-catalog>header button{display:inline-flex;align-items:center;gap:6px;padding:7px 9px;font-size:11px;white-space:nowrap}
+.compatible-model-catalog>p,.compatible-catalog-times{font-size:11px;line-height:1.6;color:var(--studio-muted)}
+.compatible-catalog-times{display:grid;gap:3px;margin:8px 0}
+.compatible-catalog-error{margin:8px 0;padding:9px;border-radius:8px;background:rgb(220 100 70 / .08);color:var(--studio-ink);font-size:11px;line-height:1.6}
+.compatible-catalog-error>span{display:block;margin-top:3px}
+.compatible-catalog-filters{display:flex;gap:5px;margin:10px 0 7px}
+.compatible-catalog-filters button{padding:6px 9px;border:0;border-radius:7px;background:transparent;color:var(--studio-muted);font-size:11px}
+.compatible-catalog-filters button[aria-pressed=true]{background:rgb(var(--studio-accent-rgb) / .08);color:var(--studio-accent)}
+.compatible-catalog-list{display:grid;gap:4px;max-height:240px;overflow-y:auto;overscroll-behavior:contain}
+.compatible-catalog-list button{display:flex;align-items:center;justify-content:space-between;gap:10px;min-width:0;padding:9px;border:1px solid transparent;border-radius:8px;background:var(--studio-surface);color:var(--studio-ink);text-align:left}
+.compatible-catalog-list button>span{min-width:0;overflow-wrap:anywhere;font-size:12px}
+.compatible-catalog-list button>small{flex-shrink:0;color:var(--studio-muted);font-size:10px}
+.compatible-catalog-list button>small.is-image{color:var(--studio-accent)}
+.compatible-catalog-list button[aria-pressed=true]{border-color:var(--studio-accent);background:rgb(var(--studio-accent-rgb) / .05)}
+.compatible-catalog-list button:hover{border-color:var(--studio-hairline)}
 @media(max-width:400px){.compatible-current-profile{flex-wrap:wrap}.compatible-current-profile>.compatible-protocol-badge{display:none}.compatible-profiles .compatible-profile-toolbar{gap:6px}.compatible-profile-toolbar .secondary{font-size:11px;padding:8px}.compatible-profile-option strong .compatible-protocol-badge{display:none}}

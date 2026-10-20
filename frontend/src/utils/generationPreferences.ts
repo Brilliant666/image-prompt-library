@@ -30,6 +30,13 @@ export function writeGenerationPreference(storage: StorageLike, profile: string,
     storage.setItem(PREFIX + 'selected-profile', profile);
   } catch { /* Storage may be unavailable or full; generation still works. */ }
 }
+/** A saved profile model changes no other choices and never selects that profile. */
+export function updateRememberedModel(storage: StorageLike, profile: string, model: string): boolean {
+  try {
+    storage.setItem(PREFIX + profile, JSON.stringify({ ...readGenerationPreference(storage, profile), model }));
+    return true;
+  } catch { return false; }
+}
 export function lastGenerationProfile(storage: StorageLike): string | null {
   try { return storage.getItem(PREFIX + 'selected-profile'); } catch { return null; }
 }

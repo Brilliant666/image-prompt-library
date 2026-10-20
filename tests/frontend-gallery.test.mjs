@@ -231,7 +231,7 @@ function inputHarness(t, overrides = {}, apiOverrides = {}, environment = {}) {
   const find = (type, label) => { const node = children(tree).find(node => node.type === type && (node.props['aria-label'] === label || node.props.children === label)); assert.ok(node, `${type} ${label} exists`); return node.props; };
   render();
   t.after(() => { slots.forEach(slot => slot?.cleanup?.()); if (oldStorage) Object.defineProperty(globalThis, 'localStorage', oldStorage); else delete globalThis.localStorage; if (OldImage) globalThis.Image = OldImage; else delete globalThis.Image; if (OldReader) globalThis.FileReader = OldReader; else delete globalThis.FileReader; });
-  return { state, flush, find, emitPreferenceReset: profileId => eventTarget.dispatchEvent(new CustomEvent('ipl:generation-preference-reset', { detail: { profileId } })), update: value => { props = { ...props, ...value }; render(); }, get tree() { return tree; } };
+  return { state, flush, find, emitModelSaved: (profileId, model) => eventTarget.dispatchEvent(new CustomEvent('ipl:profile-model-saved', { detail: { profileId, model } })), emitPreferenceReset: profileId => eventTarget.dispatchEvent(new CustomEvent('ipl:generation-preference-reset', { detail: { profileId } })), update: value => { props = { ...props, ...value }; render(); }, get tree() { return tree; } };
 }
 
 test('actual InputBar submit callback locks two same-tick clicks and clears input only after confirmed creation', async t => {
@@ -251,11 +251,103 @@ test('gallery model suggestions follow the current API list and retain a restore
   });
   await harness.flush();
   harness.find('button', '请求模型 historical-model').onClick(); await harness.flush();
-  const choices = () => children(harness.tree).find(node => node.type === 'datalist' && node.props.id === 'gallery-models').props.children.map(option => option.props.value);
+  const choices = () => children(harness.tree).filter(node => node.type === 'button' && node.props['data-model-id']).map(node => node.props['data-model-id']);
   assert.deepEqual(choices(), ['historical-model', 'configured-default', 'model-one', 'model-two']);
   harness.find('input', '请求模型完整 ID').onChange({ target: { value: 'custom-entered-model' } }); await harness.flush();
   assert.deepEqual(choices(), ['custom-entered-model', 'configured-default', 'model-one', 'model-two']);
   assert.equal(harness.state.posts.length, 0, 'browsing and editing the model never submits a request');
+});
+
+test('an explicit saved default updates only the matching gallery model and preserves the full draft', async t => {
+  const harness = inputHarness(t, { command: { id: 981, job: historicalJob({ parameters: { ...historicalJob().parameters, stream: false, partial_images: 0, response_format: 'auto', base_url_mode: 'custom' } }) } });
+  await harness.flush();
+  harness.emitModelSaved('another-api', 'wrong-model'); await harness.flush();
+  harness.find('button', '请求模型 gateway-original-alias');
+  harness.emitModelSaved('original-api', 'provider-new-alias'); await harness.flush();
+  harness.find('button', '请求模型 provider-new-alias');
+  assert.equal(harness.find('textarea', '画廊提示词').value, originalPrompt);
+  assert.equal(harness.state.posts.length, 0);
+  harness.find('button', '生成图片').onClick(); await harness.flush();
+  const payload = harness.state.posts[0];
+  assert.equal(payload.model, 'provider-new-alias');
+  assert.equal(payload.prompt_text, originalPrompt);
+  assert.equal(payload.parameters.size, '2560x3840');
+  assert.equal(payload.parameters.quality, 'max');
+  assert.equal(payload.parameters.stream, false);
+  assert.equal(payload.parameters.partial_images, 0);
+  assert.equal(payload.parameters.response_format, 'auto');
+  assert.equal(payload.parameters.base_url_mode, 'custom');
+});
+
+test('model choices stay visible across aliases and submit the exact selected or custom ID', async t => {
+  const harness = inputHarness(t, {}, {openAICompatibleProfiles: async () => ({profiles: [{id: 'original-api', display_name: 'Original API', configured: true, model: 'vendor-flare', models: ['vendor-1k', 'vendor-4k']}], default_profile_id: 'original-api'})});
+  await harness.flush();
+  harness.find('textarea', '画廊提示词').onChange({target: {value: '  synthetic prompt\n'}}); await harness.flush();
+  harness.find('button', '请求模型 vendor-flare').onClick(); await harness.flush();
+  harness.find('input', '请求模型完整 ID').onChange({target: {value: 'old-sunburst'}}); await harness.flush();
+  const choices = children(harness.tree).filter(node => node.type === 'button' && node.props['data-model-id']);
+  assert.deepEqual(choices.map(node => node.props['data-model-id']), ['old-sunburst', 'vendor-flare', 'vendor-1k', 'vendor-4k']);
+  choices.find(node => node.props['data-model-id'] === 'vendor-4k').props.onClick(); await harness.flush();
+  harness.find('button', '生成图片').onClick(); await harness.flush();
+  assert.equal(harness.state.posts[0].model, 'vendor-4k');
+  harness.find('button', '请求模型 vendor-4k').onClick(); await harness.flush();
+  harness.find('input', '请求模型完整 ID').onChange({target: {value: 'tomorrow-new-alias'}}); await harness.flush();
+  harness.find('button', '生成图片').onClick(); await harness.flush();
+  assert.equal(harness.state.posts[1].model, 'tomorrow-new-alias');
+  assert.equal(harness.state.posts[1].prompt_text, '  synthetic prompt\n');
+});
+
+test('empty API model lists do not invent supported models and allow adopting its saved default', async t => {
+  const harness = inputHarness(t, {command: {id: 982, job: historicalJob()}}, {openAICompatibleProfiles: async () => ({profiles: [{id: 'original-api', display_name: 'Original API', configured: true, model: 'new-default', models: []}], default_profile_id: 'original-api'})});
+  await harness.flush();
+  harness.find('button', '请求模型 gateway-original-alias').onClick(); await harness.flush();
+  assert.deepEqual(children(harness.tree).filter(node => node.type === 'button' && node.props['data-model-id']).map(node => node.props['data-model-id']), ['gateway-original-alias', 'new-default']);
+  harness.find('button', '使用此配置的默认模型').onClick(); await harness.flush();
+  harness.find('button', '请求模型 new-default');
+  assert.equal(harness.find('textarea', '画廊提示词').value, originalPrompt);
+});
+
+test('saving a model invalidates pending historical lookup without replaying it on settings refresh', async t => {
+  const lookup = deferred();
+  const harness = inputHarness(t, {}, {generationJobForImage: () => lookup.promise});
+  await harness.flush();
+  harness.find('textarea', '画廊提示词').onChange({target: {value: 'keep this draft'}}); await harness.flush();
+  harness.update({command: {id: 983, item: {id: 'item', prompts: [], images: [{id: 'image', generation_provider: 'openai_compatible', original_path: 'original.png'}]}, imageId: 'image'}});
+  await harness.flush();
+  harness.emitModelSaved('original-api', 'saved-default'); await harness.flush();
+  lookup.resolve(historicalJob()); await harness.flush();
+  harness.update({configurationRevision: 1}); await harness.flush();
+  harness.find('button', '请求模型 saved-default');
+  assert.equal(harness.find('textarea', '画廊提示词').value, 'keep this draft');
+  assert.equal(harness.find('button', '生成图片').disabled, false);
+  assert.equal(harness.state.posts.length, 0);
+});
+
+test('clearing the optional default does not write the obsolete model back into browser memory', async t => {
+  const harness = inputHarness(t); await harness.flush();
+  harness.emitModelSaved('original-api', ''); await harness.flush();
+  harness.find('button', '请求模型 未选择');
+  assert.equal(preferences.readGenerationPreference(localStorage, 'original-api').model, '');
+  assert.equal(harness.state.posts.length, 0);
+});
+
+test('discovered models join manual choices, prioritize explicit image output and never replace a missing historical model', async t => {
+  let catalog = {models: [{id: 'unknown-alias', image_generation: null}, {id: 'text-model', image_generation: false}, {id: 'new-image-model', image_generation: true}], fetched_at: '2026-10-20T00:00:00Z', checked_at: '2026-10-20T00:00:00Z', error: null};
+  const harness = inputHarness(t, {command: {id: 984, job: historicalJob()}}, {openAICompatibleProfiles: async () => ({profiles: [{id: 'original-api', display_name: 'Original API', configured: true, model: 'default-model', models: ['manual-alias'], model_catalog: catalog}], default_profile_id: 'original-api'})});
+  await harness.flush();
+  harness.find('button', '请求模型 gateway-original-alias').onClick(); await harness.flush();
+  const choices=()=>children(harness.tree).filter(node=>node.type==='button'&&node.props['data-model-id']);
+  assert.deepEqual(choices().map(node=>node.props['data-model-id']), ['gateway-original-alias','default-model','manual-alias','new-image-model','unknown-alias','text-model']);
+  assert.ok(children(harness.tree).some(node=>node.props?.role==='status'&&String(node.props.children).includes('未找到当前模型')));
+  assert.equal(harness.find('textarea','画廊提示词').value,originalPrompt);
+  catalog={...catalog,error:'Models request timed out.'};
+  harness.update({configurationRevision:1}); await harness.flush();
+  assert.equal(choices().length,6);
+  harness.find('button','请求模型 gateway-original-alias');
+  choices().find(node=>node.props['data-model-id']==='new-image-model').props.onClick(); await harness.flush();
+  harness.find('button','生成图片').onClick(); await harness.flush();
+  assert.equal(harness.state.posts[0].model,'new-image-model');
+  assert.equal(harness.state.posts[0].prompt_text,originalPrompt);
 });
 
 test('parameter chips display complete model and exact pixels and preserve edits in a three-job request', async t => {
