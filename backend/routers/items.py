@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Request
 from backend.repositories import ItemRepository
 from backend.schemas import ItemBatchRequest, ItemBatchResult, ItemCreate, ItemDetail, ItemList, ItemUpdate
+from backend.services.capture_organizer import gallery_title_status
 router = APIRouter()
 
 def repo(request: Request): return ItemRepository(request.app.state.library_path)
@@ -29,6 +30,11 @@ def batch_items(request: Request, payload: ItemBatchRequest):
 @router.get("/items/{item_id}", response_model=ItemDetail)
 def get_item(request: Request, item_id: str):
     try: return repo(request).get_item(item_id)
+    except KeyError as exc: not_found(exc)
+
+@router.get("/items/{item_id}/gallery-title-status")
+def get_gallery_title_status(request: Request, item_id: str):
+    try: return gallery_title_status(request.app.state.library_path, item_id)
     except KeyError as exc: not_found(exc)
 
 @router.patch("/items/{item_id}", response_model=ItemDetail)

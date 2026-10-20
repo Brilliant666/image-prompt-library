@@ -195,6 +195,7 @@ export default function ItemDetailModal({
   showMutations = true,
   showManagementActions = true,
   canGenerate = false,
+  titleRefreshKey = 0,
 }: {
   id?: string;
   t: Translator;
@@ -212,6 +213,7 @@ export default function ItemDetailModal({
   showMutations?: boolean;
   showManagementActions?: boolean;
   canGenerate?: boolean;
+  titleRefreshKey?: number;
 }) {
   const allowManagementActions = showMutations && showManagementActions;
   const [item, setItem] = useState<ItemDetail>();
@@ -303,6 +305,18 @@ export default function ItemDetailModal({
       .catch(error => { if (!cancelled) setLoadError(error instanceof Error ? error.message : t('loadFailed')); });
     return () => { cancelled = true; };
   }, [id, loadAttempt, t]);
+
+  useEffect(() => {
+    if (!id || !titleRefreshKey || !item) return;
+    let cancelled = false;
+    const previousTitle = item?.title;
+    void api.item(id).then(next => {
+      if (!cancelled) setItem(current => current?.id === id && current.title === previousTitle
+        ? { ...current, title: next.title } : current);
+    }).catch(() => { /* A failed background refresh must not disturb the open editor. */ });
+    return () => { cancelled = true; };
+    // Patch only the title once per completed naming job; never reload a user's form.
+  }, [id, titleRefreshKey, Boolean(item)]);
 
   useEffect(() => {
     const syncHeroFullscreenState = () => setIsHeroFullscreen(document.fullscreenElement === heroFullscreenFrameRef.current);

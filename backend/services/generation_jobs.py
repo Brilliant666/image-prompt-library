@@ -1686,7 +1686,10 @@ class GenerationJobRepository:
         if not self._refresh_acceptance_claim(job_id, claim_token):
             raise GenerationJobConflict("Generation job acceptance claim is no longer owned")
 
-    def _finalize_acceptance(self, job_id: str, image_id: str, claim_token: str) -> GenerationJobRecord:
+    def _finalize_acceptance(
+        self, job_id: str, image_id: str, claim_token: str, *,
+        auto_title: bool = False, manual_title: bool = False,
+    ) -> GenerationJobRecord:
         timestamp = now()
         with connect(self.library_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -1713,6 +1716,13 @@ class GenerationJobRepository:
             )
             if cursor.rowcount != 1:
                 raise GenerationJobConflict("Generation job could not be accepted")
+            if auto_title:
+                from .capture_organizer import register_gallery_title
+                image = conn.execute("SELECT item_id FROM images WHERE id=?", (image_id,)).fetchone()
+                register_gallery_title(
+                    conn, self.library_path, image["item_id"], image_id,
+                    auto_title=True, manual_title=manual_title,
+                )
             conn.commit()
         return self.get_job(job_id)
 
@@ -2007,7 +2017,13 @@ class GenerationJobRepository:
                 image_ids=image_ids,
                 references_complete=True,
             )
-            accepted_job = self._finalize_acceptance(job_id, image.id, claim_token)
+            if overrides.auto_title:
+                accepted_job = self._finalize_acceptance(
+                    job_id, image.id, claim_token, auto_title=True,
+                    manual_title=bool(overrides.title and overrides.title.strip()),
+                )
+            else:
+                accepted_job = self._finalize_acceptance(job_id, image.id, claim_token)
             finalized = True
             return GenerationJobAcceptResult(job=accepted_job, item=self.items.get_item(new_item.id))
         except Exception:

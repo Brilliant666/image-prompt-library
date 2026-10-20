@@ -16,7 +16,7 @@ import GenerationQueueDrawer, { groupGenerationQueueJobs } from '../GenerationQu
 import { mapGenerationRetryJob } from '../../utils/generationSiblings';
 import './GalleryWorkspace.css';
 
-interface Props {active:boolean;queueOpen:boolean;onQueueOpenChange:(open:boolean)=>void;t:Translator;preferences:LocalPreferences;libraryScope?:string;command?:GalleryCommand;focusJobId?:string;refreshKey:number;configurationRevision:number;promptVariablesEnabled?:boolean;promptLanguage?:string;preferredProvider?:string;onOpenAgent?:(id:string)=>void;onOpenSettings:()=>void;onAccepted:(id:string)=>void;onQueueChanged:()=>void;onCloseDetail?:()=>void}
+interface Props {active:boolean;queueOpen:boolean;onQueueOpenChange:(open:boolean)=>void;t:Translator;preferences:LocalPreferences;libraryScope?:string;command?:GalleryCommand;focusJobId?:string;refreshKey:number;configurationRevision:number;promptVariablesEnabled?:boolean;promptLanguage?:string;preferredProvider?:string;onOpenAgent?:(id:string)=>void;onOpenSettings:()=>void;onAccepted:(id:string,autoTitle?:boolean)=>void;onQueueChanged:()=>void;onCloseDetail?:()=>void}
 export default function GalleryWorkspace({active,queueOpen,onQueueOpenChange,t,preferences,libraryScope,command,focusJobId,refreshKey,configurationRevision,promptVariablesEnabled,promptLanguage,preferredProvider,onOpenAgent,onOpenSettings,onAccepted,onQueueChanged,onCloseDetail}:Props) {
   const [jobs,setJobs]=useState<GenerationJobRecord[]>([]),[total,setTotal]=useState(0),[loading,setLoading]=useState(true),[error,setError]=useState(''),[loadError,setLoadError]=useState(''),[message,setMessage]=useState('');
   const [query,setQuery]=useState(''),[status,setStatus]=useState(readGalleryFilter),[selected,setSelected]=useState<Set<string>>(new Set()),[detail,setDetail]=useState<GenerationJobRecord>(),[lightbox,setLightbox]=useState<string>(),[localCommand,setLocalCommand]=useState<GalleryCommand>(),[busy,setBusy]=useState(false);
@@ -122,7 +122,7 @@ export default function GalleryWorkspace({active,queueOpen,onQueueOpenChange,t,p
       }
       setBatch(undefined);setSelected(new Set());setMessage('');resultsRef.current?.scrollTo({top:0});setMutationRevision(value=>value+1);onQueueChanged();
     }} onOpenSettings={onOpenSettings} configurationRevision={configurationRevision} promptVariablesEnabled={promptVariablesEnabled} promptLanguage={promptLanguage} preferredProvider={preferredProvider} onOpenAgent={onOpenAgent}/>
-    {detail&&active&&!largeJob&&<DetailModal key={detail.id} job={detail} t={t} onClose={closeDetail} onChange={()=>void refreshAfterChange()} onAccepted={id=>{invalidateHistory();closeDetail();onAccepted(id);}} onReuse={reuse} onLightbox={()=>setLightbox(detail.id)}/ >}
+    {detail&&active&&!largeJob&&<DetailModal key={detail.id} job={detail} t={t} onClose={closeDetail} onChange={()=>void refreshAfterChange()} onAccepted={(id,autoTitle)=>{invalidateHistory();closeDetail();onAccepted(id,autoTitle);}} onReuse={reuse} onLightbox={()=>setLightbox(detail.id)}/ >}
     {largeJob&&active&&<Lightbox src={mediaUrl(largeJob.result_path!)} currentIndex={largeIndex} total={resultJobs.length} onClose={()=>setLightbox(undefined)} onPrev={()=>setLightbox(resultJobs[(largeIndex-1+resultJobs.length)%resultJobs.length].id)} onNext={()=>setLightbox(resultJobs[(largeIndex+1)%resultJobs.length].id)}/>}
   </section>;
 }

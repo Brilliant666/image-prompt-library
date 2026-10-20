@@ -15,9 +15,15 @@ interface Props {
   t: Translator;
   onClose: () => void;
   onChange: () => void;
-  onAccepted: (itemId: string) => void;
+  onAccepted: (itemId: string, autoTitle?: boolean) => void;
   onReuse: (job: GenerationJobRecord, edit?: boolean) => void;
   onLightbox: () => void;
+}
+
+const AUTO_TITLE_KEY = 'ipl:gallery-auto-title:v1';
+
+function readAutoTitlePreference() {
+  try { return window.localStorage.getItem(AUTO_TITLE_KEY) === 'true'; } catch { return false; }
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -33,6 +39,8 @@ export default function DetailModal({ job, t, onClose, onChange, onAccepted, onR
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [title, setTitle] = useState('');
+  const [autoTitle, setAutoTitle] = useState(readAutoTitlePreference);
+  const [attachMode, setAttachMode] = useState(false);
   const [target, setTarget] = useState('');
   const [items, setItems] = useState<ItemSummary[]>([]);
   const [saveOpen, setSaveOpen] = useState(false);
@@ -46,7 +54,7 @@ export default function DetailModal({ job, t, onClose, onChange, onAccepted, onR
   useEffect(() => () => { copyRequestRef.current += 1; }, []);
 
   useEffect(() => {
-    if (!saveOpen) return;
+    if (!saveOpen || !attachMode) return;
     let cancelled = false;
     setItemsLoading(true);
     void (async () => {
@@ -64,7 +72,7 @@ export default function DetailModal({ job, t, onClose, onChange, onAccepted, onR
     })().catch(e => { if (!cancelled) setError(String(e)); })
       .finally(() => { if (!cancelled) setItemsLoading(false); });
     return () => { cancelled = true; };
-  }, [saveOpen, itemLimit]);
+  }, [saveOpen, attachMode, itemLimit]);
 
   useEffect(() => {
     if (!copied) return;
@@ -103,15 +111,18 @@ export default function DetailModal({ job, t, onClose, onChange, onAccepted, onR
   }
 
   async function accept() {
-    if (busy) return;
+    if (busy || (attachMode && !target)) return;
     setBusy(true);
     setError('');
     try {
-      const result = target
+      const result = attachMode
         ? await api.acceptGenerationJobIntoItem(job.id, target)
-        : await api.acceptGenerationJobAsNewItem(job.id, title.trim() ? { title: title.trim() } : {});
+        : await api.acceptGenerationJobAsNewItem(job.id, {
+          ...(title.trim() ? { title: title.trim() } : {}),
+          auto_title: autoTitle && !title.trim(),
+        });
       onChange();
-      onAccepted(result.item.id);
+      onAccepted(result.item.id, !attachMode && autoTitle && !title.trim());
     } catch (e) {
       setError(String(e));
     } finally {
@@ -154,7 +165,27 @@ export default function DetailModal({ job, t, onClose, onChange, onAccepted, onR
           </div>
           <div className="pg-detail-bottom">
             {error && <p role="alert" className="pg-error">{error}</p>}
-            {saveOpen && !job.accepted_image_id && <div className="pg-save-form"><label>保存位置<select value={target} onChange={e => setTarget(e.target.value)}><option value="">新建参考</option>{items.map(item => <option key={item.id} value={item.id}>附加到：{item.title}</option>)}</select></label>{itemsLoading ? <span>正在加载保存位置…</span> : items.length < itemTotal && <button onClick={() => setItemLimit(value => value + 1000)}>加载更多参考（{items.length} / {itemTotal}）</button>}{!target && <label>名称（可选）<input value={title} onChange={e => setTitle(e.target.value)} placeholder="留空自动命名"/></label>}<button className="pg-detail-save-confirm" disabled={busy} onClick={() => void accept()}>{busy ? '保存中…' : '确认保存'}</button></div>}
+            {saveOpen && !job.accepted_image_id && <div className="pg-save-form">
+              <div className="pg-save-heading">收录到 Library</div>
+              {attachMode ? <>
+                <p className="pg-save-title-help">将这张图添加到一个已有条目中，沿用该条目的名称，不改变其他图片。</p>
+                <label>已有条目<select disabled={busy || itemsLoading} value={target} onChange={e => setTarget(e.target.value)}><option value="">请选择条目</option>{items.map(item => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label>
+                {itemsLoading ? <span role="status">正在加载已有条目…</span> : items.length < itemTotal && <button disabled={busy} onClick={() => setItemLimit(value => value + 1000)}>加载更多条目（{items.length} / {itemTotal}）</button>}
+              </> : <>
+                <p className="pg-save-title-help">单独保存为一个新条目，保留原图与原始提示词。</p>
+                <label>名称（可选）<input disabled={busy} value={title} onChange={e => setTitle(e.target.value)} placeholder="留空使用默认名称"/></label>
+                <label className="pg-save-auto-title">
+                  <input type="checkbox" checked={autoTitle && !title.trim()} disabled={busy || Boolean(title.trim())} onChange={e => {
+                    setAutoTitle(e.target.checked);
+                    try { window.localStorage.setItem(AUTO_TITLE_KEY, String(e.target.checked)); } catch { /* Collection remains available when browser storage is blocked. */ }
+                  }}/>
+                  <span>使用采集的“看图与文字模型”自动命名</span>
+                </label>
+                <p className="pg-save-title-help">{title.trim() ? '将保留你填写的名称，不调用命名模型。' : '记住本浏览器的选择；开启后可能产生模型费用。先保存，再后台命名；失败不影响收录。排队较久时可刷新 Library 查看。'}</p>
+              </>}
+              <button type="button" className="pg-save-mode" disabled={busy} onClick={() => { setAttachMode(!attachMode); setTarget(''); setError(''); }}>{attachMode ? '改为单独收录' : '添加到已有条目…'}</button>
+              <button className="pg-detail-save-confirm" disabled={busy || (attachMode && !target)} onClick={() => void accept()}>{busy ? '保存中…' : '确认保存'}</button>
+            </div>}
             <div className="pg-detail-actions">
               <button className="pg-detail-reuse" onClick={() => onReuse(job)}><RotateCcw size={16}/>恢复配方</button>
               <button disabled={!canUse} onClick={() => onReuse(job, true)}><ImagePlus size={16}/>继续编辑</button>

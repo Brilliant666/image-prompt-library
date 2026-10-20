@@ -54,6 +54,9 @@
 .pg-detail-refined .pg-detail-actions button:hover:not(:disabled) { background:color-mix(in srgb,var(--accent) 12%,transparent); }
 .pg-detail-refined .pg-save-form { padding:12px;margin:0 0 12px;background:color-mix(in srgb,var(--ink) 2%,transparent);border:0;font-size:12px; }
 .pg-detail-refined .pg-save-form input,.pg-detail-refined .pg-save-form select { width:100%; }
+.pg-detail-refined .pg-save-auto-title { display:flex;align-items:flex-start;gap:8px;line-height:1.6; }
+.pg-detail-refined .pg-save-auto-title input { flex:0 0 auto;width:15px;height:15px;margin:2px 0 0;accent-color:var(--accent); }
+.pg-save-title-help { margin:0;color:var(--muted);font-size:11px;line-height:1.6; }
 @media(max-width:900px) { .pg-detail-scroll { padding-left:22px;padding-right:22px; }.pg-detail-bottom { margin:0 22px; }.pg-detail-refined .pg-detail-image { padding:15px; }.pg-detail-refined .pg-detail-image-size { left:20px; }.pg-detail-refined .pg-detail-download { right:20px; } }
 @media(max-width:760px) {
   .pg-detail-overlay { padding:10px; }
@@ -70,3 +73,7 @@
   .pg-detail-refined .pg-detail-actions { gap:6px; }
   .pg-detail-refined .pg-detail-actions button { padding:8px;font-size:11px; }
 }
+
+.pg-save-heading { font-weight:500;font-size:13px; }
+.pg-detail-refined .pg-save-form .pg-save-mode { justify-self:start;width:auto;padding:3px 0;border:0;background:transparent;color:var(--muted);font-size:11px; }
+.pg-detail-refined .pg-save-form .pg-save-mode:hover:not(:disabled) { color:var(--accent); }

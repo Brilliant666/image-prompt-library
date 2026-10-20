@@ -16,22 +16,32 @@
 .pg-composer .pg-provider-line{display:flex;align-items:center;gap:6px;min-width:0;padding:5px 3px 7px;color:var(--muted);font-size:11px}
 .pg-composer .pg-provider-trigger{display:inline-flex;align-items:center;gap:5px;min-width:0;max-width:100%;padding:3px 6px;border:0;border-radius:7px;background:transparent;color:var(--muted);font-size:11px}
 .pg-provider-trigger>span{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.pg-provider-trigger>svg{flex:none}
-.pg-composer .pg-composer-toolbar{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:end}
-.pg-composer .pg-parameter-chips{display:flex;flex-wrap:wrap;align-items:center;gap:6px;min-width:0}
-.pg-composer .pg-param-chip{display:inline-flex;align-items:center;justify-content:flex-start;gap:6px;min-width:0;max-width:100%;min-height:32px;margin:0;padding:6px 11px;border:1px solid transparent;border-radius:999px;background:color-mix(in srgb,var(--ink) 4%,transparent);color:var(--ink);font-size:12px;line-height:1.4;box-shadow:none}
+/* Rows depend on available space, never the selected model's text width. */
+.pg-composer{container:gallery-composer / inline-size}
+.pg-composer .pg-composer-toolbar{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));grid-template-areas:"model model model size size size" "quality quality quality count count count" "more more more more actions actions";gap:6px;align-items:center}
+.pg-composer .pg-param-model{grid-area:model}
+.pg-composer .pg-param-size{grid-area:size}
+.pg-composer .pg-param-quality{grid-area:quality}
+.pg-composer .pg-param-count{grid-area:count}
+.pg-composer .pg-param-more{grid-area:more;max-width:280px}
+@container gallery-composer (min-width:560px){
+  .pg-composer .pg-composer-toolbar{grid-template-columns:minmax(0,1.2fr) minmax(0,1.65fr) 104px 104px;grid-template-areas:"model size quality count" "more more actions actions"}
+}
+@container gallery-composer (min-width:820px){
+  .pg-composer .pg-composer-toolbar{grid-template-columns:minmax(0,1.2fr) minmax(0,1.65fr) 104px 104px minmax(0,1.65fr) 80px;grid-template-areas:"model size quality count more actions"}
+}
+.pg-composer .pg-parameter-chips{display:contents}
+.pg-composer .pg-param-chip{display:inline-flex;align-items:center;justify-content:flex-start;gap:6px;min-width:0;width:100%;max-width:100%;min-height:32px;margin:0;padding:6px 11px;border:1px solid transparent;border-radius:999px;background:color-mix(in srgb,var(--ink) 4%,transparent);color:var(--ink);font-size:12px;line-height:1.4;box-shadow:none}
 .pg-composer button.pg-param-chip:hover,.pg-composer button.pg-param-chip.active,.pg-composer .pg-add-image:hover,.pg-composer .pg-add-image.active{background:color-mix(in srgb,var(--accent) 10%,transparent);color:var(--accent-strong)}
 .pg-param-chip>.pg-param-label{flex:none;color:var(--muted)}
-.pg-param-chip>.pg-param-value{min-width:0;overflow-wrap:anywhere;text-align:left;font-variant-numeric:tabular-nums}
+.pg-param-chip>.pg-param-value{flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;text-align:left;font-variant-numeric:tabular-nums}
 .pg-param-chip>svg{flex:none;color:var(--muted)}
-.pg-composer .pg-param-model .pg-param-value{font-size:12px;word-break:break-word}
-.pg-composer .pg-param-count{position:relative;flex:none}
-.pg-composer .pg-param-count select{width:auto;min-width:30px;height:auto;margin:0;padding:0;border:0;border-radius:0;appearance:none;background:transparent;color:inherit;font:inherit;cursor:pointer}
-.pg-param-count>svg{pointer-events:none}
-.pg-composer .pg-composer-actions{display:flex;align-items:center;gap:8px;align-self:end;padding-bottom:1px}
+.pg-composer .pg-param-model .pg-param-value{font-size:12px}
+.pg-composer .pg-composer-actions{grid-area:actions;display:flex;align-items:center;justify-self:end;gap:8px;padding-bottom:0}
 .pg-composer .pg-composer-actions>button{display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;min-width:36px;min-height:36px;margin:0;padding:0;border:0;border-radius:12px;background:color-mix(in srgb,var(--ink) 6%,transparent);color:var(--muted)}
 .pg-composer .pg-composer-actions>.pg-submit{background:var(--accent);color:#fff}
 .pg-composer .pg-composer-actions>.pg-submit:hover:not(:disabled){background:var(--accent-strong)}
-.pg-composer button:focus-visible,.pg-composer .pg-param-count:focus-within{outline:2px solid var(--accent);outline-offset:2px}
+.pg-composer button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .pg-composer .pg-parameters-panel{z-index:25;width:min(380px,calc(100vw - 48px));max-height:min(55dvh,460px)}
 .pg-composer .pg-parameters-panel[data-panel=add]{left:auto;right:10px;width:min(280px,calc(100vw - 48px))}
 .pg-composer .pg-add-options{display:grid;gap:4px}.pg-composer .pg-add-options button{justify-content:flex-start;gap:10px;padding:10px 8px;border:0;border-radius:10px;background:transparent;text-align:left;font-size:13px}
@@ -41,12 +51,6 @@
 .pg-composer .pg-more-fields>label>select,.pg-composer .pg-more-fields>label>input{box-sizing:border-box;flex:0 0 112px;width:112px;min-width:0;max-width:112px;margin:0;padding:7px 11px;border:0;border-radius:8px;background:color-mix(in srgb,var(--ink) 6%,transparent);color:var(--ink);font-size:12px}
 .pg-more-fields>label>span>small{font-size:10px;color:var(--muted)}.pg-more-fields>small{font-size:10px;line-height:1.6;color:var(--muted);margin-top:2px}
 @media(max-width:760px){
-  .pg-composer .pg-composer-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:5px}
-  .pg-composer .pg-parameter-chips{display:contents}
-  .pg-composer .pg-param-chip{padding:5px 9px;font-size:11px}
-  .pg-composer .pg-param-model .pg-param-value{font-size:11px}
-  .pg-composer .pg-composer-actions{flex:0 0 auto;align-self:center;margin-left:auto;gap:3px;padding-bottom:0}
-  .pg-composer .pg-composer-actions>button{width:34px;height:34px;min-width:34px;min-height:34px}
   .pg-composer .pg-parameters-panel{left:0;width:min(380px,calc(100vw - 24px));max-height:48dvh}
   .pg-composer .pg-parameters-panel[data-panel=more]{left:auto;right:12px;width:min(270px,calc(100vw - 48px))}
 }

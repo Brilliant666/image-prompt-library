@@ -18,6 +18,7 @@ import ConfigPanel from './components/ConfigPanel';
 import BatchActionDialog from './components/BatchActionDialog';
 import { useDebouncedValue } from './hooks/useDebouncedValue';
 import { useItemsQuery } from './hooks/useItemsQuery';
+import { useGalleryTitleUpdates } from './hooks/useGalleryTitleUpdates';
 import { useModalFocus } from './hooks/useModalFocus';
 import type { AppearancePreset, AppConfig, AppUpdateStatus, ClusterRecord, ItemBatchAction, ItemDetail, ItemSortMode, ItemSummary, TagRecord, AiProvider, ViewMode } from './types';
 import { copyTextToClipboard } from './utils/clipboard';
@@ -84,6 +85,7 @@ function localizeItemForDisplay(item: ItemSummary, language: UiLanguage): ItemSu
 }
 
 export default function App() {
+  const [titleUpdates, setTitleUpdates] = useState<Record<string, number>>({});
   const [q, setQ] = useState('');
   const [sort, setSort] = useState<ItemSortMode>(DEFAULT_ITEM_SORT);
   const debouncedQ = useDebouncedValue(q);
@@ -295,10 +297,15 @@ export default function App() {
   const handleFilterSelect = (c: ClusterRecord) => selectCluster(c);
   const clearCluster = () => setClusterId(undefined);
   const saved = () => { refreshClusters(); refreshLibraryTotal(); refreshTags(); setItemsReloadKey(k => k + 1); };
+  const savedLibraryAssets = () => { saved(); setGenerationQueueRefreshKey(k => k + 1); };
+  const trackGalleryTitle = useGalleryTitleUpdates(itemId => {
+    setItemsReloadKey(k => k + 1);
+    setTitleUpdates(previous => ({ ...previous, [itemId]: (previous[itemId] || 0) + 1 }));
+  });
   const clearSelection = () => setSelectedItemIds(new Set());
   const exitSelectionMode = () => { setBatchActionDialog(undefined); setSelectionActionsOpen(false); setSelectionMode(false); clearSelection(); };
-  const deleted = () => { setDetailId(undefined); setEditing(undefined); setFocusedGenerationJobId(undefined); exitSelectionMode(); refreshClusters(); refreshLibraryTotal(); refreshTags(); setItemsReloadKey(k => k + 1); };
-  const refreshAfterBatch = () => { refreshClusters(); refreshLibraryTotal(); refreshTags(); setItemsReloadKey(k => k + 1); };
+  const deleted = () => { setDetailId(undefined); setEditing(undefined); setFocusedGenerationJobId(undefined); exitSelectionMode(); refreshClusters(); refreshLibraryTotal(); refreshTags(); setItemsReloadKey(k => k + 1); setGenerationQueueRefreshKey(k => k + 1); };
+  const refreshAfterBatch = () => { refreshClusters(); refreshLibraryTotal(); refreshTags(); setItemsReloadKey(k => k + 1); setGenerationQueueRefreshKey(k => k + 1); };
   const updatePreferredLanguage = (language: PromptCopyLanguage) => {
     setPreferredLanguage(language);
     window.localStorage.setItem(PROMPT_LANGUAGE_STORAGE_KEY, language);
@@ -537,7 +544,7 @@ export default function App() {
         : <CardsView t={t} items={localizedData.items} loading={contentLoading} emptyMode={emptyMode} total={localizedData.total} sort={activeSort} onSort={updateSort} clusterName={localizedClusterName(selectedCluster, uiLanguage)} hasActiveSearch={Boolean(parsedSearchQuery.q.trim())} onClearCluster={clearCluster} onOpen={setDetailId} onFavorite={isDemoMode ? undefined : favorite} onEdit={isDemoMode ? undefined : editSummary} editingItemId={editingItemId} onToggleSelection={selectionMode ? toggleSelectedItem : undefined} selectedIds={selectedItemIds} onCopyPrompt={copyPrompt} onAdd={isDemoMode ? undefined : openNewItemEditor} onOpenConfig={openConfig} />)}
     </main>
     {!isDemoMode && <>
-      <GalleryWorkspace active={view === 'gallery'} queueOpen={galleryQueueOpen} onQueueOpenChange={setGalleryQueueOpen} t={t} preferences={localPreferences} libraryScope={appConfig?.library_path} command={galleryCommand} focusJobId={focusedGenerationJobId} onCloseDetail={() => setFocusedGenerationJobId(undefined)} refreshKey={generationQueueRefreshKey} configurationRevision={configurationRevision} promptVariablesEnabled={Boolean(appConfig?.features?.camelot?.percival)} promptLanguage={preferredLanguage === 'origin' ? uiLanguage : preferredLanguage} preferredProvider={defaultAiProvider} onOpenAgent={id => {setAgentFocus({id,token:Date.now()}); updateView('agent');}} onOpenSettings={openProviders} onAccepted={id => { saved(); setDetailId(id); }} onQueueChanged={() => setGenerationQueueRefreshKey(value => value + 1)} />
+      <GalleryWorkspace active={view === 'gallery'} queueOpen={galleryQueueOpen} onQueueOpenChange={setGalleryQueueOpen} t={t} preferences={localPreferences} libraryScope={appConfig?.library_path} command={galleryCommand} focusJobId={focusedGenerationJobId} onCloseDetail={() => setFocusedGenerationJobId(undefined)} refreshKey={generationQueueRefreshKey} configurationRevision={configurationRevision} promptVariablesEnabled={Boolean(appConfig?.features?.camelot?.percival)} promptLanguage={preferredLanguage === 'origin' ? uiLanguage : preferredLanguage} preferredProvider={defaultAiProvider} onOpenAgent={id => {setAgentFocus({id,token:Date.now()}); updateView('agent');}} onOpenSettings={openProviders} onAccepted={(id, autoTitle) => { saved(); setDetailId(id); if (autoTitle) trackGalleryTitle(id); }} onQueueChanged={() => setGenerationQueueRefreshKey(value => value + 1)} />
       <AgentWorkspace focusConversationId={agentFocus?.id} focusToken={agentFocus?.token} active={view === 'agent'} onOpenSettings={() => { setFocusConfigProviders(false); setConfigSection('agent'); setConfigOpen(true); }} onOpenJob={id => {setFocusedGenerationJobId(id); updateView('gallery');}} onLibraryChanged={saved} onJobsChanged={() => setGenerationQueueRefreshKey(value => value + 1)} />
     </>}
     </div>
@@ -606,10 +613,10 @@ export default function App() {
         </div>
       </div>
     )}
-    {detailId && <ItemDetailModal key={detailId} t={t} id={detailId} uiLanguage={uiLanguage} preferredLanguage={preferredLanguage} clusters={localizedClusters} tags={tags} onClose={closeItemDetail} onCopyPrompt={showCopyToast} onChanged={saved} onDelete={isDemoMode ? undefined : deleteDetail} onOpenItem={setDetailId} onGenerate={openGenerationFromDetail} onEdit={(item) => { closeItemDetail(); setEditing(item); setEditorOpen(true); }} showMutations={!isDemoMode} showManagementActions={showManagementActions} canGenerate={!isDemoMode} />}
+    {detailId && <ItemDetailModal key={detailId} t={t} id={detailId} titleRefreshKey={titleUpdates[detailId] || 0} uiLanguage={uiLanguage} preferredLanguage={preferredLanguage} clusters={localizedClusters} tags={tags} onClose={closeItemDetail} onCopyPrompt={showCopyToast} onChanged={saved} onDelete={isDemoMode ? undefined : deleteDetail} onOpenItem={setDetailId} onGenerate={openGenerationFromDetail} onEdit={(item) => { closeItemDetail(); setEditing(item); setEditorOpen(true); }} showMutations={!isDemoMode} showManagementActions={showManagementActions} canGenerate={!isDemoMode} />}
     {toast && <div className={`toast copy-toast elegant-toast ${toast.tone}${toastClosing ? ' is-closing' : ''}`} role="status"><span className="toast-icon">{toast.tone === 'success' ? <Check size={16} /> : <XCircle size={16} />}</span><span className="toast-title">{toast.title}</span></div>}
     {!isDemoMode && <QuickCaptureModal open={quickCaptureOpen} uiLanguage={uiLanguage} onClose={() => setQuickCaptureOpen(false)} onSaved={saved} onFullEditor={item => { setQuickCaptureOpen(false); setEditing(item); setEditorOpen(true); }} />}
-    {editorOpen && <ItemEditorModal t={t} item={editing} clusters={localizedClusters} tags={tags} defaultAiProvider={defaultAiProvider} onClose={() => setEditorOpen(false)} onSaved={saved} onDeleted={deleted} allowDelete={showManagementActions} />}
+    {editorOpen && <ItemEditorModal t={t} item={editing} clusters={localizedClusters} tags={tags} defaultAiProvider={defaultAiProvider} onClose={() => setEditorOpen(false)} onSaved={savedLibraryAssets} onDeleted={deleted} allowDelete={showManagementActions} />}
     </div>
   </div>
 }
