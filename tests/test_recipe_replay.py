@@ -132,9 +132,12 @@ def test_legacy_inline_recipe_is_recoverable_without_exposing_data_urls(replay):
     recipe, originals, _ = saved_recipe(replay, 2, inline=True)
     stored = repo.get_job(recipe["id"])
     parameters = dict(stored.parameters)
-    for spec in parameters["input_images"]:
+    for spec, original in zip(parameters["input_images"], originals):
         (library / spec.pop("result_path")).unlink()
         spec.pop("preview_path")
+        # New jobs persist only durable paths; explicitly construct the older
+        # inline-only storage shape to exercise its recovery contract.
+        spec["data_url"] = "data:image/png;base64," + base64.b64encode(original).decode()
     with connect(library) as conn:
         conn.execute("UPDATE generation_jobs SET parameters=? WHERE id=?", (json.dumps(parameters), stored.id))
         conn.commit()
@@ -187,6 +190,8 @@ def test_inline_bytes_take_precedence_over_conflicting_nonlibrary_path(replay):
     recipe, originals, _ = saved_recipe(replay, 2, inline=True)
     stored = repo.get_job(recipe["id"])
     parameters = stored.parameters
+    # Simulate a legacy record carrying both inline bytes and a stale path.
+    parameters["input_images"][0]["data_url"] = "data:image/png;base64," + base64.b64encode(originals[0]).decode()
     parameters["input_images"][0]["result_path"] = parameters["input_images"][1]["result_path"]
     with connect(library) as conn:
         conn.execute("UPDATE generation_jobs SET parameters=? WHERE id=?", (json.dumps(parameters), stored.id))

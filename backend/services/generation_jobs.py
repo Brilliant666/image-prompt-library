@@ -251,6 +251,32 @@ def sanitize_generation_parameters(parameters: object, *, redact_image_data: boo
     return sanitize_structured_credentials(parameters, redact_image_data=redact_image_data)
 
 
+def _sanitize_compatible_enqueue_parameters(parameters: dict) -> dict:
+    """Scan metadata first; stage inline images only until strict persistence.
+
+    The caller must pass these inputs through _prepare_reference_input_clones
+    with persist_inline=True, which validates their bytes and removes data_url
+    before any database write. Other strings and all reference metadata retain
+    the ordinary credential filtering.
+    """
+    prepared = dict(parameters)
+    images = prepared.get("input_images")
+    if not isinstance(images, list):
+        return sanitize_generation_parameters(prepared)
+    staged = {}
+    copied = []
+    for index, raw in enumerate(images):
+        spec = dict(raw) if isinstance(raw, dict) else raw
+        if isinstance(spec, dict) and spec.get("source") != "library" and isinstance(spec.get("data_url"), str):
+            staged[index] = spec.pop("data_url")
+        copied.append(spec)
+    prepared["input_images"] = copied
+    sanitized = sanitize_generation_parameters(prepared)
+    for index, data_url in staged.items():
+        sanitized["input_images"][index]["data_url"] = data_url
+    return sanitized
+
+
 def _generation_provenance_parameters(parameters: dict) -> dict:
     return sanitize_generation_parameters(parameters, redact_image_data=True)
 
@@ -369,7 +395,7 @@ class GenerationJobRepository:
         payload = self._freeze_compatible_request(payload)
         if payload.source_item_id:
             self.items.get_item(payload.source_item_id)
-        parameters = sanitize_generation_parameters(payload.parameters)
+        parameters = _sanitize_compatible_enqueue_parameters(payload.parameters) if payload.provider == "openai_compatible" else sanitize_generation_parameters(payload.parameters)
         input_images = parameters.get("input_images")
         input_limit = GENERATION_INPUT_LIMITS.get(payload.provider, MAX_GENERATION_INPUT_IMAGES)
         if isinstance(input_images, list) and len(input_images) > input_limit:
@@ -545,6 +571,7 @@ class GenerationJobRepository:
             if persist_inline and spec.get("source") != "library" and isinstance(spec.get("data_url"), str):
                 spec["result_path"] = self._persist_inline_reference(job_id, index, spec["data_url"])
                 spec["preview_path"] = spec["result_path"]
+                del spec["data_url"]
             result_path = spec.get("result_path")
             if isinstance(result_path, str) and result_path:
                 clone = self._clone_generation_result_input(job_id=job_id, result_path=result_path, name=str(spec.get("name") or ""))
@@ -683,28 +710,28 @@ class GenerationJobRepository:
         return self.get_generation_set(generation_group_id)
 
     @staticmethod
-    def _current_generation_set_records(records: list[GenerationJobRecord]) -> list[GenerationJobRecord]:
-        records_by_id = {record.id: record for record in records}
+    def _current_generation_set_records(records: list[dict]) -> list[dict]:
+        records_by_id = {record["id"]: record for record in records}
         valid_replacements: dict[str, str] = {}
         for record in records:
-            replacement_id = record.metadata.get("retried_by_generation_job_id")
+            replacement_id = record["metadata"].get("retried_by_generation_job_id")
             if (
-                record.status not in {"failed", "discarded"}
+                record["status"] not in {"failed", "discarded"}
                 or not isinstance(replacement_id, str)
-                or not record.generation_group_id
-                or not isinstance(record.generation_group_index, int)
-                or record.generation_group_index < 1
+                or not record["generation_group_id"]
+                or not isinstance(record["generation_group_index"], int)
+                or record["generation_group_index"] < 1
             ):
                 continue
             replacement = records_by_id.get(replacement_id)
             if (
                 replacement is None
-                or replacement.metadata.get("retry_of_generation_job_id") != record.id
-                or replacement.generation_group_id != record.generation_group_id
-                or replacement.generation_group_index != record.generation_group_index
+                or replacement["metadata"].get("retry_of_generation_job_id") != record["id"]
+                or replacement["generation_group_id"] != record["generation_group_id"]
+                or replacement["generation_group_index"] != record["generation_group_index"]
             ):
                 continue
-            valid_replacements[record.id] = replacement.id
+            valid_replacements[record["id"]] = replacement["id"]
 
         superseded_ids: set[str] = set()
         for record_id in valid_replacements:
@@ -717,13 +744,18 @@ class GenerationJobRepository:
                 chain.add(current_id)
                 current_id = valid_replacements[current_id]
             superseded_ids.update(chain)
-        return [record for record in records if record.id not in superseded_ids]
+        return [record for record in records if record["id"] not in superseded_ids]
 
     def _generation_set_from_rows(self, group, rows, *, include_jobs: bool = True) -> GenerationJobSetRecord:
         counts = {status: 0 for status in ("queued", "running", "succeeded", "failed", "accepted", "discarded", "cancelled")}
-        jobs = [self._record_from_row(row) for row in rows]
-        for record in self._current_generation_set_records(jobs):
-            counts[record.status] = counts.get(record.status, 0) + 1
+        # Summaries need only identity, status and retry links. In particular,
+        # never decode inline input images merely to count a batch's states.
+        states = [dict(row) for row in rows]
+        for state in states:
+            metadata = _from_json(state.get("metadata"), {})
+            state["metadata"] = metadata if isinstance(metadata, dict) else {}
+        for record in self._current_generation_set_records(states):
+            counts[record["status"]] = counts.get(record["status"], 0) + 1
         total = int(group["total"])
         completed = counts["succeeded"] + counts["failed"] + counts["accepted"] + counts["discarded"] + counts["cancelled"]
         return GenerationJobSetRecord(
@@ -740,7 +772,7 @@ class GenerationJobRepository:
             cancelled=counts["cancelled"],
             completed=completed,
             remaining=max(0, total - completed),
-            jobs=jobs if include_jobs else [],
+            jobs=[self._record_from_row(row) for row in rows] if include_jobs else [],
         )
 
     def list_jobs(
@@ -771,10 +803,23 @@ class GenerationJobRepository:
             status_rows = conn.execute(
                 "SELECT status, COUNT(*) AS count FROM generation_jobs GROUP BY status"
             ).fetchall()
-            rows = conn.execute(
-                f"SELECT * FROM generation_jobs {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            # Select/sort only IDs before reading large recipe records. Sorting
+            # full rows spills historical inline image payloads into SQLite's
+            # temporary sorter, even when the requested page is very small.
+            page_ids = [row["id"] for row in conn.execute(
+                f"SELECT id FROM generation_jobs {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
                 (*params, limit, offset),
-            ).fetchall()
+            ).fetchall()]
+            rows_by_id = {}
+            for start in range(0, len(page_ids), 500):
+                ids = page_ids[start:start + 500]
+                for row in conn.execute(
+                    f"SELECT * FROM generation_jobs WHERE id IN ({','.join('?' for _ in ids)})",
+                    ids,
+                ).fetchall():
+                    rows_by_id[row["id"]] = row
+            # Preserve the page's ordering without sorting large rows again.
+            rows = [rows_by_id[job_id] for job_id in page_ids if job_id in rows_by_id]
             page_group_ids = list(dict.fromkeys(
                 row["generation_group_id"] for row in rows if row["generation_group_id"]
             ))
@@ -821,7 +866,8 @@ class GenerationJobRepository:
                             group_job_params.append(source_item_id)
                         set_job_rows.extend(conn.execute(
                             f"""
-                            SELECT * FROM generation_jobs
+                            SELECT id, status, generation_group_id, generation_group_index, metadata
+                            FROM generation_jobs
                             WHERE generation_group_id IN ({','.join('?' for _ in group_id_chunk)})
                             {group_job_filter}
                             ORDER BY generation_group_id, generation_group_index ASC, created_at ASC
@@ -2448,7 +2494,7 @@ class GenerationJobRepository:
             raise GenerationJobConflict("Manual result upload supports one image at a time")
         if payload.source_item_id:
             self.items.get_item(payload.source_item_id)
-        parameters = sanitize_generation_parameters(payload.parameters)
+        parameters = _sanitize_compatible_enqueue_parameters(payload.parameters) if payload.provider == "openai_compatible" else sanitize_generation_parameters(payload.parameters)
         input_images = parameters.get("input_images")
         input_limit = GENERATION_INPUT_LIMITS.get(payload.provider, MAX_GENERATION_INPUT_IMAGES)
         if isinstance(input_images, list) and len(input_images) > input_limit:

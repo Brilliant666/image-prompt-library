@@ -2,7 +2,8 @@ import type { GenerationJobRecord } from '../types';
 
 const FILTER_KEY = 'image-prompt-library:gallery-filter:v1';
 const HISTORY_KEY = 'image-prompt-library:gallery-history:v1';
-const STATUSES = ['queued', 'running', 'succeeded', 'accepted', 'failed', 'cancelled', 'discarded'];
+// Cleared images remain in execution history, but never in gallery pages or totals.
+const STATUSES = ['queued', 'running', 'succeeded', 'accepted', 'failed', 'cancelled'];
 const FILTERS = ['', 'active', 'successful', 'completed', ...STATUSES];
 const VISIBLE_FILTERS = ['', 'active', 'successful', 'accepted', 'failed'];
 const MAX_JOBS = 200;
@@ -30,7 +31,7 @@ export function galleryFilterStatuses(filter: string): string | undefined {
   if (filter === 'active') return 'queued,running';
   if (filter === 'successful') return 'succeeded,accepted';
   if (filter === 'completed') return 'succeeded,accepted,failed';
-  return STATUSES.includes(filter) ? filter : undefined;
+  return STATUSES.includes(filter) ? filter : STATUSES.join(',');
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -94,7 +95,7 @@ export function readGalleryHistory(scope: string, filter: string): GalleryHistor
     if (!raw) return;
     if (raw.length * 2 > MAX_BYTES) { clearGalleryHistory(); return; }
     const snapshot: unknown = JSON.parse(raw);
-    if (!record(snapshot) || snapshot.version !== 1 || snapshot.scope !== scope || snapshot.filter !== filter) return;
+    if (!record(snapshot) || snapshot.version !== 2 || snapshot.scope !== scope || snapshot.filter !== filter) return;
     const { jobs, total, savedAt } = snapshot;
     if (!Array.isArray(jobs) || jobs.length > MAX_JOBS || typeof total !== 'number'
       || !Number.isSafeInteger(total) || total < jobs.length || typeof savedAt !== 'number'
@@ -117,7 +118,7 @@ export function saveGalleryHistory(scope: string, filter: string, value: Pick<Ga
     if (jobs.some(job => !job || !matchesFilter(job, filter))) return;
     const safeJobs = jobs as GenerationJobRecord[];
     if (new Set(safeJobs.map(job => job.id)).size !== safeJobs.length) return;
-    const snapshot = JSON.stringify({ version: 1, scope, filter, jobs, total: value.total, savedAt: Date.now() });
+    const snapshot = JSON.stringify({ version: 2, scope, filter, jobs, total: value.total, savedAt: Date.now() });
     // Web Storage stores UTF-16 strings; bound the actual string rather than only its UTF-8 size.
     if (snapshot.length * 2 > MAX_BYTES) { clearGalleryHistory(); return; }
     sessionStorage.setItem(HISTORY_KEY, snapshot);
