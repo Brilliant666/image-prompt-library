@@ -161,15 +161,15 @@ test('reset removes only this profile recipe and preserves selection, other APIs
   assert.equal(resetGenerationPreference({ removeItem() { throw Error('denied'); } }, 'a'), false);
 });
 
-test('custom root mode never appends v1 and model choices preserve exact configured and historical IDs', () => {
+test('custom root mode never appends v1 and non-gpt image choices only preserve the selected historical ID', () => {
   assert.equal(compatibleEndpointPreview('https://example.test/gateway/', 'custom').generate, 'https://example.test/gateway/images/generations');
   assert.equal(compatibleEndpointPreview('https://example.test/v1/v1/', 'custom').base, 'https://example.test/v1/v1');
   assert.equal(compatibleEndpointPreview('https://example.test/', 'custom').responses, 'https://example.test/responses');
   assert.equal(compatibleEndpointPreview('https://key:secret@example.test/', 'custom'), undefined);
   assert.deepEqual(parseProfileModels(' alpha, beta\r\nalpha， gamma\n'), ['alpha', 'beta', 'gamma']);
   assert.deepEqual(parseProfileModels(' \n,'), []);
-  assert.deepEqual(profileModelChoices({ model: 'default-id', models: ['alpha', 'beta', 'alpha'] }, 'historical-id', ['legacy']), ['historical-id', 'default-id', 'alpha', 'beta']);
-  assert.deepEqual(profileModelChoices({ model: 'default-id', models: [] }, '', ['legacy']), ['default-id', 'legacy']);
+  assert.deepEqual(profileModelChoices({ model: 'default-id', models: ['alpha', 'beta', 'alpha'] }, 'historical-id', ['legacy']), ['historical-id']);
+  assert.deepEqual(profileModelChoices({ model: 'default-id', models: [] }, '', ['legacy']), []);
   for (const partial_images of [-1, 4, 1.5, NaN]) assert.equal(profileValidation({ display_name: 'API', base_url: 'https://example.test', timeout: 300, partial_images }), 'partial_images');
   for (const models of [Array.from({ length: 101 }, (_, index) => `model-${index}`), ['a'.repeat(201)], ['model\tname']]) assert.equal(profileValidation({ display_name: 'API', base_url: 'https://example.test', timeout: 300, models }), 'models');
 });
@@ -342,7 +342,7 @@ test('editing a named profile preserves the existing key and does not issue mode
   assert.equal(h.calls[0].fields.base_url, 'https://changed.example.test/v1');
   assert.equal(h.calls[0].fields.model, 'model-a');
   assert.deepEqual(h.calls[0].fields.models, [], 'saving a legacy profile preserves an empty list and existing fallback suggestions');
-  assert.deepEqual(profileModelChoices(h.calls[0].fields, '', ['legacy-suggestion']), ['model-a', 'legacy-suggestion']);
+  assert.deepEqual(profileModelChoices(h.calls[0].fields, '', ['legacy-suggestion']), []);
   assert.ok(!('api_key' in h.calls[0].fields)); assert.ok(!('api_key_present' in h.calls[0].fields));
   assert.equal(readGenerationPreference(h.storage, 'a').model, 'remembered-a');
   assert.equal(h.events.filter(event => event.type === 'ipl:profile-model-saved').length, 0, 'an unrelated save must not change the remembered model');

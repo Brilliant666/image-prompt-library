@@ -252,9 +252,9 @@ test('gallery model suggestions follow the current API list and retain a restore
   await harness.flush();
   harness.find('button', '请求模型 historical-model').onClick(); await harness.flush();
   const choices = () => children(harness.tree).filter(node => node.type === 'button' && node.props['data-model-id']).map(node => node.props['data-model-id']);
-  assert.deepEqual(choices(), ['historical-model', 'configured-default', 'model-one', 'model-two']);
+  assert.deepEqual(choices(), ['historical-model']);
   harness.find('input', '请求模型完整 ID').onChange({ target: { value: 'custom-entered-model' } }); await harness.flush();
-  assert.deepEqual(choices(), ['custom-entered-model', 'configured-default', 'model-one', 'model-two']);
+  assert.deepEqual(choices(), ['custom-entered-model']);
   assert.equal(harness.state.posts.length, 0, 'browsing and editing the model never submits a request');
 });
 
@@ -280,17 +280,17 @@ test('an explicit saved default updates only the matching gallery model and pres
 });
 
 test('model choices stay visible across aliases and submit the exact selected or custom ID', async t => {
-  const harness = inputHarness(t, {}, {openAICompatibleProfiles: async () => ({profiles: [{id: 'original-api', display_name: 'Original API', configured: true, model: 'vendor-flare', models: ['vendor-1k', 'vendor-4k']}], default_profile_id: 'original-api'})});
+  const harness = inputHarness(t, {}, {openAICompatibleProfiles: async () => ({profiles: [{id: 'original-api', display_name: 'Original API', configured: true, model: 'gpt-image-vendor-flare', models: ['gpt-image-vendor-1k', 'gpt-image-vendor-4k']}], default_profile_id: 'original-api'})});
   await harness.flush();
   harness.find('textarea', '画廊提示词').onChange({target: {value: '  synthetic prompt\n'}}); await harness.flush();
-  harness.find('button', '请求模型 vendor-flare').onClick(); await harness.flush();
+  harness.find('button', '请求模型 gpt-image-vendor-flare').onClick(); await harness.flush();
   harness.find('input', '请求模型完整 ID').onChange({target: {value: 'old-sunburst'}}); await harness.flush();
   const choices = children(harness.tree).filter(node => node.type === 'button' && node.props['data-model-id']);
-  assert.deepEqual(choices.map(node => node.props['data-model-id']), ['old-sunburst', 'vendor-flare', 'vendor-1k', 'vendor-4k']);
-  choices.find(node => node.props['data-model-id'] === 'vendor-4k').props.onClick(); await harness.flush();
+  assert.deepEqual(choices.map(node => node.props['data-model-id']), ['old-sunburst', 'gpt-image-vendor-flare', 'gpt-image-vendor-1k', 'gpt-image-vendor-4k']);
+  choices.find(node => node.props['data-model-id'] === 'gpt-image-vendor-4k').props.onClick(); await harness.flush();
   harness.find('button', '生成图片').onClick(); await harness.flush();
-  assert.equal(harness.state.posts[0].model, 'vendor-4k');
-  harness.find('button', '请求模型 vendor-4k').onClick(); await harness.flush();
+  assert.equal(harness.state.posts[0].model, 'gpt-image-vendor-4k');
+  harness.find('button', '请求模型 gpt-image-vendor-4k').onClick(); await harness.flush();
   harness.find('input', '请求模型完整 ID').onChange({target: {value: 'tomorrow-new-alias'}}); await harness.flush();
   harness.find('button', '生成图片').onClick(); await harness.flush();
   assert.equal(harness.state.posts[1].model, 'tomorrow-new-alias');
@@ -298,12 +298,12 @@ test('model choices stay visible across aliases and submit the exact selected or
 });
 
 test('empty API model lists do not invent supported models and allow adopting its saved default', async t => {
-  const harness = inputHarness(t, {command: {id: 982, job: historicalJob()}}, {openAICompatibleProfiles: async () => ({profiles: [{id: 'original-api', display_name: 'Original API', configured: true, model: 'new-default', models: []}], default_profile_id: 'original-api'})});
+  const harness = inputHarness(t, {command: {id: 982, job: historicalJob()}}, {openAICompatibleProfiles: async () => ({profiles: [{id: 'original-api', display_name: 'Original API', configured: true, model: 'gpt-image-new-default', models: []}], default_profile_id: 'original-api'})});
   await harness.flush();
   harness.find('button', '请求模型 gateway-original-alias').onClick(); await harness.flush();
-  assert.deepEqual(children(harness.tree).filter(node => node.type === 'button' && node.props['data-model-id']).map(node => node.props['data-model-id']), ['gateway-original-alias', 'new-default']);
+  assert.deepEqual(children(harness.tree).filter(node => node.type === 'button' && node.props['data-model-id']).map(node => node.props['data-model-id']), ['gateway-original-alias', 'gpt-image-new-default']);
   harness.find('button', '使用此配置的默认模型').onClick(); await harness.flush();
-  harness.find('button', '请求模型 new-default');
+  harness.find('button', '请求模型 gpt-image-new-default');
   assert.equal(harness.find('textarea', '画廊提示词').value, originalPrompt);
 });
 
@@ -331,23 +331,75 @@ test('clearing the optional default does not write the obsolete model back into 
   assert.equal(harness.state.posts.length, 0);
 });
 
-test('discovered models join manual choices, prioritize explicit image output and never replace a missing historical model', async t => {
-  let catalog = {models: [{id: 'unknown-alias', image_generation: null}, {id: 'text-model', image_generation: false}, {id: 'new-image-model', image_generation: true}], fetched_at: '2026-10-20T00:00:00Z', checked_at: '2026-10-20T00:00:00Z', error: null};
+test('discovered gpt-image models preserve a missing historical selection and survive refresh failure', async t => {
+  let catalog = {models: [{id: 'unknown-alias', image_generation: null}, {id: 'text-model', image_generation: false}, {id: 'gpt-image-new-model', image_generation: true}], fetched_at: '2026-10-20T00:00:00Z', checked_at: '2026-10-20T00:00:00Z', error: null};
   const harness = inputHarness(t, {command: {id: 984, job: historicalJob()}}, {openAICompatibleProfiles: async () => ({profiles: [{id: 'original-api', display_name: 'Original API', configured: true, model: 'default-model', models: ['manual-alias'], model_catalog: catalog}], default_profile_id: 'original-api'})});
   await harness.flush();
   harness.find('button', '请求模型 gateway-original-alias').onClick(); await harness.flush();
   const choices=()=>children(harness.tree).filter(node=>node.type==='button'&&node.props['data-model-id']);
-  assert.deepEqual(choices().map(node=>node.props['data-model-id']), ['gateway-original-alias','default-model','manual-alias','new-image-model','unknown-alias','text-model']);
+  assert.deepEqual(choices().map(node=>node.props['data-model-id']), ['gateway-original-alias','gpt-image-new-model']);
   assert.ok(children(harness.tree).some(node=>node.props?.role==='status'&&String(node.props.children).includes('未找到当前模型')));
   assert.equal(harness.find('textarea','画廊提示词').value,originalPrompt);
   catalog={...catalog,error:'Models request timed out.'};
   harness.update({configurationRevision:1}); await harness.flush();
-  assert.equal(choices().length,6);
+  assert.equal(choices().length,2);
   harness.find('button','请求模型 gateway-original-alias');
-  choices().find(node=>node.props['data-model-id']==='new-image-model').props.onClick(); await harness.flush();
+  choices().find(node=>node.props['data-model-id']==='gpt-image-new-model').props.onClick(); await harness.flush();
   harness.find('button','生成图片').onClick(); await harness.flush();
-  assert.equal(harness.state.posts[0].model,'new-image-model');
+  assert.equal(harness.state.posts[0].model,'gpt-image-new-model');
   assert.equal(harness.state.posts[0].prompt_text,originalPrompt);
+});
+
+test('gallery only recommends gpt-image while preserving selected exceptions and unrestricted manual entry', async t => {
+  const models = [
+    ['claude-opus-5', null], ['gemini-3.1-flash-lite-preview', null], ['gpt-6-astra', null],
+    ['gpt-image-2-4k', null], ['google/nano-banana-pro', null], ['gemini-3-pro-image-preview', null],
+    ['midjourney-v7', null], ['google/imagen-4', null], ['black-forest-labs/FLUX.1-schnell', null],
+    ['stable-diffusion-xl', null], ['custom-output-image', true], ['manual-unknown', null], ['gpt-image-declared', true],
+    ['gpt-image-disabled', false], ['manual-disabled', false],
+  ].map(([id, image_generation]) => ({id, image_generation}));
+  const catalog = {models, fetched_at: '2026-10-20T00:00:00Z', checked_at: '2026-10-20T00:00:00Z', error: null};
+  const harness = inputHarness(t, {command: {id: 985, job: historicalJob()}}, {
+    openAICompatibleProfiles: async () => ({profiles: [{id: 'original-api', display_name: 'Original API', configured: true, model: 'gpt-6-astra', models: ['manual-unknown', 'manual-disabled'], model_catalog: catalog}], default_profile_id: 'original-api'}),
+  });
+  await harness.flush();
+  harness.find('button', '请求模型 gateway-original-alias').onClick(); await harness.flush();
+  const choices = () => children(harness.tree).filter(node => node.type === 'button' && node.props['data-model-id']);
+  assert.deepEqual(choices().map(node => node.props['data-model-id']), [
+    'gateway-original-alias', 'gpt-image-declared', 'gpt-image-2-4k',
+  ]);
+  const text = value => typeof value === 'string' ? value : Array.isArray(value) ? value.map(text).join('') : value?.props ? text(value.props.children) : '';
+  assert.match(text(choices().find(node => node.props['data-model-id'] === 'gpt-image-2-4k')), /名称匹配.*未验证/);
+  assert.equal(choices().some(node => node.props['data-model-id'] === 'custom-output-image'), false, 'even explicit image capability does not widen the requested family');
+  assert.equal(children(harness.tree).some(node => node.props?.children === '使用此配置的默认模型'), false);
+  assert.equal(models.find(model => model.id === 'google/nano-banana-pro').image_generation, null, 'UI recommendations never mutate capability metadata');
+  assert.equal(catalog.models.length, 15, 'gallery filtering leaves the settings catalog intact');
+  choices().find(node => node.props['data-model-id'] === 'gpt-image-2-4k').props.onClick(); await harness.flush();
+  harness.find('button', '生成图片').onClick(); await harness.flush();
+  assert.equal(harness.state.posts[0].model, 'gpt-image-2-4k');
+  assert.equal(harness.state.posts[0].prompt_text, originalPrompt);
+
+  harness.find('button', '请求模型 gpt-image-2-4k').onClick(); await harness.flush();
+  harness.find('input', '请求模型完整 ID').onChange({target: {value: 'gpt-image-disabled'}}); await harness.flush();
+  assert.equal(choices()[0].props['data-model-id'], 'gpt-image-disabled', 'an intentional custom selection stays editable');
+  assert.match(text(choices()[0]), /接口标注：非图片输出/);
+  harness.find('input', '请求模型完整 ID').onChange({target: {value: 'tomorrows-custom-image-alias'}}); await harness.flush();
+  assert.equal(choices().some(node => node.props['data-model-id'] === 'gpt-image-disabled'), false);
+  harness.find('button', '生成图片').onClick(); await harness.flush();
+  assert.equal(harness.state.posts[1].model, 'tomorrows-custom-image-alias');
+});
+
+test('API gallery family filtering does not restrict OAuth account image model options', async t => {
+  const harness = inputHarness(t, {preferredProvider: 'xai_grok_oauth'}, {
+    generationProviders: async () => [{provider: 'xai_grok_oauth', display_name: 'Grok', can_generate: true, default_image_model: 'grok-image-default', image_models: ['grok-image-default', 'grok-image-alternate']}],
+  });
+  await harness.flush();
+  harness.find('button', '请求模型 grok-image-default').onClick(); await harness.flush();
+  const choices = children(harness.tree).filter(node => node.type === 'button' && node.props['data-model-id']);
+  assert.deepEqual(choices.map(node => node.props['data-model-id']), ['grok-image-default', 'grok-image-alternate']);
+  choices[1].props.onClick(); await harness.flush();
+  harness.find('button', '请求模型 grok-image-alternate');
+  assert.equal(harness.state.posts.length, 0);
 });
 
 test('parameter chips display complete model and exact pixels and preserve edits in a three-job request', async t => {
