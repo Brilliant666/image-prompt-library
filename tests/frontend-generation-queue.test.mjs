@@ -41,7 +41,7 @@ const result = (jobs, extra = {}) => ({
   generation_sets: [], provider_queue_states: [], ...extra,
 });
 
-function harness(t, apiOverrides = {}, propOverrides = {}) {
+function harness(t, apiOverrides = {}, propOverrides = {}, environment = {}) {
   const slots = [], effects = [], calls = [], timers = new Map();
   let cursor = 0, dirty = false, tree, nextTimer = 0;
   const same = (a, b) => a && b && a.length === b.length && a.every((value, i) => Object.is(value, b[i]));
@@ -70,6 +70,7 @@ function harness(t, apiOverrides = {}, propOverrides = {}) {
     },
   };
   const window = {
+    confirm: environment.confirm || (() => true),
     setTimeout(callback) { timers.set(++nextTimer, callback); return nextTimer; },
     clearTimeout(id) { timers.delete(id); },
     setInterval() { throw Error('No rate limit countdown in these fixtures'); }, clearInterval() {},
@@ -103,7 +104,7 @@ function harness(t, apiOverrides = {}, propOverrides = {}) {
   const dispose = () => slots.forEach(slot => slot?.cleanup?.());
   render(); t.after(dispose);
   return {
-    calls, timers, flush, update, dispose,
+    calls, timers, flush, update, dispose, node,
     open() { node((props, type) => type === 'button' && props['aria-controls'] === 'generation-work-queue').onClick(); },
     close() { node((props, type) => type === 'button' && props['aria-label'] === 'close').onClick(); },
     rows: () => nodes(tree).filter(value => value.props?.className?.startsWith('generation-queue-row status-')),
@@ -196,6 +197,54 @@ test('failed detail refresh retains cached rows and can recover on a later poll'
 });
 
 const batch = { generation_group_id: 'batch', total: 2, remaining: 2, running: 2, queued: 0 };
+test('cleared images retain an openable history record and explain the distinction from deletion', async t => {
+  const cleared = job('cleared', { status: 'discarded', result_path: null });
+  const opened = [];
+  const h = harness(t, {}, { onOpenJob: value => opened.push(value) });
+  h.open(); await h.flush();
+  h.calls.at(-1).resolve(result([cleared])); await h.flush();
+  assert.equal(h.rows().length, 1);
+  const open = h.node(p => p.className === 'generation-queue-row-main');
+  assert.ok(!open.disabled);
+  open.onClick();
+  assert.deepEqual(opened, [cleared]);
+  assert.equal(h.button('queueDiscardResult'), undefined);
+  assert.equal(h.node(p => p.className === 'muted queue-history-help').children, 'queueCleanupHelp');
+  assert.ok(h.node(p => p.children === 'queueRecordRetained'));
+});
+
+test('cancelling the clear-image confirmation leaves the result and history untouched', async t => {
+  const ready = job('ready', { status: 'succeeded', result_path: 'generation-results/ready/result.png' });
+  let changed = 0, discarded = 0;
+  const confirmations = [];
+  const h = harness(t, { discardGenerationJob: async () => { discarded++; } },
+    { onChanged: () => changed++ }, { confirm: value => { confirmations.push(value); return false; } });
+  h.open(); await h.flush();
+  h.calls.at(-1).resolve(result([ready])); await h.flush();
+  h.button('queueDiscardResult').onClick(); await h.flush();
+  assert.deepEqual(confirmations, ['queueCleanupConfirm']);
+  assert.equal(discarded, 0);
+  assert.equal(changed, 0);
+  assert.ok(h.button('queueDiscardResult'));
+});
+
+for (const otherStatus of ['succeeded', 'discarded']) test(`cleared batch members remain individually readable in history (${otherStatus})`, async t => {
+  const cleared = job('cleared-slot', { status: 'discarded', generation_group_id: 'batch', generation_group_index: 1, generation_group_size: 2 });
+  const other = job('other-slot', { status: otherStatus, generation_group_id: 'batch', generation_group_index: 2, generation_group_size: 2 });
+  const opened = [];
+  const h = harness(t, {}, { onOpenJob: value => opened.push(value) });
+  h.open(); await h.flush();
+  h.calls.at(-1).resolve(result([cleared, other])); await h.flush();
+  const rows = h.rows().filter(row => row.props.className.includes('status-discarded'));
+  assert.equal(rows.length, otherStatus === 'discarded' ? 2 : 1);
+  for (const row of rows) {
+    const button = nodes(row).find(node => node.props?.className === 'generation-queue-row-main');
+    assert.ok(!button.props.disabled);
+    button.props.onClick();
+  }
+  assert.deepEqual(opened.map(value => value.id), otherStatus === 'discarded' ? ['cleared-slot', 'other-slot'] : ['cleared-slot']);
+});
+
 const mutations = [
   { method: 'cancelGenerationJob', button: 'queueStopSaving', original: job('cancel'), updated: job('cancel', { status: 'cancelled' }) },
   { method: 'retryGenerationJob', button: 'queueRetry', original: job('failed', { status: 'failed' }), updated: job('retried', { status: 'queued' }) },
@@ -206,8 +255,8 @@ const mutations = [
 for (const mutation of mutations) for (const succeeds of [true, false]) {
   test(`${mutation.method} notifies the gallery only after server-confirmed success (${succeeds ? 'success' : 'failure'})`, async t => {
     const pending = deferred(), requests = [];
-    let changed = 0;
-    const h = harness(t, { [mutation.method]: id => { requests.push(id); return pending.promise; } }, { onChanged: () => changed++ });
+    let changed = 0; const confirmedJobs = [];
+    const h = harness(t, { [mutation.method]: id => { requests.push(id); return pending.promise; } }, { onChanged: value => { changed++; confirmedJobs.push(value); } });
     h.open(); await h.flush();
     h.calls.at(-1).resolve(result([mutation.original], { generation_sets: mutation.sets || [] }));
     await h.flush();
@@ -221,6 +270,7 @@ for (const mutation of mutations) for (const succeeds of [true, false]) {
     else pending.reject(Error('Synthetic mutation failure'));
     await h.flush();
     assert.equal(changed, succeeds ? 1 : 0);
+    if (succeeds && mutation.method === 'discardGenerationJob') assert.deepEqual(confirmedJobs, [mutation.updated]);
     if (succeeds) {
       h.calls.at(-1).reject(Error('Synthetic refresh failure after mutation'));
       await h.flush();

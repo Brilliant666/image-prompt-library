@@ -23,6 +23,7 @@
 .pg-selection-toolbar{visibility:hidden;pointer-events:none;gap:12px;padding:0 4px;font-size:13px}
 .pg-selection-toolbar.is-active{visibility:visible;pointer-events:auto}
 .pg-selection-count{white-space:nowrap;color:var(--muted)}.pg-selection-count b{color:var(--ink);font-variant-numeric:tabular-nums}
+.pg-selection-note{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--muted)}
 .pg-selection-toolbar button{border-color:transparent;background:transparent;font-size:12px;padding:9px 8px;color:var(--muted);white-space:nowrap}
 .pg-selection-toolbar button:hover{color:var(--ink);background:var(--surface-warm)}
 .pg-bulk-actions{display:flex;align-items:center;gap:8px;margin-left:auto}

@@ -49,5 +49,5 @@ export const galleryStatus: Record<string,string> = {queued:'排队中',running:
 export function galleryMatches(job: GenerationJobRecord, query:string, status:string) {
   const haystack=[galleryJobPrompt(job),job.model,job.provider,job.parameters?.compatible_profile_name,job.id].join('\n').toLowerCase();
   const matchesStatus=status==='active'?['queued','running'].includes(job.status):status==='successful'?['succeeded','accepted'].includes(job.status):status==='completed'?['succeeded','accepted','failed'].includes(job.status):!status||job.status===status;
-  return matchesStatus&&(!query.trim()||haystack.includes(query.trim().toLowerCase()));
+  return job.status!=='discarded'&&matchesStatus&&(!query.trim()||haystack.includes(query.trim().toLowerCase()));
 }

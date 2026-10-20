@@ -42,8 +42,8 @@ test('filter defaults to all, remembers five choices and migrates legacy states'
   assert.equal(history.galleryFilterStatuses('successful'), 'succeeded,accepted');
   assert.equal(history.galleryFilterStatuses('completed'), 'succeeded,accepted,failed');
   assert.equal(history.galleryFilterStatuses('failed'), 'failed');
-  assert.equal(history.galleryFilterStatuses(''), undefined);
-  assert.equal(history.galleryFilterStatuses('bogus'), undefined);
+  assert.equal(history.galleryFilterStatuses(''), 'queued,running,succeeded,accepted,failed,cancelled');
+  assert.equal(history.galleryFilterStatuses('bogus'), 'queued,running,succeeded,accepted,failed,cancelled');
 });
 
 test('running preview metadata is never restored from the history cache', t => {
@@ -156,4 +156,17 @@ test('normal restore only reads browser storage and cannot submit or fetch any j
   history.saveGalleryHistory('/library', 'completed', { jobs: [job(), job({ id: 'failed-job', status: 'failed' })], total: 2 });
   assert.equal(history.readGalleryHistory('/library', 'completed').jobs.length, 2);
   assert.equal(fetches, 0);
+});
+
+
+test('old snapshots with cleared cards and obsolete totals cannot be restored', t => {
+  const state = installStorage(t);
+  history.saveGalleryHistory('/library', '', { jobs: [job()], total: 1 });
+  const snapshot = state.saved();
+  state.replace({ ...snapshot, version: 1, jobs: [job(), job({ id: 'cleared', status: 'discarded' })], total: 99 });
+  assert.equal(history.readGalleryHistory('/library', ''), undefined);
+  state.replace({ ...snapshot, jobs: [job({ status: 'discarded' })] });
+  assert.equal(history.readGalleryHistory('/library', ''), undefined);
+  history.saveGalleryHistory('/library', '', { jobs: [job({ status: 'discarded' })], total: 1 });
+  assert.equal(history.readGalleryHistory('/library', ''), undefined);
 });

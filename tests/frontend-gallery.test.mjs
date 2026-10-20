@@ -29,6 +29,8 @@ const profileSettings = await loadTs('../frontend/src/utils/profileSettings.ts')
 const templates = await loadTs('../frontend/src/utils/promptTemplateVariables.ts');
 const generationSiblings = await loadTs('../frontend/src/utils/generationSiblings.ts');
 const history = await loadTs('../frontend/src/utils/galleryHistory.ts');
+const allGalleryStatuses = 'queued,running,succeeded,accepted,failed,cancelled';
+const isAllGallery = params => params.statuses === allGalleryStatuses;
 const originalPrompt = '  原文\r\n\nB & <tag>\t ';
 const historicalJob = (change = {}) => ({
   id: 'historical', provider: 'openai_compatible', mode: 'text_to_image', prompt_text: originalPrompt,
@@ -915,7 +917,7 @@ test('successful-only gallery returns to all states to show newly submitted jobs
   assert.deepEqual(harness.node('TaskGrid').jobs.map(job => job.id), [created.id]);
   assert.equal(children(harness.tree).some(node => node.props?.className?.includes('pg-gallery-feedback')), false, 'confirmed cards provide feedback without another toast');
   assert.equal(calls.at(-1).options.fresh, true);
-  assert.equal(calls.at(-1).params.statuses, undefined);
+  assert.equal(calls.at(-1).params.statuses, allGalleryStatuses);
   assert.equal(queueChanged, 1);
   pending.resolve({ jobs: [created], total: 1 }); await harness.flush();
   assert.equal(harness.node('TaskGrid').jobs.length, 1);
@@ -944,8 +946,8 @@ test('returning from failed to all restores the loaded page immediately while fr
   let delayed = false;
   const h = workspaceHarness(t, { generationJobs: params => {
     calls.push(params);
-    if (delayed && !params.statuses) return pending.promise;
-    const jobs = params.statuses ? all.filter(job => job.status === params.statuses) : all;
+    if (delayed && isAllGallery(params)) return pending.promise;
+    const jobs = all.filter(job => params.statuses.split(',').includes(job.status));
     return Promise.resolve({ jobs: jobs.slice(0, params.limit), total: jobs.length });
   } }, { libraryScope: 'library' });
   await h.flush();
@@ -969,7 +971,7 @@ test('empty filtered results can return instantly to all and late filter reads c
   const pendingAll = deferred(), lateFailed = deferred(), success = historicalJob();
   let allReads = 0, failedReads = 0;
   const h = workspaceHarness(t, { generationJobs: params => {
-    if (!params.statuses) return ++allReads === 1 ? Promise.resolve({ jobs: [success], total: 1 }) : pendingAll.promise;
+    if (isAllGallery(params)) return ++allReads === 1 ? Promise.resolve({ jobs: [success], total: 1 }) : pendingAll.promise;
     return ++failedReads === 1 ? Promise.resolve({ jobs: [], total: 0 }) : lateFailed.promise;
   } });
   await h.flush();
@@ -988,8 +990,8 @@ for(const change of ['library', 'mutation']) test(`filter page cache is invalida
   const old = historicalJob({ id: 'old-success' }), failed = historicalJob({ id: 'old-failed', status: 'failed' });
   const pending = deferred(); let changed = false;
   const h = workspaceHarness(t, { generationJobs: params => {
-    if(changed)return params.statuses ? Promise.resolve({ jobs: [], total: 0 }) : pending.promise;
-    return Promise.resolve({ jobs: params.statuses ? [failed] : [old, failed], total: params.statuses ? 1 : 2 });
+    if(changed)return !isAllGallery(params) ? Promise.resolve({ jobs: [], total: 0 }) : pending.promise;
+    return Promise.resolve({ jobs: !isAllGallery(params) ? [failed] : [old, failed], total: !isAllGallery(params) ? 1 : 2 });
   } }, { libraryScope: 'library-a' });
   await h.flush();
   h.node('select').onChange({ target: { value: 'failed' } }); await h.flush();
@@ -1009,7 +1011,7 @@ test('a confirmed submission invalidates old filter snapshots and survives retur
   const created = historicalJob({ id: 'just-created', status: 'queued' }), pending = deferred();
   let submitted = false;
   const h = workspaceHarness(t, { generationJobs: params => submitted ? pending.promise
-    : Promise.resolve({ jobs: params.statuses ? [failed] : [old, failed], total: params.statuses ? 1 : 2 }) });
+    : Promise.resolve({ jobs: !isAllGallery(params) ? [failed] : [old, failed], total: !isAllGallery(params) ? 1 : 2 }) });
   await h.flush();
   h.node('select').onChange({ target: { value: 'failed' } }); await h.flush();
   submitted = true;
@@ -1104,7 +1106,7 @@ test('returning to a pending filter starts a fresh read instead of sharing its o
   historyStorage(t); const old = deferred(), latest = deferred(); const calls = [];
   const pendingReads = new Map(); let allReads = 0;
   const h = workspaceHarness(t, { generationJobs: (params, options) => {
-    const key = params.statuses || 'all'; calls.push({ key, fresh: options.fresh });
+    const key = isAllGallery(params) ? 'all' : params.statuses; calls.push({ key, fresh: options.fresh });
     if (pendingReads.has(key) && !options.fresh) return pendingReads.get(key);
     const pending = key === 'all' ? (++allReads === 1 ? old.promise : latest.promise) : Promise.resolve({ jobs: [], total: 0 });
     pendingReads.set(key, pending); return pending;
@@ -1230,6 +1232,54 @@ test('queue callbacks close the queue, scope batch results and restore the compl
   assert.equal(harness.node('DetailModal').job.id, 'older-batch-job');
 });
 
+test('already cleaned records never become gallery cards even in stale API or batch data', async t => {
+  const job = historicalJob({ status: 'discarded', result_path: undefined, generation_group_id: 'cleared-batch' });
+  let discarded = 0, confirmed = 0;
+  const h = workspaceHarness(t, {
+    generationJobs: async () => ({ jobs: [job], total: 0 }),
+    generationSet: async () => ({ jobs: [job], total: 1 }),
+    discardGenerationJob: async () => { discarded++; },
+  }, {}, { window: { confirm: () => { confirmed++; return true; } } });
+  await h.flush();
+  assert.equal(h.node('TaskGrid'), undefined);
+  h.node('GenerationQueueDrawer').onOpenBatch([job], 1, 'cleared-batch'); await h.flush();
+  assert.equal(h.node('TaskGrid'), undefined);
+  assert.match(h.node('h2').children, /此批次暂无/);
+  const button = h.node('button', p => p.className === 'pg-cleanup-action');
+  assert.equal(button.disabled, true);
+  button.onClick(); await h.flush();
+  assert.equal(confirmed, 0); assert.equal(discarded, 0);
+  assert.equal(job.status, 'discarded', 'the underlying history record is retained unchanged');
+});
+
+test('mixed bulk cleanup only sends uncollected successful results and explains skipped records', async t => {
+  const jobs = [
+    historicalJob({ id: 'ready', result_path: 'generation-results/ready/result.png' }),
+    historicalJob({ id: 'accepted', status: 'accepted', result_path: 'images/kept.png', accepted_image_id: 'image' }),
+    historicalJob({ id: 'cleaned', status: 'discarded' }),
+    historicalJob({ id: 'failed', status: 'failed' }),
+    historicalJob({ id: 'running', status: 'running' }),
+    historicalJob({ id: 'missing', status: 'succeeded' }),
+    historicalJob({ id: 'linked', result_path: 'images/kept.png', accepted_image_id: 'image' }),
+  ];
+  const calls = [], confirmations = [];
+  const h = workspaceHarness(t, {
+    generationJobs: async () => ({ jobs, total: jobs.length }),
+    discardGenerationJob: async id => { calls.push(id); const job=jobs.find(row=>row.id===id); job.status='discarded'; job.result_path=undefined; },
+  }, {}, { window: { confirm: message => { confirmations.push(message); return true; } } });
+  await h.flush();
+  h.node('TaskGrid').onSelection(new Set(h.node('TaskGrid').jobs.map(job => job.id))); await h.flush();
+  const button = h.node('button', p => p.className === 'pg-cleanup-action');
+  assert.equal(button.disabled, false);
+  button.onClick(); await h.flush();
+  assert.deepEqual(calls, ['ready']);
+  assert.match(confirmations[0], /清理 1 项/);
+  assert.match(confirmations[0], /其余 5 项不适用/);
+  assert.match(confirmations[0], /任务记录和原始请求仍保留/);
+  assert.deepEqual(h.node('TaskGrid').jobs.map(job=>job.id), ['accepted','failed','running','missing','linked']);
+  assert.equal(jobs.find(job=>job.id==='ready').status, 'discarded', 'cleanup retains the historical task');
+});
+
 test('an old queue batch refreshes outside the global page and uses its current original for download and cleanup', async t => {
   const newer = historicalJob({ id: 'newer-global-job' });
   let old = historicalJob({ id: 'old-slot', status: 'running', generation_group_id: 'old-batch', generation_group_index: 1, generation_group_size: 3 });
@@ -1263,10 +1313,10 @@ test('an old queue batch refreshes outside the global page and uses its current 
   assert.equal(calls.clicks, 1); assert.equal(anchor.download, 'generation-results.zip');
   assert.deepEqual(calls.revoked, ['blob:isolated-download']);
 
-  harness.node('button', props => Array.isArray(props.children) && props.children.includes('清理结果')).onClick(); await harness.flush();
+  harness.node('button', props => Array.isArray(props.children) && props.children.includes('清理图片')).onClick(); await harness.flush();
   assert.deepEqual(calls.discarded, ['old-slot']);
-  assert.deepEqual(harness.node('TaskGrid').jobs.map(job => [job.id, job.status, job.result_path]), [['old-slot', 'discarded', undefined]]);
-  assert.equal(harness.node('TaskGrid').selected.size, 0); assert.equal(calls.changed, 1);
+  assert.equal(harness.node('TaskGrid'), undefined);
+  assert.equal(harness.node('div', props => props['aria-label'] === '批量操作')['aria-hidden'], true); assert.equal(calls.changed, 1);
   assert.equal(harness.node('p', props => props.role === 'alert'), undefined);
   assert.deepEqual(calls.sets, ['old-batch', 'old-batch', 'old-batch']);
   harness.node('button', props => props.children === '返回全部历史').onClick(); await harness.flush();
@@ -1528,4 +1578,74 @@ for (const authenticated of [false,true]) test(`provider chooser only offers aut
   h.find('button','管理 API 配置');
   assert.equal(h.find('textarea','画廊提示词').value,originalPrompt);
   assert.equal(h.state.posts.length,0);
+});
+
+
+test('All pages apply the gallery exclusion before totals and pagination while retaining other statuses', async t => {
+  historyStorage(t);
+  const rows = Array.from({ length: 120 }, (_, index) => historicalJob({ id: `page-${index}`, status: index % 3 === 0 ? 'discarded' : ['succeeded','accepted','failed','running','queued','cancelled'][index % 6] }));
+  const requests = [];
+  const h = workspaceHarness(t, { generationJobs: async params => {
+    requests.push(params);
+    const matching = rows.filter(job => params.statuses.split(',').includes(job.status));
+    return { jobs: matching.slice(params.offset || 0, (params.offset || 0) + params.limit), total: matching.length };
+  } }); await h.flush();
+  assert.equal(requests[0].statuses, allGalleryStatuses);
+  assert.equal(h.node('TaskGrid').jobs.length, 48);
+  assert.deepEqual(h.node('button', p => p.className === 'pg-load-more').children, ['已加载 ',48,' / ',80,' · 加载更多']);
+  h.node('button', p => p.className === 'pg-load-more').onClick(); await h.flush();
+  assert.deepEqual(h.node('TaskGrid').jobs.map(job=>job.id), rows.filter(job=>job.status!=='discarded').map(job=>job.id));
+  assert.equal(h.node('button', p => p.className === 'pg-load-more'), undefined);
+  assert.equal(rows.length, 120, 'gallery filtering does not remove execution history');
+});
+
+test('confirmed image cleanup hides the card immediately and rejects pending pre-cleanup history', async t => {
+  historyStorage(t);
+  const ready = historicalJob({ id: 'ready-to-clear', result_path: 'generation-results/ready.png' });
+  const kept = historicalJob({ id: 'library-kept', status: 'accepted', result_path: 'images/kept.png', accepted_image_id: 'kept' });
+  const oldRead = deferred(), freshRead = deferred(); let reads = 0; const confirmations = [], actions = [];
+  const h = workspaceHarness(t, {
+    generationJobs: () => ++reads === 1 ? Promise.resolve({ jobs: [ready,kept], total: 2 }) : reads === 2 ? oldRead.promise : freshRead.promise,
+    discardGenerationJob: async id => { actions.push(id); },
+  }, { libraryScope: 'cleanup-library' }, { window: { confirm: message => { confirmations.push(message); return true; } } });
+  await h.flush();
+  h.node('button', p=>p['aria-label']==='刷新生成历史').onClick(); await h.flush();
+  h.node('TaskGrid').onSelection(new Set([ready.id])); await h.flush();
+  h.node('button', p=>p.className==='pg-cleanup-action').onClick(); await h.flush();
+  assert.deepEqual(actions, [ready.id]);
+  assert.deepEqual(h.node('TaskGrid').jobs.map(job=>job.id), [kept.id]);
+  assert.match(confirmations[0], /历史中.*不会删除记录/);
+  assert.equal(history.readGalleryHistory('cleanup-library',''), undefined, 'old cache cannot resurrect the cleaned image');
+  oldRead.resolve({ jobs: [ready,kept], total: 2 }); await h.flush();
+  assert.deepEqual(h.node('TaskGrid').jobs.map(job=>job.id), [kept.id]);
+  freshRead.resolve({ jobs: [kept], total: 1 }); await h.flush();
+  assert.deepEqual(h.node('TaskGrid').jobs.map(job=>job.id), [kept.id]);
+  assert.equal(h.node('TaskGrid').selected.size, 0);
+  assert.deepEqual(history.readGalleryHistory('cleanup-library','').jobs.map(job=>job.id), [kept.id]);
+});
+
+test('opening a mixed historical batch hides cleared cards without renumbering original slots', async t => {
+  const batch = [0,1,2].map(index=>historicalJob({ id:`slot-${index}`,status:index===1?'discarded':'failed',generation_group_id:'mixed',generation_group_index:index,generation_group_size:3 }));
+  const h = workspaceHarness(t, { generationJobs: async()=>({jobs:[],total:0}),generationSet: async()=>({jobs:batch,total:3}) }); await h.flush();
+  h.node('GenerationQueueDrawer').onOpenBatch(batch,3,'mixed'); await h.flush();
+  assert.deepEqual(h.node('TaskGrid').jobs.map(job=>[job.id,job.generation_group_index]), [['slot-0',0],['slot-2',2]]);
+  assert.deepEqual(h.node('div',p=>p.className==='pg-batch-scope').children[0].props.children,['生成批次 · 显示 ',2,' 项 / 原批次 ',3,' 项']);
+  assert.equal(batch[1].status,'discarded');
+});
+
+
+test('confirmed cleanup from execution history hides its gallery card even when the following read fails', async t => {
+  historyStorage(t);
+  const ready = historicalJob({id:'queue-cleanup',result_path:'generation-results/queue.png'}), kept=historicalJob({id:'retained'});
+  let reads=0;
+  const pending=deferred();
+  const h=workspaceHarness(t,{generationJobs:()=>++reads===1?Promise.resolve({jobs:[ready,kept],total:2}):pending.promise});await h.flush();
+  h.node('TaskGrid').onSelection(new Set([ready.id,kept.id]));await h.flush();
+  h.node('GenerationQueueDrawer').onChanged({...ready,status:'discarded',result_path:null});await h.flush();
+  assert.deepEqual(h.node('TaskGrid').jobs.map(job=>job.id),[kept.id]);
+  assert.deepEqual([...h.node('TaskGrid').selected],[kept.id]);
+  pending.reject(Error('history temporarily unavailable'));await h.flush();
+  assert.deepEqual(h.node('TaskGrid').jobs.map(job=>job.id),[kept.id]);
+  assert.equal(h.node('button',p=>p.className==='pg-load-more'),undefined);
+  assert.match(h.node('div',p=>p.role==='alert').children[0].props.children,/temporarily unavailable/);
 });

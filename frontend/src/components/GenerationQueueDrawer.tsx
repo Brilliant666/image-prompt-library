@@ -210,10 +210,6 @@ function isUsedAsGenerationReference(job: GenerationJobRecord, jobs: GenerationJ
   });
 }
 
-function canOpenJob(job: GenerationJobRecord) {
-  return job.status !== 'discarded';
-}
-
 const STALE_RUNNING_JOB_MS = 10 * 60 * 1000;
 const QUEUE_EXIT_WATCHDOG_MS = 260;
 const QUEUE_PAGE_SIZE = 100;
@@ -287,7 +283,7 @@ export default function GenerationQueueDrawer({
   onOpenProviders: () => void;
   placement?: 'floating' | 'gallery';
   onOpenBatch?: (jobs: GenerationJobRecord[], total: number, groupId: string) => void;
-  onChanged?: () => void;
+  onChanged?: (job?: GenerationJobRecord) => void;
 }) {
   const [jobs, setJobs] = useState<GenerationJobRecord[]>([]);
   const [generationSets, setGenerationSets] = useState<GenerationJobSetRecord[]>([]);
@@ -494,6 +490,7 @@ export default function GenerationQueueDrawer({
 
   const discardJob = async (job: GenerationJobRecord) => {
     if (!canDiscardTransientResult(job) || discardBusyIds.has(job.id)) return;
+    if (!window.confirm(t('queueCleanupConfirm'))) return;
     const timestamp = new Date().toISOString();
     const optimisticDiscardedJob: GenerationJobRecord = {
       ...job,
@@ -514,7 +511,7 @@ export default function GenerationQueueDrawer({
     try {
       const updated = await api.discardGenerationJob(job.id);
       setJobs(current => current.map(candidate => candidate.id === updated.id ? updated : candidate));
-      onChanged?.();
+      onChanged?.(updated);
       setLoadError('');
       void refresh();
     } catch (error) {
@@ -571,7 +568,7 @@ export default function GenerationQueueDrawer({
         }
       }
       if (openSetRequestRef.current !== requestId) return;
-      const openableJobs = groupJobs.filter(canOpenJob);
+      const openableJobs = groupJobs;
       const job = openableJobs.find(candidate => candidate.status === 'succeeded')
         || openableJobs.find(candidate => candidate.status === 'failed')
         || openableJobs.find(candidate => candidate.status === 'running')
@@ -675,7 +672,9 @@ export default function GenerationQueueDrawer({
     { key: 'active', title: t('queueInProgress'), jobs: jobs.filter(job => !groupedJobIds.has(job.id) && isActive(job)) },
     { key: 'ready', title: t('queueReadyForReview'), jobs: jobs.filter(job => !groupedJobIds.has(job.id) && job.status === 'succeeded') },
     { key: 'failed', title: t('queueNeedsAttention'), jobs: jobs.filter(job => !groupedJobIds.has(job.id) && job.status === 'failed') },
-    { key: 'recent', title: t('queueRecent'), jobs: jobs.filter(job => !groupedJobIds.has(job.id) && ['accepted', 'discarded', 'cancelled'].includes(job.status)) },
+    // A cleared batch slot is absent from the gallery, so keep its own history
+    // entry available even when the batch also has a summary card.
+    { key: 'recent', title: t('queueRecent'), jobs: jobs.filter(job => job.status === 'discarded' || (!groupedJobIds.has(job.id) && ['accepted', 'cancelled'].includes(job.status))) },
   ];
   const visibleSections = sections.filter(section => section.jobs.length > 0);
   const hasHistoricalActivity = jobTotal > 0 || Object.values(statusCounts || {}).some(count => Number(count) > 0);
@@ -716,6 +715,7 @@ export default function GenerationQueueDrawer({
             <h2 id="generation-work-queue-title">{t('workQueue')}</h2>
             <button className="modal-icon-button" onClick={() => closeDrawer()} aria-label={t('close')}><X size={20} strokeWidth={2.25} /></button>
           </div>
+          <p className="muted queue-history-help">{t('queueCleanupHelp')}</p>
           {!hasLoaded && !loadError && <p className="muted queue-loading" role="status">{t('queueLoading')}</p>}
           {loadError && <p className="error" role="alert">{loadError}</p>}
           {hasLoaded && hasQueueContent && queueStatusItems.length > 0 && (
@@ -852,13 +852,13 @@ export default function GenerationQueueDrawer({
                       type="button"
                       className="generation-queue-row-main"
                       onClick={() => onOpenJob(job)}
-                      disabled={!canOpenJob(job)}
                     >
                       {statusIcon(job)}
                       <span>{job.edited_prompt_text || job.prompt_text}</span>
                     </button>
                     <span className="generation-queue-row-actions">
                       <b>{statusLabel(job, t, isUsedAsGenerationReference(job, jobs))}</b>
+                      {job.status === 'discarded' && <em className="generation-cancel-copy">{t('queueRecordRetained')}</em>}
                        {isStaleRunningJob(job) && <em className="generation-stale-copy">{t('generationStalled')}</em>}
                       {isActive(job) && (
                         <em className="generation-cancel-copy">

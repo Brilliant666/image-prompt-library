@@ -128,7 +128,7 @@ export default function DetailModal({ job, t, onClose, onChange, onAccepted, onR
             <button className="pg-detail-original" onClick={onLightbox} aria-label="查看原图大图"><img src={mediaUrl(job.result_path!)} alt="生成结果"/></button>
             {actualSize && <span className="pg-detail-image-size" title="实际文件尺寸">{actualSize}</span>}
             <a className="pg-detail-download" href={mediaUrl(job.result_path!)} download aria-label="下载原图" title="下载原图"><Download size={18}/></a>
-          </> : <div className={`pg-detail-unavailable ${job.status}`}><span>{status}</span><small>{job.status === 'discarded' ? '结果已清理，原始请求仍保留在此处。' : '此任务尚无可查看的图片。'}</small></div>}
+          </> : <div className={`pg-detail-unavailable ${job.status}`}><span>{status}</span><small>{job.status === 'discarded' ? '图片已清理，已从画廊隐藏。历史记录与原始请求仍保留；清理图片不等于删除记录。' : '此任务尚无可查看的图片。'}</small></div>}
         </div>
         <div className="pg-detail-info">
           <div className="pg-detail-scroll">
