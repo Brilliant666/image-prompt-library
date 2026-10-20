@@ -24,16 +24,16 @@ function descendants(node) {
   return [node, ...(Array.isArray(node.props?.children) ? node.props.children.flat(Infinity) : [node.props?.children]).flatMap(descendants)];
 }
 function harness(t, job, overrides = {}) {
-  const slots = [], effects = [], timers = [], events = { copies: [], reused: [], accepted: [], naming: [], writes: [], changed: 0 };
+  const slots = [], effects = [], timers = [], events = { copies: [], reused: [], accepted: [], naming: [], writes: [], lists: 0, changed: 0 };
   let cursor = 0, dirty = false, tree;
   const hooks = {
-    useState(initial) { const i = cursor++; if (!(i in slots)) slots[i] = initial; return [slots[i], value => { slots[i] = typeof value === 'function' ? value(slots[i]) : value; dirty = true; }]; },
+    useState(initial) { const i = cursor++; if (!(i in slots)) slots[i] = typeof initial === 'function' ? initial() : initial; return [slots[i], value => { slots[i] = typeof value === 'function' ? value(slots[i]) : value; dirty = true; }]; },
     useRef(initial) { const i = cursor++; if (!(i in slots)) slots[i] = { current: initial }; return slots[i]; },
     useEffect(effect, deps) { const i = cursor++, old = slots[i]; if (!old || deps.some((value, index) => !Object.is(value, old.deps[index]))) { effects.push(() => { old?.cleanup?.(); slots[i].cleanup = effect(); }); slots[i] = { deps }; } },
   };
   const jsx = (type, props) => ({ type, props });
   const api = {
-    items: async () => ({ items: [{ id: 'existing', title: 'Existing reference' }], total: 1 }),
+    items: async () => { events.lists++; return { items: [{ id: 'existing', title: 'Existing reference' }], total: 1 }; },
     acceptGenerationJobAsNewItem: async (...args) => { events.writes.push(['new', ...args]); return { item: { id: 'new-reference' } }; },
     acceptGenerationJobIntoItem: async (...args) => { events.writes.push(['existing', ...args]); return { item: { id: 'existing' } }; },
     ...overrides.api,
@@ -46,7 +46,7 @@ function harness(t, job, overrides = {}) {
     '../../utils/clipboard': { copyTextToClipboard: async text => { events.copies.push(text); return typeof overrides.copyResult === 'function' ? overrides.copyResult() : overrides.copyResult ?? true; } },
     '../../hooks/useModalFocus': { useModalFocus: () => ({ containerRef: {}, handleModalKeyDown() {} }) },
     '../GenerationResultSummary': { GenerationResultSummary: 'GenerationResultSummary' }, './DetailModal.css': {},
-  }, { setTimeout(callback) { timers.push(callback); return timers.length; }, clearTimeout(id) { timers[id - 1] = undefined; } });
+  }, { localStorage: overrides.storage ?? { getItem: () => null, setItem() {} }, setTimeout(callback) { timers.push(callback); return timers.length; }, clearTimeout(id) { timers[id - 1] = undefined; } });
   function render() {
     cursor = 0; dirty = false;
     tree = DetailModal({ job, t: key => key, onClose() {}, onLightbox() {}, onChange: () => events.changed++, onAccepted: (id, autoTitle) => { events.accepted.push(id); events.naming.push(autoTitle); }, onReuse: (...args) => events.reused.push(args) });
@@ -112,7 +112,7 @@ test('detail keeps unknown values unknown, reports copy failure and does not off
 for (const existing of [false, true]) test(`detail saves ${existing ? 'into an existing reference' : 'a new reference with optional title left blank'} through existing endpoints`, async t => {
   const h = harness(t, job);
   h.find('button', props => props.children === '保存到 Library').onClick(); await h.flush();
-  if (existing) { h.find('select').onChange({ target: { value: 'existing' } }); await h.flush(); }
+  if (existing) { h.find('button', props => props.children === '添加到已有条目…').onClick(); await h.flush(); h.find('select').onChange({ target: { value: 'existing' } }); await h.flush(); }
   h.find('button', props => props.children === '确认保存').onClick(); await h.flush();
   assert.deepEqual(h.events.writes, existing ? [['existing', job.id, 'existing']] : [['new', job.id, { auto_title: false }]]);
   assert.equal(h.events.changed, 1);
@@ -152,6 +152,7 @@ test('attaching to an existing reference cannot rename it even after selecting a
   const h = harness(t, job);
   h.find('button', props => props.children === '保存到 Library').onClick(); await h.flush();
   h.find('input', props => props.type === 'checkbox').onChange({ target: { checked: true } }); await h.flush();
+  h.find('button', props => props.children === '添加到已有条目…').onClick(); await h.flush();
   h.find('select').onChange({ target: { value: 'existing' } }); await h.flush();
   assert.equal(h.find('input', props => props.type === 'checkbox'), undefined);
   h.find('button', props => props.children === '确认保存').onClick(); await h.flush();
@@ -164,6 +165,52 @@ test('a result whose Library asset was removed offers collection again without g
   h.find('button', props => props.children === '保存到 Library').onClick(); await h.flush();
   h.find('button', props => props.children === '确认保存').onClick(); await h.flush();
   assert.deepEqual(h.events.writes, [['new', job.id, { auto_title: false }]]);
+});
+
+test('naming preference survives remounts and opt-out; a manual title does not erase the preference', async t => {
+  const values = new Map();
+  const storage = { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value) };
+  const open = async () => { const h = harness(t, job, { storage }); h.find('button', p => p.children === '保存到 Library').onClick(); await h.flush(); return h; };
+  const first = await open();
+  assert.equal(first.find('input', p => p.type === 'checkbox').checked, false);
+  first.find('input', p => p.type === 'checkbox').onChange({ target: { checked: true } }); await first.flush();
+  const second = await open();
+  assert.equal(second.find('input', p => p.type === 'checkbox').checked, true);
+  second.find('input', p => p.placeholder === '留空使用默认名称').onChange({ target: { value: 'Manual' } }); await second.flush();
+  second.find('button', p => p.children === '确认保存').onClick(); await second.flush();
+  assert.deepEqual(second.events.writes, [['new', job.id, { title: 'Manual', auto_title: false }]]);
+  const third = await open();
+  assert.equal(third.find('input', p => p.type === 'checkbox').checked, true);
+  third.find('button', p => p.children === '确认保存').onClick(); await third.flush();
+  assert.deepEqual(third.events.writes, [['new', job.id, { auto_title: true }]]);
+  third.find('input', p => p.type === 'checkbox').onChange({ target: { checked: false } }); await third.flush();
+  const fourth = await open();
+  assert.equal(fourth.find('input', p => p.type === 'checkbox').checked, false);
+});
+
+test('default collection avoids loading destinations; optional attachment requires a target and can be cancelled', async t => {
+  const h = harness(t, job);
+  h.find('button', p => p.children === '保存到 Library').onClick(); await h.flush();
+  assert.equal(h.events.lists, 0);
+  assert.equal(h.find('select'), undefined);
+  h.find('button', p => p.children === '添加到已有条目…').onClick(); await h.flush();
+  assert.equal(h.events.lists, 1);
+  assert.equal(h.find('button', p => p.children === '确认保存').disabled, true);
+  await h.find('button', p => p.children === '确认保存').onClick(); await h.flush();
+  assert.deepEqual(h.events.writes, []);
+  h.find('select').onChange({ target: { value: 'existing' } }); await h.flush();
+  h.find('button', p => p.children === '改为单独收录').onClick(); await h.flush();
+  h.find('button', p => p.children === '确认保存').onClick(); await h.flush();
+  assert.deepEqual(h.events.writes, [['new', job.id, { auto_title: false }]]);
+});
+
+test('unavailable browser storage does not prevent collection or an explicit naming choice', async t => {
+  const h = harness(t, job, { storage: { getItem() { throw Error('denied'); }, setItem() { throw Error('denied'); } } });
+  h.find('button', p => p.children === '保存到 Library').onClick(); await h.flush();
+  assert.equal(h.find('input', p => p.type === 'checkbox').checked, false);
+  h.find('input', p => p.type === 'checkbox').onChange({ target: { checked: true } }); await h.flush();
+  h.find('button', p => p.children === '确认保存').onClick(); await h.flush();
+  assert.deepEqual(h.events.writes, [['new', job.id, { auto_title: true }]]);
 });
 
 const titleUpdates = await compile('../frontend/src/hooks/useGalleryTitleUpdates.ts');

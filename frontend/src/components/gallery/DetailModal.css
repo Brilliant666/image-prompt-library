@@ -73,3 +73,7 @@
   .pg-detail-refined .pg-detail-actions { gap:6px; }
   .pg-detail-refined .pg-detail-actions button { padding:8px;font-size:11px; }
 }
+
+.pg-save-heading { font-weight:500;font-size:13px; }
+.pg-detail-refined .pg-save-form .pg-save-mode { justify-self:start;width:auto;padding:3px 0;border:0;background:transparent;color:var(--muted);font-size:11px; }
+.pg-detail-refined .pg-save-form .pg-save-mode:hover:not(:disabled) { color:var(--accent); }

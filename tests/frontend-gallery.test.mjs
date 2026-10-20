@@ -237,7 +237,19 @@ function inputHarness(t, overrides = {}, apiOverrides = {}, environment = {}) {
   return { state, flush, find, emitCatalogChanged: profileId => eventTarget.dispatchEvent(new CustomEvent('ipl:model-catalog-changed', { detail: { profileId } })), emitModelSaved: (profileId, model) => eventTarget.dispatchEvent(new CustomEvent('ipl:profile-model-saved', { detail: { profileId, model } })), emitPreferenceReset: profileId => eventTarget.dispatchEvent(new CustomEvent('ipl:generation-preference-reset', { detail: { profileId } })), update: value => { props = { ...props, ...value }; render(); }, get tree() { return tree; } };
 }
 
-for (const count of [1, 3]) test(`confirmed creation immediately delivers returned jobs to the gallery (${count})`, async t => {
+async function chooseCount(h, count) {
+  const text = value => Array.isArray(value) ? value.map(text).join('') : typeof value === 'object' ? text(value?.props?.children) : String(value ?? '');
+  h.find('button', '生成数量').onClick(); await h.flush();
+  const panel = children(h.tree).find(node => node.props?.['data-panel'] === 'count');
+  assert.ok(panel);
+  const options = children(panel).filter(node => node.type === 'button' && /^\d+ 张$/.test(text(node.props.children)));
+  assert.deepEqual(options.map(node => text(node.props.children)), ['1 张', '3 张', '5 张', '10 张']);
+  options.find(node => text(node.props.children) === `${count} 张`).props.onClick(); await h.flush();
+  assert.equal(h.find('button', '生成数量')['aria-expanded'], false);
+  assert.equal(children(h.tree).find(node => node.props?.['data-panel'] === 'count'), undefined);
+}
+
+for (const count of [1, 3, 5, 10]) test(`confirmed creation immediately delivers returned jobs to the gallery (${count})`, async t => {
   const pending = deferred(), created = [];
   const records = Array.from({ length: count }, (_, index) => historicalJob({ id: `new-${index}`, status: 'queued' }));
   const h = inputHarness(t, { onCreated: jobs => created.push(jobs) }, {
@@ -246,7 +258,7 @@ for (const count of [1, 3]) test(`confirmed creation immediately delivers return
   });
   await h.flush();
   h.find('textarea', '画廊提示词').onChange({ target: { value: originalPrompt } }); await h.flush();
-  h.find('select', '生成数量').onChange({ target: { value: String(count) } }); await h.flush();
+  await chooseCount(h, count);
   h.find('button', '生成图片').onClick(); await h.flush();
   assert.deepEqual(created, [], 'never invent a queued job before the server confirms creation');
   pending.resolve(count === 1 ? records[0] : { jobs: records }); await h.flush();
@@ -441,8 +453,7 @@ test('parameter chips display complete model and exact pixels and preserve edits
   harness.find('select', '输出格式').onChange({ target: { value: 'webp' } });
   harness.find('input', '输出压缩').onChange({ target: { value: '0' } });
   harness.find('select', '审核强度').onChange({ target: { value: 'low' } });
-  harness.find('select', '生成数量').onChange({ target: { value: '3' } }); await harness.flush();
-  assert.deepEqual(harness.find('select', '生成数量').children.map(option => option.props.value), [1, 3, 5, 10]);
+  await chooseCount(harness, 3);
   harness.find('button', '生成图片').onClick(); await harness.flush();
   assert.equal(harness.state.posts.length, 1);
   const request = harness.state.posts[0]; assert.equal(request.count, 3);
@@ -567,7 +578,7 @@ const pendingEdits = {
   size: async h => { composerChip(h, 'size').onClick(); await h.flush(); children(h.tree).find(node => node.type === 'SizeDialog').props.onApply({ size: '2048x3072' }); return payload => assert.equal(payload.parameters.size, '2048x3072'); },
   quality: async h => { composerChip(h, 'quality').onClick(); await h.flush(); children(h.tree).find(node => node.type === 'button' && node.props.children?.at?.(-1) === 'high').props.onClick(); return payload => assert.equal(payload.parameters.quality, 'high'); },
   format: async h => { composerChip(h, 'more').onClick(); await h.flush(); h.find('select', '输出格式').onChange({ target: { value: 'png' } }); return payload => assert.equal(payload.parameters.output_format, 'png'); },
-  count: async h => { h.find('select', '生成数量').onChange({ target: { value: '3' } }); return (_payload, posted) => assert.equal(posted.count, 3); },
+  count: async h => { await chooseCount(h, 3); return (_payload, posted) => assert.equal(posted.count, 3); },
   template: async h => { const label = children(h.tree).find(node => node.type === 'label' && node.props.children?.[0] === 'subject'); children(label).find(node => node.type === 'input').props.onChange({ target: { value: 'new subject' } }); return payload => assert.equal(payload.parameters.prompt_template_values.subject, 'new subject'); },
   'selected attachment': async h => { h.find('button', '添加参考图').onClick(); await h.flush(); h.find('button', '从 Library 或画廊选择参考图').onClick(); await h.flush(); children(h.tree).find(node => node.type === 'ReferencePicker').props.onSelect(input('new-reference')); return payload => assert.deepEqual(payload.parameters.input_images.map(value => value.id), ['keep', 'new-reference']); },
   'removed attachment': async h => { h.find('button', '移除参考图 1').onClick(); return payload => assert.equal(payload.parameters.input_images.length, 0); },

@@ -37,14 +37,11 @@
 .pg-param-chip>.pg-param-value{flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;text-align:left;font-variant-numeric:tabular-nums}
 .pg-param-chip>svg{flex:none;color:var(--muted)}
 .pg-composer .pg-param-model .pg-param-value{font-size:12px}
-.pg-composer .pg-param-count{position:relative;flex:none}
-.pg-composer .pg-param-count select{width:auto;min-width:30px;height:auto;margin:0;padding:0;border:0;border-radius:0;appearance:none;background:transparent;color:inherit;font:inherit;cursor:pointer}
-.pg-param-count>svg{pointer-events:none}
 .pg-composer .pg-composer-actions{grid-area:actions;display:flex;align-items:center;justify-self:end;gap:8px;padding-bottom:0}
 .pg-composer .pg-composer-actions>button{display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;min-width:36px;min-height:36px;margin:0;padding:0;border:0;border-radius:12px;background:color-mix(in srgb,var(--ink) 6%,transparent);color:var(--muted)}
 .pg-composer .pg-composer-actions>.pg-submit{background:var(--accent);color:#fff}
 .pg-composer .pg-composer-actions>.pg-submit:hover:not(:disabled){background:var(--accent-strong)}
-.pg-composer button:focus-visible,.pg-composer .pg-param-count:focus-within{outline:2px solid var(--accent);outline-offset:2px}
+.pg-composer button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .pg-composer .pg-parameters-panel{z-index:25;width:min(380px,calc(100vw - 48px));max-height:min(55dvh,460px)}
 .pg-composer .pg-parameters-panel[data-panel=add]{left:auto;right:10px;width:min(280px,calc(100vw - 48px))}
 .pg-composer .pg-add-options{display:grid;gap:4px}.pg-composer .pg-add-options button{justify-content:flex-start;gap:10px;padding:10px 8px;border:0;border-radius:10px;background:transparent;text-align:left;font-size:13px}
