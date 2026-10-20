@@ -24,14 +24,25 @@ export default function GalleryWorkspace({active,queueOpen,onQueueOpenChange,t,p
   const resultsRef=useRef<HTMLDivElement>(null);
   const [batchOpenVersion,setBatchOpenVersion]=useState(0),[mutationRevision,setMutationRevision]=useState(0);
   const displayedScope=useRef<{value:string|undefined}|undefined>(undefined),forceFresh=useRef(false);
+  // Keep each visited filter's authoritative page in memory. The persisted snapshot is
+  // intentionally just one small, display-only page and cannot serve a round trip to All.
+  const filterPages=useRef(new Map<string,{jobs:GenerationJobRecord[];total:number;limit:number}>());
+  const lastRefreshKey=useRef(refreshKey);
+  const invalidateHistory=()=>{filterPages.current.clear();clearGalleryHistory();readSequence.current++;readLock.current=undefined;forceFresh.current=true;};
   const [batch,setBatch]=useState<{id:string;jobs:GenerationJobRecord[];total:number}>();
   useEffect(()=>{alive.current=true;return()=>{alive.current=false;};},[]);
   useEffect(()=>{
-    readSequence.current++;readLock.current=undefined;pageLimit.current=48;
+    if(lastRefreshKey.current!==refreshKey){lastRefreshKey.current=refreshKey;invalidateHistory();}
+  },[refreshKey]);
+  useEffect(()=>{
+    readSequence.current++;readLock.current=undefined;
     const scopeChanged=displayedScope.current?.value!==libraryScope;
     const firstRead=!displayedScope.current;
+    if(scopeChanged)filterPages.current.clear();
     displayedScope.current={value:libraryScope};
-    const cached=libraryScope?readGalleryHistory(libraryScope,status):undefined;
+    const cached=filterPages.current.get(status)||(libraryScope?readGalleryHistory(libraryScope,status):undefined);
+    pageLimit.current=cached&&'limit' in cached?cached.limit:Math.max(48,cached?.jobs.length||0);
+    if(cached)filterPages.current.set(status,{jobs:cached.jobs,total:cached.total,limit:pageLimit.current});
     if(firstRead||scopeChanged){
       forceFresh.current=scopeChanged;
       setJobs(cached?.jobs||[]);setTotal(cached?.total||0);setLoading(!cached);setFromCache(Boolean(cached));
@@ -41,7 +52,7 @@ export default function GalleryWorkspace({active,queueOpen,onQueueOpenChange,t,p
       forceFresh.current=true;
       // Filter the cards already on screen immediately; refresh the authoritative page in the background.
       if(cached){setJobs(cached.jobs);setTotal(cached.total);setFromCache(true);}
-      else setTotal(0);
+      else{setTotal(0);setFromCache(true);}
       setLoading(false);
     }
     setSelected(new Set());setLoadError('');
@@ -56,10 +67,11 @@ export default function GalleryWorkspace({active,queueOpen,onQueueOpenChange,t,p
     if(preferences.notifyOnCompletion&&(result.jobs.some(job=>previous.current.get(job.id)==='running'&&['succeeded','failed'].includes(job.status))||(completed!==undefined&&completionCount.current!==undefined&&completed>completionCount.current)))setMessage('生成任务已有新结果');
     completionCount.current=completed;
     previous.current=new Map(result.jobs.map(job=>[job.id,job.status]));setJobs(result.jobs);setTotal(result.total);setFromCache(false);setLoading(false);setDetail(current=>{const updated=result.jobs.find(job=>job.id===current?.id);return current&&updated?{...updated,parameters:current.parameters}:current;});setLoadError('');
+    filterPages.current.set(status,{jobs:result.jobs,total:result.total,limit:pageLimit.current});
     if(libraryScope)saveGalleryHistory(libraryScope,status,result);
     if(batch?.id){const expanded=await api.generationSet(batch.id,{fresh});if(!current())return;const mapped=expanded.jobs.map(mapGenerationRetryJob);const group=groupGenerationQueueJobs(mapped).find(candidate=>candidate.generationGroupId===batch.id);const updated=group?.jobs||mapped;setBatch(current=>current?.id===batch.id?{id:batch.id,jobs:updated,total:expanded.total}:current);setDetail(current=>{const fresh=updated.find(job=>job.id===current?.id);return current&&fresh?{...fresh,parameters:current.parameters}:current;});}
   }catch(e){if(current())setLoadError(String(e));}finally{if(current()){readLock.current=undefined;setLoading(false);setRefreshing(false);}}},[preferences.notifyOnCompletion,batch?.id,status,libraryScope]);
-  const refreshAfterChange=()=>{clearGalleryHistory();readSequence.current++;readLock.current=undefined;return refresh(true);};
+  const refreshAfterChange=()=>{invalidateHistory();return refresh(true);};
   useEffect(()=>{if(!active)return;void refresh();const timer=setInterval(()=>{if(document.visibilityState==='visible')void refresh();},4000);return()=>clearInterval(timer);},[active,refresh,refreshKey,mutationRevision]);
   useEffect(()=>{if(!focusJobId)return;const sequence=++detailSequence.current;void api.generationJob(focusJobId).then(job=>alive.current&&sequence===detailSequence.current&&setDetail(job)).catch(e=>alive.current&&sequence===detailSequence.current&&setError(String(e)));return()=>{detailSequence.current++;};},[focusJobId]);
   useEffect(()=>{if(command)setLocalCommand(command);},[command?.id]);
@@ -81,7 +93,7 @@ export default function GalleryWorkspace({active,queueOpen,onQueueOpenChange,t,p
   async function cleanup(){if(busy||!selected.size)return;if(!window.confirm('清理选中的生成结果？已收录的 Library 资产将保留；被其他任务或 Agent 引用的结果会受到保护。'))return;setBusy(true);const failures:string[]=[];for(const id of selected){try{await api.discardGenerationJob(id);}catch(e){failures.push(String(e));}}setSelected(new Set());await refreshAfterChange();setBusy(false);if(failures.length)setError(failures.join('\n'));onQueueChanged();}
   return <section className="pg-gallery" hidden={!active} aria-label="画廊工作区">
     <header className="pg-gallery-header"><div className={`pg-gallery-filters ${selected.size?'is-inactive':''}`} inert={selected.size>0} aria-hidden={selected.size>0||undefined}><select aria-label="任务状态筛选" value={status} onChange={e=>{setStatus(e.target.value);saveGalleryFilter(e.target.value);setSelected(new Set());}}><option value="">全部状态</option><option value="active">进行中</option><option value="successful">成功</option><option value="accepted">已收录</option><option value="failed">失败</option></select><label><Search size={17}/><input aria-label="搜索生成历史" placeholder="搜索提示词、模型或任务…" value={query} onChange={e=>setQuery(e.target.value)}/></label><button aria-label="刷新生成历史" title={fromCache?'上次列表 · 正在后台更新':refreshing?'正在更新生成历史':'刷新生成历史'} aria-busy={refreshing} onClick={()=>void refresh()}><RefreshCw size={17} className={refreshing?'pg-history-refreshing':undefined}/></button>
-      {active&&<GenerationQueueDrawer t={t} placement="gallery" open={queueOpen} refreshKey={refreshKey} onOpen={()=>onQueueOpenChange(true)} onClose={()=>{onQueueOpenChange(false);void refresh();}} onOpenJob={job=>{onQueueOpenChange(false);void openJob(job);}} onOpenBatch={(batchJobs,batchTotal,groupId)=>{onQueueOpenChange(false);closeDetail();setBatch({id:groupId,jobs:batchJobs,total:batchTotal});setBatchOpenVersion(value=>value+1);setSelected(new Set());setQuery('');setStatus('');resultsRef.current?.scrollTo({top:0});}} onOpenProviders={()=>{onQueueOpenChange(false);onOpenSettings();}}/>}
+      {active&&<GenerationQueueDrawer t={t} placement="gallery" open={queueOpen} refreshKey={refreshKey} onChanged={()=>{invalidateHistory();setMutationRevision(value=>value+1);}} onOpen={()=>onQueueOpenChange(true)} onClose={()=>{onQueueOpenChange(false);void refresh();}} onOpenJob={job=>{onQueueOpenChange(false);void openJob(job);}} onOpenBatch={(batchJobs,batchTotal,groupId)=>{onQueueOpenChange(false);closeDetail();setBatch({id:groupId,jobs:batchJobs,total:batchTotal});setBatchOpenVersion(value=>value+1);setSelected(new Set());setQuery('');setStatus('');resultsRef.current?.scrollTo({top:0});}} onOpenProviders={()=>{onQueueOpenChange(false);onOpenSettings();}}/>}
     </div>
     <div className={`pg-selection-toolbar ${selected.size?'is-active':''}`} role="group" aria-label="批量操作" aria-hidden={!selected.size||undefined} inert={!selected.size}>
       <span className="pg-selection-count" role="status" aria-live="polite">已选择 <b>{selected.size}</b> 项</span><button className="pg-select-all" onClick={()=>setSelected(new Set(filtered.map(job=>job.id)))}>全选当前列表</button><button className="pg-selection-cancel" onClick={()=>{setSelected(new Set());resultsRef.current?.focus({preventScroll:true});}}>取消选择</button>
@@ -89,12 +101,12 @@ export default function GalleryWorkspace({active,queueOpen,onQueueOpenChange,t,p
     </div></header>
     <div className="pg-gallery-results" ref={resultsRef} tabIndex={0} role="region" aria-label="画廊结果列表">
     {batch&&<div className="pg-batch-scope"><span>生成批次 · {batch.jobs.length} / {batch.total} 个结果</span><button onClick={()=>{setBatch(undefined);setStatus(readGalleryFilter());setSelected(new Set());}}>返回全部历史</button></div>}
-    {loading?<div className="pg-empty">加载生成历史…</div>:filtered.length?<TaskGrid active={active} scrollRef={resultsRef} jobs={filtered} selected={selected} onSelection={setSelected} onOpen={job=>void openJob(job)} onReuse={reuse} onMessage={setError}/>:<div className="pg-empty"><h2>{jobs.length?'没有匹配的任务':'从一个想法开始'}</h2><p>{jobs.length?'试试其他关键词或状态。':'输入提示词，或从 Library 带入配方。快捷收录无需配置生成接口。'}</p></div>}
+    {loading?<div className="pg-empty">加载生成历史…</div>:filtered.length?<TaskGrid active={active} scrollRef={resultsRef} jobs={filtered} selected={selected} onSelection={setSelected} onOpen={job=>void openJob(job)} onReuse={reuse} onMessage={setError}/>:<div className="pg-empty"><h2>{refreshing&&fromCache?'正在更新生成历史':jobs.length?'没有匹配的任务':'从一个想法开始'}</h2><p>{refreshing&&fromCache?'正在获取该状态的最新任务。':jobs.length?'试试其他关键词或状态。':'输入提示词，或从 Library 带入配方。快捷收录无需配置生成接口。'}</p></div>}
     {!batch&&jobs.length<total&&<button className="pg-load-more" disabled={refreshing} onClick={()=>{pageLimit.current+=48;void refresh();}}>已加载 {jobs.length} / {total} · 加载更多</button>}
     </div>
     {(error||loadError||message)&&<div className={`pg-gallery-feedback ${error||loadError?'is-error':''}`} role={error||loadError?'alert':'status'}><span>{error||(loadError?`${fromCache?'当前显示上次列表，历史更新失败：':''}${loadError}`:message)}</span><button aria-label="关闭画廊提示" onClick={()=>{setError('');setLoadError('');setMessage('');}}><X size={15}/></button></div>}
     <InputBar active={active} command={localCommand} preferences={preferences} t={t} onCreated={(created?:GenerationJobRecord[])=>{
-      clearGalleryHistory();readSequence.current++;readLock.current=undefined;forceFresh.current=true;
+      invalidateHistory();
       if(created?.length){
         const ids=new Set(created.map(job=>job.id));
         setJobs(current=>[...created,...current.filter(job=>!ids.has(job.id))]);
@@ -103,7 +115,7 @@ export default function GalleryWorkspace({active,queueOpen,onQueueOpenChange,t,p
       }
       setBatch(undefined);setSelected(new Set());setMessage('');resultsRef.current?.scrollTo({top:0});setMutationRevision(value=>value+1);onQueueChanged();
     }} onOpenSettings={onOpenSettings} configurationRevision={configurationRevision} promptVariablesEnabled={promptVariablesEnabled} promptLanguage={promptLanguage} preferredProvider={preferredProvider} onOpenAgent={onOpenAgent}/>
-    {detail&&active&&!largeJob&&<DetailModal key={detail.id} job={detail} t={t} onClose={closeDetail} onChange={()=>void refreshAfterChange()} onAccepted={id=>{clearGalleryHistory();closeDetail();onAccepted(id);}} onReuse={reuse} onLightbox={()=>setLightbox(detail.id)}/ >}
+    {detail&&active&&!largeJob&&<DetailModal key={detail.id} job={detail} t={t} onClose={closeDetail} onChange={()=>void refreshAfterChange()} onAccepted={id=>{invalidateHistory();closeDetail();onAccepted(id);}} onReuse={reuse} onLightbox={()=>setLightbox(detail.id)}/ >}
     {largeJob&&active&&<Lightbox src={mediaUrl(largeJob.result_path!)} currentIndex={largeIndex} total={resultJobs.length} onClose={()=>setLightbox(undefined)} onPrev={()=>setLightbox(resultJobs[(largeIndex-1+resultJobs.length)%resultJobs.length].id)} onNext={()=>setLightbox(resultJobs[(largeIndex+1)%resultJobs.length].id)}/>}
   </section>;
 }

@@ -276,6 +276,7 @@ export default function GenerationQueueDrawer({
   onOpenProviders,
   placement = 'floating',
   onOpenBatch,
+  onChanged,
 }: {
   t: Translator;
   open: boolean;
@@ -286,6 +287,7 @@ export default function GenerationQueueDrawer({
   onOpenProviders: () => void;
   placement?: 'floating' | 'gallery';
   onOpenBatch?: (jobs: GenerationJobRecord[], total: number, groupId: string) => void;
+  onChanged?: () => void;
 }) {
   const [jobs, setJobs] = useState<GenerationJobRecord[]>([]);
   const [generationSets, setGenerationSets] = useState<GenerationJobSetRecord[]>([]);
@@ -305,6 +307,7 @@ export default function GenerationQueueDrawer({
   const [hasLoaded, setHasLoaded] = useState(false);
   const windowLimitRef = useRef(QUEUE_PAGE_SIZE);
   const refreshRequestRef = useRef(0);
+  const hasActiveWorkRef = useRef(false);
   const openSetRequestRef = useRef(0);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const drawerRef = useRef<HTMLElement | null>(null);
@@ -317,35 +320,41 @@ export default function GenerationQueueDrawer({
     try {
       const result = await api.generationJobs({ limit: open ? limit : 1, prepare_references: false }, { fresh: true });
       if (refreshRequestRef.current !== requestId) return;
-      setJobs(result.jobs);
       setJobTotal(result.total);
       setStatusCounts(result.status_counts);
-      setGenerationSets(result.generation_sets || []);
       setProviderQueueStates(result.provider_queue_states || []);
-      setLoadError('');
-      setHasLoaded(true);
+      // Closed polling is only a summary read. Keep the last complete drawer
+      // page until another detail read succeeds instead of replacing it with 1 row.
+      hasActiveWorkRef.current = Boolean(
+        (result.status_counts?.queued || 0)
+        + (result.status_counts?.running || 0)
+        + (result.generation_sets || []).reduce((total, set) => total + set.remaining, 0),
+      );
+      if (open) {
+        setJobs(result.jobs);
+        setGenerationSets(result.generation_sets || []);
+        setLoadError('');
+        setHasLoaded(true);
+      }
     } catch (error) {
       if (refreshRequestRef.current !== requestId) return;
-      setLoadError(error instanceof Error ? error.message : t('queueLoadFailed'));
-      setHasLoaded(true);
+      if (open) {
+        setLoadError(error instanceof Error ? error.message : t('queueLoadFailed'));
+        setHasLoaded(true);
+      }
     }
   }, [t, open]);
 
-  const hasActiveWork = Boolean(
-    (statusCounts?.queued || 0)
-    + (statusCounts?.running || 0)
-    + generationSets.filter(set => set.total > 1).reduce((total, set) => total + set.remaining, 0),
-  );
   useEffect(() => {
     let cancelled = false;
     let timer: number | undefined;
     const poll = async () => {
       await refresh().catch(() => undefined);
-      if (!cancelled && (open || hasActiveWork)) timer = window.setTimeout(poll, 6000);
+      if (!cancelled && (open || hasActiveWorkRef.current)) timer = window.setTimeout(poll, 6000);
     };
     void poll();
-    return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [hasActiveWork, open, refresh, refreshKey]);
+    return () => { cancelled = true; window.clearTimeout(timer); refreshRequestRef.current += 1; };
+  }, [open, refresh, refreshKey]);
 
   useEffect(() => {
     if (!open || !providerQueueStates.some(state => providerPauseSeconds(state) > 0)) return undefined;
@@ -429,6 +438,7 @@ export default function GenerationQueueDrawer({
     try {
       const updated = await api.cancelGenerationJob(job.id);
       setJobs(current => current.map(candidate => candidate.id === updated.id ? updated : candidate));
+      onChanged?.();
       setLoadError('');
       await refresh();
     } catch (error) {
@@ -448,6 +458,7 @@ export default function GenerationQueueDrawer({
     try {
       const retry = await api.retryGenerationJob(job.id);
       setJobs(current => [retry, ...current.filter(candidate => candidate.id !== retry.id)]);
+      onChanged?.();
       setLoadError('');
       await refresh();
     } catch (error) {
@@ -467,6 +478,7 @@ export default function GenerationQueueDrawer({
     try {
       const updated = await api.markGenerationJobFailed(job.id);
       setJobs(current => current.map(candidate => candidate.id === updated.id ? updated : candidate));
+      onChanged?.();
       setLoadError('');
       await refresh();
     } catch (error) {
@@ -502,6 +514,7 @@ export default function GenerationQueueDrawer({
     try {
       const updated = await api.discardGenerationJob(job.id);
       setJobs(current => current.map(candidate => candidate.id === updated.id ? updated : candidate));
+      onChanged?.();
       setLoadError('');
       void refresh();
     } catch (error) {
@@ -523,6 +536,7 @@ export default function GenerationQueueDrawer({
       const updated = await api.cancelRemainingGenerationSet(set.generation_group_id);
       setGenerationSets(current => current.map(candidate => candidate.generation_group_id === updated.generation_group_id ? updated : candidate));
       setJobs(current => mergeGenerationJobs(current, updated.jobs));
+      onChanged?.();
       setLoadError('');
       void refresh();
     } catch (error) {
@@ -651,7 +665,7 @@ export default function GenerationQueueDrawer({
   ].filter(item => item.count > 0);
   const generationBatchCards = useMemo(() => groupGenerationQueueJobs(jobs), [jobs]);
   const groupedJobIds = useMemo(() => new Set(generationBatchCards.flatMap(group => group.jobs.map(job => job.id))), [generationBatchCards]);
-  const hasActiveGenerationSet = generationBatchCards.some(group => group.jobs.some(isActive));
+  const hasActiveGenerationSet = !statusCounts && generationBatchCards.some(group => group.jobs.some(isActive));
   const hasSignal = counts.active + counts.ready + counts.failed > 0 || hasActiveGenerationSet;
   const pausedProviderQueues = providerQueueStates
     .map(state => ({ state, seconds: providerPauseSeconds(state, queueClock) }))

@@ -937,6 +937,117 @@ test('filter changes retain matching cards during delayed reads and expose only 
   assert.deepEqual(h.node('TaskGrid').jobs.map(job => job.id), ['failed-visible']);
 });
 
+test('returning from failed to all restores the loaded page immediately while fresh history is pending', async t => {
+  historyStorage(t);
+  const pending = deferred(), calls = [];
+  const all = Array.from({ length: 120 }, (_, index) => historicalJob({ id: `cached-${index}`, status: index === 0 ? 'failed' : 'succeeded' }));
+  let delayed = false;
+  const h = workspaceHarness(t, { generationJobs: params => {
+    calls.push(params);
+    if (delayed && !params.statuses) return pending.promise;
+    const jobs = params.statuses ? all.filter(job => job.status === params.statuses) : all;
+    return Promise.resolve({ jobs: jobs.slice(0, params.limit), total: jobs.length });
+  } }, { libraryScope: 'library' });
+  await h.flush();
+  h.node('button', props => props.className === 'pg-load-more').onClick(); await h.flush();
+  assert.equal(h.node('TaskGrid').jobs.length, 96);
+  const command = h.node('InputBar').command;
+  h.node('select').onChange({ target: { value: 'failed' } }); await h.flush();
+  assert.equal(h.node('TaskGrid').jobs.length, 1);
+  delayed = true;
+  h.node('select').onChange({ target: { value: '' } }); await h.flush();
+  assert.equal(h.node('TaskGrid').jobs.length, 96, 'all previously loaded cards return before the API resolves');
+  assert.equal(calls.at(-1).limit, 96, 'background refresh must not collapse an expanded page to 48');
+  assert.deepEqual(h.node('button', props => props.className === 'pg-load-more').children, ['已加载 ', 96, ' / ', 120, ' · 加载更多']);
+  assert.equal(h.node('InputBar').command, command, 'filter changes do not replace the composer or its recipe');
+  pending.resolve({ jobs: all.slice(0, 96), total: 120 }); await h.flush();
+  assert.equal(h.node('TaskGrid').jobs.length, 96);
+});
+
+test('empty filtered results can return instantly to all and late filter reads cannot replace it', async t => {
+  historyStorage(t);
+  const pendingAll = deferred(), lateFailed = deferred(), success = historicalJob();
+  let allReads = 0, failedReads = 0;
+  const h = workspaceHarness(t, { generationJobs: params => {
+    if (!params.statuses) return ++allReads === 1 ? Promise.resolve({ jobs: [success], total: 1 }) : pendingAll.promise;
+    return ++failedReads === 1 ? Promise.resolve({ jobs: [], total: 0 }) : lateFailed.promise;
+  } });
+  await h.flush();
+  h.node('select').onChange({ target: { value: 'failed' } }); await h.flush();
+  assert.equal(h.node('TaskGrid'), undefined);
+  h.node('button', props => props['aria-label'] === '刷新生成历史').onClick(); await h.flush();
+  h.node('select').onChange({ target: { value: '' } }); await h.flush();
+  assert.deepEqual(h.node('TaskGrid')?.jobs.map(job => job.id), [success.id]);
+  lateFailed.resolve({ jobs: [historicalJob({ id: 'late-failure', status: 'failed' })], total: 1 }); await h.flush();
+  assert.deepEqual(h.node('TaskGrid').jobs.map(job => job.id), [success.id]);
+  pendingAll.resolve({ jobs: [success], total: 1 }); await h.flush();
+});
+
+for(const change of ['library', 'mutation']) test(`filter page cache is invalidated after ${change} changes`, async t => {
+  historyStorage(t);
+  const old = historicalJob({ id: 'old-success' }), failed = historicalJob({ id: 'old-failed', status: 'failed' });
+  const pending = deferred(); let changed = false;
+  const h = workspaceHarness(t, { generationJobs: params => {
+    if(changed)return params.statuses ? Promise.resolve({ jobs: [], total: 0 }) : pending.promise;
+    return Promise.resolve({ jobs: params.statuses ? [failed] : [old, failed], total: params.statuses ? 1 : 2 });
+  } }, { libraryScope: 'library-a' });
+  await h.flush();
+  h.node('select').onChange({ target: { value: 'failed' } }); await h.flush();
+  changed = true;
+  h.update(change === 'library' ? { libraryScope: 'library-b' } : { refreshKey: 1 }); await h.flush();
+  h.node('select').onChange({ target: { value: '' } }); await h.flush();
+  assert.equal(h.node('TaskGrid'), undefined, 'an invalidated All snapshot must not resurrect old records');
+  assert.equal(h.node('button', props => props.className === 'pg-load-more'), undefined, 'old totals are not reused');
+  assert.equal(h.node('h2').children, '正在更新生成历史', 'uncached pending reads do not claim the library is empty');
+  pending.resolve({ jobs: [], total: 0 }); await h.flush();
+  assert.equal(h.node('h2').children, '从一个想法开始');
+});
+
+test('a confirmed submission invalidates old filter snapshots and survives return to all', async t => {
+  historyStorage(t);
+  const old = historicalJob(), failed = historicalJob({ id: 'failed', status: 'failed' });
+  const created = historicalJob({ id: 'just-created', status: 'queued' }), pending = deferred();
+  let submitted = false;
+  const h = workspaceHarness(t, { generationJobs: params => submitted ? pending.promise
+    : Promise.resolve({ jobs: params.statuses ? [failed] : [old, failed], total: params.statuses ? 1 : 2 }) });
+  await h.flush();
+  h.node('select').onChange({ target: { value: 'failed' } }); await h.flush();
+  submitted = true;
+  h.node('InputBar').onCreated([created]); await h.flush();
+  assert.equal(h.node('TaskGrid').jobs[0].id, created.id, 'a cached All page cannot replace the new server record');
+  pending.resolve({ jobs: [created, old, failed], total: 3 }); await h.flush();
+  assert.deepEqual(h.node('TaskGrid').jobs.map(job => job.id), [created.id, old.id, failed.id]);
+});
+
+test('queue mutations invalidate every gallery filter and pending reads without duplicating refresh', async t => {
+  historyStorage(t);
+  const success = historicalJob({ id: 'discarded-from-queue' }), failed = historicalJob({ id: 'failed', status: 'failed' });
+  const stale = deferred(), freshFailed = deferred(), freshAll = deferred();
+  let reads = 0, changes = 0;
+  const h = workspaceHarness(t, { generationJobs: () => {
+    reads++;
+    if(reads === 1)return Promise.resolve({ jobs: [success, failed], total: 2 });
+    if(reads === 2)return Promise.resolve({ jobs: [failed], total: 1 });
+    return reads === 3 ? stale.promise : reads === 4 ? freshFailed.promise : freshAll.promise;
+  } }, { libraryScope: 'library', onQueueChanged: () => changes++ });
+  await h.flush();
+  h.node('select').onChange({ target: { value: 'failed' } }); await h.flush();
+  h.node('button', props => props['aria-label'] === '刷新生成历史').onClick(); await h.flush();
+  h.node('GenerationQueueDrawer').onChanged(); await h.flush();
+  assert.equal(changes, 0, 'the queue refreshes itself; do not bounce its mutation back through the global refresh key');
+  assert.equal(reads, 4, 'the local revision starts one gallery refresh');
+  assert.equal(h.node('GenerationQueueDrawer').refreshKey, 0, 'the queue does not receive a redundant refresh notification');
+  stale.resolve({ jobs: [historicalJob({ id: 'stale-failed', status: 'failed' })], total: 1 }); await h.flush();
+  assert.deepEqual(h.node('TaskGrid').jobs.map(job => job.id), [failed.id], 'the pre-mutation read is invalidated');
+  h.node('select').onChange({ target: { value: '' } }); await h.flush();
+  assert.deepEqual(h.node('TaskGrid').jobs.map(job => job.id), [failed.id], 'the cached All page cannot resurrect the discarded success');
+  assert.equal(h.node('button', props => props.className === 'pg-load-more'), undefined);
+  freshFailed.resolve({ jobs: [], total: 0 }); await h.flush();
+  assert.deepEqual(h.node('TaskGrid').jobs.map(job => job.id), [failed.id], 'the previous filter cannot overwrite All');
+  freshAll.resolve({ jobs: [failed], total: 1 }); await h.flush();
+  assert.deepEqual(h.node('TaskGrid').jobs.map(job => job.id), [failed.id]);
+});
+
 test('library changes discard old cards and ignore late old-library responses', async t => {
   historyStorage(t);
   const stale = deferred(), current = deferred(); let calls = 0;
