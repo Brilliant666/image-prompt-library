@@ -231,7 +231,7 @@ function inputHarness(t, overrides = {}, apiOverrides = {}, environment = {}) {
   const find = (type, label) => { const node = children(tree).find(node => node.type === type && (node.props['aria-label'] === label || node.props.children === label)); assert.ok(node, `${type} ${label} exists`); return node.props; };
   render();
   t.after(() => { slots.forEach(slot => slot?.cleanup?.()); if (oldStorage) Object.defineProperty(globalThis, 'localStorage', oldStorage); else delete globalThis.localStorage; if (OldImage) globalThis.Image = OldImage; else delete globalThis.Image; if (OldReader) globalThis.FileReader = OldReader; else delete globalThis.FileReader; });
-  return { state, flush, find, emitPreferenceReset: profileId => eventTarget.dispatchEvent(new CustomEvent('ipl:generation-preference-reset', { detail: { profileId } })), update: value => { props = { ...props, ...value }; render(); }, get tree() { return tree; } };
+  return { state, flush, find, emitCatalogChanged: profileId => eventTarget.dispatchEvent(new CustomEvent('ipl:model-catalog-changed', { detail: { profileId } })), emitModelSaved: (profileId, model) => eventTarget.dispatchEvent(new CustomEvent('ipl:profile-model-saved', { detail: { profileId, model } })), emitPreferenceReset: profileId => eventTarget.dispatchEvent(new CustomEvent('ipl:generation-preference-reset', { detail: { profileId } })), update: value => { props = { ...props, ...value }; render(); }, get tree() { return tree; } };
 }
 
 test('actual InputBar submit callback locks two same-tick clicks and clears input only after confirmed creation', async t => {
@@ -251,11 +251,155 @@ test('gallery model suggestions follow the current API list and retain a restore
   });
   await harness.flush();
   harness.find('button', '请求模型 historical-model').onClick(); await harness.flush();
-  const choices = () => children(harness.tree).find(node => node.type === 'datalist' && node.props.id === 'gallery-models').props.children.map(option => option.props.value);
-  assert.deepEqual(choices(), ['historical-model', 'configured-default', 'model-one', 'model-two']);
+  const choices = () => children(harness.tree).filter(node => node.type === 'button' && node.props['data-model-id']).map(node => node.props['data-model-id']);
+  assert.deepEqual(choices(), ['historical-model']);
   harness.find('input', '请求模型完整 ID').onChange({ target: { value: 'custom-entered-model' } }); await harness.flush();
-  assert.deepEqual(choices(), ['custom-entered-model', 'configured-default', 'model-one', 'model-two']);
+  assert.deepEqual(choices(), ['custom-entered-model']);
   assert.equal(harness.state.posts.length, 0, 'browsing and editing the model never submits a request');
+});
+
+test('an explicit saved default updates only the matching gallery model and preserves the full draft', async t => {
+  const harness = inputHarness(t, { command: { id: 981, job: historicalJob({ parameters: { ...historicalJob().parameters, stream: false, partial_images: 0, response_format: 'auto', base_url_mode: 'custom' } }) } });
+  await harness.flush();
+  harness.emitModelSaved('another-api', 'wrong-model'); await harness.flush();
+  harness.find('button', '请求模型 gateway-original-alias');
+  harness.emitModelSaved('original-api', 'provider-new-alias'); await harness.flush();
+  harness.find('button', '请求模型 provider-new-alias');
+  assert.equal(harness.find('textarea', '画廊提示词').value, originalPrompt);
+  assert.equal(harness.state.posts.length, 0);
+  harness.find('button', '生成图片').onClick(); await harness.flush();
+  const payload = harness.state.posts[0];
+  assert.equal(payload.model, 'provider-new-alias');
+  assert.equal(payload.prompt_text, originalPrompt);
+  assert.equal(payload.parameters.size, '2560x3840');
+  assert.equal(payload.parameters.quality, 'max');
+  assert.equal(payload.parameters.stream, false);
+  assert.equal(payload.parameters.partial_images, 0);
+  assert.equal(payload.parameters.response_format, 'auto');
+  assert.equal(payload.parameters.base_url_mode, 'custom');
+});
+
+test('model choices stay visible across aliases and submit the exact selected or custom ID', async t => {
+  const harness = inputHarness(t, {}, {openAICompatibleProfiles: async () => ({profiles: [{id: 'original-api', display_name: 'Original API', configured: true, model: 'gpt-image-vendor-flare', models: ['gpt-image-vendor-1k', 'gpt-image-vendor-4k']}], default_profile_id: 'original-api'})});
+  await harness.flush();
+  harness.find('textarea', '画廊提示词').onChange({target: {value: '  synthetic prompt\n'}}); await harness.flush();
+  harness.find('button', '请求模型 gpt-image-vendor-flare').onClick(); await harness.flush();
+  harness.find('input', '请求模型完整 ID').onChange({target: {value: 'old-sunburst'}}); await harness.flush();
+  const choices = children(harness.tree).filter(node => node.type === 'button' && node.props['data-model-id']);
+  assert.deepEqual(choices.map(node => node.props['data-model-id']), ['old-sunburst', 'gpt-image-vendor-flare', 'gpt-image-vendor-1k', 'gpt-image-vendor-4k']);
+  choices.find(node => node.props['data-model-id'] === 'gpt-image-vendor-4k').props.onClick(); await harness.flush();
+  harness.find('button', '生成图片').onClick(); await harness.flush();
+  assert.equal(harness.state.posts[0].model, 'gpt-image-vendor-4k');
+  harness.find('button', '请求模型 gpt-image-vendor-4k').onClick(); await harness.flush();
+  harness.find('input', '请求模型完整 ID').onChange({target: {value: 'tomorrow-new-alias'}}); await harness.flush();
+  harness.find('button', '生成图片').onClick(); await harness.flush();
+  assert.equal(harness.state.posts[1].model, 'tomorrow-new-alias');
+  assert.equal(harness.state.posts[1].prompt_text, '  synthetic prompt\n');
+});
+
+test('empty API model lists do not invent supported models and allow adopting its saved default', async t => {
+  const harness = inputHarness(t, {command: {id: 982, job: historicalJob()}}, {openAICompatibleProfiles: async () => ({profiles: [{id: 'original-api', display_name: 'Original API', configured: true, model: 'gpt-image-new-default', models: []}], default_profile_id: 'original-api'})});
+  await harness.flush();
+  harness.find('button', '请求模型 gateway-original-alias').onClick(); await harness.flush();
+  assert.deepEqual(children(harness.tree).filter(node => node.type === 'button' && node.props['data-model-id']).map(node => node.props['data-model-id']), ['gateway-original-alias', 'gpt-image-new-default']);
+  harness.find('button', '使用此配置的默认模型').onClick(); await harness.flush();
+  harness.find('button', '请求模型 gpt-image-new-default');
+  assert.equal(harness.find('textarea', '画廊提示词').value, originalPrompt);
+});
+
+test('saving a model invalidates pending historical lookup without replaying it on settings refresh', async t => {
+  const lookup = deferred();
+  const harness = inputHarness(t, {}, {generationJobForImage: () => lookup.promise});
+  await harness.flush();
+  harness.find('textarea', '画廊提示词').onChange({target: {value: 'keep this draft'}}); await harness.flush();
+  harness.update({command: {id: 983, item: {id: 'item', prompts: [], images: [{id: 'image', generation_provider: 'openai_compatible', original_path: 'original.png'}]}, imageId: 'image'}});
+  await harness.flush();
+  harness.emitModelSaved('original-api', 'saved-default'); await harness.flush();
+  lookup.resolve(historicalJob()); await harness.flush();
+  harness.update({configurationRevision: 1}); await harness.flush();
+  harness.find('button', '请求模型 saved-default');
+  assert.equal(harness.find('textarea', '画廊提示词').value, 'keep this draft');
+  assert.equal(harness.find('button', '生成图片').disabled, false);
+  assert.equal(harness.state.posts.length, 0);
+});
+
+test('clearing the optional default does not write the obsolete model back into browser memory', async t => {
+  const harness = inputHarness(t); await harness.flush();
+  harness.emitModelSaved('original-api', ''); await harness.flush();
+  harness.find('button', '请求模型 未选择');
+  assert.equal(preferences.readGenerationPreference(localStorage, 'original-api').model, '');
+  assert.equal(harness.state.posts.length, 0);
+});
+
+test('discovered gpt-image models preserve a missing historical selection and survive refresh failure', async t => {
+  let catalog = {models: [{id: 'unknown-alias', image_generation: null}, {id: 'text-model', image_generation: false}, {id: 'gpt-image-new-model', image_generation: true}], fetched_at: '2026-10-20T00:00:00Z', checked_at: '2026-10-20T00:00:00Z', error: null};
+  const harness = inputHarness(t, {command: {id: 984, job: historicalJob()}}, {openAICompatibleProfiles: async () => ({profiles: [{id: 'original-api', display_name: 'Original API', configured: true, model: 'default-model', models: ['manual-alias'], model_catalog: catalog}], default_profile_id: 'original-api'})});
+  await harness.flush();
+  harness.find('button', '请求模型 gateway-original-alias').onClick(); await harness.flush();
+  const choices=()=>children(harness.tree).filter(node=>node.type==='button'&&node.props['data-model-id']);
+  assert.deepEqual(choices().map(node=>node.props['data-model-id']), ['gateway-original-alias','gpt-image-new-model']);
+  assert.ok(children(harness.tree).some(node=>node.props?.role==='status'&&String(node.props.children).includes('未找到当前模型')));
+  assert.equal(harness.find('textarea','画廊提示词').value,originalPrompt);
+  catalog={...catalog,error:'Models request timed out.'};
+  harness.update({configurationRevision:1}); await harness.flush();
+  assert.equal(choices().length,2);
+  harness.find('button','请求模型 gateway-original-alias');
+  choices().find(node=>node.props['data-model-id']==='gpt-image-new-model').props.onClick(); await harness.flush();
+  harness.find('button','生成图片').onClick(); await harness.flush();
+  assert.equal(harness.state.posts[0].model,'gpt-image-new-model');
+  assert.equal(harness.state.posts[0].prompt_text,originalPrompt);
+});
+
+test('gallery only recommends gpt-image while preserving selected exceptions and unrestricted manual entry', async t => {
+  const models = [
+    ['claude-opus-5', null], ['gemini-3.1-flash-lite-preview', null], ['gpt-6-astra', null],
+    ['gpt-image-2-4k', null], ['google/nano-banana-pro', null], ['gemini-3-pro-image-preview', null],
+    ['midjourney-v7', null], ['google/imagen-4', null], ['black-forest-labs/FLUX.1-schnell', null],
+    ['stable-diffusion-xl', null], ['custom-output-image', true], ['manual-unknown', null], ['gpt-image-declared', true],
+    ['gpt-image-disabled', false], ['manual-disabled', false],
+  ].map(([id, image_generation]) => ({id, image_generation}));
+  const catalog = {models, fetched_at: '2026-10-20T00:00:00Z', checked_at: '2026-10-20T00:00:00Z', error: null};
+  const harness = inputHarness(t, {command: {id: 985, job: historicalJob()}}, {
+    openAICompatibleProfiles: async () => ({profiles: [{id: 'original-api', display_name: 'Original API', configured: true, model: 'gpt-6-astra', models: ['manual-unknown', 'manual-disabled'], model_catalog: catalog}], default_profile_id: 'original-api'}),
+  });
+  await harness.flush();
+  harness.find('button', '请求模型 gateway-original-alias').onClick(); await harness.flush();
+  const choices = () => children(harness.tree).filter(node => node.type === 'button' && node.props['data-model-id']);
+  assert.deepEqual(choices().map(node => node.props['data-model-id']), [
+    'gateway-original-alias', 'gpt-image-declared', 'gpt-image-2-4k',
+  ]);
+  const text = value => typeof value === 'string' ? value : Array.isArray(value) ? value.map(text).join('') : value?.props ? text(value.props.children) : '';
+  assert.match(text(choices().find(node => node.props['data-model-id'] === 'gpt-image-2-4k')), /名称匹配.*未验证/);
+  assert.equal(choices().some(node => node.props['data-model-id'] === 'custom-output-image'), false, 'even explicit image capability does not widen the requested family');
+  assert.equal(children(harness.tree).some(node => node.props?.children === '使用此配置的默认模型'), false);
+  assert.equal(models.find(model => model.id === 'google/nano-banana-pro').image_generation, null, 'UI recommendations never mutate capability metadata');
+  assert.equal(catalog.models.length, 15, 'gallery filtering leaves the settings catalog intact');
+  choices().find(node => node.props['data-model-id'] === 'gpt-image-2-4k').props.onClick(); await harness.flush();
+  harness.find('button', '生成图片').onClick(); await harness.flush();
+  assert.equal(harness.state.posts[0].model, 'gpt-image-2-4k');
+  assert.equal(harness.state.posts[0].prompt_text, originalPrompt);
+
+  harness.find('button', '请求模型 gpt-image-2-4k').onClick(); await harness.flush();
+  harness.find('input', '请求模型完整 ID').onChange({target: {value: 'gpt-image-disabled'}}); await harness.flush();
+  assert.equal(choices()[0].props['data-model-id'], 'gpt-image-disabled', 'an intentional custom selection stays editable');
+  assert.match(text(choices()[0]), /接口标注：非图片输出/);
+  harness.find('input', '请求模型完整 ID').onChange({target: {value: 'tomorrows-custom-image-alias'}}); await harness.flush();
+  assert.equal(choices().some(node => node.props['data-model-id'] === 'gpt-image-disabled'), false);
+  harness.find('button', '生成图片').onClick(); await harness.flush();
+  assert.equal(harness.state.posts[1].model, 'tomorrows-custom-image-alias');
+});
+
+test('API gallery family filtering does not restrict OAuth account image model options', async t => {
+  const harness = inputHarness(t, {preferredProvider: 'xai_grok_oauth'}, {
+    generationProviders: async () => [{provider: 'xai_grok_oauth', display_name: 'Grok', can_generate: true, default_image_model: 'grok-image-default', image_models: ['grok-image-default', 'grok-image-alternate']}],
+  });
+  await harness.flush();
+  harness.find('button', '请求模型 grok-image-default').onClick(); await harness.flush();
+  const choices = children(harness.tree).filter(node => node.type === 'button' && node.props['data-model-id']);
+  assert.deepEqual(choices.map(node => node.props['data-model-id']), ['grok-image-default', 'grok-image-alternate']);
+  choices[1].props.onClick(); await harness.flush();
+  harness.find('button', '请求模型 grok-image-alternate');
+  assert.equal(harness.state.posts.length, 0);
 });
 
 test('parameter chips display complete model and exact pixels and preserve edits in a three-job request', async t => {
@@ -978,4 +1122,95 @@ test('actual reference picker serializes repeated load-more clicks and appends o
   page.resolve({ items: [{ id: 'B', title: 'B' }], total: 2 }); await harness.flush();
   assert.equal(children(harness.tree).filter(node => node.type === 'span' && node.props.children === 'B').length, 1);
   assert.equal(children(harness.tree).some(node => node.type === 'button' && node.props.children === '加载更多参考（搜索已加载结果）'), false);
+});
+
+
+const syncedCatalog = (id = 'gpt-image-catalog-new') => ({models: [{id, image_generation: null}], fetched_at: '2026-10-20T10:00:00Z', checked_at: '2026-10-20T10:00:00Z', error: null});
+const catalogChoices = h => children(h.tree).filter(node => node.type === 'button' && node.props['data-model-id']).map(node => node.props['data-model-id']);
+
+test('catalog invalidation updates actual gallery choices without resetting pending selected files or draft', async t => {
+  const first = deferred(), second = deferred(), cache = deferred(), reads = [];
+  const h = inputHarness(t, {}, {openAICompatibleModels: id => {reads.push(id); return cache.promise;}}, {readFile: file => file.name === 'first.png' ? first.promise : second.promise});
+  await h.flush();
+  h.find('textarea', '画廊提示词').onChange({target: {value: '  keep original\n prompt  '}}); await h.flush();
+  h.find('textarea', '画廊提示词').onPaste({preventDefault() {}, clipboardData: {files: ['first.png', 'second.png'].map(name => new File(['synthetic'], name, {type:'image/png'}))}}); await h.flush();
+  h.emitCatalogChanged('original-api'); await h.flush(); cache.resolve(syncedCatalog()); await h.flush();
+  h.find('button', '请求模型 gateway-original-alias').onClick(); await h.flush();
+  assert.ok(catalogChoices(h).includes('gpt-image-catalog-new'));
+  assert.deepEqual(reads, ['original-api']);
+  assert.equal(h.find('button', '生成图片').disabled, true);
+  second.resolve('data:image/png;base64,second'); await h.flush(); first.resolve('data:image/png;base64,first'); await h.flush();
+  assert.equal(h.find('textarea', '画廊提示词').value, '  keep original\n prompt  ');
+  assert.deepEqual(children(h.tree).filter(node => node.type === 'img').map(node => node.props.src), ['data:image/png;base64,first','data:image/png;base64,second']);
+  assert.equal(h.find('button', '生成图片').disabled, false);
+  assert.equal(h.state.posts.length, 0);
+  h.find('button', '生成图片').onClick(); await h.flush();
+  assert.equal(h.state.posts[0].model, 'gateway-original-alias');
+  assert.equal(h.state.posts[0].parameters.input_images.length, 2);
+});
+
+for (const edited of [false, true]) test(`catalog update preserves historical restoration and accepted edits (${edited})`, async t => {
+  const lookup = deferred();
+  const item = {id:'source', prompts:[], images:[{id:'source-image',role:'reference_image',generation_provider:'openai_compatible'}]};
+  const h = inputHarness(t, {command:{id:2300,item,imageId:'source-image'}}, {generationJobForImage:()=>lookup.promise, openAICompatibleModels: async()=>syncedCatalog()}); await h.flush();
+  if(edited){h.find('textarea','画廊提示词').onChange({target:{value:'accepted user edit'}}); await h.flush();}
+  h.emitCatalogChanged('original-api'); await h.flush();
+  h.find('button','请求模型 gateway-original-alias').onClick(); await h.flush();
+  assert.ok(catalogChoices(h).includes('gpt-image-catalog-new'));
+  lookup.resolve(historicalJob({parameters:{...historicalJob().parameters,stream:false,partial_images:0,response_format:'auto',base_url_mode:'custom'}})); await h.flush();
+  assert.equal(h.find('textarea','画廊提示词').value,edited?'accepted user edit':originalPrompt);
+  assert.equal(h.find('button','生成图片').disabled,false);
+  assert.equal(h.state.posts.length,0);
+  if(!edited){h.find('button','生成图片').onClick();await h.flush();assert.equal(h.state.posts[0].parameters.stream,false);assert.equal(h.state.posts[0].parameters.base_url_mode,'custom');}
+});
+
+test('catalog cache reads reject older requests and responses from an earlier configuration epoch', async t => {
+  const old = deferred(), newer = deferred(), connectionOld = deferred(); let calls = 0;
+  const h = inputHarness(t, {}, {openAICompatibleModels:()=>[old,newer,connectionOld][calls++].promise}); await h.flush();
+  h.find('button','请求模型 gateway-original-alias').onClick(); await h.flush();
+  h.emitCatalogChanged('original-api'); h.emitCatalogChanged('original-api'); await h.flush();
+  newer.resolve(syncedCatalog('gpt-image-newest')); await h.flush(); old.resolve(syncedCatalog('gpt-image-obsolete')); await h.flush();
+  assert.ok(catalogChoices(h).includes('gpt-image-newest')); assert.ok(!catalogChoices(h).includes('gpt-image-obsolete'));
+  h.emitCatalogChanged('original-api'); await h.flush(); h.update({configurationRevision:1}); await h.flush();
+  connectionOld.resolve(syncedCatalog('gpt-image-old-connection')); await h.flush();
+  assert.ok(!catalogChoices(h).includes('gpt-image-old-connection'));
+  assert.equal(h.state.posts.length,0);
+});
+
+test('catalog failure retains successful candidates, manual model and prompt; reopening makes no catalog requests', async t => {
+  let calls = 0;
+  const retained = {...syncedCatalog(), error:'Models request timed out.'};
+  const h = inputHarness(t, {}, {openAICompatibleModels: async()=>{calls++;return retained;}});await h.flush();
+  h.find('textarea','画廊提示词').onChange({target:{value:'my draft'}});await h.flush();
+  h.find('button','请求模型 gateway-original-alias').onClick();await h.flush();
+  h.find('input','请求模型完整 ID').onChange({target:{value:'manual-unknown-model'}});await h.flush();
+  h.emitCatalogChanged('original-api');await h.flush();
+  assert.deepEqual(catalogChoices(h),['manual-unknown-model','gpt-image-catalog-new']);
+  assert.equal(h.find('textarea','画廊提示词').value,'my draft');
+  h.update({active:false});await h.flush();h.update({active:true});await h.flush();
+  assert.equal(calls,1);assert.equal(h.state.posts.length,0);
+});
+
+
+test('a catalog arriving during initial profile loading is retained when that older snapshot resolves', async t => {
+  const store=deferred();
+  const h=inputHarness(t,{}, {openAICompatibleProfiles:()=>store.promise,openAICompatibleModels:async()=>syncedCatalog()});await h.flush();
+  h.emitCatalogChanged('original-api');await h.flush();
+  store.resolve({profiles:[{id:'original-api',display_name:'Original API',configured:true,model:'gateway-original-alias'}],default_profile_id:'original-api'});await h.flush();
+  h.find('button','请求模型 gateway-original-alias').onClick();await h.flush();
+  assert.ok(catalogChoices(h).includes('gpt-image-catalog-new'));
+  assert.equal(h.state.posts.length,0);
+});
+
+test('catalog update for another profile does not change the active candidates or unsaved input', async t => {
+  const h=inputHarness(t,{}, {openAICompatibleProfiles:async()=>({profiles:[{id:'original-api',display_name:'Original API',configured:true,model:'gateway-original-alias'},{id:'other-api',display_name:'Other API',configured:true,model:'other-default'}],default_profile_id:'original-api'}),openAICompatibleModels:async()=>syncedCatalog('gpt-image-other')});await h.flush();
+  h.find('textarea','画廊提示词').onChange({target:{value:'preserve me'}});await h.flush();
+  h.emitCatalogChanged('other-api');await h.flush();
+  h.find('button','请求模型 gateway-original-alias').onClick();await h.flush();
+  assert.ok(!catalogChoices(h).includes('gpt-image-other'));
+  h.find('button','Original API').onClick();await h.flush();
+  children(h.tree).find(n=>n.type==='button'&&n.props.children?.[0]==='Other API').props.onClick();await h.flush();
+  h.find('button','请求模型 other-default').onClick();await h.flush();
+  assert.ok(catalogChoices(h).includes('gpt-image-other'));
+  assert.equal(h.find('textarea','画廊提示词').value,'preserve me');assert.equal(h.state.posts.length,0);
 });

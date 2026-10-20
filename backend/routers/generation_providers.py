@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
-from backend.services.openai_compatible import OpenAICompatibleConfig, OpenAICompatibleError
+from backend.services.openai_compatible import OpenAICompatibleConfig, OpenAICompatibleError, ModelCatalogProfileNotFound
 
 from backend.services.openai_codex_native import (
     CodexDeviceCodeFlow,
@@ -113,6 +113,27 @@ async def order_openai_compatible_profiles(request: Request):
         return OpenAICompatibleConfig(library_path=request.app.state.library_path).reorder_profiles(payload["profile_ids"])
     except (ValueError, TypeError, OSError, OpenAICompatibleError):
         raise HTTPException(status_code=409, detail="Could not reorder profiles. Refresh the list and try again.") from None
+
+
+@router.get("/openai-compatible/profiles/{profile_id}/models")
+def openai_compatible_model_catalog(profile_id: str, request: Request):
+    try:
+        return OpenAICompatibleConfig(library_path=request.app.state.library_path).model_catalog(profile_id)
+    except ModelCatalogProfileNotFound:
+        raise HTTPException(status_code=404, detail="The selected API profile no longer exists.") from None
+    except (ValueError, OSError, OpenAICompatibleError):
+        raise HTTPException(status_code=409, detail="Could not read the saved model catalog.") from None
+
+
+@router.post("/openai-compatible/profiles/{profile_id}/models/refresh")
+def refresh_openai_compatible_model_catalog(profile_id: str, request: Request):
+    try:
+        # No submitted URL/key or other unsaved form values are accepted here.
+        return OpenAICompatibleConfig(library_path=request.app.state.library_path).refresh_model_catalog(profile_id)
+    except ModelCatalogProfileNotFound:
+        raise HTTPException(status_code=404, detail="The selected API profile no longer exists.") from None
+    except (ValueError, OSError, OpenAICompatibleError):
+        raise HTTPException(status_code=409, detail="Could not refresh the saved model catalog.") from None
 
 
 @router.post("/openai-compatible/profiles/{profile_id}/copy")

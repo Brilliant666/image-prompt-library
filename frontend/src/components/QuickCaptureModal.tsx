@@ -166,6 +166,7 @@ export default function QuickCaptureModal({ open, uiLanguage, onClose, onSaved, 
       </section> : <form onSubmit={submit} className={dragging ? 'quick-capture-form is-dragging' : 'quick-capture-form'}>
         <div className="quick-capture-grid">
           <div className="quick-capture-image-column">
+            <div className="quick-capture-pane-title">{text.image}</div>
             <input ref={fileInput} type="file" accept={CAPTURE_IMAGE_ACCEPT} className="sr-only" tabIndex={-1} disabled={locked || saving} onChange={event => { acceptFiles(Array.from(event.target.files || [])); event.target.value = ''; }} />
             <button type="button" className={`quick-capture-image${preview ? ' has-image' : ''}`} onClick={() => fileInput.current?.click()} disabled={locked || saving} aria-label={file ? text.replace : text.choose}>
               {preview && !previewFailed ? <img src={preview} alt={text.image} onError={() => setPreviewFailed(true)} /> : <span><ImagePlus size={38} /><strong>{previewFailed ? text.imagePreviewFailed : text.drop}</strong><span>{text.paste}</span><span className="quick-capture-choose">{file ? text.replace : text.choose}</span></span>}
@@ -179,16 +180,16 @@ export default function QuickCaptureModal({ open, uiLanguage, onClose, onSaved, 
               <label><span>{text.language}</span><select aria-label={text.language} value={language} onChange={event => setLanguage(event.target.value as CaptureLanguage)} disabled={locked || saving}>{(['auto', 'en', 'zh_hans', 'zh_hant', 'und'] as const).map(value => <option key={value} value={value}>{text[value]}</option>)}</select></label>
               <p aria-live="polite">{language !== 'auto' ? text.manual : detecting ? text.detecting : detected ? `${text.detected}：${text[detected.language]}${detected.uncertain ? ` · ${text.uncertain}` : ''}` : text.uncertain}</p>
             </div>
-            <details className="quick-capture-details"><summary><ChevronDown size={16} />{text.details}</summary>
-              <div className="quick-capture-fields">
-                <label><span>{text.title}</span><input value={title} onChange={event => setTitle(event.target.value)} placeholder={text.titlePlaceholder} disabled={locked || saving} /></label>
-                <label><span>{text.source}</span><input value={sourceName} onChange={event => setSourceName(event.target.value)} placeholder={text.sourcePlaceholder} disabled={locked || saving} /></label>
-                <label><span>{text.url}</span><input type="url" value={sourceUrl} onChange={event => setSourceUrl(event.target.value)} placeholder="https://…" disabled={locked || saving} /></label>
-                <label><span>{text.notes}</span><textarea value={notes} onChange={event => setNotes(event.target.value)} rows={3} disabled={locked || saving} /></label>
-              </div>
-            </details>
           </div>
         </div>
+        <details className="quick-capture-details"><summary><ChevronDown size={16} />{text.details}</summary>
+          <div className="quick-capture-fields">
+            <label><span>{text.title}</span><input value={title} onChange={event => setTitle(event.target.value)} placeholder={text.titlePlaceholder} disabled={locked || saving} /></label>
+            <label><span>{text.source}</span><input value={sourceName} onChange={event => setSourceName(event.target.value)} placeholder={text.sourcePlaceholder} disabled={locked || saving} /></label>
+            <label><span>{text.url}</span><input type="url" value={sourceUrl} onChange={event => setSourceUrl(event.target.value)} placeholder="https://…" disabled={locked || saving} /></label>
+            <label><span>{text.notes}</span><textarea value={notes} onChange={event => setNotes(event.target.value)} rows={3} disabled={locked || saving} /></label>
+          </div>
+        </details>
         {error && <div className="quick-capture-error" role="alert"><p>{error}</p>{locked && !saving && !recoverableConflict && <p>{text.uncertainSave}</p>}{recoverableConflict && <button type="button" className="secondary" onClick={() => { if (confirm(text.unlockConfirm)) { submission.current.reset(); setRecoverableConflict(false); setError(''); } }}>{text.unlock}</button>}</div>}
         <footer className="quick-capture-footer"><div><span>{text.shortcut}</span><span>{text.draftKept}</span></div><button type="submit" className="primary" disabled={saving || !file || !prompt.trim()}>{saving ? text.saving : locked ? text.retry : text.save}</button></footer>
       </form>}

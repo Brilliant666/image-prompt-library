@@ -25,8 +25,22 @@ export function parseProfileModels(value: string): string[] {
   return [...new Set(value.split(/[,，\r\n]+/).map(model => model.trim()).filter(Boolean))];
 }
 
-/** The selected historical/custom model remains available after a profile changes. */
-export function profileModelChoices(profile: Pick<OpenAICompatibleProfile, 'models' | 'model'> | undefined, selected: string, fallback: string[] = []): string[] {
+/** Names are only UI hints: they never establish an API capability. */
+export function isGptImageModelName(id: string): boolean {
+  return /(?:^|[/:_\s-])gpt[-_]image(?:[-_]|$)/i.test(id);
+}
+
+/** Recommend images without losing a selected historical/custom model. */
+export function profileModelChoices(profile: Pick<OpenAICompatibleProfile, 'models' | 'model' | 'model_catalog'> | undefined, selected: string, fallback: string[] = []): string[] {
   const configured = profile?.models?.length ? profile.models : fallback;
-  return [...new Set([selected, profile?.model || '', ...configured].map(model => model.trim()).filter(Boolean))];
+  const catalog = profile?.model_catalog?.models || [];
+  const byId = new Map(catalog.map(model => [model.id, model]));
+  const recommends = (id: string) => {
+    const detected = byId.get(id.trim());
+    if (detected?.image_generation === false) return false;
+    return isGptImageModelName(id);
+  };
+  const defaultModel = profile?.model?.trim() || '';
+  const discovered = catalog.filter(model => recommends(model.id)).sort((a,b) => Number(b.image_generation === true) - Number(a.image_generation === true));
+  return [...new Set([selected, recommends(defaultModel) ? defaultModel : '', ...configured.filter(recommends), ...discovered.map(model => model.id)].map(model => model.trim()).filter(Boolean))];
 }

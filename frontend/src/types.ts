@@ -4,7 +4,9 @@ export type UploadImageRole = 'result_image' | 'reference_image';
 export type UiLanguage = 'zh_hant' | 'zh_hans' | 'en';
 export type AiProvider = TitleSuggestionProvider | 'openai_compatible';
 export interface OpenAICompatibleConfig { display_name: string; base_url: string; model: string; timeout: number; api_key_present: boolean; models?: string[]; base_url_mode?: 'versioned' | 'custom'; stream?: boolean; partial_images?: number; response_format?: 'auto' | 'b64_json' }
-export interface OpenAICompatibleProfile extends OpenAICompatibleConfig { id: string; configured: boolean }
+export interface CatalogModel { id: string; image_generation: boolean | null }
+export interface ModelCatalog { models: CatalogModel[]; fetched_at: string | null; checked_at: string | null; error: string | null }
+export interface OpenAICompatibleProfile extends OpenAICompatibleConfig { id: string; configured: boolean; model_catalog?: ModelCatalog }
 export interface OpenAICompatibleProfiles { profiles: OpenAICompatibleProfile[]; default_profile_id: string | null }
 export type TitleSuggestionProvider = 'openai_codex_oauth_native' | 'xai_grok_oauth';
 export interface PromptRecord { id: string; item_id: string; language: string; text: string; is_primary: boolean; is_original?: boolean; provenance?: Record<string, unknown> }

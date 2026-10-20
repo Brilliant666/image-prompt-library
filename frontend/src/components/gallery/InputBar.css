@@ -1,4 +1,5 @@
 /* Playground-style parameter chips; the workspace owns composer placement. */
+.pg-composer .pg-model-options{max-height:240px;overflow-y:auto}.pg-composer .pg-model-options button{white-space:normal;overflow-wrap:anywhere;text-align:left}.pg-model-options button small{display:block}
 .pg-composer .pg-composer-body{min-height:0;max-height:30dvh;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;scrollbar-gutter:stable}
 .pg-composer .pg-composer-body>.pg-note{margin:5px 4px;font-size:11px;line-height:1.5}
 .pg-composer .pg-provider-line{display:flex;align-items:center;gap:6px;min-width:0;padding:5px 3px 7px;color:var(--muted);font-size:11px}

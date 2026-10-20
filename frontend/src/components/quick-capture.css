@@ -1,36 +1,37 @@
-.quick-capture-modal{width:min(1050px,96vw);padding:22px;max-height:92dvh}
+.quick-capture-modal{--capture-pane-height:clamp(240px,38dvh,360px);width:min(1050px,96vw);padding:24px;max-height:92dvh}
 .quick-capture-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding-bottom:18px;border-bottom:1px solid var(--border);margin-bottom:20px}
 .quick-capture-header h2{margin:0 0 7px;font-size:26px;font-weight:600;letter-spacing:-.03em}
 .quick-capture-header p:not(.modal-kicker){margin:0;color:var(--muted);font-size:13px}
 .quick-capture-header .iconbtn{flex-shrink:0}
-.quick-capture-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.1fr);gap:24px;align-items:start}
+.quick-capture-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:24px;align-items:start}
 .quick-capture-image-column,.quick-capture-content{min-width:0}
-.quick-capture-image{display:flex;position:relative;align-items:center;justify-content:center;min-height:360px;width:100%;padding:16px;border:1px dashed var(--border);border-radius:16px;background:var(--surface-soft);color:var(--muted);cursor:pointer;overflow:hidden}
+.quick-capture-pane-title,.quick-capture-prompt>span{display:block;margin:0 0 10px;font-size:13px;font-weight:500;line-height:20px;color:var(--ink)}
+.quick-capture-image{display:flex;position:relative;align-items:center;justify-content:center;height:var(--capture-pane-height);width:100%;padding:16px;border:1px dashed var(--border);border-radius:14px;background:var(--surface-soft);color:var(--muted);cursor:pointer;overflow:hidden}
 .quick-capture-image>span:not(.quick-capture-replace){display:flex;align-items:center;flex-direction:column;gap:12px;line-height:1.6;font-size:13px}
 .quick-capture-image strong{font-weight:500;color:var(--ink)}
 .quick-capture-choose{border-radius:12px;padding:7px 18px;background:var(--surface-warm);color:var(--accent)}
-.quick-capture-image.has-image{padding:0;min-height:0;border-style:solid}
-.quick-capture-image img{display:block;width:100%;height:auto;max-height:56dvh;object-fit:contain}
+.quick-capture-image.has-image{padding:0;border-style:solid}
+.quick-capture-image img{display:block;width:100%;height:100%;object-fit:contain}
 .quick-capture-image:disabled{cursor:default;opacity:1}
 .quick-capture-replace{position:absolute;bottom:12px;left:50%;transform:translateX(-50%);padding:7px 15px;border:1px solid var(--border);border-radius:99px;background:var(--surface);color:var(--ink);box-shadow:var(--shadow-soft);font-size:12px}
 .quick-capture-image:disabled .quick-capture-replace{display:none}
 .quick-capture-form.is-dragging .quick-capture-image{border-color:var(--accent);background:var(--surface-warm);box-shadow:0 0 0 2px var(--accent)}
 .quick-capture-note{margin:10px 0 0;color:var(--muted);font-size:11px;line-height:1.65}
-.quick-capture-content{display:flex;flex-direction:column;gap:15px}
-.quick-capture-prompt{display:flex;flex-direction:column;gap:9px;font-size:14px}
-.quick-capture-content textarea,.quick-capture-content input,.quick-capture-content select{min-width:0;border:1px solid var(--border);border-radius:12px;padding:10px 12px;background:var(--surface);color:var(--ink);font:inherit}
-.quick-capture-content textarea:focus,.quick-capture-content input:focus,.quick-capture-content select:focus{outline:2px solid var(--accent);outline-offset:2px}
-.quick-capture-prompt textarea{width:100%;min-height:320px;resize:vertical;line-height:1.75;font-size:14px;white-space:pre-wrap}
-.quick-capture-content :disabled{opacity:.72}
+.quick-capture-content{display:flex;flex-direction:column;gap:10px}
+.quick-capture-prompt{display:flex;flex-direction:column;font-size:14px}
+.quick-capture-form textarea,.quick-capture-form input,.quick-capture-form select{min-width:0;border:1px solid var(--border);border-radius:14px;padding:12px 14px;background:var(--surface);color:var(--ink);font:inherit}
+.quick-capture-form textarea:focus,.quick-capture-form input:focus,.quick-capture-form select:focus{outline:2px solid color-mix(in srgb,var(--accent) 25%,transparent);outline-offset:1px;border-color:var(--accent)}
+.quick-capture-prompt textarea{box-sizing:border-box;width:100%;height:var(--capture-pane-height);min-height:0;resize:none;overflow-y:auto;line-height:1.75;font-size:14px;white-space:pre-wrap}
+.quick-capture-form :disabled{opacity:.72}
 .quick-capture-language{font-size:12px;color:var(--muted)}
 .quick-capture-language label{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
 .quick-capture-language select{font-size:12px;padding:6px 9px;border-radius:9px}
 .quick-capture-language p{margin:6px 0 0;line-height:1.6;min-height:20px}
-.quick-capture-details{border-top:1px solid var(--border);padding-top:12px;font-size:13px}
+.quick-capture-details{border-top:1px solid var(--border);padding-top:14px;margin-top:18px;font-size:13px}
 .quick-capture-details summary{display:flex;align-items:center;gap:7px;list-style:none;cursor:pointer;color:var(--muted)}
 .quick-capture-details summary::-webkit-details-marker{display:none}
 .quick-capture-details[open] summary svg{transform:rotate(180deg)}
-.quick-capture-fields{display:grid;gap:12px;padding-top:15px}
+.quick-capture-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;padding-top:15px}
 .quick-capture-fields label{display:flex;flex-direction:column;gap:6px}
 .quick-capture-fields textarea{resize:vertical}
 .quick-capture-error{padding:12px 14px;margin:16px 0 0;border:1px solid #e7bbb2;border-radius:12px;background:#fff3f0;color:#8b392c;font-size:13px;overflow-wrap:anywhere;line-height:1.6}
@@ -49,10 +50,10 @@
   .quick-capture-header{margin-bottom:16px;padding-bottom:14px}
   .quick-capture-header h2{font-size:23px}
   .quick-capture-grid{grid-template-columns:minmax(0,1fr);gap:20px}
-  .quick-capture-image{min-height:220px}
-  .quick-capture-image img{max-height:44dvh}
-  .quick-capture-prompt textarea{min-height:240px;font-size:16px}
-  .quick-capture-content input,.quick-capture-content select{font-size:16px}
+  .quick-capture-image{height:240px}
+  .quick-capture-prompt textarea{height:240px;font-size:16px}
+  .quick-capture-form input,.quick-capture-form select{font-size:16px}
+  .quick-capture-fields{grid-template-columns:minmax(0,1fr)}
   .quick-capture-footer{position:sticky;bottom:-16px;background:var(--studio-surface,var(--surface));padding-bottom:16px;margin-bottom:-16px}
   .quick-capture-footer>div{max-width:52%}
   .quick-capture-success{grid-template-columns:90px minmax(0,1fr);gap:14px;padding:15px 0}
