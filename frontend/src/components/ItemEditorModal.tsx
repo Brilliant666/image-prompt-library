@@ -250,7 +250,12 @@ export default function ItemEditorModal({
         ...(unchangedPrompts ? {} : { prompts }),
       };
       const createdNewItem = !currentItem;
-      let saved = currentItem ? await api.updateItem(currentItem.id, payload) : await api.createItem({ ...payload, prompts });
+      let saved = currentItem ? await api.updateItem(currentItem.id, {
+        ...payload,
+        model: model.trim(),
+        source_url: sourceUrl.trim() || null,
+        notes: notes.trim() || null,
+      }) : await api.createItem({ ...payload, prompts });
       if (currentItem && !needsImageReconcile && imageDraftChanged) {
         saved = await api.updateImages(saved.id, imageDrafts.map(image => ({ id: image.id, role: image.role || 'result_image' })));
       }

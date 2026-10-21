@@ -52,7 +52,19 @@ export default function InputBar({command,preferences,t,active,onCreated,onOpenS
   // must not invalidate an accepted recipe command or an in-flight file read.
   useEffect(()=>{let alive=true;catalogUpdates.current.clear();if(!initialized.current)setLoading(true);setRefreshing(true);Promise.all([api.generationProviders(),api.openAICompatibleProfiles()]).then(async([available,store])=>{
     if(!alive)return;setProviders(available.filter(p=>p.provider!=='manual_upload'));setProfiles(store.profiles.map(profile=>catalogUpdates.current.has(profile.id)?{...profile,model_catalog:catalogUpdates.current.get(profile.id)}:profile));
-    if(!initialized.current){let restored:GalleryDraft|undefined;if(preferences.persistInputOnRestart&&editRevision.current===0){try{restored=await readGalleryDraft();}catch{if(alive&&editRevision.current===0)setError('无法恢复本地草稿；已保存的任务不受影响');}}if(!alive)return;initialized.current=true;if(editRevision.current!==0)return;
+    if(!initialized.current){
+      let restored:GalleryDraft|undefined;
+      if(preferences.persistInputOnRestart&&editRevision.current===0){
+        try{
+          restored=await readGalleryDraft();
+          // IndexedDB keeps Library identities, never an arbitrary saved preview URL.
+          // Reuse recipe verification to resolve the local original and keep failed
+          // references as explicit slots instead of silently submitting without them.
+          if(restored&&alive&&editRevision.current===0)restored={...restored,inputs:await restoreRecipeInputs(restored.inputs,verifiedInput)};
+        }catch{if(alive&&editRevision.current===0)setError('无法恢复本地草稿；已保存的任务不受影响');}
+      }
+      if(!alive)return;initialized.current=true;if(editRevision.current!==0)return;
+      if(restored?.inputs.some(input=>input.missing))setError('部分参考图无法恢复，请重新添加或明确移除缺失图片后再生成');
       const selected=store.profiles.find(p=>p.id===lastGenerationProfile(localStorage))||store.profiles.find(p=>p.id===store.default_profile_id);
       const preferred=available.find(p=>p.provider===preferredProvider&&p.can_generate);
       const fallback=preferred?.provider||(selected?'openai_compatible':available.find(p=>p.can_generate)?.provider)||'openai_compatible';

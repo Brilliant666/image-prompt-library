@@ -111,6 +111,56 @@ function clipboardEvent(files = [], data = {}) {
 }
 function deferred() { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; }
 
+for (const blank of ['', ' \t\n ']) {
+  test(`editor serializes cleared metadata explicitly and reopens it empty (${JSON.stringify(blank)})`, async () => {
+    const original = { ...structuredClone(item), source_url: 'https://example.invalid/original' };
+    let persisted = original, payload;
+    const h = harness({ item: original, api: {
+      updateItem: async (id, value) => {
+        assert.equal(id, original.id);
+        payload = JSON.parse(JSON.stringify(value));
+        persisted = { ...persisted, ...payload };
+        return persisted;
+      },
+    } });
+    h.find('input', props => props.placeholder === 'notReported').onChange({ target: { value: blank } });
+    h.find('input', props => props.type === 'url').onChange({ target: { value: blank } });
+    h.find('textarea', props => props.placeholder === 'addNote').onChange({ target: { value: blank } });
+    await h.flush();
+    await h.save(); await h.flush();
+    assert.equal(payload.model, '');
+    assert.equal(payload.source_url, null);
+    assert.equal(payload.notes, null);
+    assert.equal('prompts' in payload, false);
+    for (const field of ['id', 'title', 'author', 'tags', 'prompts', 'images']) assert.deepEqual(persisted[field], original[field]);
+    assert.deepEqual(h.events.uploads, []);
+    assert.equal(h.events.writes.length, 0, 'metadata-only save must not write image order or remove images');
+    const reopened = harness({ item: persisted });
+    assert.equal(reopened.find('input', props => props.placeholder === 'notReported').value, '');
+    assert.equal(reopened.find('input', props => props.type === 'url').value, '');
+    assert.equal(reopened.find('textarea', props => props.placeholder === 'addNote').value, '');
+    assert.equal(reopened.find('textarea', props => props.value === originalPrompt).value, originalPrompt);
+  });
+}
+
+test('editor keeps omitted empty metadata on create so server defaults still apply', async () => {
+  let payload;
+  const h = harness({ item: undefined, api: {
+    createItem: async value => {
+      payload = JSON.parse(JSON.stringify(value));
+      return { ...structuredClone(item), ...payload, images: [] };
+    },
+  } });
+  h.find('SuggestedTitleField').onChange('Synthetic new card');
+  h.find('textarea', props => props.placeholder === 'simplifiedPromptPlaceholder').onChange({ target: { value: originalPrompt } });
+  h.find('input', props => props.placeholder === 'notReported').onChange({ target: { value: '' } });
+  h.zone('result').onDrop(dragEvent([image()])); await h.flush();
+  await h.save(); await h.flush();
+  for (const field of ['model', 'source_url', 'notes']) assert.equal(field in payload, false);
+  assert.equal(payload.prompts[0].text, originalPrompt);
+  assert.equal(h.events.uploads.length, 1);
+});
+
 test('editor preserves an existing collection by ID without submitting its localized display name', async () => {
   const collection = { id: 'portrait-collection', name: 'Portraits', names: { en: 'Portraits', zh_hans: '环境人像' }, count: 1, preview_images: [] };
   const h = harness({ item: { ...item, cluster: collection }, clusters: [{ ...collection, name: '环境人像' }] });

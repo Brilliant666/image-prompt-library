@@ -33,6 +33,10 @@ export default function CardsView({
   clusterName,
   hasActiveSearch = false,
   onClearCluster,
+  hasMore = false,
+  loadingMore = false,
+  loadMoreError,
+  onLoadMore,
 }: {
   items: ItemSummary[];
   loading?: boolean;
@@ -53,6 +57,10 @@ export default function CardsView({
   clusterName?: string;
   hasActiveSearch?: boolean;
   onClearCluster: () => void;
+  hasMore?: boolean;
+  loadingMore?: boolean;
+  loadMoreError?: string;
+  onLoadMore?: () => void;
 }) {
   const [layout, setLayout] = useState<CardLayout>(loadCardLayout);
   const [columnCount, setColumnCount] = useState(1);
@@ -190,6 +198,10 @@ export default function CardsView({
           </div>)
           : items.map(renderCard)}
       </section>
+      {loadMoreError && <p className="error" role="alert">{t('loadFailed')}</p>}
+      {hasMore && <button type="button" className="explore-load-more" onClick={onLoadMore} disabled={loading || loadingMore}>
+        {t(loadingMore ? 'loading' : loadMoreError ? 'retry' : 'more')}
+      </button>}
     </>
   );
 }

@@ -650,6 +650,117 @@ for (const phase of ['providers', 'stored-draft']) test(`late ${phase} initializ
   assert.equal(h.state.posts.length, 0);
 });
 
+const persistedLibraryDraft = (inputs = [1, 2].map(index => ({ id: `library-slot-${index}`, name: `Library reference ${index}`, source: 'library', sourceItemId: `local-item-${index}`, imageId: `local-image-${index}`, previewUrl: `https://untrusted.invalid/old-preview-${index}.png` }))) => drafts.validateGalleryDraft({
+  ...recipe.draftFromJob(historicalJob({ parameters: { ...historicalJob().parameters, stream: false, partial_images: 0, response_format: 'auto', base_url_mode: 'custom' } }), inputs),
+  sourceItemId: 'source-item', promptLanguage: 'en', templateValues: { subject: 'unchanged subject' },
+});
+const localImageItem = index => ({ id: `local-item-${index}`, images: [{ id: `local-image-${index}`, original_path: `originals/synthetic-${index}.png` }] });
+
+test('persisted Library references hydrate verified original previews in order before submission', async t => {
+  const first = deferred(), second = deferred(), requests = [], lookups = [];
+  t.mock.method(globalThis, 'fetch', async url => { requests.push(url); return { ok: true, blob: async () => ({ dataUrl: `data:image/png;base64,original-${url.endsWith('1.png') ? 'one' : 'two'}` }) }; });
+  const stored = persistedLibraryDraft();
+  assert.deepEqual(stored.inputs.map(value => value.previewUrl), ['', ''], 'stored arbitrary preview URLs must not be trusted');
+  const h = inputHarness(t, { preferences: { persistInputOnRestart: true } }, {
+    item: id => { lookups.push(id); return id === 'local-item-1' ? first.promise : second.promise; },
+  }, { readGalleryDraft: async () => stored, readFile: blob => blob.dataUrl });
+  await h.flush();
+  assert.deepEqual(lookups, ['local-item-1', 'local-item-2']);
+  assert.equal(h.find('button', '生成图片').disabled, true);
+  second.resolve(localImageItem(2)); await h.flush();
+  assert.equal(h.find('button', '生成图片').disabled, true, 'wait for all ordered references');
+  first.resolve(localImageItem(1)); await h.flush();
+  assert.deepEqual(children(h.tree).filter(node => node.type === 'img').map(node => node.props.src), ['data:image/png;base64,original-one', 'data:image/png;base64,original-two']);
+  assert.deepEqual(requests.sort(), ['/media/originals/synthetic-1.png', '/media/originals/synthetic-2.png']);
+  assert.equal(h.find('textarea', '画廊提示词').value, originalPrompt);
+  assert.equal(h.find('button', '生成图片').disabled, false);
+  h.find('button', '解除关联');
+  assert.equal(h.state.posts.length, 0, 'draft recovery does not generate anything');
+  h.find('button', '生成图片').onClick(); await h.flush();
+  const payload = h.state.posts[0];
+  assert.equal(payload.prompt_text, originalPrompt);
+  assert.equal(payload.model, stored.recipe.model);
+  assert.equal(payload.parameters.quality, stored.recipe.quality);
+  assert.deepEqual(payload.parameters.input_images.map(value => [value.id, value.data_url, value.source_item_id]), [['library-slot-1', 'data:image/png;base64,original-one', 'local-item-1'], ['library-slot-2', 'data:image/png;base64,original-two', 'local-item-2']]);
+  assert.deepEqual(Object.fromEntries(['stream', 'partial_images', 'response_format', 'base_url_mode'].map(key => [key, payload.parameters[key]])), { stream: false, partial_images: 0, response_format: 'auto', base_url_mode: 'custom' });
+});
+
+for (const failure of ['metadata-rejected', 'image-missing', 'media-rejected', 'file-read', 'decode']) test(`persisted Library reference ${failure} keeps an explicit missing slot and blocks generation`, async t => {
+  const requests = [];
+  t.mock.method(globalThis, 'fetch', async url => { requests.push(url); return { ok: failure !== 'media-rejected', blob: async () => ({ dataUrl: 'data:image/png;base64,unreadable' }) }; });
+  const stored = persistedLibraryDraft([input('keep-original'), { id: 'missing-library', name: 'Library original', source: 'library', sourceItemId: 'local-item-2', imageId: 'local-image-2', previewUrl: 'https://untrusted.invalid/fallback.png' }]);
+  const h = inputHarness(t, { preferences: { persistInputOnRestart: true } }, {
+    item: async () => { if (failure === 'metadata-rejected') throw Error('local item unavailable'); return failure === 'image-missing' ? { images: [{ id: 'different-image', original_path: 'originals/wrong.png' }] } : localImageItem(2); },
+  }, { readGalleryDraft: async () => stored, readFile: blob => { if (failure === 'file-read') throw Error('read failed'); return blob.dataUrl; }, decode: async src => { if (failure === 'decode' && src.endsWith(',unreadable')) throw Error('invalid image'); } });
+  await h.flush();
+  assert.deepEqual(children(h.tree).filter(node => node.type === 'img').map(node => node.props.src), ['data:image/png;base64,keep-original']);
+  assert.ok(children(h.tree).some(node => node.props?.className === 'missing'), 'failed reference stays in its original slot');
+  h.find('button', '移除参考图 2');
+  assert.equal(h.find('textarea', '画廊提示词').value, originalPrompt);
+  assert.equal(h.find('button', '生成图片').disabled, true);
+  h.find('button', '生成图片').onClick(); await h.flush(); assert.equal(h.state.posts.length, 0);
+  assert.ok(requests.every(url => url === '/media/originals/synthetic-2.png'));
+  h.find('button', '移除参考图 2').onClick(); await h.flush();
+  h.find('button', '生成图片').onClick(); await h.flush();
+  assert.equal(h.state.posts.length, 1);
+  assert.equal(h.state.posts[0].parameters.input_images[0].data_url, 'data:image/png;base64,keep-original');
+});
+
+for (const edit of ['prompt', 'model', 'attachment']) test(`late persisted Library hydration preserves a newer ${edit} edit`, async t => {
+  const pending = deferred();
+  t.mock.method(globalThis, 'fetch', async () => ({ ok: true, blob: async () => ({ dataUrl: 'data:image/png;base64,old-original' }) }));
+  const h = inputHarness(t, { preferences: { persistInputOnRestart: true } }, { item: () => pending.promise }, { readGalleryDraft: async () => persistedLibraryDraft([persistedLibraryDraft().inputs[0]]), readFile: blob => blob.dataUrl });
+  await h.flush();
+  if (edit === 'prompt') h.find('textarea', '画廊提示词').onChange({ target: { value: 'accepted new prompt' } });
+  else if (edit === 'model') { children(h.tree).find(node => node.type === 'button' && node.props.className?.includes('pg-param-model')).props.onClick(); await h.flush(); h.find('input', '请求模型完整 ID').onChange({ target: { value: 'accepted-new-model' } }); }
+  else { h.find('button', '添加参考图').onClick(); await h.flush(); h.find('button', '从 Library 或画廊选择参考图').onClick(); await h.flush(); children(h.tree).find(node => node.type === 'ReferencePicker').props.onSelect(input('new-reference')); }
+  await h.flush(); pending.resolve(localImageItem(1)); await h.flush();
+  assert.equal(h.find('textarea', '画廊提示词').value, edit === 'prompt' ? 'accepted new prompt' : '');
+  assert.deepEqual(children(h.tree).filter(node => node.type === 'img').map(node => node.props.src), edit === 'attachment' ? ['data:image/png;base64,new-reference'] : []);
+  if (edit === 'model') assert.equal(h.find('input', '请求模型完整 ID').value, 'accepted-new-model');
+  assert.equal(h.state.posts.length, 0);
+});
+
+test('a newer settings initialization owns restored Library references when old metadata arrives late', async t => {
+  const pending = deferred(); let reads = 0;
+  t.mock.method(globalThis, 'fetch', async () => ({ ok: true, blob: async () => ({ dataUrl: 'data:image/png;base64,old-original' }) }));
+  const h = inputHarness(t, { preferences: { persistInputOnRestart: true } }, { item: () => pending.promise }, {
+    readGalleryDraft: async () => ++reads === 1 ? persistedLibraryDraft([persistedLibraryDraft().inputs[0]]) : { ...persistedLibraryDraft([input('latest-original')]), prompt: 'latest disk prompt' }, readFile: blob => blob.dataUrl,
+  });
+  await h.flush(); h.update({ configurationRevision: 1 }); await h.flush();
+  pending.resolve(localImageItem(1)); await h.flush();
+  assert.equal(reads, 2);
+  assert.equal(h.find('textarea', '画廊提示词').value, 'latest disk prompt');
+  assert.deepEqual(children(h.tree).filter(node => node.type === 'img').map(node => node.props.src), ['data:image/png;base64,latest-original']);
+  assert.equal(h.find('button', '生成图片').disabled, false);
+});
+
+test('a new recipe command wins over pending persisted Library hydration without submitting', async t => {
+  const pending = deferred();
+  t.mock.method(globalThis, 'fetch', async () => ({ ok: true, blob: async () => ({ dataUrl: 'data:image/png;base64,old-original' }) }));
+  const h = inputHarness(t, { preferences: { persistInputOnRestart: true } }, { item: () => pending.promise }, { readGalleryDraft: async () => persistedLibraryDraft([persistedLibraryDraft().inputs[0]]), readFile: blob => blob.dataUrl });
+  await h.flush();
+  h.update({ command: { id: 2900, job: historicalJob({ prompt_text: 'new command prompt', parameters: { ...historicalJob().parameters, input_images: [{ id: 'new-command-input', data_url: 'data:image/png;base64,new-command-original' }] } }) } }); await h.flush();
+  pending.resolve(localImageItem(1)); await h.flush();
+  await h.flush(); // The newly accepted command verifies its own reference after initialization.
+  assert.equal(h.find('textarea', '画廊提示词').value, 'new command prompt');
+  assert.deepEqual(children(h.tree).filter(node => node.type === 'img').map(node => node.props.src), ['data:image/png;base64,new-command-original']);
+  assert.equal(h.find('button', '生成图片').disabled, false);
+  assert.equal(h.state.posts.length, 0);
+});
+
+test('switching workspaces during first Library draft hydration finishes without permanent loading', async t => {
+  const pending = deferred();
+  t.mock.method(globalThis, 'fetch', async () => ({ ok: true, blob: async () => ({ dataUrl: 'data:image/png;base64,restored-original' }) }));
+  const h = inputHarness(t, { preferences: { persistInputOnRestart: true } }, { item: () => pending.promise }, { readGalleryDraft: async () => persistedLibraryDraft([persistedLibraryDraft().inputs[0]]), readFile: blob => blob.dataUrl });
+  await h.flush(); h.update({ active: false }); await h.flush();
+  pending.resolve(localImageItem(1)); await h.flush(); h.update({ active: true }); await h.flush();
+  assert.equal(h.find('textarea', '画廊提示词').value, originalPrompt);
+  assert.deepEqual(children(h.tree).filter(node => node.type === 'img').map(node => node.props.src), ['data:image/png;base64,restored-original']);
+  assert.equal(h.find('button', '生成图片').disabled, false);
+  assert.equal(h.state.posts.length, 0);
+});
+
 const composerChip = (h, name) => children(h.tree).find(node => node.type === 'button' && node.props.className?.includes(`pg-param-${name}`)).props;
 const pendingEdits = {
   'dropped prompt': async h => { h.find('textarea', '画廊提示词').onDrop({ preventDefault() {}, dataTransfer: { files: [], getData: type => type === 'text/plain' ? '\nnew text' : '' } }); return payload => assert.equal(payload.prompt_text, 'current {{subject}}\nnew text'); },

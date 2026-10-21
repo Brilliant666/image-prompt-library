@@ -703,6 +703,37 @@ def test_editing_last_item_out_of_collection_removes_empty_collection(tmp_path):
         assert conn.execute("SELECT name FROM clusters").fetchall()[0]["name"] == "New Collection"
 
 
+@pytest.mark.parametrize("clear_fields", [[], ["model"], ["source_url"], ["notes"], ["model", "source_url", "notes"]])
+def test_item_metadata_clear_round_trip_preserves_other_fields_and_originals(tmp_path, clear_fields):
+    c = client(tmp_path)
+    library = tmp_path / "library"
+    original_prompt = "  Synthetic original prompt\r\nKeep whitespace.\n\t "
+    created = c.post("/api/items", json=create_payload(
+        notes="Saved note", author="Synthetic author", favorite=True, rating=4,
+        prompts=[{"language": "en", "text": original_prompt, "is_primary": True, "is_original": True}],
+    )).json()
+    item_id = created["id"]
+    original_files = []
+    for role, color in [("result_image", (120, 40, 220)), ("reference_image", (1, 2, 3))]:
+        content = png_bytes(color=color)
+        uploaded = c.post(f"/api/items/{item_id}/images", data={"role": role},
+                          files={"file": (f"{role}.png", content, "image/png")})
+        assert uploaded.status_code == 200
+        original_files.append((library / uploaded.json()["original_path"], content))
+    before = c.get(f"/api/items/{item_id}").json()
+    cleared = {"model": "", "source_url": None, "notes": None}
+    response = c.patch(f"/api/items/{item_id}", json={field: cleared[field] for field in clear_fields})
+    assert response.status_code == 200
+    persisted = c.get(f"/api/items/{item_id}").json()
+    for field in ("title", "model", "source_name", "source_url", "notes", "author", "favorite", "rating", "archived", "cluster", "tags", "prompts", "images"):
+        expected = cleared[field] if field in clear_fields else before[field]
+        assert response.json()[field] == expected
+        assert persisted[field] == expected
+    assert persisted["prompts"][0]["text"] == original_prompt
+    for path, content in original_files:
+        assert path.read_bytes() == content
+
+
 @pytest.mark.parametrize("collection_edit", ["omitted", "same_id", "other_id", "clear", "new_name"])
 def test_item_collection_edit_contract_preserves_original_assets(tmp_path, collection_edit):
     c = client(tmp_path)

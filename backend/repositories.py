@@ -607,7 +607,7 @@ class ItemRepository:
         order = {"created_desc":"i.created_at DESC", "created_asc":"i.created_at ASC", "title_asc":"i.title COLLATE NOCASE ASC", "title_desc":"i.title COLLATE NOCASE DESC", "source_asc":"i.source_name COLLATE NOCASE ASC", "model_asc":"i.model COLLATE NOCASE ASC", "rating_desc":"i.rating DESC, i.updated_at DESC"}.get(sort, "i.updated_at DESC")
         with connect(self.library_path) as conn:
             total = conn.execute(f"SELECT COUNT(DISTINCT i.id) FROM items i LEFT JOIN clusters c ON c.id=i.cluster_id {where_sql}", params).fetchone()[0]
-            rows = conn.execute(f"""SELECT i.*, c.id cluster_id, c.name cluster_name, c.names cluster_names, c.description cluster_description, c.sort_order cluster_sort_order FROM items i LEFT JOIN clusters c ON c.id=i.cluster_id {where_sql} GROUP BY i.id ORDER BY {order} LIMIT ? OFFSET ?""", (*params, limit, offset)).fetchall()
+            rows = conn.execute(f"""SELECT i.*, c.id cluster_id, c.name cluster_name, c.names cluster_names, c.description cluster_description, c.sort_order cluster_sort_order FROM items i LEFT JOIN clusters c ON c.id=i.cluster_id {where_sql} GROUP BY i.id ORDER BY {order}, i.id ASC LIMIT ? OFFSET ?""", (*params, limit, offset)).fetchall()
             return ItemList(items=[self._summary_from_row(conn,r) for r in rows], total=total, limit=limit, offset=offset)
 
     def list_clusters(self) -> list[ClusterRecord]:
