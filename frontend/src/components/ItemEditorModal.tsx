@@ -78,6 +78,7 @@ export default function ItemEditorModal({
   const [draggingImageRole, setDraggingImageRole] = useState<UploadImageRole>();
   const [pasteImageRole, setPasteImageRole] = useState<UploadImageRole>('result_image');
   const [imageDrafts, setImageDrafts] = useState<ImageRecord[]>(item?.images || []);
+  const [needsImageReconcile, setNeedsImageReconcile] = useState(false);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [isClosing, setIsClosing] = useState(false);
@@ -105,6 +106,7 @@ export default function ItemEditorModal({
   const missingRequiredImage = !hasExistingResultImage && !resultFile;
   const [saveError, setSaveError] = useState('');
   const imageInputBusy = saving || deleting || isClosing;
+  const imageListBusy = imageInputBusy || needsImageReconcile;
   const acceptImageFiles = (files: File[], role: UploadImageRole) => {
     if (imageInputBusy || !files.length) return;
     const problem = captureImageError(files);
@@ -169,6 +171,7 @@ export default function ItemEditorModal({
     ...images.filter(image => image.role === 'reference_image'),
   ];
   const updateImageRole = (imageId: string, role: UploadImageRole) => {
+    if (imageListBusy) return;
     setSaveError('');
     const image = imageDrafts.find(candidate => candidate.id === imageId);
     if (!image || image.role === role) return;
@@ -179,6 +182,7 @@ export default function ItemEditorModal({
     setImageDrafts(current => normalizeImageDrafts(current.map(candidate => candidate.id === imageId ? { ...candidate, role } : candidate)));
   };
   const moveImage = (imageId: string, direction: -1 | 1) => {
+    if (imageListBusy) return;
     setImageDrafts(current => {
       const index = current.findIndex(image => image.id === imageId);
       if (index < 0) return current;
@@ -195,6 +199,7 @@ export default function ItemEditorModal({
     });
   };
   const makePrimaryImage = (imageId: string) => {
+    if (imageListBusy) return;
     setImageDrafts(current => {
       const selected = current.find(image => image.id === imageId && image.role !== 'reference_image');
       if (!selected) return current;
@@ -202,6 +207,7 @@ export default function ItemEditorModal({
     });
   };
   const removeImage = (imageId: string) => {
+    if (imageListBusy) return;
     setSaveError('');
     const image = imageDrafts.find(candidate => candidate.id === imageId);
     if (image?.role !== 'reference_image' && imageDrafts.filter(candidate => candidate.role !== 'reference_image').length === 1) {
@@ -212,10 +218,23 @@ export default function ItemEditorModal({
   };
 
   const save = async () => {
-    if (!title.trim() || !hasPrompt || missingRequiredImage || saving || deleting) return;
+    if (!title.trim() || !hasPrompt || (missingRequiredImage && !needsImageReconcile) || saving || deleting) return;
     setSaving(true);
     setSaveError('');
     try {
+      // A failed readback leaves the server image list unknown. Refresh it before
+      // any retry writes; never replace it with the pre-upload image draft.
+      let currentItem = persistedItem;
+      if (needsImageReconcile && currentItem) {
+        currentItem = await api.item(currentItem.id);
+        setPersistedItem(currentItem);
+        setImageDrafts(currentItem.images);
+        setNeedsImageReconcile(false);
+        if (!currentItem.images.some(image => image.role !== 'reference_image') && !resultFile) {
+          setSaveError(t('resultImageRequired'));
+          return;
+        }
+      }
       const prompts = mergeEditorPrompts(item?.prompts || [], {
         en: englishPrompt, zh_hant: zhHantPrompt, zh_hans: zhHansPrompt,
       }, extraPromptTexts, originalLanguage);
@@ -230,35 +249,36 @@ export default function ItemEditorModal({
         tags: tags.split(',').map(t => t.trim()).filter(Boolean),
         ...(unchangedPrompts ? {} : { prompts }),
       };
-      const createdNewItem = !persistedItem;
-      let saved = persistedItem ? await api.updateItem(persistedItem.id, payload) : await api.createItem({ ...payload, prompts });
-      if (persistedItem && imageDraftChanged) {
+      const createdNewItem = !currentItem;
+      let saved = currentItem ? await api.updateItem(currentItem.id, payload) : await api.createItem({ ...payload, prompts });
+      if (currentItem && !needsImageReconcile && imageDraftChanged) {
         saved = await api.updateImages(saved.id, imageDrafts.map(image => ({ id: image.id, role: image.role || 'result_image' })));
       }
       setPersistedItem(saved);
       setImageDrafts(saved.images);
-      let resultUploaded = false;
-      let referenceUploaded = false;
+      let uploadedResultId: string | undefined;
+      let uploadedReferenceId: string | undefined;
       try {
         if (resultFile) {
-          await api.uploadImage(saved.id, resultFile, 'result_image');
-          resultUploaded = true;
+          uploadedResultId = (await api.uploadImage(saved.id, resultFile, 'result_image')).id;
         }
         if (referenceFile) {
-          await api.uploadImage(saved.id, referenceFile, 'reference_image');
-          referenceUploaded = true;
+          uploadedReferenceId = (await api.uploadImage(saved.id, referenceFile, 'reference_image')).id;
         }
       } catch {
         if (createdNewItem) {
           try {
             await api.deleteItem(saved.id);
             setPersistedItem(undefined);
+            setImageDrafts([]);
             setSaveError(t('imageUploadFailed'));
           } catch {
             const reconciled = await api.item(saved.id).catch(() => undefined);
             setPersistedItem(reconciled || saved);
-            if (resultUploaded && reconciled?.images.some(image => image.role === 'result_image')) setResultFile(undefined);
-            if (referenceUploaded && reconciled?.images.some(image => image.role === 'reference_image')) setReferenceFile(undefined);
+            if (reconciled) setImageDrafts(reconciled.images);
+            setNeedsImageReconcile(!reconciled);
+            if (uploadedResultId) setResultFile(undefined);
+            if (uploadedReferenceId) setReferenceFile(undefined);
             onSaved();
             setSaveError(t('saveRollbackFailed'));
           }
@@ -266,8 +286,10 @@ export default function ItemEditorModal({
         }
         const reconciled = await api.item(saved.id).catch(() => undefined);
         setPersistedItem(reconciled || saved);
-        if (resultUploaded && reconciled?.images.some(image => image.role === 'result_image')) setResultFile(undefined);
-        if (referenceUploaded && reconciled?.images.some(image => image.role === 'reference_image')) setReferenceFile(undefined);
+        if (reconciled) setImageDrafts(reconciled.images);
+        setNeedsImageReconcile(!reconciled);
+        if (uploadedResultId) setResultFile(undefined);
+        if (uploadedReferenceId) setReferenceFile(undefined);
         onSaved();
         setSaveError(t('savePartiallyCompleted'));
         return;
@@ -390,16 +412,16 @@ export default function ItemEditorModal({
                       </div>
                       <label>
                         <span>{t('imageRole')}</span>
-                        <select value={role} onChange={event => updateImageRole(image.id, event.target.value as UploadImageRole)}>
+                        <select value={role} disabled={imageListBusy} onChange={event => updateImageRole(image.id, event.target.value as UploadImageRole)}>
                           <option value="result_image">{t('result')}</option>
                           <option value="reference_image">{t('reference')}</option>
                         </select>
                       </label>
                       <div className="item-image-manager-actions">
-                        <button type="button" onClick={() => makePrimaryImage(image.id)} disabled={role === 'reference_image' || isPrimary} aria-label={t('setPrimaryImage')} title={t('setPrimaryImage')}><Star size={16} /></button>
-                        <button type="button" onClick={() => moveImage(image.id, -1)} disabled={roleIndex <= 0} aria-label={t('moveImageEarlier')} title={t('moveImageEarlier')}><ChevronLeft size={17} /></button>
-                        <button type="button" onClick={() => moveImage(image.id, 1)} disabled={roleIndex >= sameRole.length - 1} aria-label={t('moveImageLater')} title={t('moveImageLater')}><ChevronRight size={17} /></button>
-                        <button type="button" className="remove" onClick={() => removeImage(image.id)} aria-label={t('removeImage')} title={t('removeImage')}><Trash2 size={16} /></button>
+                        <button type="button" onClick={() => makePrimaryImage(image.id)} disabled={imageListBusy || role === 'reference_image' || isPrimary} aria-label={t('setPrimaryImage')} title={t('setPrimaryImage')}><Star size={16} /></button>
+                        <button type="button" onClick={() => moveImage(image.id, -1)} disabled={imageListBusy || roleIndex <= 0} aria-label={t('moveImageEarlier')} title={t('moveImageEarlier')}><ChevronLeft size={17} /></button>
+                        <button type="button" onClick={() => moveImage(image.id, 1)} disabled={imageListBusy || roleIndex >= sameRole.length - 1} aria-label={t('moveImageLater')} title={t('moveImageLater')}><ChevronRight size={17} /></button>
+                        <button type="button" className="remove" disabled={imageListBusy} onClick={() => removeImage(image.id)} aria-label={t('removeImage')} title={t('removeImage')}><Trash2 size={16} /></button>
                       </div>
                       <span className="item-image-position">{index + 1}</span>
                     </article>
@@ -443,7 +465,7 @@ export default function ItemEditorModal({
         <div className="editor-actions">
           {allowDelete && persistedItem && <details className="editor-more-actions"><summary>{t('moreActions')}</summary><button className="danger" disabled={deleting || saving} onClick={deleteReference}><Trash2 size={16} /> {t('deleteReference')}</button></details>}
           <button className="secondary" disabled={deleting || saving} onClick={handleClose}>{t('cancel')}</button>
-          <button className="primary" disabled={!title.trim() || !hasPrompt || missingRequiredImage || saving || deleting} onClick={save}>{saving ? t('saving') : t('saveReference')}</button>
+          <button className="primary" disabled={!title.trim() || !hasPrompt || (missingRequiredImage && !needsImageReconcile) || saving || deleting} onClick={save}>{saving ? t('saving') : t('saveReference')}</button>
         </div>
       </div>
     </div>

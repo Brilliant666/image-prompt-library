@@ -277,6 +277,86 @@ test('actual InputBar submit callback locks two same-tick clicks and clears inpu
   assert.equal(harness.find('textarea', '画廊提示词').value, ''); assert.equal(harness.state.created, 1);
 });
 
+for (const count of [1, 3]) test(`late confirmed submission preserves a newer Library recipe and its attachments (${count})`, async t => {
+  const pending = deferred(), posts = [], created = [];
+  const h = inputHarness(t, { preferences: { clearInputAfterSubmit: true }, onCreated: jobs => created.push(jobs) }, {
+    createGenerationJob: payload => { posts.push(payload); return pending.promise; },
+    createGenerationSet: payload => { posts.push(payload.job); return pending.promise; },
+  });
+  await h.flush();
+  h.find('textarea', '画廊提示词').onChange({ target: { value: 'old submitted prompt' } }); await h.flush();
+  await chooseCount(h, count);
+  h.find('button', '生成图片').onClick(); await h.flush();
+  h.update({ active: false }); await h.flush();
+  const item = { id: 'new-library-item', title: 'New source', prompts: [{ text: '  new Library prompt\n', is_original: true, language: 'en' }], images: [{ id: 'new-library-image', role: 'reference_image', original_path: 'originals/new.png' }] };
+  h.update({ active: true, command: { id: 90401, item, imageId: 'new-library-image' } }); await h.flush();
+  h.find('button', '请求模型 gateway-original-alias').onClick(); await h.flush();
+  const before = h.find('textarea', '画廊提示词').value;
+  const imagesBefore = children(h.tree).filter(node => node.type === 'img').map(node => node.props.src);
+  const records = Array.from({ length: count }, (_, index) => historicalJob({ id: `confirmed-old-${index}` }));
+  pending.resolve(count === 1 ? records[0] : { jobs: records }); await h.flush();
+  assert.deepEqual(created, [records], 'the old request still reports its confirmed jobs exactly once');
+  assert.equal(h.find('textarea', '画廊提示词').value, before);
+  assert.equal(before, item.prompts[0].text);
+  assert.deepEqual(children(h.tree).filter(node => node.type === 'img').map(node => node.props.src), imagesBefore);
+  assert.deepEqual(imagesBefore, ['/media/originals/new.png']);
+  h.find('button', '解除关联');
+  assert.equal(h.find('input', '请求模型完整 ID').value, 'gateway-original-alias', 'the old reply must not close a newly opened panel');
+  assert.equal(h.find('button', '生成图片')['aria-busy'], false);
+  assert.equal(h.find('button', '生成图片').disabled, false);
+  assert.equal(posts.length, 1, 'restoration and receipt handling never submit a second job');
+});
+
+for (const phase of ['metadata', 'reference']) test(`old submission cannot clear the draft while a newer ${phase} restore is pending`, async t => {
+  const submit = deferred(), restore = deferred();
+  const h = inputHarness(t, { preferences: { clearInputAfterSubmit: true } }, {
+    createGenerationJob: () => submit.promise,
+    generationJobForImage: () => restore.promise,
+  }, { decode: () => phase === 'reference' ? restore.promise : undefined });
+  await h.flush();
+  h.find('textarea', '画廊提示词').onChange({ target: { value: 'submitted prompt still visible' } }); await h.flush();
+  h.find('button', '生成图片').onClick(); await h.flush();
+  const job = historicalJob({ prompt_text: 'new restored prompt', parameters: { ...historicalJob().parameters, input_images: [{ id: 'new-ref', data_url: 'data:image/png;base64,new-reference' }] } });
+  const item = { id: 'new-item', images: [{ id: 'new-image', role: 'reference_image', generation_provider: 'openai_compatible' }], prompts: [] };
+  h.update({ command: phase === 'metadata' ? { id: 90402, item, imageId: 'new-image' } : { id: 90402, job } }); await h.flush();
+  submit.resolve(historicalJob()); await h.flush();
+  assert.equal(h.find('textarea', '画廊提示词').value, 'submitted prompt still visible', 'an accepted pending command already owns this draft');
+  assert.equal(h.find('button', '生成图片')['aria-busy'], false);
+  assert.equal(h.find('button', '生成图片').disabled, true, 'pending recipe restoration remains active');
+  restore.resolve(phase === 'metadata' ? job : undefined); await h.flush();
+  assert.equal(h.find('textarea', '画廊提示词').value, 'new restored prompt');
+  assert.deepEqual(children(h.tree).filter(node => node.type === 'img').map(node => node.props.src), ['data:image/png;base64,new-reference']);
+  assert.equal(h.find('button', '生成图片').disabled, false);
+  assert.equal(h.state.created, 1);
+});
+
+test('a model edit during submission preserves the entire draft and the new model after receipt', async t => {
+  const pending = deferred(), posts = [];
+  const job = historicalJob({ parameters: { ...historicalJob().parameters, stream: false, partial_images: 0, response_format: 'auto', base_url_mode: 'custom', input_images: [{ id: 'keep-ref', data_url: 'data:image/png;base64,keep-ref' }] } });
+  const h = inputHarness(t, { preferences: { clearInputAfterSubmit: true }, command: { id: 90403, job } }, { createGenerationJob: payload => { posts.push(payload); return pending.promise; } });
+  await h.flush();
+  h.find('button', '生成图片').onClick(); await h.flush();
+  h.find('button', '请求模型 gateway-original-alias').onClick(); await h.flush();
+  h.find('input', '请求模型完整 ID').onChange({ target: { value: 'newly-selected-model' } }); await h.flush();
+  pending.resolve(historicalJob()); await h.flush();
+  assert.equal(h.find('textarea', '画廊提示词').value, originalPrompt);
+  assert.equal(h.find('input', '请求模型完整 ID').value, 'newly-selected-model');
+  assert.deepEqual(children(h.tree).filter(node => node.type === 'img').map(node => node.props.src), ['data:image/png;base64,keep-ref']);
+  assert.equal(h.find('button', '生成图片').disabled, false);
+  assert.equal(h.state.created, 1);
+  h.find('button', '生成图片').onClick(); await h.flush();
+  assert.equal(posts.length, 2);
+  assert.equal(posts[1].prompt_text, originalPrompt);
+  assert.equal(posts[1].model, 'newly-selected-model');
+  assert.deepEqual(posts[1].parameters.input_images.map(image => image.id), ['keep-ref']);
+  assert.equal(posts[1].parameters.stream, false);
+  assert.equal(posts[1].parameters.partial_images, 0);
+  assert.equal(posts[1].parameters.response_format, 'auto');
+  assert.equal(posts[1].parameters.base_url_mode, 'custom');
+  assert.equal(posts[1].parameters.size, job.parameters.size);
+  assert.equal(posts[1].parameters.quality, job.parameters.quality);
+});
+
 test('gallery model suggestions follow the current API list and retain a restored historical model', async t => {
   const harness = inputHarness(t, { command: { id: 971, job: historicalJob({ model: 'historical-model', parameters: { ...historicalJob().parameters, model: 'historical-model' } }) } }, {
     openAICompatibleProfiles: async () => ({ profiles: [{ id: 'original-api', display_name: 'Original API', model: 'configured-default', models: ['model-one', 'model-two', 'model-one'], configured: true }], default_profile_id: 'original-api' }),

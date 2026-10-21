@@ -1059,7 +1059,9 @@ test('Explore wiring preserves Library management, semantic appearance, and rest
   assert.match(app, /if \(result\.failed > 0\)/);
   assert.match(editorModal, /t\('savePartiallyCompleted'\)/);
   assert.match(editorModal, /await api\.deleteItem\(saved\.id\)/);
-  assert.match(editorModal, /resultUploaded && reconciled\?\.images\.some\(image => image\.role === 'result_image'\)/);
+  assert.match(editorModal, /uploadedResultId = \(await api\.uploadImage\(saved\.id, resultFile, 'result_image'\)\)\.id/);
+  assert.match(editorModal, /if \(uploadedResultId\) setResultFile\(undefined\)/);
+  assert.match(editorModal, /if \(reconciled\) setImageDrafts\(reconciled\.images\)/);
   assert.match(generationPanel, /const generationSetRequestRef = useRef\(0\)/);
   assert.match(generationPanel, /if \(generationSetRequestRef\.current !== requestId\) return undefined;/);
   assert.match(generationPanel, /localizedGenerationSetProgressText\(activeGenerationSet, t\)/);

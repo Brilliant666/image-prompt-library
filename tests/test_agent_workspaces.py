@@ -1,5 +1,6 @@
 import base64
 from contextlib import contextmanager
+from concurrent.futures import Future
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 import json
@@ -510,6 +511,7 @@ def test_queued_child_is_submitted_once_and_losing_worker_cannot_fail_owner(isol
         class HeldExecutor:
             def submit(self, *args):
                 submitted.append(args)
+                return Future()
         with monkeypatch.context() as hold:
             hold.setattr(generation_queue, "_executor", HeldExecutor())
             try:

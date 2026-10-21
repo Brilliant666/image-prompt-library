@@ -90,7 +90,7 @@ function harness(overrides = {}) {
   const save = () => find('button', props => props.children === 'saveReference').onClick();
   render();
   const unmount = () => { for (const effect of effects.values()) effect.cleanup?.(); effects.clear(); };
-  return { find, zone, input, filename, preview, pasteTarget, paste, save, flush, unmount, events, timers };
+  return { find, zone, input, filename, preview, pasteTarget, paste, save, flush, unmount, events, timers, get tree() { return tree; } };
 }
 function dragEvent(files = [], data = {}) {
   const calls = { prevented: 0, stopped: 0 };
@@ -493,4 +493,129 @@ test('new-item partial upload failure moves the partial record to trash, preserv
   assert.deepEqual(uploads.slice(-2), [['new-2', result, 'result_image'], ['new-2', reference, 'reference_image']]);
   assert.ok(records.get('new-2').prompts.some(prompt => prompt.text === originalPrompt));
   assert.equal(h.events.changed, 1);
+});
+
+function uploadRetryFixture({ initial = item, failReadback = false, rollbackFails = false } = {}) {
+  let record = structuredClone(initial), failReference = true, failReads = failReadback;
+  const writes = [], uploads = [], removed = [];
+  const h = harness({ item: rollbackFails ? undefined : initial, api: {
+    createItem: async payload => { record = { ...structuredClone(item), ...payload, images: [], id: 'new-partial' }; return structuredClone(record); },
+    updateItem: async (id, payload) => { writes.push(['metadata', id]); record = { ...record, ...JSON.parse(JSON.stringify(payload)) }; return structuredClone(record); },
+    updateImages: async (id, images) => {
+      writes.push(['images', structuredClone(images)]);
+      removed.push(...record.images.filter(old => !images.some(image => image.id === old.id)).map(image => image.id));
+      record.images = images.map(image => ({ ...record.images.find(old => old.id === image.id), ...image }));
+      return structuredClone(record);
+    },
+    uploadImage: async (id, file, role) => {
+      uploads.push([id, file.name, role]);
+      if (role === 'reference_image' && failReference) { failReference = false; throw Error('synthetic reference upload failure'); }
+      const uploaded = { id: file.name, item_id: id, role, original_path: `originals/${file.name}`, thumb_path: `thumbs/${file.name}.webp` };
+      record.images.push(uploaded);
+      return structuredClone(uploaded);
+    },
+    item: async () => { if (failReads) throw Error('synthetic readback failure'); return structuredClone(record); },
+    deleteItem: async () => { throw Error('synthetic rollback failure'); },
+  } });
+  if (rollbackFails) {
+    h.find('SuggestedTitleField').onChange('Synthetic new card');
+    h.find('textarea', props => props.placeholder === 'simplifiedPromptPlaceholder').onChange({ target: { value: originalPrompt } });
+  }
+  const stage = async () => {
+    h.zone('result').onDrop(dragEvent([image('successful-result.png')]));
+    h.zone('reference').onDrop(dragEvent([image('pending-reference.png')])); await h.flush();
+  };
+  return { h, stage, writes, uploads, removed, allowReadback: () => { failReads = false; }, get record() { return record; } };
+}
+
+test('retrying a partial upload retains the acknowledged result image and uploads only the failed reference', async () => {
+  const f = uploadRetryFixture(), { h } = f;
+  await f.stage(); await h.save(); await h.flush();
+  assert.deepEqual(f.record.images.map(image => image.id), ['original-image', 'successful-result.png']);
+  assert.equal(h.filename('result'), 'resultImageAlreadySaved');
+  assert.equal(h.filename('reference'), 'pending-reference.png');
+  assert.equal(h.find('p', props => props.className === 'form-error').children, 'savePartiallyCompleted');
+  await h.save(); await h.flush();
+  assert.deepEqual(f.record.images.map(image => image.id), ['original-image', 'successful-result.png', 'pending-reference.png']);
+  assert.deepEqual(f.removed, []);
+  assert.equal(f.writes.some(([kind]) => kind === 'images'), false);
+  assert.deepEqual(f.uploads.map(([, name]) => name), ['successful-result.png', 'pending-reference.png', 'pending-reference.png']);
+  assert.equal(h.find('textarea', props => props.value === originalPrompt).value, originalPrompt);
+});
+
+test('failed upload reconciliation blocks further writes until the current images can be read', async () => {
+  const f = uploadRetryFixture({ failReadback: true }), { h } = f;
+  await f.stage(); await h.save(); await h.flush();
+  const firstWrites = structuredClone(f.writes), firstUploads = structuredClone(f.uploads);
+  await h.save(); await h.flush();
+  assert.deepEqual(f.writes, firstWrites);
+  assert.deepEqual(f.uploads, firstUploads);
+  assert.deepEqual(f.removed, []);
+  f.allowReadback();
+  await h.save(); await h.flush();
+  assert.deepEqual(f.record.images.map(image => image.id), ['original-image', 'successful-result.png', 'pending-reference.png']);
+  assert.deepEqual(f.removed, []);
+  assert.deepEqual(f.uploads.map(([, name]) => name), ['successful-result.png', 'pending-reference.png', 'pending-reference.png']);
+});
+
+test('failed new-item rollback reconciles both image snapshots so retry does not delete its uploaded result', async () => {
+  const f = uploadRetryFixture({ rollbackFails: true }), { h } = f;
+  await f.stage(); await h.save(); await h.flush();
+  assert.equal(h.find('p', props => props.className === 'form-error').children, 'saveRollbackFailed');
+  await h.save(); await h.flush();
+  assert.deepEqual(f.record.images.map(image => image.id), ['successful-result.png', 'pending-reference.png']);
+  assert.deepEqual(f.removed, []);
+  assert.deepEqual(f.uploads.map(([, name]) => name), ['successful-result.png', 'pending-reference.png', 'pending-reference.png']);
+});
+
+test('new-item rollback and readback failure still permit a safe refresh before retry', async () => {
+  const f = uploadRetryFixture({ rollbackFails: true, failReadback: true }), { h } = f;
+  await f.stage(); await h.save(); await h.flush();
+  assert.equal(h.find('button', props => props.children === 'saveReference').disabled, false);
+  const uploads = structuredClone(f.uploads);
+  await h.save(); await h.flush();
+  assert.deepEqual(f.uploads, uploads);
+  assert.deepEqual(f.writes, []);
+  f.allowReadback();
+  await h.save(); await h.flush();
+  assert.deepEqual(f.record.images.map(image => image.id), ['successful-result.png', 'pending-reference.png']);
+  assert.deepEqual(f.removed, []);
+});
+
+const imageRows = h => descendants(h.tree).filter(node => node.type === 'article' && node.props.className?.includes('item-image-manager-row'));
+const rowButton = (row, label) => descendants(row).find(node => node.type === 'button' && node.props['aria-label'] === label).props;
+
+test('partial upload reconciliation retains intentional image removal, cover and order before retry', async () => {
+  const initial = { ...item, images: [item.images[0], { ...item.images[0], id: 'second-result' }, { ...item.images[0], id: 'old-reference', role: 'reference_image' }] };
+  const f = uploadRetryFixture({ initial }), { h } = f;
+  rowButton(imageRows(h)[1], 'setPrimaryImage').onClick(); await h.flush();
+  rowButton(imageRows(h)[2], 'removeImage').onClick(); await h.flush();
+  await f.stage(); await h.save(); await h.flush();
+  await h.save(); await h.flush();
+  assert.deepEqual(f.record.images.map(image => image.id), ['second-result', 'original-image', 'successful-result.png', 'pending-reference.png']);
+  assert.deepEqual(f.removed, ['old-reference']);
+  assert.equal(f.writes.filter(([kind]) => kind === 'images').length, 1);
+  assert.ok(imageRows(h)[0].props.className.includes('is-primary'));
+});
+
+test('image-list edits during an in-flight save cannot create an unacknowledged replacement draft', async () => {
+  const initial = { ...item, images: [item.images[0], { ...item.images[0], id: 'second-result' }] }, pending = deferred();
+  const h = harness({ item: initial, api: { updateItem: () => pending.promise } });
+  const saving = h.save(); await h.flush();
+  const rows = imageRows(h);
+  for (const row of rows) {
+    for (const label of ['setPrimaryImage', 'moveImageEarlier', 'moveImageLater', 'removeImage']) {
+      const button = rowButton(row, label);
+      assert.equal(button.disabled, true);
+      button.onClick();
+    }
+    const select = descendants(row).find(node => node.type === 'select').props;
+    assert.equal(select.disabled, true);
+    select.onChange({ target: { value: 'reference_image' } });
+  }
+  await h.flush();
+  assert.equal(imageRows(h).length, 2);
+  pending.resolve(initial); await saving; await h.flush();
+  assert.equal(h.events.writes.some(([kind]) => kind === 'images'), false);
+  assert.equal(imageRows(h).length, 2);
 });

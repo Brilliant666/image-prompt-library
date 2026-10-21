@@ -767,7 +767,7 @@ def test_item_collection_edit_contract_preserves_original_assets(tmp_path, colle
         assert path.read_bytes() == content
 
 
-def test_listing_clusters_removes_existing_empty_collections(tmp_path):
+def test_listing_clusters_hides_empty_collections_without_deleting_them(tmp_path):
     c = client(tmp_path)
     library = tmp_path / "library"
     c.post("/api/items", json=create_payload(cluster_name="Keep Collection"))
@@ -784,7 +784,46 @@ def test_listing_clusters_removes_existing_empty_collections(tmp_path):
 
     assert [cluster["name"] for cluster in clusters] == ["Keep Collection"]
     with connect(library) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM clusters WHERE name=?", (old_name,)).fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM clusters WHERE name=?", (old_name,)).fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_archiving_last_collection_member_preserves_identity_and_metadata(tmp_path, batch):
+    c = client(tmp_path)
+    library = tmp_path / "library"
+    created = c.post("/api/items", json=create_payload(cluster_name="Keep Me")).json()
+    item_id, cluster_id = created["id"], created["cluster"]["id"]
+    with connect(library) as conn:
+        conn.execute("UPDATE clusters SET names=?, description=?, sort_order=? WHERE id=?",
+                     ('{"zh_hans":"保留分类","en":"Keep Me"}', "Collection description", 7, cluster_id))
+        conn.commit()
+        before = dict(conn.execute("SELECT * FROM clusters WHERE id=?", (cluster_id,)).fetchone())
+
+    if batch:
+        assert c.post("/api/items/batch", json={"item_ids": [item_id], "action": "archive"}).json()["changed"] == 1
+    else:
+        assert c.patch(f"/api/items/{item_id}", json={"archived": True}).status_code == 200
+    assert c.get("/api/clusters").json() == []
+    archived = c.get(f"/api/items/{item_id}").json()
+    assert archived["cluster"] is not None
+    assert archived["cluster"]["id"] == cluster_id
+
+    # Cleanup caused by another item's move must not remove archived references.
+    other = c.post("/api/items", json=create_payload(title="Other item", cluster_name="Temporary")).json()
+    assert c.patch(f"/api/items/{other['id']}", json={"cluster_id": None}).status_code == 200
+    if batch:
+        assert c.post("/api/items/batch", json={"item_ids": [item_id], "action": "unarchive"}).json()["changed"] == 1
+    else:
+        assert c.patch(f"/api/items/{item_id}", json={"archived": False}).status_code == 200
+    restored = c.get(f"/api/items/{item_id}").json()
+    assert restored["cluster"] == archived["cluster"]
+    assert restored["prompts"] == archived["prompts"]
+    listed = c.get("/api/clusters").json()
+    assert len(listed) == 1
+    assert listed[0]["id"] == cluster_id
+    assert listed[0]["count"] == 1
+    with connect(library) as conn:
+        assert dict(conn.execute("SELECT * FROM clusters WHERE id=?", (cluster_id,)).fetchone()) == before
 
 
 def test_create_simplified_prompt_adds_traditional_prompt(tmp_path):

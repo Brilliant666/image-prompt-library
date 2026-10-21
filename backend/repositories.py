@@ -119,20 +119,10 @@ class ItemRepository:
         return tid
 
     def delete_empty_clusters(self, conn):
-        rows = conn.execute("""
-            SELECT c.id
-            FROM clusters c
-            LEFT JOIN items active_items ON active_items.cluster_id = c.id AND active_items.archived = 0 AND active_items.deleted_at IS NULL
-            GROUP BY c.id
-            HAVING COUNT(active_items.id) = 0
-               AND NOT EXISTS (SELECT 1 FROM items trashed WHERE trashed.cluster_id=c.id AND trashed.deleted_at IS NOT NULL)
-        """).fetchall()
-        cluster_ids = [row["id"] for row in rows]
-        if not cluster_ids:
-            return
-        placeholders = ",".join("?" for _ in cluster_ids)
-        conn.execute(f"UPDATE items SET cluster_id=NULL, updated_at=? WHERE cluster_id IN ({placeholders})", (now(), *cluster_ids))
-        conn.execute(f"DELETE FROM clusters WHERE id IN ({placeholders})", cluster_ids)
+        # Archived and trashed cards still own their collection. Visibility in
+        # the sidebar must not determine whether the relationship is retained.
+        conn.execute("""DELETE FROM clusters
+            WHERE NOT EXISTS (SELECT 1 FROM items WHERE items.cluster_id=clusters.id)""")
 
     def _normalized_prompts(self, prompts: list[PromptIn], *, strict_original: bool = False) -> list[PromptIn]:
         normalized = list(prompts)
@@ -292,7 +282,7 @@ class ItemRepository:
                 for idx, prompt in enumerate(prompts_for_template_tag):
                     self._insert_prompt(conn, item_id, prompt, prompt.is_primary or idx == 0, ts)
             self.rebuild_search(conn, item_id)
-            if ("cluster_id" in scalar and scalar["cluster_id"] != previous_cluster_id) or scalar.get("archived") == 1:
+            if "cluster_id" in scalar and scalar["cluster_id"] != previous_cluster_id:
                 self.delete_empty_clusters(conn)
             conn.commit()
         return self.get_item(item_id)
@@ -622,8 +612,6 @@ class ItemRepository:
 
     def list_clusters(self) -> list[ClusterRecord]:
         with connect(self.library_path) as conn:
-            self.delete_empty_clusters(conn)
-            conn.commit()
             rows = conn.execute("""SELECT c.*, COUNT(i.id) count FROM clusters c LEFT JOIN items i ON i.cluster_id=c.id AND i.archived=0 AND i.deleted_at IS NULL GROUP BY c.id HAVING count > 0 ORDER BY c.sort_order, c.name""").fetchall()
             out=[]
             for r in rows:

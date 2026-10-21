@@ -1,5 +1,5 @@
 import type { TitleSuggestionProvider, OpenAICompatibleConfig, OpenAICompatibleProfiles, AppConfig, AppUpdateRequest, AppUpdateResult, AppUpdateStatus, CleanupApplyRequest, CleanupApplyResult, CleanupPreview, ClusterRecord, CodexNativeAuthPollRequest, CodexNativeAuthPollResponse, CodexNativeAuthStart, GenerationJobAcceptAsNewItemPayload, GenerationJobAcceptResult, GenerationJobCreate, GenerationJobList, GenerationJobRecord, GenerationJobRetryResult, GenerationJobSetCreate, GenerationJobSetRecord, GenerationProviderStatus, GrokOAuthPollRequest, ItemBatchRequest, ItemBatchResult, ItemCreate, ItemDetail, ItemImageUpdate, ItemList, ItemSortMode, ItemSummary, ProviderDeviceAuthStart, TagRecord, TitleSuggestionRequest, TitleSuggestionResponse, UploadImageRole } from '../types';
-import type { ModelCatalog } from '../types';
+import type { ImageRecord, ModelCatalog } from '../types';
 import { readJson } from './readJson';
 import { DEFAULT_ITEM_SORT } from '../utils/searchSort';
 import { captureFormData, type CaptureLanguageResult, type CaptureRequest } from '../utils/quickCapture';
@@ -305,7 +305,7 @@ export const api = isDemoMode ? {
   permanentlyDeleteItem: (id: string) => json<ItemDetail>(`/api/items/${id}/permanent?confirmed=true`, { method: 'DELETE' }),
   batchItems: (payload: ItemBatchRequest) => json<ItemBatchResult>('/api/items/batch', { method: 'POST', body: JSON.stringify(payload) }),
   favorite: (id: string) => json<ItemDetail>(`/api/items/${id}/favorite`, { method: 'POST' }),
-  uploadImage: (id: string, file: File, role: UploadImageRole = 'result_image') => { const fd = new FormData(); fd.set('file', file); fd.set('role', role); return json(`/api/items/${id}/images`, { method: 'POST', body: fd }); },
+  uploadImage: (id: string, file: File, role: UploadImageRole = 'result_image') => { const fd = new FormData(); fd.set('file', file); fd.set('role', role); return json<ImageRecord>(`/api/items/${id}/images`, { method: 'POST', body: fd }); },
   updateImages: (id: string, images: ItemImageUpdate[]) => json<ItemDetail>(`/api/items/${id}/images`, { method: 'PUT', body: JSON.stringify({ images }) }),
   generationProviders: () => readJson<GenerationProviderStatus[]>('/api/generation-providers'),
   openAICompatibleProfiles: () => readJson<OpenAICompatibleProfiles>('/api/generation-providers/openai-compatible/profiles'),

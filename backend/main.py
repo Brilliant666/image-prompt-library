@@ -15,7 +15,10 @@ from .routers import agent, app_updates, capture_clients, capture_organizer, cap
 from .services.capture_clients import CAPTURE_HEADERS, CaptureClients, capture_route_allowed, local_target_origin
 from .services.library_archives import LibraryOperationLock
 from .services.capture_organizer import drain_jobs, recover_jobs
-from .services.generation_queue import AUTOMATED_PROVIDER_IDS, enqueue_generation_jobs, recover_interrupted_generation_jobs
+from .services.generation_queue import (
+    AUTOMATED_PROVIDER_IDS, close_generation_queue, drain_generation_jobs,
+    enqueue_generation_jobs, open_generation_queue, recover_interrupted_generation_jobs,
+)
 from .services.agent_execution import drain_agent_requests, recover_agent_requests
 from .services.agent_repository import AgentError
 
@@ -117,6 +120,30 @@ def frontend_file_response(path: Path, *, is_index: bool) -> FileResponse:
     return FileResponse(path, headers=headers)
 
 
+async def _drain_background_workers(library: Path) -> None:
+    async def drain():
+        try:
+            await asyncio.to_thread(drain_agent_requests, library)
+        finally:
+            try:
+                await asyncio.to_thread(drain_generation_jobs, library)
+            finally:
+                await asyncio.to_thread(drain_jobs, library)
+
+    # Cancelling to_thread's await does not stop the underlying writer. Keep
+    # the lease until cleanup actually settles, including repeated cancellation.
+    shutdown = asyncio.create_task(drain())
+    cancelled = False
+    while not shutdown.done():
+        try:
+            await asyncio.shield(shutdown)
+        except asyncio.CancelledError:
+            cancelled = True
+    shutdown.result()
+    if cancelled:
+        raise asyncio.CancelledError
+
+
 def create_app(library_path: Path | str | None = None, frontend_dist_path: Path | str | None = None) -> FastAPI:
     library = resolve_library_path(library_path)
     validate_app_owned_paths(library)
@@ -131,6 +158,7 @@ def create_app(library_path: Path | str | None = None, frontend_dist_path: Path 
     async def lifespan(app: FastAPI):
         with LibraryOperationLock(library):
             try:
+                open_generation_queue(library)
                 recover_jobs(library)
                 for provider in AUTOMATED_PROVIDER_IDS:
                     recover_interrupted_generation_jobs(library, provider=provider)
@@ -139,10 +167,12 @@ def create_app(library_path: Path | str | None = None, frontend_dist_path: Path 
                     enqueue_generation_jobs(library, provider=provider)
                 yield
             finally:
-                await asyncio.to_thread(drain_agent_requests, library)
-                # No metadata worker may write after backup/restore can acquire
-                # the library lease. Pending jobs remain durable and unstarted.
-                await asyncio.to_thread(drain_jobs, library)
+                # Block Gallery continuations before draining Agent requests,
+                # whose image children share the same queue and provider slots.
+                close_generation_queue(library)
+                # No worker may write after backup/restore acquires the lease.
+                # Unstarted jobs remain durable for the next app startup.
+                await _drain_background_workers(library)
 
     app = FastAPI(title="Image Prompt Library", version=APP_VERSION, lifespan=lifespan)
     @app.exception_handler(AgentError)
