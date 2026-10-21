@@ -10,6 +10,7 @@ import pytest
 
 from PIL import Image
 
+from backend.db import connect
 from backend.repositories import ItemRepository
 from backend.services.import_sample_bundle import import_sample_bundle
 
@@ -188,6 +189,43 @@ def test_import_sample_bundle_loads_manifest_assets_and_is_idempotent(tmp_path: 
     assert "Original source URL" not in (detail.notes or "")
     assert "Original source file" not in (detail.notes or "")
     assert len(detail.notes or "") < 180
+
+
+def test_reinstall_samples_skips_trash_and_completes_remaining_items(tmp_path: Path):
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    Image.new("RGB", (16, 12), "blue").save(assets / "fixture.png")
+    manifest = tmp_path / "manifest.json"
+    first = {"id": "first", "slug": "first-sample", "title": "Original sample",
+             "image": "fixture.png", "prompts": [
+                 {"language": "en", "text": "  Keep original\n\n whitespace  ", "is_original": True}]}
+    payload = {"schema_version": 2, "id": "fixture", "collections": [], "items": [first]}
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    library = tmp_path / "library"
+    import_sample_bundle(manifest, assets, library)
+    repo = ItemRepository(library)
+    trashed = repo.delete_item(repo.list_items().items[0].id)
+    original_files = {path: (library / path).read_bytes() for image in trashed.images
+                      for path in (image.original_path, image.thumb_path, image.preview_path)}
+
+    first["title"] = "Revised sample must not overwrite Trash"
+    first["prompts"][0]["text"] = "Replacement text"
+    payload["items"].append({"id": "second", "slug": "second-sample", "title": "Next sample",
+                             "image": "fixture.png", "prompts": [
+                                 {"language": "en", "text": "Next prompt", "is_original": True}]})
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    result = import_sample_bundle(manifest, assets, library)
+
+    assert result.status == "completed"
+    assert result.item_count == 1 and result.image_count == 1
+    assert "Skipped trashed sample first-sample" in result.log
+    assert repo.get_item(trashed.id, include_trashed=True) == trashed
+    assert repo.list_items(trashed=True).total == 1
+    assert [item.title for item in repo.list_items().items] == ["Next sample"]
+    assert {path: (library / path).read_bytes() for path in original_files} == original_files
+    with connect(library) as conn:
+        assert conn.execute("SELECT status FROM imports WHERE id=?", (result.id,)).fetchone()[0] == "completed"
+        assert conn.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 2
 
 
 def test_install_sample_data_script_verifies_release_zip_checksum():
