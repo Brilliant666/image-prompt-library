@@ -1,6 +1,7 @@
 import type { UiLanguage } from '../types';
 export type { UiLanguage } from '../types';
 type TranslationKey =
+  | 'editorImageDropHelp' | 'editorOneImage' | 'editorEmptyImage' | 'editorImageType' | 'editorImageTooLarge' | 'editorImageFileOnly'
   | 'recipeInputsMissing' | 'recipeTextOnly' | 'recipeRestoreLoading'
   | 'generationXhigh' | 'generationMax'
   | 'imageLegacyRatio' | 'imageHistoricalSize'
@@ -71,6 +72,12 @@ export function normalizeUiLanguage(value?: string | null): UiLanguage {
 
 const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
   zh_hant: {
+    editorImageDropHelp: '拖入一張圖片，或點擊選擇；每張最多 30 MB。',
+    editorOneImage: '每個區域一次只能放入一張圖片；請逐張新增並儲存。',
+    editorEmptyImage: '這個檔案為空，請選擇其他圖片。',
+    editorImageType: '請選擇 PNG、JPEG、WebP 或 GIF 圖片。',
+    editorImageTooLarge: '圖片不能超過 30 MB。',
+    editorImageFileOnly: '請拖入圖片檔案；網頁圖片連結請先下載後再拖入。',
     generationXhigh: '超高', generationMax: '最高',
     imageLegacyRatio: '歷史構圖比例（選擇尺寸後清除）',
     imageHistoricalSize: '歷史固定尺寸（重新選擇比例後改為自動尺寸）',
@@ -199,6 +206,12 @@ const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
 
   },
   zh_hans: {
+    editorImageDropHelp: '拖入一张图片，或点击选择；每张最多 30 MB。',
+    editorOneImage: '每个区域一次只能放入一张图片；请逐张添加并保存。',
+    editorEmptyImage: '这个文件为空，请选择其他图片。',
+    editorImageType: '请选择 PNG、JPEG、WebP 或 GIF 图片。',
+    editorImageTooLarge: '图片不能超过 30 MB。',
+    editorImageFileOnly: '请拖入图片文件；网页图片链接请先下载后再拖入。',
     generationXhigh: '超高', generationMax: '最高',
     imageLegacyRatio: '历史构图比例（选择尺寸后清除）',
     imageHistoricalSize: '历史固定尺寸（重新选择比例后改为自动尺寸）',
@@ -328,6 +341,12 @@ const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
 
   },
   en: {
+    editorImageDropHelp: 'Drop one image here or click to choose; up to 30 MB per image.',
+    editorOneImage: 'Add one image per area at a time; save before adding another.',
+    editorEmptyImage: 'This file is empty. Please choose another image.',
+    editorImageType: 'Please choose a PNG, JPEG, WebP or GIF image.',
+    editorImageTooLarge: 'Images must not exceed 30 MB.',
+    editorImageFileOnly: 'Drop an image file. Download linked web images before dropping them here.',
     generationXhigh: 'Extra high', generationMax: 'Maximum',
     imageLegacyRatio: 'Historical composition ratio (cleared when selecting a size)',
     imageHistoricalSize: 'Historical fixed size (select a ratio to use automatic sizing)',
