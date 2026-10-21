@@ -500,9 +500,9 @@ class GenerationJobRepository:
         prepared["input_images"] = input_specs
         return prepared, library_reference_ids
 
-    def resolve_library_reference(self, image_id: str):
+    def resolve_library_reference(self, image_id: str, *, include_trashed: bool = False):
         try:
-            image = self.items.get_image(image_id)
+            image = self.items.get_image(image_id, include_trashed=include_trashed)
         except KeyError as exc:
             raise GenerationJobConflict("Library generation reference image not found") from exc
         path, mime_type = resolve_generation_input_image_path(
@@ -1272,11 +1272,11 @@ class GenerationJobRepository:
                     data = source_path.read_bytes()
                     name = Path(result_path).name
                     try:
-                        source_image = self.items.get_image(image_id)
+                        source_image = self.items.get_image(image_id, include_trashed=True)
                     except KeyError:
                         source_image = None
                 else:
-                    source_image, source_path, _ = self.resolve_library_reference(image_id)
+                    source_image, source_path, _ = self.resolve_library_reference(image_id, include_trashed=True)
                     data = source_path.read_bytes()
                     name = Path(source_image.original_path).name
                 if source_image is not None:
@@ -1855,7 +1855,7 @@ class GenerationJobRepository:
     def accept_result_as_new_item(self, job_id: str, overrides: GenerationJobAcceptAsNewItemRequest | None = None) -> GenerationJobAcceptResult:
         job, claim_token = self._claim_acceptance(job_id, require_source_item=False)
         try:
-            source_item = self.items.get_item(job.source_item_id) if job.source_item_id else None
+            source_item = self.items.get_item(job.source_item_id, include_trashed=True) if job.source_item_id else None
         except Exception:
             self._release_acceptance(job_id, claim_token)
             raise
@@ -1935,7 +1935,7 @@ class GenerationJobRepository:
                 created_item = True
                 if not self._refresh_acceptance_claim(job.id, claim_token):
                     if self._acceptance_claim_can_cleanup(job.id, claim_token):
-                        self.items.delete_item(new_item.id)
+                        self.items.purge_item(new_item.id, require_trashed=False)
                     raise GenerationJobConflict("Generation job acceptance claim is no longer owned")
                 self._record_acceptance_artifacts(
                     job.id,
@@ -2030,7 +2030,7 @@ class GenerationJobRepository:
             if not finalized and self._acceptance_claim_can_cleanup(job_id, claim_token):
                 try:
                     if created_item and new_item:
-                        self.items.delete_item(new_item.id)
+                        self.items.purge_item(new_item.id, require_trashed=False)
                     elif new_item:
                         self._remove_created_images(new_item.id, created_images)
                 finally:

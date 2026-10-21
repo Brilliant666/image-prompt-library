@@ -1,6 +1,7 @@
 import type { UiLanguage } from '../types';
 export type { UiLanguage } from '../types';
 type TranslationKey =
+  | 'editorPasteDestination' | 'editorResultImage' | 'editorReferenceImage'
   | 'editorPasteSelected' | 'editorPasteTarget'
   | 'editorImageDropHelp' | 'editorOneImage' | 'editorEmptyImage' | 'editorImageType' | 'editorImageTooLarge' | 'editorImageFileOnly'
   | 'recipeInputsMissing' | 'recipeTextOnly' | 'recipeRestoreLoading'
@@ -73,6 +74,7 @@ export function normalizeUiLanguage(value?: string | null): UiLanguage {
 
 const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
   zh_hant: {
+    editorPasteDestination: '貼上到', editorResultImage: '完成圖片', editorReferenceImage: '參考圖片',
     editorPasteSelected: '已選取：Ctrl+V 貼上圖片',
     editorPasteTarget: '選為圖片貼上位置',
     editorImageDropHelp: '拖入一張圖片，或點擊選擇；每張最多 30 MB。',
@@ -171,7 +173,7 @@ const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
     title: '標題', titlePlaceholder: '為此參考命名，方便日後辨識', collection: 'Collection', collectionPlaceholder: '例如：產品商業', tags: '標籤', tagsPlaceholder: 'poster, product, cinematic', existingTagSuggestions: '現有標籤建議',
     traditionalChinesePrompt: '繁體中文 prompt', traditionalPromptPlaceholder: '貼上繁體中文 prompt…', simplifiedChinesePrompt: '簡體中文 prompt', simplifiedPromptPlaceholder: '貼上簡體中文 prompt…', englishPrompt: '英文 prompt', englishPromptPlaceholder: '貼上英文 prompt…',
     resultImageAlreadySaved: '完成圖片已儲存', resultImageRequired: '完成圖片為必填', resultImageHelp: '必填的最終輸出圖片 · PNG、JPG、WEBP 或 GIF', referencePhotoOptional: '參考圖片可選', referencePhotoHelp: '此 prompt 的可選來源／參考圖片',
-    deleteReference: '刪除參考', deleteReferenceConfirm: '刪除此參考？\n這會刪除 Library 記錄及未被其他參考使用的本機圖片。排隊中或生成中的工作不會取消；完成後仍可另存為新參考。', selectReferences: '選取', selectedReferences: '已選取', archiveSelectedReferences: '封存', restoreSelectedReferences: '還原', favoriteSelectedReferences: '加入最愛', tagSelectedReferences: '加標籤', moveSelectedReferences: '移動', deleteSelectedReferences: '刪除', deleteSelectedReferencesConfirm: '刪除已選取的 ${selectedItemIds.size} 個參考？\nLibrary 記錄及未被其他參考使用的本機圖片會被刪除。相關的排隊中或生成中工作不會取消；完成後仍可另存為新參考。', cancel: '取消', saving: '儲存中…', saveReference: '儲存參考', saveFailed: '儲存失敗，請再試一次。', imageUploadFailed: '圖片未能上載，未有儲存任何變更。', savePartiallyCompleted: '部分變更已儲存；未上載的圖片仍可重試。', saveRollbackFailed: '項目已建立，但圖片未完全上載。請在此畫面重試，避免重複建立。', deleteFailed: '刪除失敗，請再試一次。', batchActionPartialFailure: '已完成 ${changed} 項；${failed} 項失敗並保留選取。',
+    deleteReference: '移入回收站', deleteReferenceConfirm: '將此項目移入回收站？圖片和提示詞會保留，可在 Library 回收站恢復。', selectReferences: '選取', selectedReferences: '已選取', archiveSelectedReferences: '封存', restoreSelectedReferences: '還原', favoriteSelectedReferences: '加入最愛', tagSelectedReferences: '加標籤', moveSelectedReferences: '移動', deleteSelectedReferences: '移入回收站', deleteSelectedReferencesConfirm: '將選取的 ${selectedItemIds.size} 個項目移入回收站？圖片和提示詞會保留，可稍後恢復。', cancel: '取消', saving: '儲存中…', saveReference: '儲存參考', saveFailed: '儲存失敗，請再試一次。', imageUploadFailed: '圖片未完全上載，已建立的部分記錄已移入回收站。可在此重試，或到 Library 回收站查看。', savePartiallyCompleted: '部分變更已儲存；未上載的圖片仍可重試。', saveRollbackFailed: '項目已建立，但圖片未完全上載。請在此畫面重試，避免重複建立。', deleteFailed: '刪除失敗，請再試一次。', batchActionPartialFailure: '已完成 ${changed} 項；${failed} 項失敗並保留選取。',
     batchTagTitle: '為已選參考加標籤', batchMoveTitle: '移動已選參考', searchOrCreateTags: '搜尋或新增標籤', selectedTags: '已選標籤', createTag: '新增「${tag}」', noTagsFound: '找不到標籤', applyTags: '套用標籤', moveReferences: '移動參考',
     primaryNavigation: '主要導覽', appHome: 'Image Prompt Library 首頁', currentFilters: '目前篩選', preferredPromptLanguage: '偏好 prompt 語言',
     collectionFilters: 'Collection 篩選', itemActions: '項目操作', promptLanguage: 'Prompt 語言', promptText: 'Prompt 文字', source: '來源', defaultModel: 'ChatGPT Image', localReference: '本機參考',
@@ -209,6 +211,7 @@ const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
 
   },
   zh_hans: {
+    editorPasteDestination: '粘贴到', editorResultImage: '完成图片', editorReferenceImage: '参考图片',
     editorPasteSelected: '已选中：Ctrl+V 粘贴图片',
     editorPasteTarget: '选为图片粘贴位置',
     editorImageDropHelp: '拖入一张图片，或点击选择；每张最多 30 MB。',
@@ -308,7 +311,7 @@ const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
     title: '标题', titlePlaceholder: '为此参考命名，方便日后辨识', collection: 'Collection', collectionPlaceholder: '例如：产品商业', tags: '标签', tagsPlaceholder: 'poster, product, cinematic', existingTagSuggestions: '现有标签建议',
     traditionalChinesePrompt: '繁体中文 prompt', traditionalPromptPlaceholder: '贴上繁体中文 prompt…', simplifiedChinesePrompt: '简体中文 prompt', simplifiedPromptPlaceholder: '粘贴简体中文 prompt…', englishPrompt: '英文 prompt', englishPromptPlaceholder: '粘贴英文 prompt…',
     resultImageAlreadySaved: '完成图片已保存', resultImageRequired: '完成图片为必填', resultImageHelp: '必填的最终输出图片 · PNG、JPG、WEBP 或 GIF', referencePhotoOptional: '参考图片可选', referencePhotoHelp: '此 prompt 的可选来源／参考图片',
-    deleteReference: '删除参考', deleteReferenceConfirm: '删除此参考？\n这会删除 Library 记录及未被其他参考使用的本地图片。排队中或生成中的任务不会取消；完成后仍可另存为新参考。', selectReferences: '选择', selectedReferences: '已选择', archiveSelectedReferences: '存档', restoreSelectedReferences: '恢复', favoriteSelectedReferences: '加入收藏', tagSelectedReferences: '添加标签', moveSelectedReferences: '移动', deleteSelectedReferences: '删除', deleteSelectedReferencesConfirm: '删除已选择的 ${selectedItemIds.size} 个参考？\nLibrary 记录及未被其他参考使用的本地图片会被删除。相关的排队中或生成中的任务不会取消；完成后仍可另存为新参考。', cancel: '取消', saving: '保存中…', saveReference: '保存参考', saveFailed: '保存失败，请再试一次。', imageUploadFailed: '图片未能上传，没有保存任何更改。', savePartiallyCompleted: '部分更改已保存；未上传的图片仍可重试。', saveRollbackFailed: '项目已建立，但图片未完全上传。请在此画面重试，避免重复建立。', deleteFailed: '删除失败，请再试一次。', batchActionPartialFailure: '已完成 ${changed} 项；${failed} 项失败并保留选择。',
+    deleteReference: '移入回收站', deleteReferenceConfirm: '将此条目移入回收站？图片和提示词会保留，可在 Library 回收站恢复。', selectReferences: '选择', selectedReferences: '已选择', archiveSelectedReferences: '存档', restoreSelectedReferences: '恢复', favoriteSelectedReferences: '加入收藏', tagSelectedReferences: '添加标签', moveSelectedReferences: '移动', deleteSelectedReferences: '移入回收站', deleteSelectedReferencesConfirm: '将选中的 ${selectedItemIds.size} 个条目移入回收站？图片和提示词会保留，可稍后恢复。', cancel: '取消', saving: '保存中…', saveReference: '保存参考', saveFailed: '保存失败，请再试一次。', imageUploadFailed: '图片未完全上传，已建立的部分记录已移入回收站。可在此重试，或到 Library 回收站查看。', savePartiallyCompleted: '部分更改已保存；未上传的图片仍可重试。', saveRollbackFailed: '项目已建立，但图片未完全上传。请在此画面重试，避免重复建立。', deleteFailed: '删除失败，请再试一次。', batchActionPartialFailure: '已完成 ${changed} 项；${failed} 项失败并保留选择。',
     batchTagTitle: '为已选参考添加标签', batchMoveTitle: '移动已选参考', searchOrCreateTags: '搜索或新增标签', selectedTags: '已选标签', createTag: '新增“${tag}”', noTagsFound: '找不到标签', applyTags: '应用标签', moveReferences: '移动参考',
     primaryNavigation: '主要导航', appHome: 'Image Prompt Library 首页', currentFilters: '当前筛选', preferredPromptLanguage: '偏好 prompt 语言',
     collectionFilters: 'Collection 筛选', itemActions: '项目操作', promptLanguage: 'Prompt 语言', promptText: 'Prompt 文字', source: '来源', defaultModel: 'ChatGPT Image', localReference: '本地参考',
@@ -346,6 +349,7 @@ const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
 
   },
   en: {
+    editorPasteDestination: 'Paste into', editorResultImage: 'Result image', editorReferenceImage: 'Reference image',
     editorPasteSelected: 'Selected: Ctrl+V to paste an image',
     editorPasteTarget: 'Select as image paste target',
     editorImageDropHelp: 'Drop one image here or click to choose; up to 30 MB per image.',
@@ -465,7 +469,7 @@ const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
     title: 'Title', titlePlaceholder: 'Give this reference a memorable name', collection: 'Collection', collectionPlaceholder: 'e.g. Product commercial', tags: 'Tags', tagsPlaceholder: 'poster, product, cinematic', existingTagSuggestions: 'Existing tag suggestions',
     traditionalChinesePrompt: 'Traditional Chinese prompt', traditionalPromptPlaceholder: 'Paste the Traditional Chinese prompt…', simplifiedChinesePrompt: 'Simplified Chinese prompt', simplifiedPromptPlaceholder: 'Paste the Simplified Chinese prompt…', englishPrompt: 'English prompt', englishPromptPlaceholder: 'Paste the English prompt…',
     resultImageAlreadySaved: 'Result image already saved', resultImageRequired: 'Result image required', resultImageHelp: 'Required finished output image · PNG, JPG, WEBP or GIF', referencePhotoOptional: 'Reference photo optional', referencePhotoHelp: 'Optional source/reference image for this prompt',
-    deleteReference: 'Delete reference', deleteReferenceConfirm: 'Delete this reference?\nThis deletes the Library record and local images not used elsewhere. Queued or running generation jobs are not cancelled; completed results can still be saved as new references.', selectReferences: 'Select', selectedReferences: 'selected', archiveSelectedReferences: 'Archive', restoreSelectedReferences: 'Restore', favoriteSelectedReferences: 'Favorite', tagSelectedReferences: 'Tag', moveSelectedReferences: 'Move', deleteSelectedReferences: 'Delete', deleteSelectedReferencesConfirm: 'Delete ${selectedItemIds.size} selected references?\nLibrary records and local images not used elsewhere will be deleted. Related queued or running generation jobs are not cancelled; completed results can still be saved as new references.', cancel: 'Cancel', saving: 'Saving…', saveReference: 'Save reference', saveFailed: 'Save failed. Please try again.', imageUploadFailed: 'The image could not be uploaded. No changes were kept.', savePartiallyCompleted: 'Some changes were saved. You can retry the remaining image upload.', saveRollbackFailed: 'The item was created, but its images did not finish uploading. Retry here to avoid a duplicate.', deleteFailed: 'Delete failed. Please try again.', batchActionPartialFailure: '${changed} completed; ${failed} failed and remain selected.',
+    deleteReference: 'Move to trash', deleteReferenceConfirm: 'Move this item to trash? Images and prompts are kept and can be restored from Library trash.', selectReferences: 'Select', selectedReferences: 'selected', archiveSelectedReferences: 'Archive', restoreSelectedReferences: 'Restore', favoriteSelectedReferences: 'Favorite', tagSelectedReferences: 'Tag', moveSelectedReferences: 'Move', deleteSelectedReferences: 'Move to trash', deleteSelectedReferencesConfirm: 'Move ${selectedItemIds.size} selected items to trash? Images and prompts are kept and can be restored later.', cancel: 'Cancel', saving: 'Saving…', saveReference: 'Save reference', saveFailed: 'Save failed. Please try again.', imageUploadFailed: 'Image upload did not complete. The partial item was moved to trash. Retry here or inspect it in Library trash.', savePartiallyCompleted: 'Some changes were saved. You can retry the remaining image upload.', saveRollbackFailed: 'The item was created, but its images did not finish uploading. Retry here to avoid a duplicate.', deleteFailed: 'Delete failed. Please try again.', batchActionPartialFailure: '${changed} completed; ${failed} failed and remain selected.',
     batchTagTitle: 'Tag selected references', batchMoveTitle: 'Move selected references', searchOrCreateTags: 'Search or create tags', selectedTags: 'Selected tags', createTag: 'Create “${tag}”', noTagsFound: 'No tags found', applyTags: 'Apply tags', moveReferences: 'Move references',
     primaryNavigation: 'Primary navigation', appHome: 'Image Prompt Library home', currentFilters: 'Current filters', preferredPromptLanguage: 'Preferred prompt language',
     collectionFilters: 'Collection filters', itemActions: 'Item actions', promptLanguage: 'Prompt language', promptText: 'Prompt text', source: 'Source', defaultModel: 'ChatGPT Image', localReference: 'Local reference',

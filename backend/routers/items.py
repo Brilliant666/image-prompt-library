@@ -10,8 +10,8 @@ def not_found(exc: KeyError):
     raise HTTPException(404, "Item not found") from exc
 
 @router.get("/items", response_model=ItemList)
-def list_items(request: Request, q: str | None=None, cluster: str | None=None, tag: str | None=None, favorite: bool | None=None, archived: bool | None=False, sort: str="updated_desc", limit: int=100, offset: int=0):
-    return repo(request).list_items(q=q, cluster=cluster, tag=tag, favorite=favorite, archived=archived, sort=sort, limit=min(limit,1000), offset=offset)
+def list_items(request: Request, q: str | None=None, cluster: str | None=None, tag: str | None=None, favorite: bool | None=None, archived: bool | None=False, sort: str="updated_desc", limit: int=100, offset: int=0, trashed: bool=False):
+    return repo(request).list_items(q=q, cluster=cluster, tag=tag, favorite=favorite, archived=archived, sort=sort, limit=min(limit,1000), offset=offset, trashed=trashed)
 
 @router.post("/items", response_model=ItemDetail)
 def create_item(request: Request, payload: ItemCreate):
@@ -29,7 +29,7 @@ def batch_items(request: Request, payload: ItemBatchRequest):
 
 @router.get("/items/{item_id}", response_model=ItemDetail)
 def get_item(request: Request, item_id: str):
-    try: return repo(request).get_item(item_id)
+    try: return repo(request).get_item(item_id, include_trashed=True)
     except KeyError as exc: not_found(exc)
 
 @router.get("/items/{item_id}/gallery-title-status")
@@ -52,3 +52,18 @@ def delete_item(request: Request, item_id: str):
 def favorite_item(request: Request, item_id: str):
     try: return repo(request).toggle_favorite(item_id)
     except KeyError as exc: not_found(exc)
+
+
+@router.post("/items/{item_id}/restore", response_model=ItemDetail)
+def restore_item(request: Request, item_id: str):
+    try: return repo(request).restore_item(item_id)
+    except KeyError as exc: not_found(exc)
+
+
+@router.delete("/items/{item_id}/permanent", response_model=ItemDetail)
+def permanently_delete_item(request: Request, item_id: str, confirmed: bool = False):
+    if not confirmed:
+        raise HTTPException(400, "Explicit confirmation is required for permanent deletion")
+    try: return repo(request).purge_item(item_id)
+    except KeyError as exc: not_found(exc)
+    except ValueError as exc: raise HTTPException(409, str(exc)) from exc

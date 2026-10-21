@@ -9,17 +9,18 @@ async function compile(path) {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
   }).outputText;
 }
-function evaluate(js, dependencies, window = {}) {
+function evaluate(js, dependencies, window = {}, objectUrls = URL) {
   const module = { exports: {} };
-  new Function('require', 'module', 'exports', 'window', 'confirm', 'fetch', js)(name => {
+  new Function('require', 'module', 'exports', 'window', 'confirm', 'fetch', 'URL', js)(name => {
     assert.ok(name in dependencies, `unmocked dependency: ${name}`);
     return dependencies[name];
-  }, module, module.exports, window, () => true, () => assert.fail('Dropping an image must not fetch a remote URL'));
+  }, module, module.exports, window, () => true, () => assert.fail('Dropping an image must not fetch a remote URL'), objectUrls);
   return module.exports;
 }
 const component = await compile('../frontend/src/components/ItemEditorModal.tsx');
 const editorPrompts = evaluate(await compile('../frontend/src/utils/editorPrompts.ts'), {});
 const capture = evaluate(await compile('../frontend/src/utils/quickCapture.ts'), {});
+const { makeTranslator } = evaluate(await compile('../frontend/src/utils/i18n.ts'), {});
 const originalPrompt = '  synthetic prompt\r\n保留空白\n\t ';
 const item = {
   id: 'synthetic-library-item', title: 'Existing manual title', model: 'synthetic-model', author: 'Synthetic author', tags: [],
@@ -32,12 +33,22 @@ function descendants(node) {
   return [node, ...(Array.isArray(node.props?.children) ? node.props.children.flat(Infinity) : [node.props?.children]).flatMap(descendants)];
 }
 function harness(overrides = {}) {
-  const slots = [], timers = [], events = { writes: [], uploads: [], changed: 0, deleted: 0, closed: 0 };
+  const slots = [], timers = [], effects = new Map(), pendingEffects = [];
+  const events = { writes: [], uploads: [], createdUrls: [], revokedUrls: [], changed: 0, deleted: 0, closed: 0 };
   let cursor = 0, dirty = false, tree;
   const hooks = {
     useState(initial) { const i = cursor++; if (!(i in slots)) slots[i] = typeof initial === 'function' ? initial() : initial; return [slots[i], value => { slots[i] = typeof value === 'function' ? value(slots[i]) : value; dirty = true; }]; },
     useMemo(callback) { return callback(); },
     useRef(initial) { const i = cursor++; if (!(i in slots)) slots[i] = { current: initial }; return slots[i]; },
+    useEffect(callback, dependencies) {
+      const i = cursor++, previous = effects.get(i);
+      if (previous && dependencies && dependencies.length === previous.dependencies?.length
+        && dependencies.every((value, index) => Object.is(value, previous.dependencies[index]))) return;
+      pendingEffects.push(() => {
+        previous?.cleanup?.();
+        effects.set(i, { dependencies, cleanup: callback() });
+      });
+    },
   };
   const jsx = (type, props) => ({ type, props });
   const api = {
@@ -55,28 +66,30 @@ function harness(overrides = {}) {
     '../api/client': { api, mediaUrl: path => `/media/${path}` },
     '../hooks/useModalFocus': { useModalFocus: () => ({ containerRef: {}, handleModalKeyDown() {} }) },
     '../utils/images': { imageThumbnailPath: image => image.thumb_path },
-    './SuggestedTitleField': { default: 'SuggestedTitleField' },
+    './SuggestedTitleField': { __esModule: true, default: 'SuggestedTitleField' },
     '../utils/editorPrompts': editorPrompts,
     '../utils/quickCapture': capture,
-  }, { matchMedia: () => ({ matches: true }), setTimeout: callback => timers.push(callback) });
+  }, { matchMedia: () => ({ matches: true }), setTimeout: callback => timers.push(callback) }, {
+    createObjectURL(file) { const url = `blob:synthetic-preview-${events.createdUrls.length + 1}`; events.createdUrls.push({ file, url }); return url; },
+    revokeObjectURL(url) { events.revokedUrls.push(url); },
+  });
   function render() {
     cursor = 0; dirty = false;
-    tree = Editor({ item, t: key => key, clusters: [], tags: [], defaultAiProvider: 'openai_compatible', onClose: () => events.closed++, onSaved: () => events.changed++, onDeleted: () => events.deleted++ });
+    tree = Editor({ item: 'item' in overrides ? overrides.item : item, t: overrides.t || (key => key), clusters: [], tags: [], defaultAiProvider: 'openai_compatible', onClose: () => events.closed++, onSaved: () => events.changed++, onDeleted: () => events.deleted++ });
+    while (pendingEffects.length) pendingEffects.shift()();
   }
   async function flush() { for (let i = 0; i < 20; i++) { if (dirty) render(); await Promise.resolve(); } if (dirty) render(); }
   const find = (type, predicate = () => true) => descendants(tree).find(node => node.type === type && predicate(node.props))?.props;
   const zone = role => find('label', props => props.className?.split(' ').includes(`${role}-drop-zone`));
   const input = role => descendants({ props: zone(role) }).find(node => node.type === 'input' && node.props.type === 'file')?.props;
   const filename = role => descendants({ props: zone(role) }).find(node => node.type === 'strong')?.props.children;
-  const pasteTarget = role => {
-    const area = descendants(tree).find(node => node.type === 'div' && node.props.className === 'editor-image-upload'
-      && descendants(node).some(child => child.type === 'label' && child.props.className.includes(`${role}-drop-zone`)));
-    return descendants(area).find(node => node.type === 'button' && node.props.className === 'editor-paste-target')?.props;
-  };
+  const preview = role => descendants({ props: zone(role) }).find(node => node.type === 'img' && node.props.className === 'editor-upload-preview')?.props;
+  const pasteTarget = role => find('button', props => props['data-paste-role'] === role);
   const paste = event => find('div', props => props.role === 'dialog').onPaste(event);
   const save = () => find('button', props => props.children === 'saveReference').onClick();
   render();
-  return { find, zone, input, filename, pasteTarget, paste, save, flush, events, timers };
+  const unmount = () => { for (const effect of effects.values()) effect.cleanup?.(); effects.clear(); };
+  return { find, zone, input, filename, preview, pasteTarget, paste, save, flush, unmount, events, timers };
 }
 function dragEvent(files = [], data = {}) {
   const calls = { prevented: 0, stopped: 0 };
@@ -321,4 +334,115 @@ test('editor ignores clipboard images after closing begins', async () => {
   h.paste(clipboardEvent([image('late.png')])); await h.flush();
   assert.equal(h.filename('result'), file.name);
   assert.deepEqual(h.events.uploads, []);
+});
+
+test('editor previews pasted result and reference images in their respective areas without uploading', async () => {
+  const h = harness(), result = image('preview-result.png'), reference = image('preview-reference.png');
+  assert.equal(h.preview('result'), undefined);
+  assert.equal(h.preview('reference'), undefined);
+  h.paste(clipboardEvent([result])); await h.flush();
+  h.pasteTarget('reference').onClick(); await h.flush();
+  h.paste(clipboardEvent([reference])); await h.flush();
+  for (const [role, file] of [['result', result], ['reference', reference]]) {
+    const created = h.events.createdUrls.find(entry => entry.file === file);
+    assert.ok(created);
+    assert.equal(h.preview(role).src, created.url);
+    assert.equal(h.preview(role).alt, file.name);
+  }
+  assert.deepEqual(h.events.writes, []);
+  assert.deepEqual(h.events.uploads, []);
+  assert.deepEqual(h.events.revokedUrls, []);
+});
+
+test('replacing a preview revokes its old URL, preserves the other role, and unmount releases the remaining URLs', async () => {
+  const h = harness(), first = image('first.png'), next = image('next.png'), reference = image('reference.png');
+  h.zone('result').onDrop(dragEvent([first]));
+  h.zone('reference').onDrop(dragEvent([reference])); await h.flush();
+  const oldUrl = h.preview('result').src, referenceUrl = h.preview('reference').src;
+  h.zone('result').onDrop(dragEvent([next])); await h.flush();
+  const newUrl = h.preview('result').src;
+  assert.notEqual(newUrl, oldUrl);
+  assert.equal(h.events.createdUrls.find(entry => entry.url === newUrl).file, next);
+  assert.deepEqual(h.events.revokedUrls, [oldUrl]);
+  assert.equal(h.preview('reference').src, referenceUrl);
+  h.unmount();
+  assert.deepEqual(h.events.revokedUrls, [oldUrl, newUrl, referenceUrl]);
+});
+
+test('picker cancellation and invalid incoming files preserve both existing previews and their URLs', async () => {
+  const h = harness();
+  for (const role of ['result', 'reference']) {
+    const input = { files: [image(`${role}.png`)], value: 'selected' };
+    h.input(role).onChange({ target: input, currentTarget: input }); await h.flush();
+  }
+  const previews = { result: h.preview('result').src, reference: h.preview('reference').src };
+  for (const role of ['result', 'reference']) {
+    const cancelled = { files: [], value: '' };
+    h.input(role).onChange({ target: cancelled, currentTarget: cancelled });
+    h.zone(role).onDrop(dragEvent([image('one.png'), image('two.png')])); await h.flush();
+    assert.equal(h.preview(role).src, previews[role]);
+  }
+  assert.equal(h.events.createdUrls.length, 2);
+  assert.deepEqual(h.events.revokedUrls, []);
+});
+
+test('successful save uploads original Files and releases both pending preview URLs', async () => {
+  const h = harness(), result = image('result.png'), reference = image('reference.png');
+  h.zone('result').onDrop(dragEvent([result]));
+  h.zone('reference').onDrop(dragEvent([reference])); await h.flush();
+  const urls = h.events.createdUrls.map(entry => entry.url);
+  await h.save(); await h.flush();
+  assert.deepEqual(h.events.uploads, [[item.id, result, 'result_image'], [item.id, reference, 'reference_image']]);
+  assert.equal(h.preview('result'), undefined);
+  assert.equal(h.preview('reference'), undefined);
+  assert.deepEqual(h.events.revokedUrls, urls);
+  h.unmount();
+  assert.deepEqual(h.events.revokedUrls, urls);
+});
+
+test('new-item partial upload failure moves the partial record to trash, preserves pending files, and retries as a new record', async () => {
+  const records = new Map(), uploads = [], deleted = [];
+  let firstReferenceFails = true;
+  const english = makeTranslator('en');
+  const h = harness({ item: undefined, t: key => key === 'imageUploadFailed' ? english(key) : key, api: {
+    createItem: async payload => {
+      const record = { ...payload, id: `new-${records.size + 1}`, images: [], deleted_at: null };
+      records.set(record.id, record);
+      return record;
+    },
+    updateItem: async () => assert.fail('Retry must not overwrite the recoverable partial item'),
+    uploadImage: async (id, file, role) => {
+      uploads.push([id, file, role]);
+      if (role === 'reference_image' && firstReferenceFails) {
+        firstReferenceFails = false;
+        throw new Error('synthetic reference upload failure');
+      }
+      records.get(id).images.push({ id: `image-${uploads.length}`, role });
+      return { id: `image-${uploads.length}` };
+    },
+    deleteItem: async id => { records.get(id).deleted_at = 'synthetic-trash-time'; deleted.push(id); return records.get(id); },
+  } });
+  const result = image('pending-result.png'), reference = image('pending-reference.png');
+  h.find('SuggestedTitleField').onChange('Manual synthetic title');
+  h.find('textarea', props => props.placeholder === 'simplifiedPromptPlaceholder').onChange({ target: { value: originalPrompt } });
+  h.zone('result').onDrop(dragEvent([result]));
+  h.zone('reference').onDrop(dragEvent([reference])); await h.flush();
+  await h.save(); await h.flush();
+  assert.deepEqual(deleted, ['new-1']);
+  assert.equal(records.get('new-1').deleted_at, 'synthetic-trash-time');
+  assert.equal(records.get('new-1').images.length, 1);
+  assert.equal(h.filename('result'), result.name);
+  assert.equal(h.filename('reference'), reference.name);
+  assert.equal(h.find('textarea', props => props.placeholder === 'simplifiedPromptPlaceholder').value, originalPrompt);
+  assert.equal(h.find('p', props => props.className === 'form-error').children,
+    'Image upload did not complete. The partial item was moved to trash. Retry here or inspect it in Library trash.');
+  assert.equal(h.events.closed, 0);
+  const partialSnapshot = JSON.stringify(records.get('new-1'));
+  await h.save(); await h.flush();
+  assert.equal(records.size, 2);
+  assert.equal(JSON.stringify(records.get('new-1')), partialSnapshot);
+  assert.equal(records.get('new-2').deleted_at, null);
+  assert.deepEqual(uploads.slice(-2), [['new-2', result, 'result_image'], ['new-2', reference, 'reference_image']]);
+  assert.ok(records.get('new-2').prompts.some(prompt => prompt.text === originalPrompt));
+  assert.equal(h.events.changed, 1);
 });

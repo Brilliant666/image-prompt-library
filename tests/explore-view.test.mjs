@@ -948,7 +948,7 @@ test('Explore wiring preserves Library management, semantic appearance, and rest
   assert.match(topBar, /className=\{`vista-button filter-button[\s\S]*?aria-label=\{t\('filters'\)\}/);
   assert.match(topBar, /className="logo-wordmark" lang="en"/);
   assert.match(topBar, /inert=\{modalOpen\} aria-hidden=\{modalOpen \|\| undefined\}/);
-  assert.match(app, /const blockingModalOpen = !hasChosenUiLanguage \|\| Boolean\(detailId \|\| editorOpen \|\| quickCaptureOpen \|\| batchActionDialog \|\| galleryQueueOpen\)/);
+  assert.match(app, /const blockingModalOpen = !hasChosenUiLanguage \|\| Boolean\(detailId \|\| editorOpen \|\| quickCaptureOpen \|\| batchActionDialog \|\| galleryQueueOpen \|\| trashOpen\)/);
   assert.match(app, /allowDelete=\{showManagementActions\}/);
   assert.match(editorModal, /allowDelete && persistedItem/);
   assert.match(editorModal, /if \(!allowDelete \|\| !persistedItem \|\| deleting \|\| saving\) return;/);
@@ -1088,7 +1088,7 @@ test('Explore detail boundary keeps local mutation actions while gating manageme
   assert.match(detail, /showMutations && canGenerate/);
   assert.match(detail, /showMutations && <button className="modal-icon-button edit-button"/);
   assert.match(detail, /allowManagementActions && <button className="modal-icon-button favorite-button"/);
-  assert.match(detail, /allowManagementActions && <button className="modal-icon-button detail-delete-button"/);
+  assert.match(detail, /allowManagementActions && <details className="detail-more-actions">[\s\S]*?className="detail-delete-button" onClick=\{handleDelete\}/);
   assert.match(detail, /allowManagementActions && editingPromptLanguage === lang/);
   assert.match(detail, /allowManagementActions && \(addingTag \?/);
   assert.match(detail, /selectedImage \|\| showMutations/);

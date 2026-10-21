@@ -34,6 +34,7 @@ def test_delete_library_item_releases_receipt_and_reaccepts_exact_original(tmp_p
     first = client.post(endpoint).json()["item"]
     assert client.post(endpoint).status_code == 409
     assert client.delete(f"/api/items/{first['id']}").status_code == 200
+    assert client.delete(f"/api/items/{first['id']}/permanent", params={"confirmed": True}).status_code == 200
     refreshed = client.get(f"/api/generation-jobs/{job['id']}").json()
     assert refreshed["status"] == "succeeded"
     assert refreshed["accepted_image_id"] is None
@@ -74,6 +75,7 @@ def test_reaccept_cannot_save_missing_or_modified_staged_result(tmp_path, change
     endpoint = f"/api/generation-jobs/{job['id']}/accept-as-new-item"
     item = client.post(endpoint).json()["item"]
     client.delete(f"/api/items/{item['id']}")
+    client.delete(f"/api/items/{item['id']}/permanent", params={"confirmed": True})
     path = library / job["result_path"]
     if changed:
         Image.new("RGB", (12, 18), "blue").save(path, format="PNG")
@@ -83,15 +85,25 @@ def test_reaccept_cannot_save_missing_or_modified_staged_result(tmp_path, change
     assert client.get("/api/items").json()["total"] == 0
 
 
-def test_migration_repairs_legacy_deleted_receipt_once(tmp_path, monkeypatch):
+def test_migration_repairs_legacy_deleted_receipt_once(tmp_path):
     library = tmp_path / "library"
-    with monkeypatch.context() as legacy:
-        legacy.setattr(db, "MIGRATIONS", db.MIGRATIONS[:14])
-        client = TestClient(create_app(library_path=library))
-        job, _, _ = staged(client)
-        item = GenerationJobRepository(library).accept_result_as_new_item(job["id"]).item
-        client.delete(f"/api/items/{item.id}")
-        assert client.get(f"/api/generation-jobs/{job['id']}").json()["status"] == "accepted"
+    client = TestClient(create_app(library_path=library))
+    job, _, _ = staged(client)
+    item = GenerationJobRepository(library).accept_result_as_new_item(job["id"]).item
+    # Recreate the pre-receipt-trigger schema and its physical deletion behavior.
+    # Current application writes must not be run against an obsolete schema.
+    with db.connect(library) as conn:
+        conn.execute("DROP INDEX idx_items_deleted_at")
+        conn.execute("ALTER TABLE items DROP COLUMN deleted_at")
+        conn.execute("DROP TABLE gallery_title_jobs")
+        conn.execute("DROP TRIGGER generation_image_deleted")
+        conn.executemany("DELETE FROM schema_migrations WHERE version=?", [(name,) for name in db.MIGRATIONS[14:]])
+        conn.execute("DELETE FROM item_search WHERE item_id=?", (item.id,))
+        conn.execute("DELETE FROM items WHERE id=?", (item.id,))
+        conn.commit()
+        row = conn.execute("SELECT status,accepted_image_id FROM generation_jobs WHERE id=?", (job["id"],)).fetchone()
+        assert row["status"] == "accepted"
+        assert row["accepted_image_id"] is None
     init_db(library)
     repaired = client.get(f"/api/generation-jobs/{job['id']}").json()
     assert repaired["status"] == "succeeded"

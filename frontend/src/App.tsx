@@ -8,6 +8,7 @@ import ExploreView from './components/ExploreView';
 import CardsView from './components/CardsView';
 import ItemDetailModal from './components/ItemDetailModal';
 import ItemEditorModal from './components/ItemEditorModal';
+import TrashModal, { trashLabels } from './components/TrashModal';
 import QuickCaptureModal from './components/QuickCaptureModal';
 import GalleryWorkspace from './components/gallery/GalleryWorkspace';
 import AgentWorkspace from './components/agent/AgentWorkspace';
@@ -123,6 +124,7 @@ export default function App() {
   });
   const [editing, setEditing] = useState<ItemDetail | undefined>();
   const [editorOpen, setEditorOpen] = useState(false);
+  const [trashOpen, setTrashOpen] = useState(false);
   const [quickCaptureOpen, setQuickCaptureOpen] = useState(false);
   const [itemsReloadKey, setItemsReloadKey] = useState(0);
   const [uiLanguage, setUiLanguage] = useState<UiLanguage>(loadUiLanguage);
@@ -495,9 +497,9 @@ export default function App() {
   };
   const showManagementActions = !isDemoMode && view === 'cards';
   const drawerModalOpen = filtersOpen || configOpen;
-  const blockingModalOpen = !hasChosenUiLanguage || Boolean(detailId || editorOpen || quickCaptureOpen || batchActionDialog || galleryQueueOpen);
+  const blockingModalOpen = !hasChosenUiLanguage || Boolean(detailId || editorOpen || quickCaptureOpen || batchActionDialog || galleryQueueOpen || trashOpen);
   const showFloatingActions = Boolean(hasChosenUiLanguage && !selectionMode && !filtersOpen && !configOpen && !detailId);
-  const floatingActionsHidden = editorOpen || quickCaptureOpen;
+  const floatingActionsHidden = editorOpen || quickCaptureOpen || trashOpen;
   const updateBadgeLabel = restartRequiredVersion
     ? t('restartRequired')
     : (updateStatus?.update_available && updateStatus.update_capability !== 'source' ? t('updateAvailable') : undefined);
@@ -607,12 +609,14 @@ export default function App() {
     {!isDemoMode && showFloatingActions && (view === 'explore' || view === 'cards') && (
       <div className={`app-command-dock${floatingActionsHidden ? ' is-hidden' : ''}`} aria-hidden={floatingActionsHidden} inert={floatingActionsHidden}>
         <div className="floating-action-rail">
+          {view === 'cards' && <button type="button" className="fab library-trash-trigger" onClick={() => { cancelPendingEdit(); setTrashOpen(true); }}><Trash2 size={17} />{trashLabels(uiLanguage).title}</button>}
           {view === 'cards' && localizedData.items.length > 0 && <button className="fab select-fab" onClick={() => { setSelectionMode(true); clearSelection(); }}>{t('selectReferences')}</button>}
           <button className="fab add-fab" onClick={openNewItemEditor}><Plus/> {quickCaptureLabels(uiLanguage).heading}</button>
           <button className="fab generate-fab" onClick={openStandaloneGeneration}>{t('generate')}</button>
         </div>
       </div>
     )}
+    {trashOpen && !isDemoMode && <TrashModal uiLanguage={uiLanguage} onClose={() => setTrashOpen(false)} onChanged={savedLibraryAssets} />}
     {detailId && <ItemDetailModal key={detailId} t={t} id={detailId} titleRefreshKey={titleUpdates[detailId] || 0} uiLanguage={uiLanguage} preferredLanguage={preferredLanguage} clusters={localizedClusters} tags={tags} onClose={closeItemDetail} onCopyPrompt={showCopyToast} onChanged={saved} onDelete={isDemoMode ? undefined : deleteDetail} onOpenItem={setDetailId} onGenerate={openGenerationFromDetail} onEdit={(item) => { closeItemDetail(); setEditing(item); setEditorOpen(true); }} showMutations={!isDemoMode} showManagementActions={showManagementActions} canGenerate={!isDemoMode} />}
     {toast && <div className={`toast copy-toast elegant-toast ${toast.tone}${toastClosing ? ' is-closing' : ''}`} role="status"><span className="toast-icon">{toast.tone === 'success' ? <Check size={16} /> : <XCircle size={16} />}</span><span className="toast-title">{toast.title}</span></div>}
     {!isDemoMode && <QuickCaptureModal open={quickCaptureOpen} uiLanguage={uiLanguage} onClose={() => setQuickCaptureOpen(false)} onSaved={saved} onFullEditor={item => { setQuickCaptureOpen(false); setEditing(item); setEditorOpen(true); }} />}

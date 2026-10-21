@@ -122,9 +122,10 @@ class ItemRepository:
         rows = conn.execute("""
             SELECT c.id
             FROM clusters c
-            LEFT JOIN items active_items ON active_items.cluster_id = c.id AND active_items.archived = 0
+            LEFT JOIN items active_items ON active_items.cluster_id = c.id AND active_items.archived = 0 AND active_items.deleted_at IS NULL
             GROUP BY c.id
             HAVING COUNT(active_items.id) = 0
+               AND NOT EXISTS (SELECT 1 FROM items trashed WHERE trashed.cluster_id=c.id AND trashed.deleted_at IS NOT NULL)
         """).fetchall()
         cluster_ids = [row["id"] for row in rows]
         if not cluster_ids:
@@ -251,7 +252,7 @@ class ItemRepository:
         data = payload.model_dump(exclude_unset=True)
         scalar = {k:v for k,v in data.items() if k in {"title","model","source_name","source_url","author","rating","notes"}}
         with connect(self.library_path) as conn:
-            existing_item = conn.execute("SELECT cluster_id FROM items WHERE id=?", (item_id,)).fetchone()
+            existing_item = conn.execute("SELECT cluster_id FROM items WHERE id=? AND deleted_at IS NULL", (item_id,)).fetchone()
             if existing_item is None:
                 raise KeyError(item_id)
             previous_cluster_id = existing_item["cluster_id"]
@@ -363,16 +364,44 @@ class ItemRepository:
                 file_path.unlink()
 
     def delete_item(self, item_id: str) -> ItemDetail:
-        detail = self.get_item(item_id)
+        # Keep rows, relationships and media intact until an explicit purge.
+        with connect(self.library_path) as conn:
+            if conn.execute("SELECT 1 FROM items WHERE id=?", (item_id,)).fetchone() is None:
+                raise KeyError(item_id)
+            conn.execute("UPDATE items SET deleted_at=COALESCE(deleted_at, ?) WHERE id=?", (now(), item_id))
+            conn.commit()
+        return self.get_item(item_id, include_trashed=True)
+
+    def restore_item(self, item_id: str) -> ItemDetail:
+        with connect(self.library_path) as conn:
+            if conn.execute("SELECT 1 FROM items WHERE id=?", (item_id,)).fetchone() is None:
+                raise KeyError(item_id)
+            conn.execute("UPDATE items SET deleted_at=NULL WHERE id=?", (item_id,))
+            self.rebuild_search(conn, item_id)
+            conn.commit()
+        return self.get_item(item_id)
+
+    def purge_item(self, item_id: str, *, require_trashed: bool = True) -> ItemDetail:
+        # The bypass is only for compensating a newly-created incomplete item.
+        # User-facing permanent deletion removes records, not shared media files:
+        # another upload may have stored the same bytes before adding its row.
+        detail = self.get_item(item_id, include_trashed=True)
+        if require_trashed and detail.deleted_at is None:
+            raise ValueError("Move this item to the recycle bin before permanently deleting it")
         candidate_paths = {
             path
             for image in detail.images
             for path in (image.original_path, image.thumb_path, image.preview_path)
             if path
-        }
+        } if not require_trashed else set()
         with connect(self.library_path) as conn:
-            if conn.execute("SELECT 1 FROM items WHERE id=?", (item_id,)).fetchone() is None:
+            # Serialize the final state check with restore before any deletion.
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT deleted_at FROM items WHERE id=?", (item_id,)).fetchone()
+            if row is None:
                 raise KeyError(item_id)
+            if require_trashed and row["deleted_at"] is None:
+                raise ValueError("Item is no longer in the recycle bin")
             conn.execute("DELETE FROM item_search WHERE item_id=?", (item_id,))
             conn.execute("DELETE FROM items WHERE id=?", (item_id,))
             self.delete_empty_clusters(conn)
@@ -387,12 +416,13 @@ class ItemRepository:
                 if row is not None:
                     still_used.add(rel_path)
             conn.commit()
-        self._remove_unreferenced_media_files(candidate_paths - still_used)
+        if not require_trashed:
+            self._remove_unreferenced_media_files(candidate_paths - still_used)
         return detail
 
     def toggle_favorite(self, item_id: str) -> ItemDetail:
         with connect(self.library_path) as conn:
-            row = conn.execute("SELECT favorite FROM items WHERE id=?", (item_id,)).fetchone()
+            row = conn.execute("SELECT favorite FROM items WHERE id=? AND deleted_at IS NULL", (item_id,)).fetchone()
         if not row:
             raise KeyError(item_id)
         return self.update_item(item_id, ItemUpdate(favorite=not bool(row["favorite"])))
@@ -404,6 +434,8 @@ class ItemRepository:
         return self._image_by_id(iid)
 
     def add_image_in_transaction(self, conn, item_id: str, image: StoredImageInput) -> str:
+        if conn.execute("SELECT 1 FROM items WHERE id=? AND deleted_at IS NULL", (item_id,)).fetchone() is None:
+            raise KeyError(item_id)
         if image.role not in {"result_image", "reference_image"}:
             raise ValueError("Invalid image role")
         iid = new_id("img")
@@ -424,8 +456,10 @@ class ItemRepository:
                 raise KeyError(image_id)
             return ImageRecord(**dict(row))
 
-    def get_image(self, image_id: str) -> ImageRecord:
-        return self._image_by_id(image_id)
+    def get_image(self, image_id: str, *, include_trashed: bool = False) -> ImageRecord:
+        image = self._image_by_id(image_id)
+        self.get_item(image.item_id, include_trashed=include_trashed)
+        return image
 
     def update_images(self, item_id: str, payload: ItemImagesUpdate) -> ItemDetail:
         image_ids = [image.id for image in payload.images]
@@ -436,7 +470,7 @@ class ItemRepository:
             raise ValueError("An item must keep at least one result image")
 
         with connect(self.library_path) as conn:
-            if conn.execute("SELECT 1 FROM items WHERE id=?", (item_id,)).fetchone() is None:
+            if conn.execute("SELECT 1 FROM items WHERE id=? AND deleted_at IS NULL", (item_id,)).fetchone() is None:
                 raise KeyError(item_id)
             rows = conn.execute("SELECT * FROM images WHERE item_id=?", (item_id,)).fetchall()
             existing_by_id = {row["id"]: row for row in rows}
@@ -510,12 +544,12 @@ class ItemRepository:
     def _summary_from_row(self, conn, row) -> ItemSummary:
         prompts = self._prompts(conn, row["id"])
         images = self._images(conn, row["id"])
-        return ItemSummary(id=row["id"], title=row["title"], slug=row["slug"], model=row["model"], source_name=row["source_name"], source_url=row["source_url"], cluster=self._cluster_from_row(row), tags=self._tags(conn,row["id"]), prompts=prompts, prompt_snippet=(prompts[0].text[:220] if prompts else None), first_image=(images[0] if images else None), rating=row["rating"], favorite=bool(row["favorite"]), archived=bool(row["archived"]), updated_at=row["updated_at"], created_at=row["created_at"])
+        return ItemSummary(id=row["id"], title=row["title"], slug=row["slug"], model=row["model"], source_name=row["source_name"], source_url=row["source_url"], cluster=self._cluster_from_row(row), tags=self._tags(conn,row["id"]), prompts=prompts, prompt_snippet=(prompts[0].text[:220] if prompts else None), first_image=(images[0] if images else None), rating=row["rating"], favorite=bool(row["favorite"]), archived=bool(row["archived"]), deleted_at=row["deleted_at"], updated_at=row["updated_at"], created_at=row["created_at"])
 
-    def get_item(self, item_id: str) -> ItemDetail:
+    def get_item(self, item_id: str, *, include_trashed: bool = False) -> ItemDetail:
         with connect(self.library_path) as conn:
             row = conn.execute("""SELECT i.*, c.id cluster_id, c.name cluster_name, c.names cluster_names, c.description cluster_description, c.sort_order cluster_sort_order FROM items i LEFT JOIN clusters c ON c.id=i.cluster_id WHERE i.id=?""", (item_id,)).fetchone()
-            if not row: raise KeyError(item_id)
+            if not row or (row["deleted_at"] is not None and not include_trashed): raise KeyError(item_id)
             summary = self._summary_from_row(conn, row)
             return ItemDetail(**summary.model_dump(), images=self._images(conn,item_id), notes=row["notes"], author=row["author"])
 
@@ -529,11 +563,12 @@ class ItemRepository:
         days = 7 if value == "7d" else 30
         return (current - timedelta(days=days)).isoformat(), None
 
-    def list_items(self, q: str | None=None, cluster: str | None=None, tag: str | None=None, favorite: bool | None=None, archived: bool | None=False, sort: str="updated_desc", limit: int=100, offset: int=0) -> ItemList:
+    def list_items(self, q: str | None=None, cluster: str | None=None, tag: str | None=None, favorite: bool | None=None, archived: bool | None=False, sort: str="updated_desc", limit: int=100, offset: int=0, trashed: bool=False) -> ItemList:
         parsed_query = parse_item_search_query(q or "")
         if parsed_query.archived is not None:
             archived = parsed_query.archived
-        where=[]; params=[]
+        where=["i.deleted_at IS NOT NULL" if trashed else "i.deleted_at IS NULL"]; params=[]
+        if trashed: archived = None
         if archived is not None: where.append("i.archived=?"); params.append(int(archived))
         if cluster: where.append("(i.cluster_id=? OR c.name=?)"); params += [cluster, cluster]
         if tag: where.append("EXISTS (SELECT 1 FROM item_tags it JOIN tags t ON t.id=it.tag_id WHERE it.item_id=i.id AND (t.id=? OR t.name=?))"); params += [tag, tag]
@@ -589,12 +624,12 @@ class ItemRepository:
         with connect(self.library_path) as conn:
             self.delete_empty_clusters(conn)
             conn.commit()
-            rows = conn.execute("""SELECT c.*, COUNT(i.id) count FROM clusters c LEFT JOIN items i ON i.cluster_id=c.id AND i.archived=0 GROUP BY c.id HAVING count > 0 ORDER BY c.sort_order, c.name""").fetchall()
+            rows = conn.execute("""SELECT c.*, COUNT(i.id) count FROM clusters c LEFT JOIN items i ON i.cluster_id=c.id AND i.archived=0 AND i.deleted_at IS NULL GROUP BY c.id HAVING count > 0 ORDER BY c.sort_order, c.name""").fetchall()
             out=[]
             for r in rows:
                 preview_rows = conn.execute("""SELECT i.id AS item_id, COALESCE(img.thumb_path,img.preview_path,img.original_path) AS preview_path
                     FROM images img JOIN items i ON i.id=img.item_id
-                    WHERE i.cluster_id=? AND i.archived=0
+                    WHERE i.cluster_id=? AND i.archived=0 AND i.deleted_at IS NULL
                       AND NOT EXISTS (
                         SELECT 1 FROM images better
                         WHERE better.item_id=img.item_id AND (
@@ -619,7 +654,7 @@ class ItemRepository:
 
     def list_tags(self) -> list[TagRecord]:
         with connect(self.library_path) as conn:
-            rows = conn.execute("""SELECT t.id,t.name,t.kind,COUNT(i.id) count FROM tags t LEFT JOIN item_tags it ON it.tag_id=t.id LEFT JOIN items i ON i.id=it.item_id AND i.archived=0 GROUP BY t.id ORDER BY t.name""").fetchall()
+            rows = conn.execute("""SELECT t.id,t.name,t.kind,COUNT(i.id) count FROM tags t LEFT JOIN item_tags it ON it.tag_id=t.id LEFT JOIN items i ON i.id=it.item_id AND i.archived=0 AND i.deleted_at IS NULL GROUP BY t.id ORDER BY t.name""").fetchall()
             return [TagRecord(**dict(r)) for r in rows]
 
     def rebuild_search(self, conn, item_id: str):

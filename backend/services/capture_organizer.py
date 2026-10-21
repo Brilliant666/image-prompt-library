@@ -190,7 +190,7 @@ class OrganizerConfig:
 
 
 def _snapshot(conn, item_id):
-    item = conn.execute("SELECT title,cluster_id,updated_at,archived FROM items WHERE id=?", (item_id,)).fetchone()
+    item = conn.execute("SELECT title,cluster_id,updated_at,archived FROM items WHERE id=? AND deleted_at IS NULL", (item_id,)).fetchone()
     if item is None:
         return None
     # Hash all mutable prompt/image metadata, not just the first original. This

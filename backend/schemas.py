@@ -115,6 +115,7 @@ class ItemSummary(BaseModel):
     rating: int = 0
     favorite: bool = False
     archived: bool = False
+    deleted_at: Optional[str] = None
     updated_at: str
     created_at: str
 

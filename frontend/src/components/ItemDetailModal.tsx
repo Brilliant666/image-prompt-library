@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from 'react';
-import { Check, Copy, Download, ExternalLink, Heart, Maximize2, Pencil, Plus, Trash2, X } from 'lucide-react';
+import { Check, Copy, Download, Ellipsis, ExternalLink, Heart, Maximize2, Pencil, Plus, Trash2, X } from 'lucide-react';
 import { api, mediaUrl } from '../api/client';
+import './TrashModal.css';
 import { focusFirstAvailable } from '../hooks/useModalFocus';
 import type { ClusterRecord, ImageRecord, ItemDetail, PromptRecord, TagRecord, UiLanguage } from '../types';
 import { mergeEditorPrompts } from '../utils/editorPrompts';
@@ -561,9 +562,7 @@ export default function ItemDetailModal({
                       {showMutations && <button className="modal-icon-button edit-button" onClick={() => onEdit(item)} aria-label={t('edit')}>
                         <Pencil size={18} />
                       </button>}
-                      {allowManagementActions && <button className="modal-icon-button detail-delete-button" onClick={handleDelete} disabled={deleteBusy} aria-label={t('deleteReference')} title={t('deleteReference')}>
-                        <Trash2 size={18} />
-                      </button>}
+                      {allowManagementActions && <details className="detail-more-actions"><summary className="modal-icon-button" tabIndex={0} aria-label={t('moreActions')} title={t('moreActions')}><Ellipsis size={18} /></summary><button type="button" className="detail-delete-button" onClick={handleDelete} disabled={deleteBusy}><Trash2 size={18} />{t('deleteReference')}</button></details>}
                        {showMutations && canGenerate && <button className="modal-icon-button mobile-generate-variant-button" onClick={() => onGenerate(item, selectedImage?.id)} aria-label={t('generateVariant')} title={t('generateVariant')}>
                          <Plus size={18} />
                          <span className="mobile-generate-variant-label">{t('generate')}</span>
@@ -601,9 +600,7 @@ export default function ItemDetailModal({
                     {showMutations && <button className="modal-icon-button edit-button" onClick={() => onEdit(item)} aria-label={t('edit')}>
                       <Pencil size={18} />
                     </button>}
-                    {allowManagementActions && <button className="modal-icon-button detail-delete-button" onClick={handleDelete} disabled={deleteBusy} aria-label={t('deleteReference')} title={t('deleteReference')}>
-                      <Trash2 size={18} />
-                    </button>}
+                    {allowManagementActions && <details className="detail-more-actions"><summary className="modal-icon-button" tabIndex={0} aria-label={t('moreActions')} title={t('moreActions')}><Ellipsis size={18} /></summary><button type="button" className="detail-delete-button" onClick={handleDelete} disabled={deleteBusy}><Trash2 size={18} />{t('deleteReference')}</button></details>}
                   </span>
                   <button className="modal-icon-button close" onClick={handleClose} aria-label={t('close')}>
                     <X size={20} strokeWidth={2.25} />
