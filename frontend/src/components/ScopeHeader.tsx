@@ -1,4 +1,4 @@
-import { useId } from 'react';
+import { useId, type ReactNode } from 'react';
 import { ArrowLeft, ChevronDown } from 'lucide-react';
 import type { ItemSortMode } from '../types';
 import type { Translator } from '../utils/i18n';
@@ -12,6 +12,7 @@ export default function ScopeHeader({
   onSort,
   backLabel,
   onBack,
+  extraControls,
 }: {
   t: Translator;
   title: string;
@@ -21,12 +22,13 @@ export default function ScopeHeader({
   onSort?: (sort: ItemSortMode) => void;
   backLabel?: string;
   onBack?: () => void;
+  extraControls?: ReactNode;
 }) {
   const showSort = Boolean(sort && onSort);
   const sortId = useId();
 
   return (
-    <header className={`scope-header${onBack ? ' has-back' : ''}`}>
+    <header className={`scope-header${onBack ? ' has-back' : ''}${extraControls ? ' has-extra-controls' : ''}`}>
       <div className="scope-heading">
         <h1>{title}</h1>
         <span className="scope-count">
@@ -35,7 +37,7 @@ export default function ScopeHeader({
           <span className="sr-only"> {countLabel}</span>
         </span>
       </div>
-      {(onBack || showSort) && (
+      {(onBack || showSort || extraControls) && (
         <div className={`scope-actions${onBack ? ' has-back' : ''}`}>
           {onBack && backLabel && (
             <button type="button" className="scope-back-button" onClick={onBack}>
@@ -66,6 +68,7 @@ export default function ScopeHeader({
               </span>
             </label>
           )}
+          {extraControls}
         </div>
       )}
     </header>

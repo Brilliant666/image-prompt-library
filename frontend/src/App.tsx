@@ -522,7 +522,7 @@ export default function App() {
         </section>
       </div>
     )}
-    <TopBar t={t} q={q} queryFilterChips={queryFilterChips} updateBadgeLabel={updateBadgeLabel} onQ={setQ} view={view} onView={updateView} onFilters={openFilters} onConfig={openConfig} onCapture={isDemoMode ? undefined : openNewItemEditor} filtersOpen={filtersOpen} configOpen={configOpen} hasActiveFilter={Boolean(selectedCluster)} modalOpen={blockingModalOpen} />
+    <TopBar t={t} q={q} queryFilterChips={queryFilterChips} updateBadgeLabel={updateBadgeLabel} onQ={setQ} view={view} onView={updateView} onFilters={openFilters} onConfig={openConfig} onCapture={isDemoMode ? undefined : openNewItemEditor} onTrash={isDemoMode ? undefined : () => { cancelPendingEdit(); setTrashOpen(true); }} trashLabel={trashLabels(uiLanguage).title} filtersOpen={filtersOpen} configOpen={configOpen} hasActiveFilter={Boolean(selectedCluster)} modalOpen={blockingModalOpen} />
     <div className={`content-plane${viewTransition ? ` ${viewTransition}` : ''}`} inert={blockingModalOpen} aria-hidden={blockingModalOpen || undefined}>
     {isDemoMode && (
       <div className="demo-banner" role="status">
@@ -609,7 +609,6 @@ export default function App() {
     {!isDemoMode && showFloatingActions && (view === 'explore' || view === 'cards') && (
       <div className={`app-command-dock${floatingActionsHidden ? ' is-hidden' : ''}`} aria-hidden={floatingActionsHidden} inert={floatingActionsHidden}>
         <div className="floating-action-rail">
-          {view === 'cards' && <button type="button" className="fab library-trash-trigger" onClick={() => { cancelPendingEdit(); setTrashOpen(true); }}><Trash2 size={17} />{trashLabels(uiLanguage).title}</button>}
           {view === 'cards' && localizedData.items.length > 0 && <button className="fab select-fab" onClick={() => { setSelectionMode(true); clearSelection(); }}>{t('selectReferences')}</button>}
           <button className="fab add-fab" onClick={openNewItemEditor}><Plus/> {quickCaptureLabels(uiLanguage).heading}</button>
           <button className="fab generate-fab" onClick={openStandaloneGeneration}>{t('generate')}</button>

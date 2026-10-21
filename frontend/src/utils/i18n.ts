@@ -1,6 +1,7 @@
 import type { UiLanguage } from '../types';
 export type { UiLanguage } from '../types';
 type TranslationKey =
+  | 'libraryCardLayout' | 'libraryVerticalLayout' | 'libraryHorizontalLayout'
   | 'editorPasteDestination' | 'editorResultImage' | 'editorReferenceImage'
   | 'editorPasteSelected' | 'editorPasteTarget'
   | 'editorImageDropHelp' | 'editorOneImage' | 'editorEmptyImage' | 'editorImageType' | 'editorImageTooLarge' | 'editorImageFileOnly'
@@ -74,6 +75,7 @@ export function normalizeUiLanguage(value?: string | null): UiLanguage {
 
 const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
   zh_hant: {
+    libraryCardLayout: '排列', libraryVerticalLayout: '縱向', libraryHorizontalLayout: '橫向',
     editorPasteDestination: '貼上到', editorResultImage: '完成圖片', editorReferenceImage: '參考圖片',
     editorPasteSelected: '已選取：Ctrl+V 貼上圖片',
     editorPasteTarget: '選為圖片貼上位置',
@@ -211,6 +213,7 @@ const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
 
   },
   zh_hans: {
+    libraryCardLayout: '排列', libraryVerticalLayout: '纵向', libraryHorizontalLayout: '横向',
     editorPasteDestination: '粘贴到', editorResultImage: '完成图片', editorReferenceImage: '参考图片',
     editorPasteSelected: '已选中：Ctrl+V 粘贴图片',
     editorPasteTarget: '选为图片粘贴位置',
@@ -349,6 +352,7 @@ const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
 
   },
   en: {
+    libraryCardLayout: 'Arrangement', libraryVerticalLayout: 'Vertical', libraryHorizontalLayout: 'Horizontal',
     editorPasteDestination: 'Paste into', editorResultImage: 'Result image', editorReferenceImage: 'Reference image',
     editorPasteSelected: 'Selected: Ctrl+V to paste an image',
     editorPasteTarget: 'Select as image paste target',

@@ -1,0 +1,13 @@
+.scope-header.has-extra-controls .scope-actions{display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:8px}
+.scope-header.has-extra-controls .library-layout-control{flex:0 0 auto}
+/* Horizontal reading order changes column placement only; ItemCard stays unchanged. */
+section.cards-grid.responsive-cards-grid.library-horizontal{display:flex;align-items:flex-start}
+.library-horizontal .library-arrangement-column{display:flex;flex-direction:column;flex:1 1 0;min-width:0;gap:22px}
+.library-horizontal.is-sparse .library-arrangement-column{gap:24px}
+.cards-grid.responsive-cards-grid.library-horizontal .library-arrangement-column > .item-card{display:block;margin:0}
+@media(max-width:760px){
+  .scope-header.has-extra-controls{flex-wrap:wrap;gap:12px}
+  .scope-header.has-extra-controls .scope-actions{margin-left:auto;max-width:100%}
+  .library-horizontal .library-arrangement-column{gap:17px}
+  .library-horizontal.is-sparse .library-arrangement-column{gap:18px}
+}
