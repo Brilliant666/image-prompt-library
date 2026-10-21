@@ -238,7 +238,9 @@ export default function ItemEditorModal({
       const prompts = mergeEditorPrompts(item?.prompts || [], {
         en: englishPrompt, zh_hant: zhHantPrompt, zh_hans: zhHansPrompt,
       }, extraPromptTexts, originalLanguage);
-      const unchangedPrompts = item && JSON.stringify(prompts) === JSON.stringify(item.prompts.map(({ language, text, is_original, is_primary, provenance }) => ({ language, text, is_original, is_primary, provenance })));
+      // Metadata can already be saved when a later image operation fails.
+      // Compare with that acknowledgement, not the snapshot that opened the editor.
+      const unchangedPrompts = currentItem && JSON.stringify(prompts) === JSON.stringify(currentItem.prompts.map(({ language, text, is_original, is_primary, provenance }) => ({ language, text, is_original, is_primary, provenance })));
       const payload = {
         title: title.trim(),
         model: model.trim() || undefined,
@@ -256,6 +258,7 @@ export default function ItemEditorModal({
         source_url: sourceUrl.trim() || null,
         notes: notes.trim() || null,
       }) : await api.createItem({ ...payload, prompts });
+      setPersistedItem(saved);
       if (currentItem && !needsImageReconcile && imageDraftChanged) {
         saved = await api.updateImages(saved.id, imageDrafts.map(image => ({ id: image.id, role: image.role || 'result_image' })));
       }

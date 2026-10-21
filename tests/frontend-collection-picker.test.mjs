@@ -79,9 +79,9 @@ function harness(overrides = {}) {
   const open = () => { trigger().props.onClick(); flush(); };
   const query = text => { search().props.onChange({ target: { value: text } }); flush(); };
   const choose = text => { const option = options().find(node => content(node) === text); assert.ok(option, `Missing option ${text}`); option.props.onClick(); flush(); };
-  const key = name => {
+  const key = (name, nativeEvent = {}) => {
     const result = { prevented: false, stopped: false };
-    tree.props.onKeyDown({ key: name, preventDefault() { result.prevented = true; }, stopPropagation() { result.stopped = true; } });
+    tree.props.onKeyDown({ key: name, nativeEvent, preventDefault() { result.prevented = true; }, stopPropagation() { result.stopped = true; } });
     flush(); return result;
   };
   render(); flush();
@@ -162,6 +162,53 @@ test('arrow keys move option focus, and disabling an open picker closes it and r
   assert.equal(h.trigger().props['aria-expanded'], false);
   assert.equal(h.listeners.size, 0);
   assert.deepEqual(h.changes, []);
+  h.unmount();
+});
+
+for (const [signal, nativeEvent] of [
+  ['isComposing', { isComposing: true }],
+  ['legacy keyCode 229', { isComposing: false, keyCode: 229 }],
+]) {
+  test(`IME ${signal} leaves candidate navigation and confirmation to the input without bubbling to the editor`, () => {
+    const h = harness(); h.open(); h.query('环境');
+    const search = h.document.activeElement;
+    for (const key of ['ArrowDown', 'ArrowUp', 'Enter', 'Escape']) {
+      assert.deepEqual(h.key(key, nativeEvent), { prevented: false, stopped: true }, key);
+      assert.equal(h.document.activeElement, search, `${key} must not move input focus`);
+      assert.equal(h.trigger().props['aria-expanded'], true, `${key} must not dismiss the picker`);
+      assert.equal(h.search().props.value, '环境');
+      assert.deepEqual(h.changes, []);
+    }
+    // The guard must not suppress ordinary navigation after IME confirmation.
+    assert.deepEqual(h.key('ArrowDown'), { prevented: true, stopped: true });
+    assert.equal(content(h.document.activeElement.node), '未分类');
+    h.unmount();
+  });
+}
+
+test('composition lifecycle preserves search focus when the key event lacks an IME flag and releases it after composition ends', () => {
+  const h = harness(); h.open();
+  h.search().props.onCompositionStart(); h.query('环境');
+  const search = h.document.activeElement;
+  for (const key of ['ArrowDown', 'ArrowUp', 'Enter', 'Escape']) {
+    assert.deepEqual(h.key(key), { prevented: false, stopped: true });
+    assert.equal(h.document.activeElement, search);
+    assert.equal(h.trigger().props['aria-expanded'], true);
+  }
+  h.search().props.onCompositionEnd();
+  assert.deepEqual(h.key('ArrowDown'), { prevented: true, stopped: true });
+  assert.equal(content(h.document.activeElement.node), '未分类');
+  assert.deepEqual(h.key('Escape'), { prevented: true, stopped: true });
+  assert.equal(h.trigger().props['aria-expanded'], false);
+  assert.deepEqual(h.changes, []);
+  h.unmount();
+});
+
+test('closing during composition does not leave keyboard navigation locked when the picker reopens', () => {
+  const h = harness(); h.open();
+  h.search().props.onCompositionStart(); h.outside(); h.open();
+  assert.deepEqual(h.key('ArrowDown'), { prevented: true, stopped: true });
+  assert.equal(content(h.document.activeElement.node), '未分类');
   h.unmount();
 });
 

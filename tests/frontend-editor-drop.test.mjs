@@ -547,10 +547,10 @@ test('new-item partial upload failure moves the partial record to trash, preserv
 
 function uploadRetryFixture({ initial = item, failReadback = false, rollbackFails = false } = {}) {
   let record = structuredClone(initial), failReference = true, failReads = failReadback;
-  const writes = [], uploads = [], removed = [];
+  const writes = [], uploads = [], removed = [], payloads = [];
   const h = harness({ item: rollbackFails ? undefined : initial, api: {
     createItem: async payload => { record = { ...structuredClone(item), ...payload, images: [], id: 'new-partial' }; return structuredClone(record); },
-    updateItem: async (id, payload) => { writes.push(['metadata', id]); record = { ...record, ...JSON.parse(JSON.stringify(payload)) }; return structuredClone(record); },
+    updateItem: async (id, payload) => { writes.push(['metadata', id]); payloads.push(JSON.parse(JSON.stringify(payload))); record = { ...record, ...payloads.at(-1) }; return structuredClone(record); },
     updateImages: async (id, images) => {
       writes.push(['images', structuredClone(images)]);
       removed.push(...record.images.filter(old => !images.some(image => image.id === old.id)).map(image => image.id));
@@ -575,8 +575,47 @@ function uploadRetryFixture({ initial = item, failReadback = false, rollbackFail
     h.zone('result').onDrop(dragEvent([image('successful-result.png')]));
     h.zone('reference').onDrop(dragEvent([image('pending-reference.png')])); await h.flush();
   };
-  return { h, stage, writes, uploads, removed, allowReadback: () => { failReads = false; }, get record() { return record; } };
+  return { h, stage, writes, uploads, removed, payloads, allowReadback: () => { failReads = false; }, get record() { return record; } };
 }
+
+for (const language of ['en', 'zh_hans', 'ja']) {
+  for (const failReadback of [false, true]) {
+    test(`partial upload retry persists reverted ${language} prompt against the latest save (readback fails: ${failReadback})`, async () => {
+      const initial = structuredClone(item);
+      initial.prompts[0].language = language;
+      const expectedPrompts = initial.prompts.map(({ id, item_id, ...prompt }) => prompt);
+      const f = uploadRetryFixture({ initial, failReadback }), { h } = f;
+      const prompt = () => h.find('textarea', props => language === 'ja'
+        ? props['aria-label'] === 'Prompt (ja)'
+        : props.placeholder === (language === 'en' ? 'englishPromptPlaceholder' : 'simplifiedPromptPlaceholder'));
+      const intermediate = '  B changed prompt\r\n\t保留原文  ';
+      prompt().onChange({ target: { value: intermediate } });
+      await f.stage(); await h.save(); await h.flush();
+      assert.equal(f.record.prompts[0].text, intermediate);
+      assert.equal(h.timers.length, 0, 'partial save must keep the editor open');
+      prompt().onChange({ target: { value: originalPrompt } }); await h.flush();
+      f.allowReadback();
+      await h.save(); await h.flush();
+      assert.deepEqual(f.payloads[1].prompts, expectedPrompts, 'retry must send the reverted text and its original metadata');
+      assert.deepEqual(f.record.prompts, expectedPrompts);
+      assert.deepEqual(f.record.images.map(image => image.id), ['original-image', 'successful-result.png', 'pending-reference.png']);
+      assert.deepEqual(f.removed, []);
+      assert.deepEqual(f.uploads.map(([, name]) => name), ['successful-result.png', 'pending-reference.png', 'pending-reference.png']);
+      for (const timer of h.timers) timer();
+      assert.equal(h.events.closed, 1);
+    });
+  }
+}
+
+test('partial upload retry omits prompts when they still match the latest acknowledged save', async () => {
+  const f = uploadRetryFixture(), { h } = f;
+  h.find('textarea', props => props.placeholder === 'englishPromptPlaceholder').onChange({ target: { value: 'B already saved' } });
+  await f.stage(); await h.save(); await h.flush();
+  await h.save(); await h.flush();
+  assert.equal(f.record.prompts[0].text, 'B already saved');
+  assert.equal('prompts' in f.payloads[1], false, 'an image-only retry must not rewrite already saved prompts');
+  assert.deepEqual(f.removed, []);
+});
 
 test('retrying a partial upload retains the acknowledged result image and uploads only the failed reference', async () => {
   const f = uploadRetryFixture(), { h } = f;
@@ -634,6 +673,36 @@ test('new-item rollback and readback failure still permit a safe refresh before 
 
 const imageRows = h => descendants(h.tree).filter(node => node.type === 'article' && node.props.className?.includes('item-image-manager-row'));
 const rowButton = (row, label) => descendants(row).find(node => node.type === 'button' && node.props['aria-label'] === label).props;
+
+test('metadata acknowledgement advances the prompt baseline even when saving image order fails', async () => {
+  const initial = { ...structuredClone(item), images: [item.images[0], { ...item.images[0], id: 'second-result' }] };
+  let record = structuredClone(initial), failOrder = true;
+  const payloads = [];
+  const h = harness({ item: initial, api: {
+    updateItem: async (_id, payload) => {
+      payloads.push(JSON.parse(JSON.stringify(payload)));
+      record = { ...record, ...payloads.at(-1) };
+      return structuredClone(record);
+    },
+    updateImages: async (_id, images) => {
+      if (failOrder) { failOrder = false; throw Error('synthetic image-order failure'); }
+      record.images = images.map(image => ({ ...record.images.find(old => old.id === image.id), ...image }));
+      return structuredClone(record);
+    },
+  } });
+  const prompt = () => h.find('textarea', props => props.placeholder === 'englishPromptPlaceholder');
+  prompt().onChange({ target: { value: 'B already saved' } });
+  rowButton(imageRows(h)[1], 'setPrimaryImage').onClick(); await h.flush();
+  await h.save(); await h.flush();
+  assert.equal(record.prompts[0].text, 'B already saved');
+  assert.equal(h.timers.length, 0);
+  prompt().onChange({ target: { value: originalPrompt } }); await h.flush();
+  await h.save(); await h.flush();
+  assert.equal(payloads[1].prompts?.[0].text, originalPrompt);
+  assert.equal(record.prompts[0].text, originalPrompt);
+  assert.deepEqual(record.images.map(image => image.id), ['second-result', 'original-image']);
+  assert.deepEqual(h.events.uploads, []);
+});
 
 test('partial upload reconciliation retains intentional image removal, cover and order before retry', async () => {
   const initial = { ...item, images: [item.images[0], { ...item.images[0], id: 'second-result' }, { ...item.images[0], id: 'old-reference', role: 'reference_image' }] };

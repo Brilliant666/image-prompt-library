@@ -18,6 +18,7 @@ export default function CollectionPicker({ value, collections, onChange, disable
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const search = useRef<HTMLInputElement>(null);
+  const composing = useRef(false);
   const panelId = useId();
   const labelId = useId();
   // Keep an existing selection available even if the current list omits it.
@@ -30,7 +31,7 @@ export default function CollectionPicker({ value, collections, onChange, disable
   const selectedName = options.find(collection => collection.id === value.id)?.name || value.name;
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) { composing.current = false; return; }
     search.current?.focus({ preventScroll: true });
     const outside = (event: PointerEvent) => {
       if (!root.current?.contains(event.target as Node)) setOpen(false);
@@ -48,6 +49,12 @@ export default function CollectionPicker({ value, collections, onChange, disable
   };
   const keyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (!open) return;
+    if (composing.current || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) {
+      // Let the IME navigate/confirm candidates, but do not let Escape reach the
+      // enclosing editor's dismissal handler. Do not cancel native key behavior.
+      event.stopPropagation();
+      return;
+    }
     if (event.key === 'Escape') {
       event.preventDefault();
       event.stopPropagation();
@@ -78,6 +85,8 @@ export default function CollectionPicker({ value, collections, onChange, disable
       <label className="collection-picker-search">
         <Search size={16} aria-hidden="true" />
         <input ref={search} value={query} onChange={event => setQuery(event.target.value)}
+          onCompositionStart={() => { composing.current = true; }}
+          onCompositionEnd={() => { composing.current = false; }}
           placeholder={t('collectionSearch')} aria-label={t('collectionSearch')} />
       </label>
       <div className="collection-picker-options">
