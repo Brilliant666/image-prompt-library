@@ -41,14 +41,14 @@ def _receipt(library, internal_id, original_id):
     # Title and terminal organizer state must come from one snapshot; otherwise
     # a fast worker can report succeeded alongside the pre-enrichment title.
     with connect(library) as conn:
-        row = conn.execute("SELECT c.item_id,i.title,i.created_at,j.status,j.category,k.name collection "
+        row = conn.execute("SELECT c.item_id,i.title,i.created_at,i.deleted_at,j.status,j.category,k.name collection "
                            "FROM capture_requests c LEFT JOIN items i ON i.id=c.item_id "
                            "LEFT JOIN clusters k ON k.id=i.cluster_id "
                            "LEFT JOIN capture_organizer_jobs j ON j.request_id=c.request_id WHERE c.request_id=?",
                            (str(internal_id),)).fetchone()
     if row is None:
         raise HTTPException(404, "No saved receipt for this request")
-    if row["item_id"] is None:
+    if row["item_id"] is None or row["deleted_at"] is not None:
         raise HTTPException(410, "The captured item was deleted; it will not be recreated")
     return {"request_id": str(original_id), "item_id": row["item_id"], "title": row["title"], "created_at": row["created_at"],
             "organizer": {"status": row["status"] or "disabled", "category": row["category"] or "", "collection": row["collection"]}}

@@ -81,7 +81,7 @@ def _existing_capture(conn, request_id: str, fingerprint: str) -> str | None:
         return None
     if row["fingerprint"] != fingerprint:
         raise CaptureError(409, "This request ID was already used with different capture content")
-    if row["item_id"] is None:
+    if row["item_id"] is None or conn.execute("SELECT 1 FROM items WHERE id=? AND deleted_at IS NULL", (row["item_id"],)).fetchone() is None:
         raise CaptureError(410, "The item saved by this request was deleted; it will not be recreated")
     return row["item_id"]
 

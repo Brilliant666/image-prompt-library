@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ClipboardEvent, type DragEvent } from 'react';
 import { ChevronLeft, ChevronRight, ImagePlus, Star, Trash2, X } from 'lucide-react';
 import { api, mediaUrl } from '../api/client';
 import { useModalFocus } from '../hooks/useModalFocus';
@@ -7,6 +7,7 @@ import { imageThumbnailPath } from '../utils/images';
 import type { Translator } from '../utils/i18n';
 import SuggestedTitleField from './SuggestedTitleField';
 import { mergeEditorPrompts } from '../utils/editorPrompts';
+import { CAPTURE_IMAGE_ACCEPT, captureImageError } from '../utils/quickCapture';
 
 function promptText(item: ItemDetail | undefined, language: string) {
   return item?.prompts.find(prompt => prompt.language === language)?.text || '';
@@ -21,6 +22,17 @@ function initialOriginalLanguage(item: ItemDetail | undefined) {
   const original = item?.prompts.find(prompt => prompt.is_original);
   if (original?.language) return original.language;
   return 'en';
+}
+
+function useImagePreview(file?: File) {
+  const [preview, setPreview] = useState<{ file: File; url: string }>();
+  useEffect(() => {
+    if (!file) { setPreview(undefined); return; }
+    const url = URL.createObjectURL(file);
+    setPreview({ file, url });
+    return () => URL.revokeObjectURL(url);
+  }, [file]);
+  return preview?.file === file ? preview?.url : undefined;
 }
 
 export default function ItemEditorModal({
@@ -60,6 +72,10 @@ export default function ItemEditorModal({
   const [originalLanguage, setOriginalLanguage] = useState(initialOriginalLanguage(item));
   const [resultFile, setResultFile] = useState<File>();
   const [referenceFile, setReferenceFile] = useState<File>();
+  const resultPreview = useImagePreview(resultFile);
+  const referencePreview = useImagePreview(referenceFile);
+  const [draggingImageRole, setDraggingImageRole] = useState<UploadImageRole>();
+  const [pasteImageRole, setPasteImageRole] = useState<UploadImageRole>('result_image');
   const [imageDrafts, setImageDrafts] = useState<ImageRecord[]>(item?.images || []);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -87,6 +103,47 @@ export default function ItemEditorModal({
   ).trim() || englishPrompt.trim() || zhHantPrompt.trim() || zhHansPrompt.trim();
   const missingRequiredImage = !hasExistingResultImage && !resultFile;
   const [saveError, setSaveError] = useState('');
+  const imageInputBusy = saving || deleting || isClosing;
+  const acceptImageFiles = (files: File[], role: UploadImageRole) => {
+    if (imageInputBusy || !files.length) return;
+    const problem = captureImageError(files);
+    if (problem) {
+      const messages = { oneImage: 'editorOneImage', emptyImage: 'editorEmptyImage', imageType: 'editorImageType', imageTooLarge: 'editorImageTooLarge' } as const;
+      setSaveError(t(messages[problem]));
+      return;
+    }
+    setSaveError('');
+    if (role === 'result_image') setResultFile(files[0]);
+    else setReferenceFile(files[0]);
+  };
+  const pasteImage = (event: ClipboardEvent<HTMLDivElement>) => {
+    const files = Array.from(event.clipboardData.items)
+      .filter(item => item.kind === 'file')
+      .map(item => item.getAsFile())
+      .filter((file): file is File => Boolean(file));
+    if (!files.length) return; // Ordinary text keeps its native paste behavior.
+    event.preventDefault();
+    event.stopPropagation();
+    acceptImageFiles(files, pasteImageRole);
+  };
+  const imageDragOver = (event: DragEvent<HTMLLabelElement>, role: UploadImageRole) => {
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = imageInputBusy ? 'none' : 'copy';
+    if (!imageInputBusy) setDraggingImageRole(role);
+  };
+  const imageDragLeave = (event: DragEvent<HTMLLabelElement>) => {
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDraggingImageRole(undefined);
+  };
+  const dropImage = (event: DragEvent<HTMLLabelElement>, role: UploadImageRole) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setDraggingImageRole(undefined);
+    if (imageInputBusy) return;
+    const files = Array.from(event.dataTransfer.files);
+    if (files.length) acceptImageFiles(files, role);
+    else setSaveError(t('editorImageFileOnly'));
+  };
   const filteredClusters = useMemo(() => {
     const query = cluster.trim().toLowerCase();
     if (!query) return clusters.slice(0, 8);
@@ -252,6 +309,7 @@ export default function ItemEditorModal({
         className="editor modal polished-modal"
         onClick={event => event.stopPropagation()}
         onKeyDown={handleModalKeyDown}
+        onPaste={pasteImage}
         tabIndex={-1}
         role="dialog"
         aria-modal="true"
@@ -360,24 +418,40 @@ export default function ItemEditorModal({
               </div>
             </section>
           )}
-          <label className={`drop-zone result-drop-zone ${missingRequiredImage ? 'required' : ''}`}>
-            <ImagePlus size={24} />
+          <div className="editor-paste-switch" role="group" aria-label={t('editorPasteDestination')}>
+            <span>{t('editorPasteDestination')}</span>
+            <button type="button" data-paste-role="result" aria-pressed={pasteImageRole === 'result_image'} disabled={imageInputBusy} onClick={() => setPasteImageRole('result_image')}>{t('editorResultImage')}</button>
+            <button type="button" data-paste-role="reference" aria-pressed={pasteImageRole === 'reference_image'} disabled={imageInputBusy} onClick={() => setPasteImageRole('reference_image')}>{t('editorReferenceImage')}</button>
+            <small>Ctrl+V</small>
+          </div>
+          <div className="editor-image-upload">
+          <label className={`drop-zone result-drop-zone ${missingRequiredImage ? 'required' : ''}${draggingImageRole === 'result_image' && !imageInputBusy ? ' is-dragging' : ''}`}
+            onFocus={() => { if (!imageInputBusy) setPasteImageRole('result_image'); }}
+            onDragOver={event => imageDragOver(event, 'result_image')} onDragLeave={imageDragLeave} onDrop={event => dropImage(event, 'result_image')} aria-disabled={imageInputBusy}>
+            {resultPreview ? <img className="editor-upload-preview" src={resultPreview} alt={resultFile?.name} /> : <ImagePlus size={24} />}
             <strong>{resultFile ? resultFile.name : hasExistingResultImage ? t('resultImageAlreadySaved') : t('resultImageRequired')}</strong>
             <span>{t('resultImageHelp')}</span>
-            <input type="file" accept="image/*" required={!hasExistingResultImage} onChange={e => setResultFile(e.target.files?.[0])} />
+            <span>{t('editorImageDropHelp')}</span>
+            <input type="file" accept={CAPTURE_IMAGE_ACCEPT} required={missingRequiredImage} disabled={imageInputBusy} onChange={event => { acceptImageFiles(Array.from(event.target.files || []), 'result_image'); event.target.value = ''; }} />
           </label>
-          <label className="drop-zone reference-drop-zone">
-            <ImagePlus size={24} />
+          </div>
+          <div className="editor-image-upload">
+          <label className={`drop-zone reference-drop-zone${draggingImageRole === 'reference_image' && !imageInputBusy ? ' is-dragging' : ''}`}
+            onFocus={() => { if (!imageInputBusy) setPasteImageRole('reference_image'); }}
+            onDragOver={event => imageDragOver(event, 'reference_image')} onDragLeave={imageDragLeave} onDrop={event => dropImage(event, 'reference_image')} aria-disabled={imageInputBusy}>
+            {referencePreview ? <img className="editor-upload-preview" src={referencePreview} alt={referenceFile?.name} /> : <ImagePlus size={24} />}
             <strong>{referenceFile ? referenceFile.name : t('referencePhotoOptional')}</strong>
             <span>{t('referencePhotoHelp')}</span>
-            <input type="file" accept="image/*" onChange={e => setReferenceFile(e.target.files?.[0])} />
+            <span>{t('editorImageDropHelp')}</span>
+            <input type="file" accept={CAPTURE_IMAGE_ACCEPT} disabled={imageInputBusy} onChange={event => { acceptImageFiles(Array.from(event.target.files || []), 'reference_image'); event.target.value = ''; }} />
           </label>
+          </div>
         </div>
 
         {saveError && <p className="form-error" role="alert">{saveError}</p>}
 
         <div className="editor-actions">
-          {allowDelete && persistedItem && <button className="danger" disabled={deleting || saving} onClick={deleteReference}><Trash2 size={16} /> {t('deleteReference')}</button>}
+          {allowDelete && persistedItem && <details className="editor-more-actions"><summary>{t('moreActions')}</summary><button className="danger" disabled={deleting || saving} onClick={deleteReference}><Trash2 size={16} /> {t('deleteReference')}</button></details>}
           <button className="secondary" disabled={deleting || saving} onClick={handleClose}>{t('cancel')}</button>
           <button className="primary" disabled={!title.trim() || !hasPrompt || missingRequiredImage || saving || deleting} onClick={save}>{saving ? t('saving') : t('saveReference')}</button>
         </div>

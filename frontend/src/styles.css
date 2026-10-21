@@ -1446,6 +1446,20 @@ body:has(.modal-backdrop),body:has(.drawer.open),body:has(.generation-queue-draw
   background:rgba(244,240,231,.68);
 }
 .drop-zone.required{border-color:#bd6a53;background:#fff5ef}
+.editor .drop-zone.is-dragging{border-color:var(--studio-accent,#315f51);background:var(--studio-canvas-deep,#f5f2eb);box-shadow:inset 0 0 0 2px var(--studio-accent,#315f51)}
+.editor .drop-zone[aria-disabled="true"],.editor .drop-zone input:disabled{cursor:not-allowed}
+.editor-image-upload{min-width:0;display:flex;flex-direction:column;gap:6px}
+.editor-image-upload .drop-zone{flex:1}
+.editor-paste-switch{grid-column:1/-1;display:flex;align-items:center;gap:6px;flex-wrap:wrap;color:var(--muted);font-size:12px}
+.editor-paste-switch button{border:0;border-radius:999px;padding:7px 12px;background:var(--surface-warm);color:inherit;font:inherit;cursor:pointer}
+.editor-paste-switch button[aria-pressed="true"]{background:var(--studio-accent,#315f51);color:white}
+.editor-paste-switch button:disabled{opacity:.5;cursor:not-allowed}
+.editor-paste-switch small{margin-left:auto}
+.editor .editor-upload-preview{width:100%;height:112px;object-fit:contain;border-radius:8px}
+.editor .drop-zone strong{max-width:100%;overflow-wrap:anywhere}
+.editor-more-actions{position:relative;margin-right:auto}
+.editor-more-actions summary{padding:10px;cursor:pointer;color:var(--muted)}
+.editor-more-actions .danger{position:absolute;bottom:100%;left:0;white-space:nowrap;box-shadow:0 5px 20px #0002;z-index:5}
 .editor-actions{
   position:relative;
   z-index:2;

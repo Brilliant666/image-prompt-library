@@ -842,6 +842,8 @@ def test_known_older_schema_is_migrated_only_in_staging(tmp_path):
         ledger = [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY rowid")]
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         image_columns = {row[1] for row in connection.execute("PRAGMA table_info(images)")}
+        item_columns = {row[1] for row in connection.execute("PRAGMA table_info(items)")}
+    assert "deleted_at" in item_columns
     assert ledger == db.MIGRATIONS
     assert {"generation_sets", "provider_queue_states"}.issubset(tables)
     assert {"generation_provider", "generation_model"}.issubset(image_columns)

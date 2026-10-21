@@ -343,7 +343,8 @@ def test_capture_retry_after_deletion_does_not_recreate_item(capture_client):
     item = capture(client, data=fields).json()
     assert client.delete("/api/items/" + item["id"]).status_code == 200
     assert capture(client, data=fields).status_code == 410
-    assert counts(library)["items"] == 0
+    assert counts(library)["items"] == 1  # Recovery retains the trashed record.
+    assert client.get("/api/items", params={"trashed": True}).json()["total"] == 1
     assert counts(library)["capture_requests"] == 1
 
 

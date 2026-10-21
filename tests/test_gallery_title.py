@@ -107,7 +107,7 @@ def test_default_off_and_manual_title_never_call_model(setup, monkeypatch, paylo
     assert client.get(f"/api/items/{item['id']}").json()["title"] == item["title"]
 
 
-@pytest.mark.parametrize("change", ["disable", "model", "key", "title", "prompt", "delete"])
+@pytest.mark.parametrize("change", ["disable", "model", "key", "title", "prompt", "delete", "permanent_delete"])
 def test_late_response_cannot_override_user_or_configuration_changes(setup, monkeypatch, change):
     library, client = setup
     _, item = accept(client, {"auto_title": True})
@@ -127,8 +127,10 @@ def test_late_response_cannot_override_user_or_configuration_changes(setup, monk
                 "disable": {"enabled": False}, "model": {"model": "different-model"},
                 "key": {"api_key": "replacement-synthetic-key"},
             }[change])
-        elif change == "delete":
+        elif change in {"delete", "permanent_delete"}:
             assert client.delete(f"/api/items/{item['id']}").status_code == 200
+            if change == "permanent_delete":
+                assert client.delete(f"/api/items/{item['id']}/permanent", params={"confirmed": True}).status_code == 200
         else:
             patch = {"title": "My latest title"} if change == "title" else {
                 "prompts": [{"text": "My new prompt", "is_original": True}]}
@@ -136,10 +138,13 @@ def test_late_response_cannot_override_user_or_configuration_changes(setup, monk
         release.set()
         pending.result(timeout=10)
     fetched = client.get(f"/api/items/{item['id']}")
-    if change == "delete":
+    if change == "permanent_delete":
         assert fetched.status_code == 404
         assert client.get(f"/api/items/{item['id']}/gallery-title-status").status_code == 404
     else:
+        if change == "delete":
+            assert fetched.json()["deleted_at"]
+            assert fetched.json()["title"] == item["title"]
         assert fetched.json()["title"] != "Late name"
         assert status(library, item)["status"] == "skipped"
 
@@ -257,3 +262,17 @@ def test_mock_http_request_reuses_saved_vision_config_and_requests_title_only(se
     assert len(requests) == 1 and status(library, item)["status"] == "succeeded"
     final = client.get(f"/api/items/{item['id']}").json()
     assert final["title"] == "Mocked HTTP title" and final["cluster"] is None
+
+
+def test_recycle_bin_skips_pending_title_and_restore_does_not_restart(setup, monkeypatch):
+    library, client = setup
+    job, item = accept(client, {"auto_title": True}, reference=True)
+    assert status(library, item)["status"] == "pending"
+    monkeypatch.setattr(service, "request_metadata", lambda *args: pytest.fail("Trashed items must not call the title model"))
+    assert client.delete(f"/api/items/{item['id']}").status_code == 200
+    service.run_gallery_title(library, item["id"])
+    assert status(library, item) == {"status": "skipped", "category": "content_changed"}
+    assert client.post(f"/api/items/{item['id']}/restore").json() == item
+    service.run_gallery_title(library, item["id"])
+    assert status(library, item) == {"status": "skipped", "category": "content_changed"}
+    assert client.get(f"/api/generation-jobs/{job['id']}").json()["status"] == "accepted"

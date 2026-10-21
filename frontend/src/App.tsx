@@ -8,6 +8,7 @@ import ExploreView from './components/ExploreView';
 import CardsView from './components/CardsView';
 import ItemDetailModal from './components/ItemDetailModal';
 import ItemEditorModal from './components/ItemEditorModal';
+import TrashModal, { trashLabels } from './components/TrashModal';
 import QuickCaptureModal from './components/QuickCaptureModal';
 import GalleryWorkspace from './components/gallery/GalleryWorkspace';
 import AgentWorkspace from './components/agent/AgentWorkspace';
@@ -123,6 +124,7 @@ export default function App() {
   });
   const [editing, setEditing] = useState<ItemDetail | undefined>();
   const [editorOpen, setEditorOpen] = useState(false);
+  const [trashOpen, setTrashOpen] = useState(false);
   const [quickCaptureOpen, setQuickCaptureOpen] = useState(false);
   const [itemsReloadKey, setItemsReloadKey] = useState(0);
   const [uiLanguage, setUiLanguage] = useState<UiLanguage>(loadUiLanguage);
@@ -495,9 +497,9 @@ export default function App() {
   };
   const showManagementActions = !isDemoMode && view === 'cards';
   const drawerModalOpen = filtersOpen || configOpen;
-  const blockingModalOpen = !hasChosenUiLanguage || Boolean(detailId || editorOpen || quickCaptureOpen || batchActionDialog || galleryQueueOpen);
+  const blockingModalOpen = !hasChosenUiLanguage || Boolean(detailId || editorOpen || quickCaptureOpen || batchActionDialog || galleryQueueOpen || trashOpen);
   const showFloatingActions = Boolean(hasChosenUiLanguage && !selectionMode && !filtersOpen && !configOpen && !detailId);
-  const floatingActionsHidden = editorOpen || quickCaptureOpen;
+  const floatingActionsHidden = editorOpen || quickCaptureOpen || trashOpen;
   const updateBadgeLabel = restartRequiredVersion
     ? t('restartRequired')
     : (updateStatus?.update_available && updateStatus.update_capability !== 'source' ? t('updateAvailable') : undefined);
@@ -520,7 +522,7 @@ export default function App() {
         </section>
       </div>
     )}
-    <TopBar t={t} q={q} queryFilterChips={queryFilterChips} updateBadgeLabel={updateBadgeLabel} onQ={setQ} view={view} onView={updateView} onFilters={openFilters} onConfig={openConfig} onCapture={isDemoMode ? undefined : openNewItemEditor} filtersOpen={filtersOpen} configOpen={configOpen} hasActiveFilter={Boolean(selectedCluster)} modalOpen={blockingModalOpen} />
+    <TopBar t={t} q={q} queryFilterChips={queryFilterChips} updateBadgeLabel={updateBadgeLabel} onQ={setQ} view={view} onView={updateView} onFilters={openFilters} onConfig={openConfig} onCapture={isDemoMode ? undefined : openNewItemEditor} onTrash={isDemoMode ? undefined : () => { cancelPendingEdit(); setTrashOpen(true); }} trashLabel={trashLabels(uiLanguage).title} filtersOpen={filtersOpen} configOpen={configOpen} hasActiveFilter={Boolean(selectedCluster)} modalOpen={blockingModalOpen} />
     <div className={`content-plane${viewTransition ? ` ${viewTransition}` : ''}`} inert={blockingModalOpen} aria-hidden={blockingModalOpen || undefined}>
     {isDemoMode && (
       <div className="demo-banner" role="status">
@@ -613,6 +615,7 @@ export default function App() {
         </div>
       </div>
     )}
+    {trashOpen && !isDemoMode && <TrashModal uiLanguage={uiLanguage} onClose={() => setTrashOpen(false)} onChanged={savedLibraryAssets} />}
     {detailId && <ItemDetailModal key={detailId} t={t} id={detailId} titleRefreshKey={titleUpdates[detailId] || 0} uiLanguage={uiLanguage} preferredLanguage={preferredLanguage} clusters={localizedClusters} tags={tags} onClose={closeItemDetail} onCopyPrompt={showCopyToast} onChanged={saved} onDelete={isDemoMode ? undefined : deleteDetail} onOpenItem={setDetailId} onGenerate={openGenerationFromDetail} onEdit={(item) => { closeItemDetail(); setEditing(item); setEditorOpen(true); }} showMutations={!isDemoMode} showManagementActions={showManagementActions} canGenerate={!isDemoMode} />}
     {toast && <div className={`toast copy-toast elegant-toast ${toast.tone}${toastClosing ? ' is-closing' : ''}`} role="status"><span className="toast-icon">{toast.tone === 'success' ? <Check size={16} /> : <XCircle size={16} />}</span><span className="toast-title">{toast.title}</span></div>}
     {!isDemoMode && <QuickCaptureModal open={quickCaptureOpen} uiLanguage={uiLanguage} onClose={() => setQuickCaptureOpen(false)} onSaved={saved} onFullEditor={item => { setQuickCaptureOpen(false); setEditing(item); setEditorOpen(true); }} />}

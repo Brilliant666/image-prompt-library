@@ -320,7 +320,8 @@ def test_batch_delete_uses_server_side_delete_and_reports_missing_items(tmp_path
     assert result["failed"] == 1
     assert "missing" in result["errors"]
     assert c.get("/api/items").json()["total"] == 0
-    assert all(not path.exists() for path in stored_paths)
+    assert all(path.exists() for path in stored_paths)
+    assert c.get("/api/items", params={"trashed": True}).json()["total"] == 1
 
 
 def test_patch_favorite_and_delete_item(tmp_path):
@@ -344,11 +345,14 @@ def test_patch_favorite_and_delete_item(tmp_path):
 
     deleted = c.delete(f"/api/items/{created['id']}").json()
     assert deleted["id"] == created["id"]
+    assert deleted["deleted_at"]
+    assert all(path.exists() for path in stored_paths)
+    assert c.delete(f"/api/items/{created['id']}/permanent", params={"confirmed": True}).status_code == 200
     assert c.get(f"/api/items/{created['id']}").status_code == 404
     assert c.get("/api/items").json()["total"] == 0
     assert c.get("/api/items", params={"archived": True}).json()["total"] == 0
     assert c.get("/api/clusters").json() == []
-    assert all(not path.exists() for path in stored_paths)
+    assert all(path.exists() for path in stored_paths)
     with connect(library) as conn:
         assert conn.execute("SELECT COUNT(*) FROM items WHERE id=?", (created["id"],)).fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM images WHERE item_id=?", (created["id"],)).fetchone()[0] == 0

@@ -1,4 +1,4 @@
-import { Filter, Search, Settings, Plus } from 'lucide-react';
+import { Filter, Search, Settings, Plus, Trash2 } from 'lucide-react';
 import headerLogo from '../assets/header-logo.png';
 import type { ViewMode } from '../types';
 import type { Translator } from '../utils/i18n';
@@ -15,6 +15,8 @@ interface Props {
   onFilters: () => void;
   onConfig: () => void;
   onCapture?: () => void;
+  onTrash?: () => void;
+  trashLabel?: string;
   filtersOpen?: boolean;
   configOpen?: boolean;
   hasActiveFilter?: boolean;
@@ -32,6 +34,8 @@ export default function TopBar({
   onFilters,
   onConfig,
   onCapture,
+  onTrash,
+  trashLabel,
   filtersOpen = false,
   configOpen = false,
   hasActiveFilter = false,
@@ -86,6 +90,7 @@ export default function TopBar({
             <Filter size={18} />
             <span className="filter-label">{t('filters')}</span>
           </button>
+          {view === 'cards' && onTrash && <button type="button" className="vista-button filter-button library-trash-trigger" onClick={onTrash} aria-label={trashLabel} title={trashLabel} aria-haspopup="dialog"><Trash2 size={18} /><span className="filter-label">{trashLabel}</span></button>}
         </div>
 
         {hasActiveSearch && isLibraryView && (

@@ -7,7 +7,7 @@
     "build:extension": "node scripts/check-browser-extension.mjs",
     "test:extension": "node --test tests/browser-capture*.test.mjs",
     "build:demo": "tsc && vite build --mode demo --base /image-prompt-library/",
-    "test:frontend": "node --test tests/frontend-utils.test.mjs tests/explore-view.test.mjs tests/frontend-recipe-inputs.test.mjs tests/frontend-ratio-mismatch.test.mjs tests/frontend-compatible-profiles.test.mjs tests/frontend-quick-capture.test.mjs tests/frontend-capture-organizer.test.mjs tests/frontend-agent.test.mjs tests/frontend-gallery.test.mjs tests/frontend-gallery-history.test.mjs tests/frontend-generation-queue.test.mjs tests/frontend-gallery-detail.test.mjs tests/frontend-lightbox.test.mjs tests/frontend-virtual-grid.test.mjs tests/frontend-compact-task-card.test.mjs tests/frontend-size-dialog.test.mjs tests/frontend-transport-recipe.test.mjs",
+    "test:frontend": "node --test tests/frontend-library-layout.test.mjs tests/frontend-trash.test.mjs tests/frontend-editor-drop.test.mjs tests/frontend-utils.test.mjs tests/explore-view.test.mjs tests/frontend-recipe-inputs.test.mjs tests/frontend-ratio-mismatch.test.mjs tests/frontend-compatible-profiles.test.mjs tests/frontend-quick-capture.test.mjs tests/frontend-capture-organizer.test.mjs tests/frontend-agent.test.mjs tests/frontend-gallery.test.mjs tests/frontend-gallery-history.test.mjs tests/frontend-generation-queue.test.mjs tests/frontend-gallery-detail.test.mjs tests/frontend-lightbox.test.mjs tests/frontend-virtual-grid.test.mjs tests/frontend-compact-task-card.test.mjs tests/frontend-size-dialog.test.mjs tests/frontend-transport-recipe.test.mjs",
     "preview": "vite preview --host 127.0.0.1 --port 5177"
   },
   "dependencies": {

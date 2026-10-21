@@ -163,7 +163,7 @@ test('all workspaces keep the same main navigation and move Library search into 
   for (const view of ['explore', 'cards', 'gallery', 'agent']) {
     const html = renderToStaticMarkup(React.createElement(TopBar, {
       t, view, q: 'saved query', queryFilterChips: ['tag:portrait'],
-      onQ() {}, onView() {}, onFilters() {}, onConfig() {}, onCapture() {},
+      onQ() {}, onView() {}, onFilters() {}, onConfig() {}, onCapture() {}, onTrash() {}, trashLabel: 'Trash',
     }));
     const header = html.match(/<header\b[\s\S]*?<\/header>/)?.[0];
     assert.ok(header);
@@ -180,6 +180,10 @@ test('all workspaces keep the same main navigation and move Library search into 
     assert.match(tools, /class="library-tools"/);
     assert.match(tools, /value="saved query"/);
     assert.match(tools, /aria-controls="filters-drawer"/);
+    if (view === 'cards') {
+      assert.match(tools, /filter-label[^]*?<\/button><button[^]*?library-trash-trigger/);
+      assert.match(tools, /aria-label="Trash"/);
+    } else assert.doesNotMatch(tools, /library-trash-trigger/);
     if (view === 'gallery' || view === 'agent') {
       assert.match(tools, /^<div class="library-tools" hidden="" aria-hidden="true">/);
       assert.doesNotMatch(tools, /tag:portrait/);
@@ -948,7 +952,7 @@ test('Explore wiring preserves Library management, semantic appearance, and rest
   assert.match(topBar, /className=\{`vista-button filter-button[\s\S]*?aria-label=\{t\('filters'\)\}/);
   assert.match(topBar, /className="logo-wordmark" lang="en"/);
   assert.match(topBar, /inert=\{modalOpen\} aria-hidden=\{modalOpen \|\| undefined\}/);
-  assert.match(app, /const blockingModalOpen = !hasChosenUiLanguage \|\| Boolean\(detailId \|\| editorOpen \|\| quickCaptureOpen \|\| batchActionDialog \|\| galleryQueueOpen\)/);
+  assert.match(app, /const blockingModalOpen = !hasChosenUiLanguage \|\| Boolean\(detailId \|\| editorOpen \|\| quickCaptureOpen \|\| batchActionDialog \|\| galleryQueueOpen \|\| trashOpen\)/);
   assert.match(app, /allowDelete=\{showManagementActions\}/);
   assert.match(editorModal, /allowDelete && persistedItem/);
   assert.match(editorModal, /if \(!allowDelete \|\| !persistedItem \|\| deleting \|\| saving\) return;/);
@@ -1088,7 +1092,7 @@ test('Explore detail boundary keeps local mutation actions while gating manageme
   assert.match(detail, /showMutations && canGenerate/);
   assert.match(detail, /showMutations && <button className="modal-icon-button edit-button"/);
   assert.match(detail, /allowManagementActions && <button className="modal-icon-button favorite-button"/);
-  assert.match(detail, /allowManagementActions && <button className="modal-icon-button detail-delete-button"/);
+  assert.match(detail, /allowManagementActions && <details className="detail-more-actions">[\s\S]*?className="detail-delete-button" onClick=\{handleDelete\}/);
   assert.match(detail, /allowManagementActions && editingPromptLanguage === lang/);
   assert.match(detail, /allowManagementActions && \(addingTag \?/);
   assert.match(detail, /selectedImage \|\| showMutations/);

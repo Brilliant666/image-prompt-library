@@ -203,8 +203,11 @@ def import_sample_bundle(manifest_path: Path | str, assets_dir: Path | str, libr
         collection = collections.get(_clean_text(item.get("collection_id")) or "")
         existing_item_id = _item_id_by_slug(library_path, slug)
         if existing_item_id:
-            created = repo.get_item(existing_item_id)
-            if created is None:
+            created = repo.get_item(existing_item_id, include_trashed=True)
+            if created.deleted_at is not None:
+                # Reinstalling samples must respect the user's removal and keep
+                # the recoverable original unchanged while processing the rest.
+                log.append(f"Skipped trashed sample {slug}")
                 continue
             with connect(library_path) as conn:
                 conn.execute(

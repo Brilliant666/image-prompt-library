@@ -59,6 +59,10 @@ image-prompt-library sample-data zh_hant awesome-gpt-image-2
 
 *Explore is for browsing collections; Library is for managing individual cards.*
 
+In the full Library editor, dropped, selected or pasted images show a preview before saving. Use the compact **Paste into** control to choose the result or reference image; ordinary text paste still works in text fields.
+
+Deleting a Library card now moves it to **Trash**, preserving its images, prompts and order. Open Trash from Library to restore it. **Delete permanently** requires a separate confirmation and removes the record and its image associations; it cannot be restored from Trash. Image files remain on disk, so this action does not immediately reclaim disk space or risk removing files reused by another save. Records deleted before Trash was introduced are not recovered automatically.
+
 ![Reference detail with an image, prompt variants, tags, and source](docs/assets/screenshots/local-app-detail.jpg)
 
 *A card keeps its images, prompt variants, and source together. New generated images also retain their provider and model details.*

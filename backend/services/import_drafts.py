@@ -175,7 +175,7 @@ class ImportDraftRepository:
         with connect(self.library_path) as conn:
             if payload.source_url:
                 row = conn.execute(
-                    "SELECT id FROM items WHERE source_url=? AND archived=0 ORDER BY created_at LIMIT 1",
+                    "SELECT id FROM items WHERE source_url=? AND archived=0 AND deleted_at IS NULL ORDER BY created_at LIMIT 1",
                     (payload.source_url,),
                 ).fetchone()
                 if row:
@@ -187,7 +187,7 @@ class ImportDraftRepository:
                     SELECT i.id, p.text
                     FROM items i
                     JOIN prompts p ON p.item_id=i.id
-                    WHERE i.archived=0
+                    WHERE i.archived=0 AND i.deleted_at IS NULL
                     ORDER BY i.created_at
                     """
                 ).fetchall()

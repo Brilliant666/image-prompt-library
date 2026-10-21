@@ -1,7 +1,17 @@
+import { useLayoutEffect, useRef, useState } from 'react';
+import { ChevronDown } from 'lucide-react';
 import type { ItemSortMode, ItemSummary } from '../types';
 import type { Translator } from '../utils/i18n';
 import ItemCard from './ItemCard';
 import ScopeHeader from './ScopeHeader';
+import './LibraryCardLayout.css';
+
+type CardLayout = 'vertical' | 'horizontal';
+const CARD_LAYOUT_KEY = 'image-prompt-library.library_card_layout.v1';
+function loadCardLayout(): CardLayout {
+  try { return window.localStorage.getItem(CARD_LAYOUT_KEY) === 'horizontal' ? 'horizontal' : 'vertical'; }
+  catch { return 'vertical'; }
+}
 
 export default function CardsView({
   items,
@@ -44,6 +54,44 @@ export default function CardsView({
   hasActiveSearch?: boolean;
   onClearCluster: () => void;
 }) {
+  const [layout, setLayout] = useState<CardLayout>(loadCardLayout);
+  const [columnCount, setColumnCount] = useState(1);
+  const gridRef = useRef<HTMLElement | null>(null);
+  const sparseCount = clusterName && items.length <= 8 ? items.length : 0;
+  const hasItems = items.length > 0;
+  useLayoutEffect(() => {
+    const grid = gridRef.current;
+    if (layout !== 'horizontal' || !grid) return;
+    const measureColumns = () => {
+      const width = grid.getBoundingClientRect().width;
+      // Match the existing vertical CSS columns and sparse-collection breakpoints.
+      const count = window.innerWidth <= 400 ? 1
+        : window.innerWidth <= 760 ? (sparseCount === 1 ? 1 : 2)
+          : sparseCount ? Math.min(sparseCount, 3)
+            : Math.max(1, Math.floor((width + 18) / (205 + 18)));
+      setColumnCount(current => current === count ? current : count);
+    };
+    measureColumns();
+    const observer = new ResizeObserver(measureColumns);
+    observer.observe(grid);
+    window.addEventListener('resize', measureColumns);
+    return () => { observer.disconnect(); window.removeEventListener('resize', measureColumns); };
+  }, [layout, sparseCount, hasItems]);
+  const changeLayout = (value: string) => {
+    const next = value === 'horizontal' ? 'horizontal' : 'vertical';
+    setLayout(next);
+    try { window.localStorage.setItem(CARD_LAYOUT_KEY, next); } catch { /* Keep the in-session choice if storage is unavailable. */ }
+  };
+  const layoutControl = <label className="scope-sort-control library-layout-control">
+    <span className="scope-sort-prefix">{t('libraryCardLayout')}</span>
+    <span className="scope-sort-picker">
+      <select className="scope-sort-select" aria-label={t('libraryCardLayout')} value={layout} onChange={event => changeLayout(event.currentTarget.value)}>
+        <option value="vertical">{t('libraryVerticalLayout')}</option>
+        <option value="horizontal">{t('libraryHorizontalLayout')}</option>
+      </select>
+      <ChevronDown size={14} aria-hidden="true" />
+    </span>
+  </label>;
   const showActions = Boolean(onFavorite && onEdit) && !onToggleSelection;
   if (!items.length && loading) {
     return (
@@ -55,6 +103,7 @@ export default function CardsView({
           countLabel={t('referencesShown')}
           sort={sort}
           onSort={onSort}
+          extraControls={layoutControl}
         />
         <div className="content-loading-state" role="status" aria-label={t('loading')}>
           <span /><span /><span />
@@ -72,6 +121,7 @@ export default function CardsView({
           countLabel={t('referencesShown')}
           sort={sort}
           onSort={onSort}
+          extraControls={layoutControl}
         />
         <div className="empty first-run-empty">
           <p className="empty-eyebrow">{t('firstRunLocalInstall')}</p>
@@ -101,6 +151,7 @@ export default function CardsView({
           countLabel={t('referencesShown')}
           sort={sort}
           onSort={onSort}
+          extraControls={layoutControl}
           backLabel={clusterName ? t(hasActiveSearch ? 'searchResults' : 'allReferences') : undefined}
           onBack={clusterName ? onClearCluster : undefined}
         />
@@ -128,11 +179,16 @@ export default function CardsView({
         countLabel={t('referencesShown')}
         sort={sort}
         onSort={onSort}
+        extraControls={layoutControl}
         backLabel={clusterName ? t(hasActiveSearch ? 'searchResults' : 'allReferences') : undefined}
         onBack={clusterName ? onClearCluster : undefined}
       />
-      <section className={`cards-grid masonry-like responsive-cards-grid${onToggleSelection ? ' is-selecting' : ''}${clusterName && items.length <= 8 ? ` is-sparse sparse-count-${items.length}` : ''}`}>
-        {items.map(renderCard)}
+      <section ref={gridRef} className={`cards-grid masonry-like responsive-cards-grid${layout === 'horizontal' ? ' library-horizontal' : ''}${onToggleSelection ? ' is-selecting' : ''}${sparseCount ? ` is-sparse sparse-count-${sparseCount}` : ''}`}>
+        {layout === 'horizontal'
+          ? Array.from({ length: columnCount }, (_, column) => <div className="library-arrangement-column" key={column}>
+            {items.filter((_, index) => index % columnCount === column).map(renderCard)}
+          </div>)
+          : items.map(renderCard)}
       </section>
     </>
   );
