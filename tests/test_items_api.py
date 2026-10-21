@@ -703,6 +703,70 @@ def test_editing_last_item_out_of_collection_removes_empty_collection(tmp_path):
         assert conn.execute("SELECT name FROM clusters").fetchall()[0]["name"] == "New Collection"
 
 
+@pytest.mark.parametrize("collection_edit", ["omitted", "same_id", "other_id", "clear", "new_name"])
+def test_item_collection_edit_contract_preserves_original_assets(tmp_path, collection_edit):
+    c = client(tmp_path)
+    library = tmp_path / "library"
+    original_prompt = "  Synthetic portrait prompt\r\nKeep original whitespace.\n\t "
+    created = c.post("/api/items", json=create_payload(
+        cluster_name="Source collection",
+        prompts=[{"language": "en", "text": original_prompt, "is_primary": True, "is_original": True}],
+    )).json()
+    source_id = created["cluster"]["id"]
+    c.post("/api/items", json=create_payload(title="Keep source collection", cluster_id=source_id))
+    target = c.post("/api/items", json=create_payload(title="Target member", cluster_name="Target collection")).json()
+    target_id = target["cluster"]["id"]
+    with connect(library) as conn:
+        conn.execute("UPDATE clusters SET names=? WHERE id=?", ('{"zh_hans":"人物"}', source_id))
+        conn.execute("UPDATE clusters SET names=? WHERE id=?", ('{"zh_hans":"环境人像"}', target_id))
+        conn.commit()
+
+    original_files = []
+    for role, color in [("result_image", (120, 40, 220)), ("reference_image", (1, 2, 3))]:
+        content = png_bytes(color=color)
+        uploaded = c.post(
+            f"/api/items/{created['id']}/images",
+            data={"role": role},
+            files={"file": (f"{role}.png", content, "image/png")},
+        )
+        assert uploaded.status_code == 200
+        original_files.append((library / uploaded.json()["original_path"], content))
+    before = c.get(f"/api/items/{created['id']}").json()
+    assert next(prompt for prompt in before["prompts"] if prompt["is_original"])["text"] == original_prompt
+
+    collection_payloads = {
+        "omitted": {},
+        "same_id": {"cluster_id": source_id},
+        "other_id": {"cluster_id": target_id},
+        "clear": {"cluster_id": None},
+        "new_name": {"cluster_name": "New collection"},
+    }
+    response = c.patch(f"/api/items/{created['id']}", json=collection_payloads[collection_edit])
+    assert response.status_code == 200
+    after = response.json()
+    persisted = c.get(f"/api/items/{created['id']}").json()
+    assert persisted["cluster"] == after["cluster"]
+    if collection_edit == "clear":
+        assert after["cluster"] is None
+    elif collection_edit == "new_name":
+        assert after["cluster"]["name"] == "New collection"
+        assert after["cluster"]["id"] not in {source_id, target_id}
+    else:
+        expected_id = target_id if collection_edit == "other_id" else source_id
+        assert after["cluster"]["id"] == expected_id
+        assert after["cluster"]["names"]["zh_hans"] == ("环境人像" if collection_edit == "other_id" else "人物")
+
+    expected_collections = {"Source collection", "Target collection"}
+    if collection_edit == "new_name":
+        expected_collections.add("New collection")
+    assert {cluster["name"] for cluster in c.get("/api/clusters").json()} == expected_collections
+    for field in ("title", "model", "author", "notes", "source_name", "source_url", "prompts", "tags", "images"):
+        assert after[field] == before[field]
+        assert persisted[field] == before[field]
+    for path, content in original_files:
+        assert path.read_bytes() == content
+
+
 def test_listing_clusters_removes_existing_empty_collections(tmp_path):
     c = client(tmp_path)
     library = tmp_path / "library"

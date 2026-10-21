@@ -67,6 +67,7 @@ function harness(overrides = {}) {
     '../hooks/useModalFocus': { useModalFocus: () => ({ containerRef: {}, handleModalKeyDown() {} }) },
     '../utils/images': { imageThumbnailPath: image => image.thumb_path },
     './SuggestedTitleField': { __esModule: true, default: 'SuggestedTitleField' },
+    './CollectionPicker': { __esModule: true, default: 'CollectionPicker' },
     '../utils/editorPrompts': editorPrompts,
     '../utils/quickCapture': capture,
   }, { matchMedia: () => ({ matches: true }), setTimeout: callback => timers.push(callback) }, {
@@ -75,7 +76,7 @@ function harness(overrides = {}) {
   });
   function render() {
     cursor = 0; dirty = false;
-    tree = Editor({ item: 'item' in overrides ? overrides.item : item, t: overrides.t || (key => key), clusters: [], tags: [], defaultAiProvider: 'openai_compatible', onClose: () => events.closed++, onSaved: () => events.changed++, onDeleted: () => events.deleted++ });
+    tree = Editor({ item: 'item' in overrides ? overrides.item : item, t: overrides.t || (key => key), clusters: overrides.clusters || [], tags: [], defaultAiProvider: 'openai_compatible', onClose: () => events.closed++, onSaved: () => events.changed++, onDeleted: () => events.deleted++ });
     while (pendingEffects.length) pendingEffects.shift()();
   }
   async function flush() { for (let i = 0; i < 20; i++) { if (dirty) render(); await Promise.resolve(); } if (dirty) render(); }
@@ -109,6 +110,53 @@ function clipboardEvent(files = [], data = {}) {
   return event;
 }
 function deferred() { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; }
+
+test('editor preserves an existing collection by ID without submitting its localized display name', async () => {
+  const collection = { id: 'portrait-collection', name: 'Portraits', names: { en: 'Portraits', zh_hans: '环境人像' }, count: 1, preview_images: [] };
+  const h = harness({ item: { ...item, cluster: collection }, clusters: [{ ...collection, name: '环境人像' }] });
+  assert.deepEqual(h.find('CollectionPicker').value, { id: collection.id, name: 'Portraits' });
+  await h.save(); await h.flush();
+  const payload = JSON.parse(JSON.stringify(h.events.writes[0][2]));
+  assert.equal(payload.cluster_id, collection.id);
+  assert.equal('cluster_name' in payload, false);
+  assert.equal('prompts' in payload, false);
+  assert.deepEqual(h.events.uploads, []);
+  assert.equal(h.find('textarea', props => props.value === originalPrompt).value, originalPrompt);
+});
+
+for (const [label, selection, expected] of [
+  ['a different existing collection', { id: 'existing-2', name: '本地化名称' }, { cluster_id: 'existing-2' }],
+  ['unassigned', { id: null, name: '' }, { cluster_id: null }],
+  ['an explicitly created collection', { id: null, name: '  New synthetic collection  ' }, { cluster_name: 'New synthetic collection' }],
+]) {
+  test(`editor applies ${label} only on save and keeps prompts and pending attachments intact`, async () => {
+    const h = harness({ item: { ...item, cluster: { id: 'old-collection', name: 'Old collection' } } });
+    const file = image('retained-attachment.png');
+    h.zone('result').onDrop(dragEvent([file])); await h.flush();
+    h.find('CollectionPicker').onChange(selection); await h.flush();
+    assert.deepEqual(h.events.writes, []);
+    assert.deepEqual(h.events.uploads, []);
+    assert.equal(h.filename('result'), file.name);
+    assert.equal(h.find('textarea', props => props.value === originalPrompt).value, originalPrompt);
+    await h.save(); await h.flush();
+    const payload = JSON.parse(JSON.stringify(h.events.writes[0][2]));
+    const actual = Object.fromEntries(Object.entries(payload).filter(([key]) => key === 'cluster_id' || key === 'cluster_name'));
+    assert.deepEqual(actual, expected);
+    assert.equal('prompts' in payload, false);
+    assert.deepEqual(h.events.uploads, [[item.id, file, 'result_image']]);
+    assert.equal(h.events.writes.some(([kind]) => kind === 'images'), false);
+  });
+}
+
+test('closing the editor after a collection choice does not create or move a collection', async () => {
+  const h = harness();
+  h.find('CollectionPicker').onChange({ id: null, name: 'Unsaved collection' }); await h.flush();
+  h.find('button', props => props['aria-label'] === 'close').onClick(); await h.flush();
+  assert.deepEqual(h.events.writes, []);
+  assert.deepEqual(h.events.uploads, []);
+  for (const timer of h.timers) timer();
+  assert.equal(h.events.closed, 1);
+});
 
 test('editor drops retain both original Files and upload to the same item with the correct roles only on save', async () => {
   const h = harness(), result = image('second.png'), reference = image('source.png');

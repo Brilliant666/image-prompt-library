@@ -6,6 +6,7 @@ import type { ClusterRecord, ImageRecord, ItemDetail, TagRecord, AiProvider, Upl
 import { imageThumbnailPath } from '../utils/images';
 import type { Translator } from '../utils/i18n';
 import SuggestedTitleField from './SuggestedTitleField';
+import CollectionPicker, { type CollectionSelection } from './CollectionPicker';
 import { mergeEditorPrompts } from '../utils/editorPrompts';
 import { CAPTURE_IMAGE_ACCEPT, captureImageError } from '../utils/quickCapture';
 
@@ -62,7 +63,7 @@ export default function ItemEditorModal({
   const [author, setAuthor] = useState(item ? item.author || '' : 'User');
   const [sourceUrl, setSourceUrl] = useState(item?.source_url || '');
   const [notes, setNotes] = useState(item?.notes || '');
-  const [cluster, setCluster] = useState(item?.cluster?.name || '');
+  const [collection, setCollection] = useState<CollectionSelection>({ id: item?.cluster?.id || null, name: item?.cluster?.name || '' });
   const [tags, setTags] = useState(item?.tags.map(t => t.name).join(', ') || '');
   const [zhHantPrompt, setZhHantPrompt] = useState(initialTraditionalPrompt(item));
   const [zhHansPrompt, setZhHansPrompt] = useState(promptText(item, 'zh_hans'));
@@ -144,11 +145,6 @@ export default function ItemEditorModal({
     if (files.length) acceptImageFiles(files, role);
     else setSaveError(t('editorImageFileOnly'));
   };
-  const filteredClusters = useMemo(() => {
-    const query = cluster.trim().toLowerCase();
-    if (!query) return clusters.slice(0, 8);
-    return clusters.filter(c => c.name.toLowerCase().includes(query)).slice(0, 8);
-  }, [cluster, clusters]);
   const filteredTags = useMemo(() => {
     const selected = new Set(tags.split(',').map(t => t.trim()).filter(Boolean));
     const query = tags.split(',').pop()?.trim().toLowerCase() || '';
@@ -230,7 +226,7 @@ export default function ItemEditorModal({
         author: author.trim() || null,
         source_url: sourceUrl.trim() || undefined,
         notes: notes.trim() || undefined,
-        cluster_name: cluster.trim() || undefined,
+        ...(collection.id ? { cluster_id: collection.id } : collection.name.trim() ? { cluster_name: collection.name.trim() } : { cluster_id: null }),
         tags: tags.split(',').map(t => t.trim()).filter(Boolean),
         ...(unchangedPrompts ? {} : { prompts }),
       };
@@ -326,13 +322,7 @@ export default function ItemEditorModal({
 
         <div className="editor-grid">
           <SuggestedTitleField className="field field-title" value={title} promptText={titleSuggestionPrompt} provider={defaultAiProvider} t={t} onChange={setTitle} autoFocus />
-          <label className="field">
-            <span>{t('collection')}</span>
-            <input list="collection-suggestions" placeholder={t('collectionPlaceholder')} value={cluster} onChange={e => setCluster(e.target.value)} />
-            <datalist id="collection-suggestions">
-              {filteredClusters.map(collection => <option key={collection.id} value={collection.name} />)}
-            </datalist>
-          </label>
+          <CollectionPicker value={collection} collections={clusters} onChange={setCollection} disabled={imageInputBusy} t={t} />
           <label className="field">
             <span>{t('imageGeneratedFrom')}</span>
             <input placeholder={t('notReported')} value={model} onChange={e => setModel(e.target.value)} />
