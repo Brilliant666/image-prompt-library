@@ -1,4 +1,4 @@
-import { useMemo, useState, type DragEvent } from 'react';
+import { useMemo, useState, type ClipboardEvent, type DragEvent } from 'react';
 import { ChevronLeft, ChevronRight, ImagePlus, Star, Trash2, X } from 'lucide-react';
 import { api, mediaUrl } from '../api/client';
 import { useModalFocus } from '../hooks/useModalFocus';
@@ -62,6 +62,7 @@ export default function ItemEditorModal({
   const [resultFile, setResultFile] = useState<File>();
   const [referenceFile, setReferenceFile] = useState<File>();
   const [draggingImageRole, setDraggingImageRole] = useState<UploadImageRole>();
+  const [pasteImageRole, setPasteImageRole] = useState<UploadImageRole>('result_image');
   const [imageDrafts, setImageDrafts] = useState<ImageRecord[]>(item?.images || []);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -101,6 +102,16 @@ export default function ItemEditorModal({
     setSaveError('');
     if (role === 'result_image') setResultFile(files[0]);
     else setReferenceFile(files[0]);
+  };
+  const pasteImage = (event: ClipboardEvent<HTMLDivElement>) => {
+    const files = Array.from(event.clipboardData.items)
+      .filter(item => item.kind === 'file')
+      .map(item => item.getAsFile())
+      .filter((file): file is File => Boolean(file));
+    if (!files.length) return; // Ordinary text keeps its native paste behavior.
+    event.preventDefault();
+    event.stopPropagation();
+    acceptImageFiles(files, pasteImageRole);
   };
   const imageDragOver = (event: DragEvent<HTMLLabelElement>, role: UploadImageRole) => {
     event.preventDefault();
@@ -285,6 +296,7 @@ export default function ItemEditorModal({
         className="editor modal polished-modal"
         onClick={event => event.stopPropagation()}
         onKeyDown={handleModalKeyDown}
+        onPaste={pasteImage}
         tabIndex={-1}
         role="dialog"
         aria-modal="true"
@@ -393,7 +405,9 @@ export default function ItemEditorModal({
               </div>
             </section>
           )}
+          <div className="editor-image-upload">
           <label className={`drop-zone result-drop-zone ${missingRequiredImage ? 'required' : ''}${draggingImageRole === 'result_image' && !imageInputBusy ? ' is-dragging' : ''}`}
+            onFocus={() => { if (!imageInputBusy) setPasteImageRole('result_image'); }}
             onDragOver={event => imageDragOver(event, 'result_image')} onDragLeave={imageDragLeave} onDrop={event => dropImage(event, 'result_image')} aria-disabled={imageInputBusy}>
             <ImagePlus size={24} />
             <strong>{resultFile ? resultFile.name : hasExistingResultImage ? t('resultImageAlreadySaved') : t('resultImageRequired')}</strong>
@@ -401,7 +415,11 @@ export default function ItemEditorModal({
             <span>{t('editorImageDropHelp')}</span>
             <input type="file" accept={CAPTURE_IMAGE_ACCEPT} required={missingRequiredImage} disabled={imageInputBusy} onChange={event => { acceptImageFiles(Array.from(event.target.files || []), 'result_image'); event.target.value = ''; }} />
           </label>
+          <button type="button" className="editor-paste-target" aria-pressed={pasteImageRole === 'result_image'} disabled={imageInputBusy} onClick={() => setPasteImageRole('result_image')}>{t(pasteImageRole === 'result_image' ? 'editorPasteSelected' : 'editorPasteTarget')}</button>
+          </div>
+          <div className="editor-image-upload">
           <label className={`drop-zone reference-drop-zone${draggingImageRole === 'reference_image' && !imageInputBusy ? ' is-dragging' : ''}`}
+            onFocus={() => { if (!imageInputBusy) setPasteImageRole('reference_image'); }}
             onDragOver={event => imageDragOver(event, 'reference_image')} onDragLeave={imageDragLeave} onDrop={event => dropImage(event, 'reference_image')} aria-disabled={imageInputBusy}>
             <ImagePlus size={24} />
             <strong>{referenceFile ? referenceFile.name : t('referencePhotoOptional')}</strong>
@@ -409,6 +427,8 @@ export default function ItemEditorModal({
             <span>{t('editorImageDropHelp')}</span>
             <input type="file" accept={CAPTURE_IMAGE_ACCEPT} disabled={imageInputBusy} onChange={event => { acceptImageFiles(Array.from(event.target.files || []), 'reference_image'); event.target.value = ''; }} />
           </label>
+          <button type="button" className="editor-paste-target" aria-pressed={pasteImageRole === 'reference_image'} disabled={imageInputBusy} onClick={() => setPasteImageRole('reference_image')}>{t(pasteImageRole === 'reference_image' ? 'editorPasteSelected' : 'editorPasteTarget')}</button>
+          </div>
         </div>
 
         {saveError && <p className="form-error" role="alert">{saveError}</p>}

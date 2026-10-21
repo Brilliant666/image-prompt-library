@@ -1,6 +1,7 @@
 import type { UiLanguage } from '../types';
 export type { UiLanguage } from '../types';
 type TranslationKey =
+  | 'editorPasteSelected' | 'editorPasteTarget'
   | 'editorImageDropHelp' | 'editorOneImage' | 'editorEmptyImage' | 'editorImageType' | 'editorImageTooLarge' | 'editorImageFileOnly'
   | 'recipeInputsMissing' | 'recipeTextOnly' | 'recipeRestoreLoading'
   | 'generationXhigh' | 'generationMax'
@@ -72,6 +73,8 @@ export function normalizeUiLanguage(value?: string | null): UiLanguage {
 
 const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
   zh_hant: {
+    editorPasteSelected: '已選取：Ctrl+V 貼上圖片',
+    editorPasteTarget: '選為圖片貼上位置',
     editorImageDropHelp: '拖入一張圖片，或點擊選擇；每張最多 30 MB。',
     editorOneImage: '每個區域一次只能放入一張圖片；請逐張新增並儲存。',
     editorEmptyImage: '這個檔案為空，請選擇其他圖片。',
@@ -206,6 +209,8 @@ const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
 
   },
   zh_hans: {
+    editorPasteSelected: '已选中：Ctrl+V 粘贴图片',
+    editorPasteTarget: '选为图片粘贴位置',
     editorImageDropHelp: '拖入一张图片，或点击选择；每张最多 30 MB。',
     editorOneImage: '每个区域一次只能放入一张图片；请逐张添加并保存。',
     editorEmptyImage: '这个文件为空，请选择其他图片。',
@@ -341,6 +346,8 @@ const TRANSLATIONS: Record<UiLanguage, Record<TranslationKey, string>> = {
 
   },
   en: {
+    editorPasteSelected: 'Selected: Ctrl+V to paste an image',
+    editorPasteTarget: 'Select as image paste target',
     editorImageDropHelp: 'Drop one image here or click to choose; up to 30 MB per image.',
     editorOneImage: 'Add one image per area at a time; save before adding another.',
     editorEmptyImage: 'This file is empty. Please choose another image.',

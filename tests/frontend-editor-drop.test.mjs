@@ -68,9 +68,15 @@ function harness(overrides = {}) {
   const zone = role => find('label', props => props.className?.split(' ').includes(`${role}-drop-zone`));
   const input = role => descendants({ props: zone(role) }).find(node => node.type === 'input' && node.props.type === 'file')?.props;
   const filename = role => descendants({ props: zone(role) }).find(node => node.type === 'strong')?.props.children;
+  const pasteTarget = role => {
+    const area = descendants(tree).find(node => node.type === 'div' && node.props.className === 'editor-image-upload'
+      && descendants(node).some(child => child.type === 'label' && child.props.className.includes(`${role}-drop-zone`)));
+    return descendants(area).find(node => node.type === 'button' && node.props.className === 'editor-paste-target')?.props;
+  };
+  const paste = event => find('div', props => props.role === 'dialog').onPaste(event);
   const save = () => find('button', props => props.children === 'saveReference').onClick();
   render();
-  return { find, zone, input, filename, save, flush, events, timers };
+  return { find, zone, input, filename, pasteTarget, paste, save, flush, events, timers };
 }
 function dragEvent(files = [], data = {}) {
   const calls = { prevented: 0, stopped: 0 };
@@ -81,6 +87,14 @@ function dragEvent(files = [], data = {}) {
   };
 }
 const image = (name = 'synthetic.png') => new File([Uint8Array.of(137, 80, 78, 71, 13, 10, 26, 10)], name, { type: 'image/png' });
+function clipboardEvent(files = [], data = {}) {
+  const event = dragEvent(files, data);
+  event.clipboardData = {
+    ...event.dataTransfer,
+    items: [...event.dataTransfer.items, ...Object.keys(data).map(type => ({ kind: 'string', type, getAsFile: () => null }))],
+  };
+  return event;
+}
 function deferred() { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; }
 
 test('editor drops retain both original Files and upload to the same item with the correct roles only on save', async () => {
@@ -218,4 +232,93 @@ test('editor ignores drop and picker changes while deletion is pending', async (
   assert.deepEqual(h.events.uploads, []);
   pending.resolve(); await deleting; await h.flush();
   assert.equal(h.events.deleted, 1);
+});
+
+test('editor pastes to result by default, switches targets, and saves both original files with the unchanged prompt', async () => {
+  const h = harness(), first = image('first.png'), result = image('result.png'), reference = image('reference.png');
+  assert.equal(h.pasteTarget('result')['aria-pressed'], true);
+  const event = clipboardEvent([first]);
+  h.paste(event); await h.flush();
+  assert.ok(event.calls.prevented > 0);
+  assert.ok(event.calls.stopped > 0);
+  assert.equal(h.filename('result'), first.name);
+  h.pasteTarget('reference').onClick(); await h.flush();
+  assert.equal(h.pasteTarget('reference')['aria-pressed'], true);
+  assert.equal(h.pasteTarget('result')['aria-pressed'], false);
+  h.paste(clipboardEvent([reference])); await h.flush();
+  h.pasteTarget('result').onClick(); await h.flush();
+  h.paste(clipboardEvent([result])); await h.flush();
+  assert.equal(h.filename('result'), result.name);
+  assert.equal(h.filename('reference'), reference.name);
+  assert.equal(h.find('textarea', props => props.value === originalPrompt).value, originalPrompt);
+  assert.deepEqual(h.events.writes, []);
+  assert.deepEqual(h.events.uploads, []);
+  await h.save(); await h.flush();
+  assert.equal('prompts' in h.events.writes[0][2], false);
+  assert.deepEqual(h.events.uploads, [[item.id, result, 'result_image'], [item.id, reference, 'reference_image']]);
+});
+
+test('focusing either upload area selects its paste target without clearing the other image', async () => {
+  const h = harness(), result = image('focus-result.png'), reference = image('focus-reference.png');
+  h.zone('reference').onFocus(); await h.flush();
+  h.paste(clipboardEvent([reference])); await h.flush();
+  h.zone('result').onFocus(); await h.flush();
+  h.paste(clipboardEvent([result])); await h.flush();
+  assert.equal(h.filename('result'), result.name);
+  assert.equal(h.filename('reference'), reference.name);
+  assert.equal(h.pasteTarget('result')['aria-pressed'], true);
+});
+
+for (const data of [{ 'text/plain': '  paste ordinary text\n' }, { 'text/uri-list': 'https://example.invalid/image.png' }]) {
+  test(`editor leaves ${Object.keys(data)[0]} paste entirely native and retains pending images`, async () => {
+    const h = harness(), file = image('keep.png');
+    h.paste(clipboardEvent([file])); await h.flush();
+    const event = clipboardEvent([], data);
+    h.paste(event); await h.flush();
+    assert.equal(event.calls.prevented, 0);
+    assert.equal(event.calls.stopped, 0);
+    assert.equal(h.filename('result'), file.name);
+    assert.equal(h.find('textarea', props => props.value === originalPrompt).value, originalPrompt);
+    assert.equal(h.find('p', props => props.className === 'form-error'), undefined);
+    assert.deepEqual(h.events.writes, []);
+    assert.deepEqual(h.events.uploads, []);
+  });
+}
+
+test('editor rejects multiple clipboard images without replacing either valid pending image', async () => {
+  const h = harness(), result = image('keep-result.png'), reference = image('keep-reference.png');
+  h.paste(clipboardEvent([result])); await h.flush();
+  h.pasteTarget('reference').onClick(); await h.flush();
+  h.paste(clipboardEvent([reference])); await h.flush();
+  const event = clipboardEvent([image('one.png'), image('two.png')]);
+  h.paste(event); await h.flush();
+  assert.ok(event.calls.prevented > 0);
+  assert.equal(h.find('p', props => props.className === 'form-error').children, 'editorOneImage');
+  assert.equal(h.filename('result'), result.name);
+  assert.equal(h.filename('reference'), reference.name);
+  assert.deepEqual(h.events.uploads, []);
+  await h.save(); await h.flush();
+  assert.deepEqual(h.events.uploads, [[item.id, result, 'result_image'], [item.id, reference, 'reference_image']]);
+});
+
+test('editor rejects incoming clipboard files while saving and preserves the pending request', async () => {
+  const pending = deferred(), h = harness({ api: { updateItem: () => pending.promise } });
+  const file = image('before-save.png');
+  h.paste(clipboardEvent([file])); await h.flush();
+  const saving = h.save(); await h.flush();
+  assert.equal(h.pasteTarget('result').disabled, true);
+  assert.equal(h.pasteTarget('reference').disabled, true);
+  h.paste(clipboardEvent([image('late.png')])); await h.flush();
+  assert.equal(h.filename('result'), file.name);
+  pending.resolve(item); await saving; await h.flush();
+  assert.deepEqual(h.events.uploads, [[item.id, file, 'result_image']]);
+});
+
+test('editor ignores clipboard images after closing begins', async () => {
+  const h = harness(), file = image('keep.png');
+  h.paste(clipboardEvent([file])); await h.flush();
+  h.find('button', props => props['aria-label'] === 'close').onClick(); await h.flush();
+  h.paste(clipboardEvent([image('late.png')])); await h.flush();
+  assert.equal(h.filename('result'), file.name);
+  assert.deepEqual(h.events.uploads, []);
 });
