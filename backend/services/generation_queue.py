@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import sqlite3
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import suppress
 from pathlib import Path
 from threading import BoundedSemaphore, RLock, Timer
 
@@ -25,8 +26,57 @@ _executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_GENERATION_JOBS, threa
 _lock = RLock()
 _active: set[str] = set()
 _active_providers: dict[str, str] = {}
+_futures: dict[tuple[str, str], Future] = {}
+_direct_futures: dict[str, set[Future]] = {}
+_closing: set[str] = set()
 _pause_timers: dict[tuple[str, str], Timer] = {}
 _provider_slots = BoundedSemaphore(MAX_CONCURRENT_GENERATION_JOBS)
+
+
+def open_generation_queue(library_path: Path | str) -> None:
+    """Reopen this library only after its previous workers have settled."""
+    key = str(Path(library_path).resolve())
+    with _lock:
+        if any(path == key for path, _ in _futures) or _direct_futures.get(key):
+            raise GenerationJobConflict("Generation workers are still shutting down")
+        _closing.discard(key)
+
+
+def close_generation_queue(library_path: Path | str) -> None:
+    """Stop new calls/retries; leave unstarted jobs durable for the next startup."""
+    key = str(Path(library_path).resolve())
+    with _lock:
+        _closing.add(key)
+        for timer_key in [timer_key for timer_key in _pause_timers if timer_key[0] == key]:
+            _pause_timers.pop(timer_key).cancel()
+        for (path, _), future in list(_futures.items()):
+            if path == key:
+                future.cancel()
+
+
+def drain_generation_jobs(library_path: Path | str) -> None:
+    """Keep the library lease until every already-started writer has returned.
+
+    A running provider request cannot safely be killed or replayed. Its normal
+    timeout still applies, and shutdown waits for its local result/failure writes.
+    """
+    key = str(Path(library_path).resolve())
+    close_generation_queue(library_path)
+    with _lock:
+        futures = [future for (path, _), future in _futures.items() if path == key]
+        futures.extend(_direct_futures.get(key, ()))
+    for future in futures:
+        with suppress(Exception):
+            future.result()
+
+
+def _discard_cancelled_job(key: tuple[str, str], future: Future) -> None:
+    if future.cancelled():
+        with _lock:
+            if _futures.get(key) is future:
+                _futures.pop(key)
+                _active.discard(key[1])
+                _active_providers.pop(key[1], None)
 
 
 def recover_interrupted_generation_jobs(library_path: Path | str, *, provider: str = CODEX_PROVIDER_ID):
@@ -51,7 +101,10 @@ def enqueue_generation_jobs(library_path: Path | str, *, provider: str = CODEX_P
     provider calls at once.
     """
     library = Path(library_path)
+    key = str(library.resolve())
     with _lock:
+        if key in _closing:
+            return
         repo = GenerationJobRepository(library)
         state = repo.get_provider_queue_state(provider)
         if state.paused:
@@ -69,13 +122,25 @@ def enqueue_generation_jobs(library_path: Path | str, *, provider: str = CODEX_P
         for job in queued:
             _active.add(job.id)
             _active_providers[job.id] = provider
-            _executor.submit(_run_job_and_continue, library, job.id, provider)
+            try:
+                future = _executor.submit(_run_job_and_continue, library, job.id, provider)
+            except Exception:
+                _active.discard(job.id)
+                _active_providers.pop(job.id, None)
+                raise
+            job_key = (key, job.id)
+            _futures[job_key] = future
+            future.add_done_callback(lambda done, key=job_key: _discard_cancelled_job(key, done))
 
 
 def _run_job_and_continue(library_path: Path, job_id: str, provider: str) -> None:
+    key = str(library_path.resolve())
     try:
         _provider_slots.acquire()
         try:
+            with _lock:
+                if key in _closing:
+                    return
             _run_provider_job(library_path, job_id, provider)
         finally:
             _provider_slots.release()
@@ -87,19 +152,32 @@ def _run_job_and_continue(library_path: Path, job_id: str, provider: str) -> Non
         with _lock:
             _active.discard(job_id)
             _active_providers.pop(job_id, None)
-            _continue_automated_generation_queues(library_path, completed_provider=provider)
+            _futures.pop((key, job_id), None)
+            if key not in _closing:
+                _continue_automated_generation_queues(library_path, completed_provider=provider)
 
 
 def run_generation_job_now(library_path: Path | str, job_id: str):
     """Run a synchronous native job without exceeding the shared provider cap."""
-    if not _provider_slots.acquire(blocking=False):
-        raise GenerationJobConflict("The generation provider is at its concurrency limit; wait for a running job to finish")
+    library = Path(library_path)
+    key = str(library.resolve())
+    future = Future()
+    with _lock:
+        if key in _closing:
+            raise GenerationJobConflict("The generation queue is shutting down")
+        if not _provider_slots.acquire(blocking=False):
+            raise GenerationJobConflict("The generation provider is at its concurrency limit; wait for a running job to finish")
+        _direct_futures.setdefault(key, set()).add(future)
     try:
-        library = Path(library_path)
         job = GenerationJobRepository(library).get_job(job_id)
         return _run_provider_job(library, job_id, job.provider)
     finally:
         _provider_slots.release()
+        with _lock:
+            _direct_futures[key].discard(future)
+            if not _direct_futures[key]:
+                _direct_futures.pop(key)
+            future.set_result(None)
 
 
 def _run_provider_job(library, job_id, provider):
@@ -127,14 +205,20 @@ def _schedule_pause_wake(library_path: Path, provider: str, delay_seconds: int) 
     key = (str(library_path.resolve()), provider)
     delay = max(0.01, float(delay_seconds or 0))
     with _lock:
+        if key[0] in _closing:
+            return
         timer = _pause_timers.get(key)
         if timer is not None and timer.is_alive():
             return
 
         def wake() -> None:
             with _lock:
+                # A cancelled callback may already be waiting for the lock.
+                # It must not consume a newer timer or resume a reopened queue.
+                if _pause_timers.get(key) is not timer:
+                    return
                 _pause_timers.pop(key, None)
-            _continue_generation_queue(library_path, provider)
+                _continue_generation_queue(library_path, provider)
 
         timer = Timer(delay, wake)
         timer.daemon = True

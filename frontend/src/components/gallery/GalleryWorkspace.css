@@ -20,6 +20,8 @@
 .pg-gallery .pg-gallery-filters>label input{background:transparent;border:0;font-size:13px;outline:none}
 .pg-gallery .pg-gallery-filters>label:focus-within{outline:2px solid var(--accent);outline-offset:2px}
 .pg-gallery .pg-gallery-filters>button,.pg-gallery .pg-gallery-filters>.gallery-history-trigger{color:var(--muted);width:42px;padding:9px;flex-shrink:0}
+.pg-gallery .pg-gallery-filters>.toolbar-select-trigger.pg-status-filter{width:auto;max-width:160px;min-width:110px;justify-content:flex-start;padding:0 11px;gap:8px;color:var(--ink);font-size:13px;font-weight:400}
+.pg-gallery .pg-gallery-filters>.toolbar-select-trigger.pg-status-filter:hover,.pg-gallery .pg-gallery-filters>.toolbar-select-trigger.pg-status-filter[aria-expanded="true"]{background:var(--studio-accent-soft,var(--surface-warm))}
 .pg-selection-toolbar{visibility:hidden;pointer-events:none;gap:12px;padding:0 4px;font-size:13px}
 .pg-selection-toolbar.is-active{visibility:visible;pointer-events:auto}
 .pg-selection-count{white-space:nowrap;color:var(--muted)}.pg-selection-count b{color:var(--ink);font-variant-numeric:tabular-nums}
@@ -58,6 +60,7 @@
 .pg-copy-feedback:empty{display:none}
 @media(hover:none){.pg-task-card .pg-select-card{opacity:1}}
 @media(prefers-reduced-motion:reduce){.pg-task-card,.pg-task-card .pg-select-card,.pg-task-card footer button,.pg-task-card footer a{transition:none}}
+@media(max-width:760px){.pg-gallery .pg-gallery-filters>.toolbar-select-trigger.pg-status-filter{grid-column:1;grid-row:2;max-width:none;width:100%}}
 .pg-selection-box{position:absolute;background:color-mix(in srgb,var(--accent) 12%,transparent);border:1px solid var(--accent);pointer-events:none;z-index:4}
 .pg-empty{min-height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;text-align:center;color:var(--muted)}
 .pg-composer{position:relative;flex:0 0 auto;z-index:12;width:100%;max-width:900px;margin:0 auto;border:1px solid var(--line);border-radius:22px;padding:14px;background:var(--surface,#fff);box-shadow:0 5px 20px #0001}

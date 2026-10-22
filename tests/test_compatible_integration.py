@@ -1,6 +1,7 @@
 import json
 import base64
 from collections import deque
+from concurrent.futures import Future
 from io import BytesIO
 
 import pytest
@@ -98,6 +99,7 @@ def test_compatible_generation_set_uses_single_image_jobs_without_retry(tmp_path
     class ControlledExecutor:
         def submit(self, function, *args):
             pending.append((function, args))
+            return Future()
 
     monkeypatch.setattr(generation_queue, '_executor', ControlledExecutor())
     monkeypatch.setattr(generation_queue, '_active', set())

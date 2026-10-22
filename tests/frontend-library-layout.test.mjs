@@ -36,7 +36,7 @@ function harness(storage, overrides = {}) {
         effects.push(() => { slots[i].cleanup?.(); slots[i].cleanup = callback(); });
       }
     },
-  }, 'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'fragment' }, 'lucide-react': { ChevronDown: 'ChevronDown' }, './ItemCard': { __esModule: true, default: 'ItemCard' }, './ScopeHeader': { __esModule: true, default: 'ScopeHeader' }, './LibraryCardLayout.css': {} };
+  }, 'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'fragment' }, 'lucide-react': { ChevronDown: 'ChevronDown' }, './ItemCard': { __esModule: true, default: 'ItemCard' }, './ScopeHeader': { __esModule: true, default: 'ScopeHeader' }, './ToolbarSelect': { __esModule: true, default: 'ToolbarSelect' }, './LibraryCardLayout.css': {} };
   const window = { innerWidth: 1200, addEventListener: (_, callback) => resizeHandlers.add(callback), removeEventListener: (_, callback) => resizeHandlers.delete(callback), localStorage: storage === undefined ? undefined : { getItem: () => storage.getItem(key), setItem: (key, value) => { writes.push([key, value]); storage.setItem(key, value); } } };
   class Observer {
     constructor(callback) { this.callback = callback; this.active = false; observers.push(this); }
@@ -56,8 +56,8 @@ function harness(storage, overrides = {}) {
     } while (dirty);
   };
   const header = () => treeNodes(tree).find(node => node.type === 'ScopeHeader').props;
-  const selector = () => treeNodes(header().extraControls).find(node => node.type === 'select').props;
-  const change = value => { selector().onChange({ currentTarget: { value } }); render(); };
+  const selector = () => treeNodes(header().extraControls).find(node => node.type === 'ToolbarSelect').props;
+  const change = value => { selector().onChange(value); render(); };
   render();
   return { header, selector, change, writes, sorts, open, selected,
     cards: () => treeNodes(tree).filter(node => node.type === 'ItemCard'),
@@ -76,6 +76,15 @@ test('Library defaults to the unchanged vertical grid without writing a preferen
   assert.equal(h.selector().value, 'vertical');
   assert.equal(h.grid().className, 'cards-grid masonry-like responsive-cards-grid is-selecting');
   assert.deepEqual(h.writes, []);
+});
+
+test('sparse Collection cards request larger responsive images while ordinary search cards use the standard sizes', () => {
+  const sparse = harness(storage(), { clusterName: 'Small collection' });
+  assert(sparse.cards().every(card => card.props.imageSizes === '100vw'));
+  const regular = harness(storage(), { hasActiveSearch: true });
+  assert(regular.cards().every(card => card.props.imageSizes === undefined));
+  sparse.update({ items: Array.from({ length: 9 }, (_, index) => ({ id: String(index) })) });
+  assert(sparse.cards().every(card => card.props.imageSizes === undefined));
 });
 
 test('layout callback changes presentation only and preserves item order, selection and sorting callbacks', () => {
@@ -140,6 +149,47 @@ test('responsive arrangement redistributes every item once on container and view
   assert.deepEqual(h.cards().map(card => card.props.item.id).sort(), items.map(item => item.id).sort());
 });
 
+test('hidden Library keeps each horizontal card in its existing column until a visible resize', () => {
+  const items = Array.from({ length: 100 }, (_, i) => ({ id: `${i + 1}` }));
+  const h = harness(storage('horizontal'), { items, selectedIds: new Set(['2']) });
+  h.resize(1600, 1400);
+  const before = h.columns();
+  assert.equal(before.length, 6);
+
+  // App keeps Library mounted with `hidden`; its observed grid then measures zero.
+  h.resize(1600, 0);
+  assert.deepEqual(h.columns(), before, 'hiding must not move cards to new React parents');
+  assert.equal(h.activeObservers(), 1, 'keep observing so reopening can measure the visible grid');
+  h.resize(1600, 1400);
+  assert.deepEqual(h.columns(), before, 'reopening at the same size preserves card parents');
+
+  h.resize(600, 0);
+  assert.deepEqual(h.columns(), before, 'viewport changes while hidden must also wait for visible dimensions');
+  h.resize(600, 500);
+  assert.equal(h.columns().length, 2);
+  assert.deepEqual(h.columns(), [items.filter((_, i) => i % 2 === 0).map(item => item.id), items.filter((_, i) => i % 2 === 1).map(item => item.id)]);
+  const second = h.cards().find(card => card.props.item.id === '2');
+  assert.equal(second.props.item, items[1]);
+  assert.equal(second.props.isSelected, true);
+  second.props.onOpen('2');
+  second.props.onToggleSelection('2');
+  assert.deepEqual(h.open, ['2']);
+  assert.deepEqual(h.selected, ['2']);
+  assert.deepEqual(h.writes, []);
+  h.unmount();
+  assert.equal(h.activeObservers(), 0);
+});
+
+test('hidden sparse collections retain their columns across viewport changes and measure on reveal', () => {
+  const h = harness(storage('horizontal'), { clusterName: 'Collection', items: [{ id: 'one' }, { id: 'two' }, { id: 'three' }] });
+  const before = h.columns();
+  assert.equal(before.length, 3);
+  h.resize(400, 0);
+  assert.deepEqual(h.columns(), before);
+  h.resize(400, 350);
+  assert.deepEqual(h.columns(), [['one', 'two', 'three']]);
+});
+
 test('sparse collections retain original one, two or three desktop columns and mobile breakpoints', () => {
   for (const length of [1, 2, 3, 8]) {
     const h = harness(storage('horizontal'), { clusterName: 'Collection', items: Array.from({ length }, (_, i) => ({ id: `${i}` })) });
@@ -162,15 +212,15 @@ test('horizontal measurement attaches after empty results populate and detaches 
 });
 
 test('production ScopeHeader appends the optional layout after sorting; callers without it keep only sorting', () => {
-  const Header = evaluate(headerCode, { react: { useId: () => 'sort' }, 'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'fragment' }, 'lucide-react': { ArrowLeft: 'ArrowLeft', ChevronDown: 'ChevronDown' } });
+  const Header = evaluate(headerCode, { './ToolbarSelect': { __esModule: true, default: 'ToolbarSelect' }, 'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'fragment' }, 'lucide-react': { ArrowLeft: 'ArrowLeft', ChevronDown: 'ChevronDown' } });
   const changes = [], props = { t: key => key, title: 'Library', count: 2, countLabel: 'items', sort: 'updated_desc', onSort: value => changes.push(value) };
   const original = Header(props);
-  assert.equal(treeNodes(original).filter(node => node.type === 'select').length, 1);
+  assert.equal(treeNodes(original).filter(node => node.type === 'ToolbarSelect').length, 1);
   assert.doesNotMatch(original.props.className, /has-extra-controls/);
-  const extra = jsx('select', { 'aria-label': 'layout' });
+  const extra = jsx('ToolbarSelect', { 'aria-label': 'layout' });
   const updated = Header({ ...props, extraControls: extra });
-  const controls = treeNodes(updated).filter(node => node.type === 'select');
+  const controls = treeNodes(updated).filter(node => node.type === 'ToolbarSelect');
   assert.equal(controls[1], extra);
-  controls[0].props.onChange({ currentTarget: { value: 'created_desc' } });
+  controls[0].props.onChange('created_desc');
   assert.deepEqual(changes, ['created_desc']);
 });

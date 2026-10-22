@@ -39,7 +39,7 @@ export default function InputBar({command,preferences,t,active,onCreated,onOpenS
   const mounted=useRef(true);
   const catalogUpdates=useRef(new Map<string,ModelCatalog>());
   // Every intentional edit owns the draft from this point onward. Pending history,
-  // attachment and first-load callbacks may only write to their original epoch.
+  // attachment, submission and first-load callbacks may only write to their original epoch.
   const beginEdit=()=>{editRevision.current++;readSequence.current++;consumedCommand.current=command?.id;setReading(pendingFiles.current);};
   const editDraft=(update:GalleryDraft|((current:GalleryDraft)=>GalleryDraft))=>{beginEdit();setDraft(update);};
   useEffect(()=>{mounted.current=true;return()=>{mounted.current=false;readSequence.current++;fileReadSequence.current++;};},[]);
@@ -52,7 +52,19 @@ export default function InputBar({command,preferences,t,active,onCreated,onOpenS
   // must not invalidate an accepted recipe command or an in-flight file read.
   useEffect(()=>{let alive=true;catalogUpdates.current.clear();if(!initialized.current)setLoading(true);setRefreshing(true);Promise.all([api.generationProviders(),api.openAICompatibleProfiles()]).then(async([available,store])=>{
     if(!alive)return;setProviders(available.filter(p=>p.provider!=='manual_upload'));setProfiles(store.profiles.map(profile=>catalogUpdates.current.has(profile.id)?{...profile,model_catalog:catalogUpdates.current.get(profile.id)}:profile));
-    if(!initialized.current){let restored:GalleryDraft|undefined;if(preferences.persistInputOnRestart&&editRevision.current===0){try{restored=await readGalleryDraft();}catch{if(alive&&editRevision.current===0)setError('无法恢复本地草稿；已保存的任务不受影响');}}if(!alive)return;initialized.current=true;if(editRevision.current!==0)return;
+    if(!initialized.current){
+      let restored:GalleryDraft|undefined;
+      if(preferences.persistInputOnRestart&&editRevision.current===0){
+        try{
+          restored=await readGalleryDraft();
+          // IndexedDB keeps Library identities, never an arbitrary saved preview URL.
+          // Reuse recipe verification to resolve the local original and keep failed
+          // references as explicit slots instead of silently submitting without them.
+          if(restored&&alive&&editRevision.current===0)restored={...restored,inputs:await restoreRecipeInputs(restored.inputs,verifiedInput)};
+        }catch{if(alive&&editRevision.current===0)setError('无法恢复本地草稿；已保存的任务不受影响');}
+      }
+      if(!alive)return;initialized.current=true;if(editRevision.current!==0)return;
+      if(restored?.inputs.some(input=>input.missing))setError('部分参考图无法恢复，请重新添加或明确移除缺失图片后再生成');
       const selected=store.profiles.find(p=>p.id===lastGenerationProfile(localStorage))||store.profiles.find(p=>p.id===store.default_profile_id);
       const preferred=available.find(p=>p.provider===preferredProvider&&p.can_generate);
       const fallback=preferred?.provider||(selected?'openai_compatible':available.find(p=>p.can_generate)?.provider)||'openai_compatible';
@@ -95,7 +107,7 @@ export default function InputBar({command,preferences,t,active,onCreated,onOpenS
     window.addEventListener('ipl:generation-preference-reset',reset);
     return()=>window.removeEventListener('ipl:generation-preference-reset',reset);
   },[profiles,draft.provider,draft.profileId]);
-  useEffect(()=>{if(!active||!command||loading||consumedCommand.current===command.id)return;consumedCommand.current=command.id;fileReadSequence.current++;pendingFiles.current=false;const sequence=++readSequence.current;const current=()=>mounted.current&&sequence===readSequence.current;setReading(true);setError('');
+  useEffect(()=>{if(!active||!command||loading||consumedCommand.current===command.id)return;consumedCommand.current=command.id;editRevision.current++;fileReadSequence.current++;pendingFiles.current=false;const sequence=++readSequence.current;const current=()=>mounted.current&&sequence===readSequence.current;setReading(true);setError('');
     void (async()=>{
       let job=command.job;
       const selected=command.item?libraryRecipeImage(command.item,command.imageId):undefined;
@@ -116,12 +128,17 @@ export default function InputBar({command,preferences,t,active,onCreated,onOpenS
     setReading(true);setError('');try{const added=await Promise.all(files.map(async file=>{if(!file.type.startsWith('image/')||file.size>30*1024*1024)throw new Error('请选择 30 MB 内的图片文件');const dataUrl=await imageDataUrl(file);const image=new Image();image.src=dataUrl;await image.decode();return{id:crypto.randomUUID(),name:file.name,source:'uploaded' as const,previewUrl:dataUrl,dataUrl};}));if(current())setDraft(current=>{const remaining=[...added];return{...current,inputs:[...current.inputs.map(input=>input.missing&&remaining.length?remaining.shift()!:input),...remaining]};});}catch(e){if(current())setError(String(e));}finally{if(current()){pendingFiles.current=false;setReading(false);}}
   }
   async function submit() {
-    if(submitLock.current||busy||reading||loading||refreshing||uncertain||!ready)return;submitLock.current=true;setBusy(true);setError('');let posted=false;
+    if(submitLock.current||busy||reading||loading||refreshing||uncertain||!ready)return;submitLock.current=true;const submittedRevision=editRevision.current;setBusy(true);setError('');let posted=false;
     try{let dimensions: {width:number;height:number}|undefined;if(draft.provider==='openai_compatible'&&draft.recipe.size_mode==='auto4k'&&draft.inputs[0]){const data=await verifiedInput(draft.inputs[0]);const image=new Image();image.src=data;await image.decode();dimensions={width:image.naturalWidth,height:image.naturalHeight};}
       const payload=galleryPayload({...draft,promptLanguage:draft.promptLanguage||promptLanguage},limit,dimensions,promptVariablesEnabled);posted=true;
       const created=count===1?[await api.createGenerationJob(payload)]:(await api.createGenerationSet({job:payload,count})).jobs;
       onCreated(created);
-      if(preferences.clearInputAfterSubmit)setDraft(current=>({...current,prompt:'',inputs:[],sourceItemId:undefined}));setPanel('');
+      // A newer edit or accepted restore (even while its images are loading)
+      // owns the composer. This receipt only clears the draft it submitted.
+      if(mounted.current&&editRevision.current===submittedRevision){
+        if(preferences.clearInputAfterSubmit)setDraft(current=>editRevision.current===submittedRevision?{...current,prompt:'',inputs:[],sourceItemId:undefined}:current);
+        setPanel('');
+      }
     }catch(e){setError(String(e));if(posted){setUncertain(true);setError(`${String(e)} · 未自动重试。先查看历史确认是否已创建任务，再决定是否再次提交。`);}}
     finally{submitLock.current=false;setBusy(false);}
   }

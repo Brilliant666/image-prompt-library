@@ -1,0 +1,5 @@
+.active-filter-strip .chip.collection-scope-chip{display:inline-flex;align-items:center;gap:6px;max-width:100%;min-height:36px;padding:2px 3px 2px 10px;border:1px solid var(--studio-hairline);background:var(--studio-surface);color:var(--studio-ink);white-space:normal}
+.collection-scope-label{min-width:0;overflow-wrap:anywhere}
+.collection-scope-clear{display:grid;place-items:center;flex:0 0 32px;width:32px;height:32px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--studio-muted);cursor:pointer}
+.collection-scope-clear:hover{background:var(--studio-canvas-deep);color:var(--studio-ink)}
+.collection-scope-clear:focus-visible{outline:2px solid var(--studio-accent);outline-offset:1px}

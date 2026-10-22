@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 import base64
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 import json
 from pathlib import Path
 from threading import Event
@@ -2754,7 +2754,7 @@ def test_generation_queue_runs_at_most_five_native_jobs(tmp_path, monkeypatch):
     monkeypatch.setattr(
         generation_queue._executor,
         "submit",
-        lambda fn, *args: submitted.append((fn, args)),
+        lambda fn, *args: submitted.append((fn, args)) or Future(),
     )
 
     generation_queue.enqueue_generation_jobs(library)
@@ -3100,7 +3100,7 @@ def test_queue_worker_gives_other_provider_first_chance_at_released_slot(tmp_pat
     monkeypatch.setattr(
         generation_queue._executor,
         "submit",
-        lambda fn, *args: submitted.append((fn, args)),
+        lambda fn, *args: submitted.append((fn, args)) or Future(),
     )
 
     continue_automated_queues = generation_queue._continue_automated_generation_queues

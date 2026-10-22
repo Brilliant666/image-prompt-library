@@ -67,6 +67,7 @@ function harness(overrides = {}) {
     '../hooks/useModalFocus': { useModalFocus: () => ({ containerRef: {}, handleModalKeyDown() {} }) },
     '../utils/images': { imageThumbnailPath: image => image.thumb_path },
     './SuggestedTitleField': { __esModule: true, default: 'SuggestedTitleField' },
+    './CollectionPicker': { __esModule: true, default: 'CollectionPicker' },
     '../utils/editorPrompts': editorPrompts,
     '../utils/quickCapture': capture,
   }, { matchMedia: () => ({ matches: true }), setTimeout: callback => timers.push(callback) }, {
@@ -75,7 +76,7 @@ function harness(overrides = {}) {
   });
   function render() {
     cursor = 0; dirty = false;
-    tree = Editor({ item: 'item' in overrides ? overrides.item : item, t: overrides.t || (key => key), clusters: [], tags: [], defaultAiProvider: 'openai_compatible', onClose: () => events.closed++, onSaved: () => events.changed++, onDeleted: () => events.deleted++ });
+    tree = Editor({ item: 'item' in overrides ? overrides.item : item, t: overrides.t || (key => key), clusters: overrides.clusters || [], tags: [], defaultAiProvider: 'openai_compatible', onClose: () => events.closed++, onSaved: () => events.changed++, onDeleted: () => events.deleted++ });
     while (pendingEffects.length) pendingEffects.shift()();
   }
   async function flush() { for (let i = 0; i < 20; i++) { if (dirty) render(); await Promise.resolve(); } if (dirty) render(); }
@@ -89,7 +90,7 @@ function harness(overrides = {}) {
   const save = () => find('button', props => props.children === 'saveReference').onClick();
   render();
   const unmount = () => { for (const effect of effects.values()) effect.cleanup?.(); effects.clear(); };
-  return { find, zone, input, filename, preview, pasteTarget, paste, save, flush, unmount, events, timers };
+  return { find, zone, input, filename, preview, pasteTarget, paste, save, flush, unmount, events, timers, get tree() { return tree; } };
 }
 function dragEvent(files = [], data = {}) {
   const calls = { prevented: 0, stopped: 0 };
@@ -109,6 +110,103 @@ function clipboardEvent(files = [], data = {}) {
   return event;
 }
 function deferred() { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; }
+
+for (const blank of ['', ' \t\n ']) {
+  test(`editor serializes cleared metadata explicitly and reopens it empty (${JSON.stringify(blank)})`, async () => {
+    const original = { ...structuredClone(item), source_url: 'https://example.invalid/original' };
+    let persisted = original, payload;
+    const h = harness({ item: original, api: {
+      updateItem: async (id, value) => {
+        assert.equal(id, original.id);
+        payload = JSON.parse(JSON.stringify(value));
+        persisted = { ...persisted, ...payload };
+        return persisted;
+      },
+    } });
+    h.find('input', props => props.placeholder === 'notReported').onChange({ target: { value: blank } });
+    h.find('input', props => props.type === 'url').onChange({ target: { value: blank } });
+    h.find('textarea', props => props.placeholder === 'addNote').onChange({ target: { value: blank } });
+    await h.flush();
+    await h.save(); await h.flush();
+    assert.equal(payload.model, '');
+    assert.equal(payload.source_url, null);
+    assert.equal(payload.notes, null);
+    assert.equal('prompts' in payload, false);
+    for (const field of ['id', 'title', 'author', 'tags', 'prompts', 'images']) assert.deepEqual(persisted[field], original[field]);
+    assert.deepEqual(h.events.uploads, []);
+    assert.equal(h.events.writes.length, 0, 'metadata-only save must not write image order or remove images');
+    const reopened = harness({ item: persisted });
+    assert.equal(reopened.find('input', props => props.placeholder === 'notReported').value, '');
+    assert.equal(reopened.find('input', props => props.type === 'url').value, '');
+    assert.equal(reopened.find('textarea', props => props.placeholder === 'addNote').value, '');
+    assert.equal(reopened.find('textarea', props => props.value === originalPrompt).value, originalPrompt);
+  });
+}
+
+test('editor keeps omitted empty metadata on create so server defaults still apply', async () => {
+  let payload;
+  const h = harness({ item: undefined, api: {
+    createItem: async value => {
+      payload = JSON.parse(JSON.stringify(value));
+      return { ...structuredClone(item), ...payload, images: [] };
+    },
+  } });
+  h.find('SuggestedTitleField').onChange('Synthetic new card');
+  h.find('textarea', props => props.placeholder === 'simplifiedPromptPlaceholder').onChange({ target: { value: originalPrompt } });
+  h.find('input', props => props.placeholder === 'notReported').onChange({ target: { value: '' } });
+  h.zone('result').onDrop(dragEvent([image()])); await h.flush();
+  await h.save(); await h.flush();
+  for (const field of ['model', 'source_url', 'notes']) assert.equal(field in payload, false);
+  assert.equal(payload.prompts[0].text, originalPrompt);
+  assert.equal(h.events.uploads.length, 1);
+});
+
+test('editor preserves an existing collection by ID without submitting its localized display name', async () => {
+  const collection = { id: 'portrait-collection', name: 'Portraits', names: { en: 'Portraits', zh_hans: '环境人像' }, count: 1, preview_images: [] };
+  const h = harness({ item: { ...item, cluster: collection }, clusters: [{ ...collection, name: '环境人像' }] });
+  assert.deepEqual(h.find('CollectionPicker').value, { id: collection.id, name: 'Portraits' });
+  await h.save(); await h.flush();
+  const payload = JSON.parse(JSON.stringify(h.events.writes[0][2]));
+  assert.equal(payload.cluster_id, collection.id);
+  assert.equal('cluster_name' in payload, false);
+  assert.equal('prompts' in payload, false);
+  assert.deepEqual(h.events.uploads, []);
+  assert.equal(h.find('textarea', props => props.value === originalPrompt).value, originalPrompt);
+});
+
+for (const [label, selection, expected] of [
+  ['a different existing collection', { id: 'existing-2', name: '本地化名称' }, { cluster_id: 'existing-2' }],
+  ['unassigned', { id: null, name: '' }, { cluster_id: null }],
+  ['an explicitly created collection', { id: null, name: '  New synthetic collection  ' }, { cluster_name: 'New synthetic collection' }],
+]) {
+  test(`editor applies ${label} only on save and keeps prompts and pending attachments intact`, async () => {
+    const h = harness({ item: { ...item, cluster: { id: 'old-collection', name: 'Old collection' } } });
+    const file = image('retained-attachment.png');
+    h.zone('result').onDrop(dragEvent([file])); await h.flush();
+    h.find('CollectionPicker').onChange(selection); await h.flush();
+    assert.deepEqual(h.events.writes, []);
+    assert.deepEqual(h.events.uploads, []);
+    assert.equal(h.filename('result'), file.name);
+    assert.equal(h.find('textarea', props => props.value === originalPrompt).value, originalPrompt);
+    await h.save(); await h.flush();
+    const payload = JSON.parse(JSON.stringify(h.events.writes[0][2]));
+    const actual = Object.fromEntries(Object.entries(payload).filter(([key]) => key === 'cluster_id' || key === 'cluster_name'));
+    assert.deepEqual(actual, expected);
+    assert.equal('prompts' in payload, false);
+    assert.deepEqual(h.events.uploads, [[item.id, file, 'result_image']]);
+    assert.equal(h.events.writes.some(([kind]) => kind === 'images'), false);
+  });
+}
+
+test('closing the editor after a collection choice does not create or move a collection', async () => {
+  const h = harness();
+  h.find('CollectionPicker').onChange({ id: null, name: 'Unsaved collection' }); await h.flush();
+  h.find('button', props => props['aria-label'] === 'close').onClick(); await h.flush();
+  assert.deepEqual(h.events.writes, []);
+  assert.deepEqual(h.events.uploads, []);
+  for (const timer of h.timers) timer();
+  assert.equal(h.events.closed, 1);
+});
 
 test('editor drops retain both original Files and upload to the same item with the correct roles only on save', async () => {
   const h = harness(), result = image('second.png'), reference = image('source.png');
@@ -445,4 +543,198 @@ test('new-item partial upload failure moves the partial record to trash, preserv
   assert.deepEqual(uploads.slice(-2), [['new-2', result, 'result_image'], ['new-2', reference, 'reference_image']]);
   assert.ok(records.get('new-2').prompts.some(prompt => prompt.text === originalPrompt));
   assert.equal(h.events.changed, 1);
+});
+
+function uploadRetryFixture({ initial = item, failReadback = false, rollbackFails = false } = {}) {
+  let record = structuredClone(initial), failReference = true, failReads = failReadback;
+  const writes = [], uploads = [], removed = [], payloads = [];
+  const h = harness({ item: rollbackFails ? undefined : initial, api: {
+    createItem: async payload => { record = { ...structuredClone(item), ...payload, images: [], id: 'new-partial' }; return structuredClone(record); },
+    updateItem: async (id, payload) => { writes.push(['metadata', id]); payloads.push(JSON.parse(JSON.stringify(payload))); record = { ...record, ...payloads.at(-1) }; return structuredClone(record); },
+    updateImages: async (id, images) => {
+      writes.push(['images', structuredClone(images)]);
+      removed.push(...record.images.filter(old => !images.some(image => image.id === old.id)).map(image => image.id));
+      record.images = images.map(image => ({ ...record.images.find(old => old.id === image.id), ...image }));
+      return structuredClone(record);
+    },
+    uploadImage: async (id, file, role) => {
+      uploads.push([id, file.name, role]);
+      if (role === 'reference_image' && failReference) { failReference = false; throw Error('synthetic reference upload failure'); }
+      const uploaded = { id: file.name, item_id: id, role, original_path: `originals/${file.name}`, thumb_path: `thumbs/${file.name}.webp` };
+      record.images.push(uploaded);
+      return structuredClone(uploaded);
+    },
+    item: async () => { if (failReads) throw Error('synthetic readback failure'); return structuredClone(record); },
+    deleteItem: async () => { throw Error('synthetic rollback failure'); },
+  } });
+  if (rollbackFails) {
+    h.find('SuggestedTitleField').onChange('Synthetic new card');
+    h.find('textarea', props => props.placeholder === 'simplifiedPromptPlaceholder').onChange({ target: { value: originalPrompt } });
+  }
+  const stage = async () => {
+    h.zone('result').onDrop(dragEvent([image('successful-result.png')]));
+    h.zone('reference').onDrop(dragEvent([image('pending-reference.png')])); await h.flush();
+  };
+  return { h, stage, writes, uploads, removed, payloads, allowReadback: () => { failReads = false; }, get record() { return record; } };
+}
+
+for (const language of ['en', 'zh_hans', 'ja']) {
+  for (const failReadback of [false, true]) {
+    test(`partial upload retry persists reverted ${language} prompt against the latest save (readback fails: ${failReadback})`, async () => {
+      const initial = structuredClone(item);
+      initial.prompts[0].language = language;
+      const expectedPrompts = initial.prompts.map(({ id, item_id, ...prompt }) => prompt);
+      const f = uploadRetryFixture({ initial, failReadback }), { h } = f;
+      const prompt = () => h.find('textarea', props => language === 'ja'
+        ? props['aria-label'] === 'Prompt (ja)'
+        : props.placeholder === (language === 'en' ? 'englishPromptPlaceholder' : 'simplifiedPromptPlaceholder'));
+      const intermediate = '  B changed prompt\r\n\t保留原文  ';
+      prompt().onChange({ target: { value: intermediate } });
+      await f.stage(); await h.save(); await h.flush();
+      assert.equal(f.record.prompts[0].text, intermediate);
+      assert.equal(h.timers.length, 0, 'partial save must keep the editor open');
+      prompt().onChange({ target: { value: originalPrompt } }); await h.flush();
+      f.allowReadback();
+      await h.save(); await h.flush();
+      assert.deepEqual(f.payloads[1].prompts, expectedPrompts, 'retry must send the reverted text and its original metadata');
+      assert.deepEqual(f.record.prompts, expectedPrompts);
+      assert.deepEqual(f.record.images.map(image => image.id), ['original-image', 'successful-result.png', 'pending-reference.png']);
+      assert.deepEqual(f.removed, []);
+      assert.deepEqual(f.uploads.map(([, name]) => name), ['successful-result.png', 'pending-reference.png', 'pending-reference.png']);
+      for (const timer of h.timers) timer();
+      assert.equal(h.events.closed, 1);
+    });
+  }
+}
+
+test('partial upload retry omits prompts when they still match the latest acknowledged save', async () => {
+  const f = uploadRetryFixture(), { h } = f;
+  h.find('textarea', props => props.placeholder === 'englishPromptPlaceholder').onChange({ target: { value: 'B already saved' } });
+  await f.stage(); await h.save(); await h.flush();
+  await h.save(); await h.flush();
+  assert.equal(f.record.prompts[0].text, 'B already saved');
+  assert.equal('prompts' in f.payloads[1], false, 'an image-only retry must not rewrite already saved prompts');
+  assert.deepEqual(f.removed, []);
+});
+
+test('retrying a partial upload retains the acknowledged result image and uploads only the failed reference', async () => {
+  const f = uploadRetryFixture(), { h } = f;
+  await f.stage(); await h.save(); await h.flush();
+  assert.deepEqual(f.record.images.map(image => image.id), ['original-image', 'successful-result.png']);
+  assert.equal(h.filename('result'), 'resultImageAlreadySaved');
+  assert.equal(h.filename('reference'), 'pending-reference.png');
+  assert.equal(h.find('p', props => props.className === 'form-error').children, 'savePartiallyCompleted');
+  await h.save(); await h.flush();
+  assert.deepEqual(f.record.images.map(image => image.id), ['original-image', 'successful-result.png', 'pending-reference.png']);
+  assert.deepEqual(f.removed, []);
+  assert.equal(f.writes.some(([kind]) => kind === 'images'), false);
+  assert.deepEqual(f.uploads.map(([, name]) => name), ['successful-result.png', 'pending-reference.png', 'pending-reference.png']);
+  assert.equal(h.find('textarea', props => props.value === originalPrompt).value, originalPrompt);
+});
+
+test('failed upload reconciliation blocks further writes until the current images can be read', async () => {
+  const f = uploadRetryFixture({ failReadback: true }), { h } = f;
+  await f.stage(); await h.save(); await h.flush();
+  const firstWrites = structuredClone(f.writes), firstUploads = structuredClone(f.uploads);
+  await h.save(); await h.flush();
+  assert.deepEqual(f.writes, firstWrites);
+  assert.deepEqual(f.uploads, firstUploads);
+  assert.deepEqual(f.removed, []);
+  f.allowReadback();
+  await h.save(); await h.flush();
+  assert.deepEqual(f.record.images.map(image => image.id), ['original-image', 'successful-result.png', 'pending-reference.png']);
+  assert.deepEqual(f.removed, []);
+  assert.deepEqual(f.uploads.map(([, name]) => name), ['successful-result.png', 'pending-reference.png', 'pending-reference.png']);
+});
+
+test('failed new-item rollback reconciles both image snapshots so retry does not delete its uploaded result', async () => {
+  const f = uploadRetryFixture({ rollbackFails: true }), { h } = f;
+  await f.stage(); await h.save(); await h.flush();
+  assert.equal(h.find('p', props => props.className === 'form-error').children, 'saveRollbackFailed');
+  await h.save(); await h.flush();
+  assert.deepEqual(f.record.images.map(image => image.id), ['successful-result.png', 'pending-reference.png']);
+  assert.deepEqual(f.removed, []);
+  assert.deepEqual(f.uploads.map(([, name]) => name), ['successful-result.png', 'pending-reference.png', 'pending-reference.png']);
+});
+
+test('new-item rollback and readback failure still permit a safe refresh before retry', async () => {
+  const f = uploadRetryFixture({ rollbackFails: true, failReadback: true }), { h } = f;
+  await f.stage(); await h.save(); await h.flush();
+  assert.equal(h.find('button', props => props.children === 'saveReference').disabled, false);
+  const uploads = structuredClone(f.uploads);
+  await h.save(); await h.flush();
+  assert.deepEqual(f.uploads, uploads);
+  assert.deepEqual(f.writes, []);
+  f.allowReadback();
+  await h.save(); await h.flush();
+  assert.deepEqual(f.record.images.map(image => image.id), ['successful-result.png', 'pending-reference.png']);
+  assert.deepEqual(f.removed, []);
+});
+
+const imageRows = h => descendants(h.tree).filter(node => node.type === 'article' && node.props.className?.includes('item-image-manager-row'));
+const rowButton = (row, label) => descendants(row).find(node => node.type === 'button' && node.props['aria-label'] === label).props;
+
+test('metadata acknowledgement advances the prompt baseline even when saving image order fails', async () => {
+  const initial = { ...structuredClone(item), images: [item.images[0], { ...item.images[0], id: 'second-result' }] };
+  let record = structuredClone(initial), failOrder = true;
+  const payloads = [];
+  const h = harness({ item: initial, api: {
+    updateItem: async (_id, payload) => {
+      payloads.push(JSON.parse(JSON.stringify(payload)));
+      record = { ...record, ...payloads.at(-1) };
+      return structuredClone(record);
+    },
+    updateImages: async (_id, images) => {
+      if (failOrder) { failOrder = false; throw Error('synthetic image-order failure'); }
+      record.images = images.map(image => ({ ...record.images.find(old => old.id === image.id), ...image }));
+      return structuredClone(record);
+    },
+  } });
+  const prompt = () => h.find('textarea', props => props.placeholder === 'englishPromptPlaceholder');
+  prompt().onChange({ target: { value: 'B already saved' } });
+  rowButton(imageRows(h)[1], 'setPrimaryImage').onClick(); await h.flush();
+  await h.save(); await h.flush();
+  assert.equal(record.prompts[0].text, 'B already saved');
+  assert.equal(h.timers.length, 0);
+  prompt().onChange({ target: { value: originalPrompt } }); await h.flush();
+  await h.save(); await h.flush();
+  assert.equal(payloads[1].prompts?.[0].text, originalPrompt);
+  assert.equal(record.prompts[0].text, originalPrompt);
+  assert.deepEqual(record.images.map(image => image.id), ['second-result', 'original-image']);
+  assert.deepEqual(h.events.uploads, []);
+});
+
+test('partial upload reconciliation retains intentional image removal, cover and order before retry', async () => {
+  const initial = { ...item, images: [item.images[0], { ...item.images[0], id: 'second-result' }, { ...item.images[0], id: 'old-reference', role: 'reference_image' }] };
+  const f = uploadRetryFixture({ initial }), { h } = f;
+  rowButton(imageRows(h)[1], 'setPrimaryImage').onClick(); await h.flush();
+  rowButton(imageRows(h)[2], 'removeImage').onClick(); await h.flush();
+  await f.stage(); await h.save(); await h.flush();
+  await h.save(); await h.flush();
+  assert.deepEqual(f.record.images.map(image => image.id), ['second-result', 'original-image', 'successful-result.png', 'pending-reference.png']);
+  assert.deepEqual(f.removed, ['old-reference']);
+  assert.equal(f.writes.filter(([kind]) => kind === 'images').length, 1);
+  assert.ok(imageRows(h)[0].props.className.includes('is-primary'));
+});
+
+test('image-list edits during an in-flight save cannot create an unacknowledged replacement draft', async () => {
+  const initial = { ...item, images: [item.images[0], { ...item.images[0], id: 'second-result' }] }, pending = deferred();
+  const h = harness({ item: initial, api: { updateItem: () => pending.promise } });
+  const saving = h.save(); await h.flush();
+  const rows = imageRows(h);
+  for (const row of rows) {
+    for (const label of ['setPrimaryImage', 'moveImageEarlier', 'moveImageLater', 'removeImage']) {
+      const button = rowButton(row, label);
+      assert.equal(button.disabled, true);
+      button.onClick();
+    }
+    const select = descendants(row).find(node => node.type === 'select').props;
+    assert.equal(select.disabled, true);
+    select.onChange({ target: { value: 'reference_image' } });
+  }
+  await h.flush();
+  assert.equal(imageRows(h).length, 2);
+  pending.resolve(initial); await saving; await h.flush();
+  assert.equal(h.events.writes.some(([kind]) => kind === 'images'), false);
+  assert.equal(imageRows(h).length, 2);
 });
