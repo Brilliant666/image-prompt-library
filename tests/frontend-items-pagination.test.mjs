@@ -50,7 +50,7 @@ function harness(t, view = 'cards', initial = {}) {
     react: hooks, 'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'fragment' },
     '../api/client': { mediaUrl: value => value, api: { items(params) { const pending = deferred(); calls.push({ params, ...pending }); return pending.promise; } } },
     '../utils/searchSort': { DEFAULT_ITEM_SORT: 'updated_desc' },
-    './ItemCard': 'ItemCard', './ScopeHeader': 'ScopeHeader',
+    './ItemCard': 'ItemCard', './ScopeHeader': 'ScopeHeader', './ToolbarSelect': 'ToolbarSelect',
     './LibraryCardLayout.css': {}, 'lucide-react': { ChevronDown: 'ChevronDown' },
   };
   function load(js) { const module = { exports: {} }; new Function('require', 'module', 'exports', js)(name => { assert.ok(name in deps, name); return deps[name]; }, module, module.exports); return module.exports; }

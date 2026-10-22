@@ -989,6 +989,7 @@ function workspaceHarness(t, api, overrides = {}, environment = {}) {
   const deps = { react: hooks, 'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'fragment' }, 'lucide-react': new Proxy({}, { get: (_, key) => key }),
     fflate: { zipSync: environment.zipSync || (() => { throw Error('download not part of this test'); }) }, '../../api/client': { api, mediaUrl: path => `/media/${path}` },
     '../../utils/galleryRecipe': recipe, './InputBar': { __esModule: true, default: 'InputBar' }, './TaskGrid': { __esModule: true, default: 'TaskGrid' }, './DetailModal': { __esModule: true, default: 'DetailModal' }, './Lightbox': { __esModule: true, default: 'Lightbox' }, './GalleryWorkspace.css': {},
+    '../ToolbarSelect': { __esModule: true, default: 'ToolbarSelect' },
     '../../utils/generationSiblings': generationSiblings,
     '../../utils/galleryHistory': history,
     '../../utils/generationQueueHistory': queueHistory,
@@ -1091,18 +1092,18 @@ test('gallery starts with all states and persists explicit grouped filtering bef
   const harness = workspaceHarness(t, api); await harness.flush();
   assert.deepEqual(harness.node('TaskGrid').jobs.map(job => job.id), all.map(job => job.id));
   assert.equal(calls[0].prepare_references, false);
-  harness.node('select', props => props['aria-label'] === '任务状态筛选').onChange({ target: { value: 'successful' } }); await harness.flush();
+  harness.node('ToolbarSelect', props => props.label === '任务状态筛选').onChange('successful'); await harness.flush();
   assert.deepEqual(harness.node('TaskGrid').jobs.map(job => job.id), ['succeeded', 'accepted']);
   assert.equal(calls.at(-1).statuses, 'succeeded,accepted');
-  harness.node('select', props => props['aria-label'] === '任务状态筛选').onChange({ target: { value: 'accepted' } }); await harness.flush();
+  harness.node('ToolbarSelect', props => props.label === '任务状态筛选').onChange('accepted'); await harness.flush();
   assert.deepEqual(harness.node('TaskGrid').jobs.map(job => job.id), ['accepted']);
   assert.equal(calls.at(-1).statuses, 'accepted');
-  harness.node('select', props => props['aria-label'] === '任务状态筛选').onChange({ target: { value: 'active' } }); await harness.flush();
+  harness.node('ToolbarSelect', props => props.label === '任务状态筛选').onChange('active'); await harness.flush();
   assert.deepEqual(harness.node('TaskGrid').jobs.map(job => job.id), ['running', 'queued']);
   assert.equal(calls.at(-1).statuses, 'queued,running');
   assert.equal(history.readGalleryFilter(), 'active');
   const reopened = workspaceHarness(t, api); await reopened.flush();
-  assert.equal(reopened.node('select', props => props['aria-label'] === '任务状态筛选').value, 'active');
+  assert.equal(reopened.node('ToolbarSelect', props => props.label === '任务状态筛选').value, 'active');
 });
 
 test('successful-only gallery returns to all states to show newly submitted jobs immediately', async t => {
@@ -1115,7 +1116,7 @@ test('successful-only gallery returns to all states to show newly submitted jobs
   harness.node('input', props => props['aria-label'] === '搜索生成历史').onChange({ target: { value: 'other prompt' } }); await harness.flush();
   const created = historicalJob({ status: 'queued' });
   harness.node('InputBar').onCreated([created]); await harness.flush();
-  assert.equal(harness.node('select', props => props['aria-label'] === '任务状态筛选').value, '');
+  assert.equal(harness.node('ToolbarSelect', props => props.label === '任务状态筛选').value, '');
   assert.equal(history.readGalleryFilter(), '');
   assert.equal(harness.node('input', props => props['aria-label'] === '搜索生成历史').value, '');
   assert.deepEqual(harness.node('TaskGrid').jobs.map(job => job.id), [created.id]);
@@ -1133,10 +1134,10 @@ test('filter changes retain matching cards during delayed reads and expose only 
   let calls = 0;
   const h = workspaceHarness(t, { generationJobs: () => ++calls === 1 ? Promise.resolve({ jobs: [historicalJob(), failed], total: 2 }) : pending.promise });
   await h.flush();
-  const filter = () => h.node('select', props => props['aria-label'] === '任务状态筛选');
+  const filter = () => h.node('ToolbarSelect', props => props.label === '任务状态筛选');
   assert.equal(filter().value, '');
-  assert.deepEqual(children(h.tree).filter(node => node.type === 'option').map(node => node.props.value), ['', 'active', 'successful', 'accepted', 'failed']);
-  filter().onChange({ target: { value: 'failed' } }); await h.flush();
+  assert.deepEqual(filter().options.map(option => option.value), ['', 'active', 'successful', 'accepted', 'failed']);
+  filter().onChange('failed'); await h.flush();
   assert.deepEqual(h.node('TaskGrid')?.jobs.map(job => job.id), ['failed-visible']);
   assert.equal(children(h.tree).some(node => node.props?.children === '加载生成历史…'), false);
   pending.resolve({ jobs: [failed], total: 1 }); await h.flush();
@@ -1158,10 +1159,10 @@ test('returning from failed to all restores the loaded page immediately while fr
   h.node('button', props => props.className === 'pg-load-more').onClick(); await h.flush();
   assert.equal(h.node('TaskGrid').jobs.length, 96);
   const command = h.node('InputBar').command;
-  h.node('select').onChange({ target: { value: 'failed' } }); await h.flush();
+  h.node('ToolbarSelect').onChange('failed'); await h.flush();
   assert.equal(h.node('TaskGrid').jobs.length, 1);
   delayed = true;
-  h.node('select').onChange({ target: { value: '' } }); await h.flush();
+  h.node('ToolbarSelect').onChange(''); await h.flush();
   assert.equal(h.node('TaskGrid').jobs.length, 96, 'all previously loaded cards return before the API resolves');
   assert.equal(calls.at(-1).limit, 96, 'background refresh must not collapse an expanded page to 48');
   assert.deepEqual(h.node('button', props => props.className === 'pg-load-more').children, ['已加载 ', 96, ' / ', 120, ' · 加载更多']);
@@ -1179,10 +1180,10 @@ test('empty filtered results can return instantly to all and late filter reads c
     return ++failedReads === 1 ? Promise.resolve({ jobs: [], total: 0 }) : lateFailed.promise;
   } });
   await h.flush();
-  h.node('select').onChange({ target: { value: 'failed' } }); await h.flush();
+  h.node('ToolbarSelect').onChange('failed'); await h.flush();
   assert.equal(h.node('TaskGrid'), undefined);
   h.node('button', props => props['aria-label'] === '刷新生成历史').onClick(); await h.flush();
-  h.node('select').onChange({ target: { value: '' } }); await h.flush();
+  h.node('ToolbarSelect').onChange(''); await h.flush();
   assert.deepEqual(h.node('TaskGrid')?.jobs.map(job => job.id), [success.id]);
   lateFailed.resolve({ jobs: [historicalJob({ id: 'late-failure', status: 'failed' })], total: 1 }); await h.flush();
   assert.deepEqual(h.node('TaskGrid').jobs.map(job => job.id), [success.id]);
@@ -1198,10 +1199,10 @@ for(const change of ['library', 'mutation']) test(`filter page cache is invalida
     return Promise.resolve({ jobs: !isAllGallery(params) ? [failed] : [old, failed], total: !isAllGallery(params) ? 1 : 2 });
   } }, { libraryScope: 'library-a' });
   await h.flush();
-  h.node('select').onChange({ target: { value: 'failed' } }); await h.flush();
+  h.node('ToolbarSelect').onChange('failed'); await h.flush();
   changed = true;
   h.update(change === 'library' ? { libraryScope: 'library-b' } : { refreshKey: 1 }); await h.flush();
-  h.node('select').onChange({ target: { value: '' } }); await h.flush();
+  h.node('ToolbarSelect').onChange(''); await h.flush();
   assert.equal(h.node('TaskGrid'), undefined, 'an invalidated All snapshot must not resurrect old records');
   assert.equal(h.node('button', props => props.className === 'pg-load-more'), undefined, 'old totals are not reused');
   assert.equal(h.node('h2').children, '正在更新生成历史', 'uncached pending reads do not claim the library is empty');
@@ -1217,7 +1218,7 @@ test('a confirmed submission invalidates old filter snapshots and survives retur
   const h = workspaceHarness(t, { generationJobs: params => submitted ? pending.promise
     : Promise.resolve({ jobs: !isAllGallery(params) ? [failed] : [old, failed], total: !isAllGallery(params) ? 1 : 2 }) });
   await h.flush();
-  h.node('select').onChange({ target: { value: 'failed' } }); await h.flush();
+  h.node('ToolbarSelect').onChange('failed'); await h.flush();
   submitted = true;
   h.node('InputBar').onCreated([created]); await h.flush();
   assert.equal(h.node('TaskGrid').jobs[0].id, created.id, 'a cached All page cannot replace the new server record');
@@ -1237,7 +1238,7 @@ test('queue mutations invalidate every gallery filter and pending reads without 
     return reads === 3 ? stale.promise : reads === 4 ? freshFailed.promise : freshAll.promise;
   } }, { libraryScope: 'library', onQueueChanged: () => changes++ });
   await h.flush();
-  h.node('select').onChange({ target: { value: 'failed' } }); await h.flush();
+  h.node('ToolbarSelect').onChange('failed'); await h.flush();
   h.node('button', props => props['aria-label'] === '刷新生成历史').onClick(); await h.flush();
   h.node('GenerationQueueDrawer').onChanged(); await h.flush();
   assert.equal(changes, 0, 'the queue refreshes itself; do not bounce its mutation back through the global refresh key');
@@ -1245,7 +1246,7 @@ test('queue mutations invalidate every gallery filter and pending reads without 
   assert.equal(h.node('GenerationQueueDrawer').refreshKey, 0, 'the queue does not receive a redundant refresh notification');
   stale.resolve({ jobs: [historicalJob({ id: 'stale-failed', status: 'failed' })], total: 1 }); await h.flush();
   assert.deepEqual(h.node('TaskGrid').jobs.map(job => job.id), [failed.id], 'the pre-mutation read is invalidated');
-  h.node('select').onChange({ target: { value: '' } }); await h.flush();
+  h.node('ToolbarSelect').onChange(''); await h.flush();
   assert.deepEqual(h.node('TaskGrid').jobs.map(job => job.id), [failed.id], 'the cached All page cannot resurrect the discarded success');
   assert.equal(h.node('button', props => props.className === 'pg-load-more'), undefined);
   freshFailed.resolve({ jobs: [], total: 0 }); await h.flush();
@@ -1288,7 +1289,7 @@ test('authoritative post-creation results remove completed tasks from a newly se
   const queued = historicalJob({ id: 'new-job', status: 'queued' });
   const h = workspaceHarness(t, { generationJobs: () => ++calls === 1 ? Promise.resolve({ jobs: [], total: 0 }) : calls === 2 ? pending.promise : filtered.promise });
   await h.flush(); h.node('InputBar').onCreated([queued]); await h.flush();
-  h.node('select', props => props['aria-label'] === '任务状态筛选').onChange({ target: { value: 'active' } }); await h.flush();
+  h.node('ToolbarSelect', props => props.label === '任务状态筛选').onChange('active'); await h.flush();
   assert.deepEqual(h.node('TaskGrid').jobs.map(job => job.id), ['new-job']);
   filtered.resolve({ jobs: [], total: 0 }); await h.flush();
   assert.equal(h.node('TaskGrid'), undefined, 'a task completed before this authoritative read is no longer pinned as queued');
@@ -1316,8 +1317,8 @@ test('returning to a pending filter starts a fresh read instead of sharing its o
     pendingReads.set(key, pending); return pending;
   } });
   await h.flush();
-  h.node('select', props => props['aria-label'] === '任务状态筛选').onChange({ target: { value: 'failed' } }); await h.flush();
-  h.node('select', props => props['aria-label'] === '任务状态筛选').onChange({ target: { value: '' } }); await h.flush();
+  h.node('ToolbarSelect', props => props.label === '任务状态筛选').onChange('failed'); await h.flush();
+  h.node('ToolbarSelect', props => props.label === '任务状态筛选').onChange(''); await h.flush();
   assert.equal(calls.at(-1).fresh, true);
   latest.resolve({ jobs: [historicalJob({ id: 'latest' })], total: 1 }); await h.flush();
   old.resolve({ jobs: [historicalJob({ id: 'obsolete' })], total: 1 }); await h.flush();
@@ -1347,7 +1348,7 @@ test('late history for an old filter cannot replace the new filter or its cache'
   const failed = historicalJob({ id: 'failed', status: 'failed' });
   const harness = workspaceHarness(t, { generationJobs: params => params.statuses === 'succeeded,accepted' ? old.promise : Promise.resolve({ jobs: [failed], total: 1 }) }, { libraryScope: 'library-a' });
   await harness.flush();
-  harness.node('select', props => props['aria-label'] === '任务状态筛选').onChange({ target: { value: 'failed' } }); await harness.flush();
+  harness.node('ToolbarSelect', props => props.label === '任务状态筛选').onChange('failed'); await harness.flush();
   old.resolve({ jobs: [historicalJob()], total: 1 }); await harness.flush();
   assert.deepEqual(harness.node('TaskGrid').jobs.map(job => job.id), ['failed']);
   assert.deepEqual(history.readGalleryHistory('library-a', 'failed').jobs.map(job => job.id), ['failed']);

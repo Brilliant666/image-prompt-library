@@ -36,7 +36,7 @@ function harness(storage, overrides = {}) {
         effects.push(() => { slots[i].cleanup?.(); slots[i].cleanup = callback(); });
       }
     },
-  }, 'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'fragment' }, 'lucide-react': { ChevronDown: 'ChevronDown' }, './ItemCard': { __esModule: true, default: 'ItemCard' }, './ScopeHeader': { __esModule: true, default: 'ScopeHeader' }, './LibraryCardLayout.css': {} };
+  }, 'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'fragment' }, 'lucide-react': { ChevronDown: 'ChevronDown' }, './ItemCard': { __esModule: true, default: 'ItemCard' }, './ScopeHeader': { __esModule: true, default: 'ScopeHeader' }, './ToolbarSelect': { __esModule: true, default: 'ToolbarSelect' }, './LibraryCardLayout.css': {} };
   const window = { innerWidth: 1200, addEventListener: (_, callback) => resizeHandlers.add(callback), removeEventListener: (_, callback) => resizeHandlers.delete(callback), localStorage: storage === undefined ? undefined : { getItem: () => storage.getItem(key), setItem: (key, value) => { writes.push([key, value]); storage.setItem(key, value); } } };
   class Observer {
     constructor(callback) { this.callback = callback; this.active = false; observers.push(this); }
@@ -56,8 +56,8 @@ function harness(storage, overrides = {}) {
     } while (dirty);
   };
   const header = () => treeNodes(tree).find(node => node.type === 'ScopeHeader').props;
-  const selector = () => treeNodes(header().extraControls).find(node => node.type === 'select').props;
-  const change = value => { selector().onChange({ currentTarget: { value } }); render(); };
+  const selector = () => treeNodes(header().extraControls).find(node => node.type === 'ToolbarSelect').props;
+  const change = value => { selector().onChange(value); render(); };
   render();
   return { header, selector, change, writes, sorts, open, selected,
     cards: () => treeNodes(tree).filter(node => node.type === 'ItemCard'),
@@ -162,15 +162,15 @@ test('horizontal measurement attaches after empty results populate and detaches 
 });
 
 test('production ScopeHeader appends the optional layout after sorting; callers without it keep only sorting', () => {
-  const Header = evaluate(headerCode, { react: { useId: () => 'sort' }, 'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'fragment' }, 'lucide-react': { ArrowLeft: 'ArrowLeft', ChevronDown: 'ChevronDown' } });
+  const Header = evaluate(headerCode, { './ToolbarSelect': { __esModule: true, default: 'ToolbarSelect' }, 'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'fragment' }, 'lucide-react': { ArrowLeft: 'ArrowLeft', ChevronDown: 'ChevronDown' } });
   const changes = [], props = { t: key => key, title: 'Library', count: 2, countLabel: 'items', sort: 'updated_desc', onSort: value => changes.push(value) };
   const original = Header(props);
-  assert.equal(treeNodes(original).filter(node => node.type === 'select').length, 1);
+  assert.equal(treeNodes(original).filter(node => node.type === 'ToolbarSelect').length, 1);
   assert.doesNotMatch(original.props.className, /has-extra-controls/);
-  const extra = jsx('select', { 'aria-label': 'layout' });
+  const extra = jsx('ToolbarSelect', { 'aria-label': 'layout' });
   const updated = Header({ ...props, extraControls: extra });
-  const controls = treeNodes(updated).filter(node => node.type === 'select');
+  const controls = treeNodes(updated).filter(node => node.type === 'ToolbarSelect');
   assert.equal(controls[1], extra);
-  controls[0].props.onChange({ currentTarget: { value: 'created_desc' } });
+  controls[0].props.onChange('created_desc');
   assert.deepEqual(changes, ['created_desc']);
 });

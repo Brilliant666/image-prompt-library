@@ -522,7 +522,7 @@ export default function App() {
         </section>
       </div>
     )}
-    <TopBar t={t} q={q} queryFilterChips={queryFilterChips} updateBadgeLabel={updateBadgeLabel} onQ={setQ} view={view} onView={updateView} onFilters={openFilters} onConfig={openConfig} onCapture={isDemoMode ? undefined : openNewItemEditor} onTrash={isDemoMode ? undefined : () => { cancelPendingEdit(); setTrashOpen(true); }} trashLabel={trashLabels(uiLanguage).title} filtersOpen={filtersOpen} configOpen={configOpen} hasActiveFilter={Boolean(selectedCluster)} modalOpen={blockingModalOpen} />
+    <TopBar t={t} q={q} queryFilterChips={queryFilterChips} collectionName={localizedClusterName(selectedCluster, uiLanguage)} onClearCollection={clearCluster} updateBadgeLabel={updateBadgeLabel} onQ={setQ} view={view} onView={updateView} onFilters={openFilters} onConfig={openConfig} onCapture={isDemoMode ? undefined : openNewItemEditor} onTrash={isDemoMode ? undefined : () => { cancelPendingEdit(); setTrashOpen(true); }} trashLabel={trashLabels(uiLanguage).title} filtersOpen={filtersOpen} configOpen={configOpen} hasActiveFilter={Boolean(selectedCluster)} modalOpen={blockingModalOpen} />
     <div className={`content-plane${viewTransition ? ` ${viewTransition}` : ''}`} inert={blockingModalOpen} aria-hidden={blockingModalOpen || undefined}>
     {isDemoMode && (
       <div className="demo-banner" role="status">

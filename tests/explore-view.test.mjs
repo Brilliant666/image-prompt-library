@@ -294,7 +294,7 @@ test('Explore search feed renders the first 48 natural-ratio cards and keeps man
   assert.equal((html.match(/<h1\b/g) || []).length, 1);
   assert.match(html, /<h1>Search results<\/h1>/);
   assert.match(html, /class="scope-count"[\s\S]*?>60<span class="sr-only"> references<\/span>/);
-  assert.match(html, /<select\b[^>]*aria-label="Sort"/);
+  assert.match(html, /<button\b[^>]*role="combobox"[^>]*aria-label="Sort"/);
   assert.equal((html.match(/class="item-card /g) || []).length, 48);
   assert.match(html, /Item 47/);
   assert.doesNotMatch(html, /Item 48/);
@@ -324,14 +324,14 @@ test('Library keeps one contextual scope, sort, and first-run count', () => {
   assert.equal((html.match(/<h1\b/g) || []).length, 1);
   assert.match(html, /<h1>All references<\/h1>/);
   assert.match(html, /class="scope-count"[\s\S]*?>1<span class="sr-only"> references<\/span>/);
-  assert.match(html, /class="scope-sort-control"[\s\S]*?<span class="scope-sort-prefix">Sort<\/span>[\s\S]*?<span class="scope-sort-picker">[\s\S]*?<select\b/);
-  assert.match(html, /<label class="scope-sort-control" for="[^"]+">[\s\S]*?<select id="[^"]+" class="scope-sort-select"/);
-  assert.match(html, /<select\b[^>]*aria-label="Sort"/);
+  assert.match(html, /<button\b[^>]*role="combobox"[^>]*aria-label="Sort"[^>]*aria-haspopup="listbox"[^>]*aria-expanded="false"/);
+  assert.match(html, /class="toolbar-select-prefix">Sort<\/span>/);
+  assert.match(html, /class="toolbar-select-value">Recently updated<\/span>/);
 
   const firstRunHtml = renderCards({ emptyMode: 'first-run' });
   assert.match(firstRunHtml, /<h1>All references<\/h1>/);
   assert.match(firstRunHtml, /class="scope-count"[\s\S]*?>0<span class="sr-only"> references<\/span>/);
-  assert.match(firstRunHtml, /<select\b[^>]*aria-label="Sort"/);
+  assert.match(firstRunHtml, /<button\b[^>]*role="combobox"[^>]*aria-label="Sort"/);
 });
 
 test('empty work queue uses one composed state instead of four empty sections', () => {

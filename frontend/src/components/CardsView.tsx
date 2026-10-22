@@ -1,9 +1,9 @@
 import { useLayoutEffect, useRef, useState } from 'react';
-import { ChevronDown } from 'lucide-react';
 import type { ItemSortMode, ItemSummary } from '../types';
 import type { Translator } from '../utils/i18n';
 import ItemCard from './ItemCard';
 import ScopeHeader from './ScopeHeader';
+import ToolbarSelect from './ToolbarSelect';
 import './LibraryCardLayout.css';
 
 type CardLayout = 'vertical' | 'horizontal';
@@ -90,16 +90,9 @@ export default function CardsView({
     setLayout(next);
     try { window.localStorage.setItem(CARD_LAYOUT_KEY, next); } catch { /* Keep the in-session choice if storage is unavailable. */ }
   };
-  const layoutControl = <label className="scope-sort-control library-layout-control">
-    <span className="scope-sort-prefix">{t('libraryCardLayout')}</span>
-    <span className="scope-sort-picker">
-      <select className="scope-sort-select" aria-label={t('libraryCardLayout')} value={layout} onChange={event => changeLayout(event.currentTarget.value)}>
-        <option value="vertical">{t('libraryVerticalLayout')}</option>
-        <option value="horizontal">{t('libraryHorizontalLayout')}</option>
-      </select>
-      <ChevronDown size={14} aria-hidden="true" />
-    </span>
-  </label>;
+  const layoutControl = <ToolbarSelect<CardLayout> className="scope-sort-control library-layout-control"
+    label={t('libraryCardLayout')} prefix={t('libraryCardLayout')} value={layout} onChange={changeLayout}
+    options={[{ value: 'vertical', label: t('libraryVerticalLayout') }, { value: 'horizontal', label: t('libraryHorizontalLayout') }]} />;
   const showActions = Boolean(onFavorite && onEdit) && !onToggleSelection;
   if (!items.length && loading) {
     return (
