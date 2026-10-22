@@ -8,7 +8,7 @@
 .toolbar-select-value{overflow:hidden;white-space:nowrap;text-overflow:ellipsis;min-width:0}
 .toolbar-select-chevron{flex-shrink:0;margin-left:auto;color:var(--studio-muted,var(--muted));transition:transform .12s ease}
 .toolbar-select-trigger[aria-expanded="true"] .toolbar-select-chevron{transform:rotate(180deg)}
-.toolbar-select-menu{position:fixed;z-index:65;box-sizing:border-box;overflow-y:auto;overscroll-behavior:contain;padding:5px;border:1px solid var(--studio-hairline,var(--line));border-radius:12px;background:var(--studio-surface,var(--surface,#fff));color:var(--studio-ink,var(--ink));box-shadow:0 10px 30px rgba(35,30,25,.13);font:inherit;font-size:12px;line-height:1.4;scroll-padding:5px}
+.toolbar-select-menu{position:fixed;z-index:65;box-sizing:border-box;overflow-y:auto;overscroll-behavior:contain;padding:5px;border:1px solid var(--studio-hairline,var(--line));border-radius:12px;background:var(--studio-surface,var(--surface,#fff));color:var(--studio-ink,var(--ink));box-shadow:0 10px 30px rgb(var(--studio-ink-rgb) / .13);font:inherit;font-size:12px;line-height:1.4;scroll-padding:5px}
 .toolbar-select-option{display:flex;align-items:center;gap:12px;min-height:34px;padding:7px 9px;border-radius:7px;cursor:pointer;user-select:none;overflow-wrap:anywhere}
 .toolbar-select-option>span{flex:1;min-width:0}
 .toolbar-select-option.is-active{background:var(--studio-accent-soft,var(--surface-warm))}

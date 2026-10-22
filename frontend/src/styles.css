@@ -1049,7 +1049,7 @@ button.explore-collection-preview:focus-visible{outline:2px solid var(--studio-a
   padding:0 7px 0 10px;
   border:1px solid var(--studio-hairline);
   border-radius:9px;
-  background:rgba(251,248,241,.66);
+  background:var(--studio-surface);
   cursor:pointer;
   touch-action:manipulation;
 }
