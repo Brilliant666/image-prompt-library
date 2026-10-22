@@ -901,7 +901,8 @@ test('Explore wiring preserves Library management, semantic appearance, and rest
   assert.match(app, /window\.setTimeout\([\s\S]*?\}, 220\)/);
   assert.match(app, /loading && !dataScopeMatches \? ' is-scope-loading'/);
   assert.match(app, /const contentLoading = initialLoading[\s\S]*?clustersLoading/);
-  assert.match(app, /loading=\{contentLoading\}/);
+  assert.equal(app.match(/loading=\{contentLoading \|\| refreshing\}/g)?.length, 2,
+    'both lists must pause pagination during a same-scope refresh without hiding their cards');
   assert.match(app, /className="error" role="alert"[\s\S]*?setItemsReloadKey\(key => key \+ 1\)/);
   assert.match(app, /hasActiveSearch=/);
   assert.match(app, /onOpenCollection=\{selectCluster\}/);

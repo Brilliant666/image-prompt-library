@@ -145,3 +145,138 @@ test('duplicate records do not duplicate cards or prevent cursor progress; unmou
   h.calls[2].resolve(page(200)); await h.flush();
   assert.equal(h.query().data.items.length, 199);
 });
+
+async function loadTwoPages(h) {
+  h.calls[0].resolve(page(0)); await h.flush();
+  while (h.calls.length === 1) { h.more().onClick(); await h.flush(); }
+  h.calls[1].resolve(page(100)); await h.flush();
+  while (!h.cards().includes('item-150')) { h.more().onClick(); await h.flush(); }
+}
+
+for (const view of ['cards', 'explore']) {
+  test(`${view} preserves the loaded window during a same-scope save refresh`, async t => {
+    const h = harness(t, view, { sort: 'title_asc' });
+    await loadTwoPages(h);
+    const visibleBefore = h.cards();
+    h.update({ reload: 1 }); await h.flush();
+    assert.deepEqual(h.cards(), visibleBefore, 'pending refresh retains the browsing window');
+    assert.equal(h.more().disabled, true, 'pause pagination while the current window is refreshed');
+    h.calls[2].resolve(page(0)); await h.flush();
+    assert.deepEqual(h.cards(), visibleBefore, 'do not publish only the first refreshed page');
+    assert.equal(h.calls[3].params.offset, 100);
+    assert.equal(h.calls[3].params.limit, 100, 'refresh uses bounded API pages');
+    const secondPage = page(100);
+    secondPage.items[50] = { ...secondPage.items[50], favorite: true, notes: 'Saved edit' };
+    h.calls[3].resolve(secondPage); await h.flush();
+    assert.deepEqual(h.cards(), visibleBefore);
+    assert.equal(h.query().data.items.find(value => value.id === 'item-150').favorite, true);
+    assert.equal(h.query().data.items.find(value => value.id === 'item-150').notes, 'Saved edit');
+    assert.equal(h.query().loading, false);
+    assert.equal(h.calls.length, 4, 'do not fetch pages beyond the loaded window');
+    h.query().loadMore(); await h.flush();
+    assert.equal(h.calls[4].params.offset, 200);
+  });
+}
+
+test('partial refresh failure retains all old pages and retries the full loaded window', async t => {
+  const h = harness(t);
+  await loadTwoPages(h);
+  h.update({ reload: 1 }); await h.flush();
+  h.calls[2].resolve(page(0)); await h.flush();
+  assert.ok(h.calls[3], 'refresh must include the second loaded page');
+  h.calls[3].reject(Error('synthetic refresh offline')); await h.flush();
+  assert.equal(h.query().data.items.length, 200);
+  assert.ok(h.query().error);
+  assert.equal(h.query().loading, false);
+  assert.equal(h.query().hasMore, false, 'pause automatic pagination until the failed refresh is retried');
+  h.query().loadMore(); await h.flush();
+  assert.equal(h.calls.length, 4, 'do not append to a partially refreshed snapshot');
+  h.update({ reload: 2 }); await h.flush();
+  h.calls[4].resolve(page(0)); await h.flush();
+  h.calls[5].resolve(page(100)); await h.flush();
+  assert.equal(h.query().data.items.length, 200);
+  assert.equal(h.query().error, undefined);
+});
+
+test('superseded refreshes and load-more responses cannot truncate or extend the current window', async t => {
+  const h = harness(t);
+  await loadTwoPages(h);
+  h.query().loadMore(); await h.flush();
+  const oldMore = h.calls[2];
+  h.update({ reload: 1 }); await h.flush();
+  h.calls[3].resolve(page(0)); await h.flush();
+  const oldRefreshPage = h.calls[4];
+  assert.ok(oldRefreshPage);
+  h.update({ reload: 2 }); await h.flush();
+  oldMore.resolve(page(200)); oldRefreshPage.resolve(page(100)); await h.flush();
+  assert.equal(h.query().data.items.length, 200);
+  h.calls[5].resolve(page(0)); await h.flush();
+  assert.equal(h.calls[6].params.offset, 100);
+  h.calls[6].resolve(page(100)); await h.flush();
+  assert.equal(h.query().data.items.length, 200);
+  assert.equal(h.query().loading, false);
+});
+
+test('changing scope during a window refresh resets to one page and rejects old results', async t => {
+  const h = harness(t);
+  await loadTwoPages(h);
+  h.update({ reload: 1 }); await h.flush();
+  h.calls[2].resolve(page(0)); await h.flush();
+  const oldRefreshPage = h.calls[3];
+  assert.ok(oldRefreshPage);
+  h.update({ q: 'Other', cluster: 'other-collection', sort: 'title_asc' }); await h.flush();
+  assert.equal(h.calls[4].params.offset, 0);
+  h.calls[4].resolve(page(0, 100, 700)); await h.flush();
+  oldRefreshPage.resolve(page(100)); await h.flush();
+  assert.equal(h.query().data.items.length, 100);
+  assert.equal(h.query().data.total, 700);
+  assert.equal(h.calls.length, 5);
+  assert.equal(h.query().dataScope.q, 'Other');
+});
+
+test('refresh handles deletions, deduplicates boundary shifts, and advances by the server window', async t => {
+  const h = harness(t);
+  await loadTwoPages(h);
+  h.update({ reload: 1 }); await h.flush();
+  h.calls[2].resolve(page(0, 100, 250)); await h.flush();
+  assert.ok(h.calls[3]);
+  h.calls[3].resolve({ ...page(100, 100, 250), items: [item(99), ...page(101, 99).items] }); await h.flush();
+  assert.equal(h.query().data.items.length, 199);
+  h.update({ reload: 2 }); await h.flush();
+  h.calls[4].resolve(page(0, 100, 125)); await h.flush();
+  h.calls[5].resolve(page(100, 25, 125)); await h.flush();
+  assert.equal(h.query().data.items.length, 125);
+  assert.equal(h.query().hasMore, false);
+  assert.equal(h.query().data.total, 125);
+});
+
+test('refresh retains a window beyond 1000 without increasing API page size', async t => {
+  const h = harness(t);
+  h.calls[0].resolve(page(0)); await h.flush();
+  for (let offset = 100; offset <= 1000; offset += 100) {
+    h.query().loadMore(); await h.flush();
+    h.calls.at(-1).resolve(page(offset, offset === 1000 ? 1 : 100)); await h.flush();
+  }
+  h.update({ reload: 1 }); await h.flush();
+  for (let offset = 0; offset <= 1000; offset += 100) {
+    assert.equal(h.calls.at(-1).params.offset, offset);
+    assert.equal(h.calls.at(-1).params.limit, 100);
+    assert.equal(h.query().data.items.length, 1001);
+    h.calls.at(-1).resolve(page(offset, offset === 1000 ? 1 : 100)); await h.flush();
+  }
+  assert.equal(h.query().data.items.length, 1001);
+  assert.equal(h.query().hasMore, false);
+  assert.equal(h.calls.length, 22);
+});
+
+test('an empty refreshed page terminates the window even if total is temporarily stale', async t => {
+  const h = harness(t);
+  await loadTwoPages(h);
+  h.update({ reload: 1 }); await h.flush();
+  h.calls[2].resolve(page(0)); await h.flush();
+  h.calls[3].resolve(page(100, 0)); await h.flush();
+  assert.equal(h.query().data.items.length, 100);
+  assert.equal(h.query().hasMore, false);
+  assert.equal(h.query().loading, false);
+  assert.equal(h.calls.length, 4);
+});
