@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { flushSync } from 'react-dom';
 import { Archive, ArchiveRestore, Check, Ellipsis, FolderInput, Plus, Star, Tags, Trash2, XCircle } from 'lucide-react';
 import { api, isDemoMode } from './api/client';
 import TopBar from './components/TopBar';
@@ -36,14 +35,6 @@ const PROMPT_LANGUAGE_STORAGE_KEY = 'image-prompt-library.preferred_prompt_langu
 const VIEW_STORAGE_KEY = 'image-prompt-library.view_mode.v2';
 const FRONTEND_BUILD_VERSION = import.meta.env.VITE_APP_VERSION || '';
 const FRONTEND_VERSION_RELOAD_STORAGE_KEY = 'image-prompt-library.frontend_version_reload_target.v1';
-
-type NativeViewTransition = {
-  finished: Promise<void>;
-};
-
-type ViewTransitionDocument = Document & {
-  startViewTransition?: (update: () => void) => NativeViewTransition;
-};
 
 function loadPreferredLanguage(): PromptCopyLanguage {
   if (typeof window === 'undefined') return DEFAULT_PROMPT_LANGUAGE;
@@ -106,9 +97,7 @@ export default function App() {
   const [configSection, setConfigSection] = useState<'api'|'general'|'agent'|'capture'|'data'|'about'>();
   const [configurationRevision, setConfigurationRevision] = useState(0);
   useEffect(() => { const refresh = () => setConfigurationRevision(value => value + 1); window.addEventListener('ipl:agent-config-changed', refresh); return () => window.removeEventListener('ipl:agent-config-changed', refresh); }, []);
-  const [viewTransition, setViewTransition] = useState<'to-explore' | 'to-cards'>();
-  const viewTransitionTimerRef = useRef<number | undefined>(undefined);
-  const viewTransitionRunRef = useRef(0);
+  const viewNavigationRunRef = useRef(0);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [configOpen, setConfigOpen] = useState(() => !isDemoMode && ['capture_pair', 'capture_organizer'].some(key => new URLSearchParams(location.search).has(key)));
   const [focusConfigProviders, setFocusConfigProviders] = useState(false);
@@ -201,8 +190,7 @@ export default function App() {
     };
   }, [selectionActionsOpen]);
   useEffect(() => () => {
-    if (viewTransitionTimerRef.current !== undefined) window.clearTimeout(viewTransitionTimerRef.current);
-    document.documentElement.removeAttribute('data-view-transition');
+    viewNavigationRunRef.current += 1;
   }, []);
   const refreshClusters = useCallback(async () => {
     const requestId = clustersRequestRef.current + 1;
@@ -334,45 +322,20 @@ export default function App() {
   };
   const updateView = (nextView: ViewMode) => {
     if (nextView === view) return;
+    const run = ++viewNavigationRunRef.current;
     cancelPendingEdit();
     viewScroll.current[view] = window.scrollY;
-    const direction = nextView === 'explore' ? 'to-explore' : 'to-cards';
-    const commitView = () => {
-      setGalleryQueueOpen(false);
-      if (nextView === 'explore' || nextView === 'cards') {
-        setBatchActionDialog(undefined);
-        setSelectionActionsOpen(false);
-      }
-      setView(nextView);
-      requestAnimationFrame(() => window.scrollTo({top:viewScroll.current[nextView] || 0,behavior:'instant'}));
-      window.localStorage.setItem(VIEW_STORAGE_KEY, nextView);
-    };
-    if (viewTransitionTimerRef.current !== undefined) window.clearTimeout(viewTransitionTimerRef.current);
-    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    const transitionDocument = document as ViewTransitionDocument;
-    if (!reducedMotion && transitionDocument.startViewTransition) {
-      const run = ++viewTransitionRunRef.current;
-      document.documentElement.dataset.viewTransition = direction;
-      try {
-        const transition = transitionDocument.startViewTransition(() => {
-          flushSync(commitView);
-        });
-        void transition.finished.finally(() => {
-          if (viewTransitionRunRef.current === run) {
-            document.documentElement.removeAttribute('data-view-transition');
-          }
-        }).catch(() => undefined);
-        return;
-      } catch {
-        document.documentElement.removeAttribute('data-view-transition');
-      }
+    setGalleryQueueOpen(false);
+    if (nextView === 'explore' || nextView === 'cards') {
+      setBatchActionDialog(undefined);
+      setSelectionActionsOpen(false);
     }
-    setViewTransition(direction);
-    commitView();
-    viewTransitionTimerRef.current = window.setTimeout(() => {
-      viewTransitionTimerRef.current = undefined;
-      setViewTransition(undefined);
-    }, 220);
+    // Keep the live header and content instead of compositing old/new snapshots.
+    setView(nextView);
+    requestAnimationFrame(() => {
+      if (viewNavigationRunRef.current === run) window.scrollTo({top:viewScroll.current[nextView] || 0,behavior:'instant'});
+    });
+    window.localStorage.setItem(VIEW_STORAGE_KEY, nextView);
   };
   const updateSort = (nextSort: ItemSortMode) => {
     setSort(nextSort);
@@ -523,7 +486,7 @@ export default function App() {
       </div>
     )}
     <TopBar t={t} q={q} queryFilterChips={queryFilterChips} collectionName={localizedClusterName(selectedCluster, uiLanguage)} onClearCollection={clearCluster} updateBadgeLabel={updateBadgeLabel} onQ={setQ} view={view} onView={updateView} onFilters={openFilters} onConfig={openConfig} onCapture={isDemoMode ? undefined : openNewItemEditor} onTrash={isDemoMode ? undefined : () => { cancelPendingEdit(); setTrashOpen(true); }} trashLabel={trashLabels(uiLanguage).title} filtersOpen={filtersOpen} configOpen={configOpen} hasActiveFilter={Boolean(selectedCluster)} modalOpen={blockingModalOpen} />
-    <div className={`content-plane${viewTransition ? ` ${viewTransition}` : ''}`} inert={blockingModalOpen} aria-hidden={blockingModalOpen || undefined}>
+    <div className="content-plane" inert={blockingModalOpen} aria-hidden={blockingModalOpen || undefined}>
     {isDemoMode && (
       <div className="demo-banner" role="status">
         <strong>{t('onlineReadOnlyDemo')}</strong>

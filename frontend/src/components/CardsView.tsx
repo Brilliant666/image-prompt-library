@@ -72,6 +72,8 @@ export default function CardsView({
     if (layout !== 'horizontal' || !grid) return;
     const measureColumns = () => {
       const width = grid.getBoundingClientRect().width;
+      // Hidden views have no measurable width; keep card parents stable until visible.
+      if (width <= 0) return;
       // Match the existing vertical CSS columns and sparse-collection breakpoints.
       const count = window.innerWidth <= 400 ? 1
         : window.innerWidth <= 760 ? (sparseCount === 1 ? 1 : 2)
@@ -168,7 +170,7 @@ export default function CardsView({
   }
 
   const renderCard = (item: ItemSummary) => (
-    <ItemCard key={item.id} t={t} item={item} onOpen={onOpen} onFavorite={onFavorite} onEdit={onEdit} editBusy={editingItemId === item.id} onToggleSelection={onToggleSelection} isSelecting={Boolean(onToggleSelection)} isSelected={Boolean(selectedIds?.has(item.id))} onCopyPrompt={onCopyPrompt} showActions={showActions} />
+    <ItemCard key={item.id} t={t} item={item} imageSizes={sparseCount ? '100vw' : undefined} onOpen={onOpen} onFavorite={onFavorite} onEdit={onEdit} editBusy={editingItemId === item.id} onToggleSelection={onToggleSelection} isSelecting={Boolean(onToggleSelection)} isSelected={Boolean(selectedIds?.has(item.id))} onCopyPrompt={onCopyPrompt} showActions={showActions} />
   );
 
   return (

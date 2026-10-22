@@ -78,6 +78,15 @@ test('Library defaults to the unchanged vertical grid without writing a preferen
   assert.deepEqual(h.writes, []);
 });
 
+test('sparse Collection cards request larger responsive images while ordinary search cards use the standard sizes', () => {
+  const sparse = harness(storage(), { clusterName: 'Small collection' });
+  assert(sparse.cards().every(card => card.props.imageSizes === '100vw'));
+  const regular = harness(storage(), { hasActiveSearch: true });
+  assert(regular.cards().every(card => card.props.imageSizes === undefined));
+  sparse.update({ items: Array.from({ length: 9 }, (_, index) => ({ id: String(index) })) });
+  assert(sparse.cards().every(card => card.props.imageSizes === undefined));
+});
+
 test('layout callback changes presentation only and preserves item order, selection and sorting callbacks', () => {
   const h = harness(storage());
   const before = h.cards().map(card => card.props.item);
@@ -138,6 +147,47 @@ test('responsive arrangement redistributes every item once on container and view
   h.resize(1200, 900);
   assert.equal(h.columns().length, 4);
   assert.deepEqual(h.cards().map(card => card.props.item.id).sort(), items.map(item => item.id).sort());
+});
+
+test('hidden Library keeps each horizontal card in its existing column until a visible resize', () => {
+  const items = Array.from({ length: 100 }, (_, i) => ({ id: `${i + 1}` }));
+  const h = harness(storage('horizontal'), { items, selectedIds: new Set(['2']) });
+  h.resize(1600, 1400);
+  const before = h.columns();
+  assert.equal(before.length, 6);
+
+  // App keeps Library mounted with `hidden`; its observed grid then measures zero.
+  h.resize(1600, 0);
+  assert.deepEqual(h.columns(), before, 'hiding must not move cards to new React parents');
+  assert.equal(h.activeObservers(), 1, 'keep observing so reopening can measure the visible grid');
+  h.resize(1600, 1400);
+  assert.deepEqual(h.columns(), before, 'reopening at the same size preserves card parents');
+
+  h.resize(600, 0);
+  assert.deepEqual(h.columns(), before, 'viewport changes while hidden must also wait for visible dimensions');
+  h.resize(600, 500);
+  assert.equal(h.columns().length, 2);
+  assert.deepEqual(h.columns(), [items.filter((_, i) => i % 2 === 0).map(item => item.id), items.filter((_, i) => i % 2 === 1).map(item => item.id)]);
+  const second = h.cards().find(card => card.props.item.id === '2');
+  assert.equal(second.props.item, items[1]);
+  assert.equal(second.props.isSelected, true);
+  second.props.onOpen('2');
+  second.props.onToggleSelection('2');
+  assert.deepEqual(h.open, ['2']);
+  assert.deepEqual(h.selected, ['2']);
+  assert.deepEqual(h.writes, []);
+  h.unmount();
+  assert.equal(h.activeObservers(), 0);
+});
+
+test('hidden sparse collections retain their columns across viewport changes and measure on reveal', () => {
+  const h = harness(storage('horizontal'), { clusterName: 'Collection', items: [{ id: 'one' }, { id: 'two' }, { id: 'three' }] });
+  const before = h.columns();
+  assert.equal(before.length, 3);
+  h.resize(400, 0);
+  assert.deepEqual(h.columns(), before);
+  h.resize(400, 350);
+  assert.deepEqual(h.columns(), [['one', 'two', 'three']]);
 });
 
 test('sparse collections retain original one, two or three desktop columns and mobile breakpoints', () => {

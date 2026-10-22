@@ -833,6 +833,33 @@ test('Library card keeps desktop actions and exposes a compact mobile More trigg
   assert.equal((selectingHtml.match(/aria-label="Select Item 0"/g) || []).length, 1);
 });
 
+test('Library cards offer responsive thumbnails while downloads retain the original image', () => {
+  const value = item(0);
+  value.first_image = { ...value.first_image, width: 2000, height: 3000, original_path: 'originals/result.png', thumb_path: 'thumbs/result.webp', preview_path: 'previews/result.webp' };
+  const html = renderToStaticMarkup(React.createElement(ItemCard, { t, item: value, onOpen() {}, onCopyPrompt() {} }));
+  assert.match(html, /<img[^>]*src="\/media\/thumbs\/result.webp"/);
+  assert.match(html, /srcSet="\/media\/thumbs\/result.webp 280w, \/media\/previews\/result.webp 933w"/);
+  assert.match(html, /sizes="\(max-width: 520px\) 100vw, \(max-width: 760px\) 50vw, 320px"[^>]*loading="lazy"/);
+  assert.match(html, /width="2000" height="3000"/);
+  assert.match(html, /style="aspect-ratio:2000 \/ 3000"/);
+  assert.match(html, /href="\/media\/originals\/result.png" download="item-0.png"/);
+  const sparseHtml = renderToStaticMarkup(React.createElement(ItemCard, { t, item: value, imageSizes: '100vw', onOpen() {}, onCopyPrompt() {} }));
+  assert.match(sparseHtml, /sizes="100vw"/);
+});
+
+test('Library cards keep legacy image fallbacks and original downloads without guessing source dimensions', () => {
+  for (const firstImage of [
+    { original_path: 'originals/legacy.png', preview_path: 'previews/legacy.webp', thumb_path: 'thumbs/legacy.webp' },
+    { original_path: 'originals/legacy.png', preview_path: 'previews/legacy.webp', width: 2000, height: 3000 },
+  ]) {
+    const value = { ...item(0), first_image: firstImage };
+    const html = renderToStaticMarkup(React.createElement(ItemCard, { t, item: value, onOpen() {}, onCopyPrompt() {} }));
+    assert.match(html, /<img[^>]*src="\/media\/previews\/legacy.webp"/);
+    assert.doesNotMatch(html, /srcSet=|sizes=/);
+    assert.match(html, /href="\/media\/originals\/legacy.png"/);
+  }
+});
+
 test('Config provider actions clear busy on close without accepting stale results', async () => {
   const config = await readFile(`${ROOT}/frontend/src/components/ConfigPanel.tsx`, 'utf8');
 
@@ -893,12 +920,7 @@ test('Explore wiring preserves Library management, semantic appearance, and rest
   assert.match(galleryWorkspace, /<TaskGrid[\s\S]*?onOpen=/);
   assert.equal((app.match(/className="fab select-fab"/g) || []).length, 1);
   assert.match(app, /dataScopeMatches/);
-  assert.match(app, /const \[viewTransition, setViewTransition\]/);
-  assert.match(app, /startViewTransition\?: \(update: \(\) => void\) => NativeViewTransition/);
-  assert.match(app, /transitionDocument\.startViewTransition\(\(\) => \{[\s\S]*?flushSync\(commitView\)/);
-  assert.match(app, /className=\{`content-plane\$\{viewTransition/);
-  assert.match(app, /const direction = nextView === 'explore' \? 'to-explore' : 'to-cards';/);
-  assert.match(app, /window\.setTimeout\([\s\S]*?\}, 220\)/);
+  assert.match(app, /className="content-plane"/);
   assert.match(app, /loading && !dataScopeMatches \? ' is-scope-loading'/);
   assert.match(app, /const contentLoading = initialLoading[\s\S]*?clustersLoading/);
   assert.equal(app.match(/loading=\{contentLoading \|\| refreshing\}/g)?.length, 2,
@@ -1277,15 +1299,6 @@ test('redesign interaction guards keep overlays mutually exclusive and focus-saf
   assert.match(styles, /@keyframes generation-exposure-sweep/);
   assert.match(styles, /\.generation-download-overlay,\.generation-fullscreen-overlay\{[^}]*position:absolute;[^}]*top:12px;[^}]*z-index:9/);
   assert.match(styles, /\.content-plane\{min-width:0\}/);
-  assert.match(styles, /html\[data-view-transition\]\{view-transition-name:none\}/);
-  assert.match(styles, /html\[data-view-transition\] \.content-plane\{view-transition-name:library-content\}/);
-  assert.match(styles, /html\[data-view-transition\] \.chrome\{view-transition-name:library-chrome\}/);
-  assert.match(styles, /html\[data-view-transition\] \.app-command-dock\{view-transition-name:library-command-dock\}/);
-  assert.match(styles, /::view-transition-group\(library-content\),[\s\S]*?::view-transition-new\(library-command-dock\)\{animation:none\}/);
-  assert.match(styles, /\.content-plane\.to-explore\{animation:content-plane-from-left 220ms/);
-  assert.match(styles, /\.content-plane\.to-cards\{animation:content-plane-from-right 220ms/);
-  assert.match(styles, /html\[data-view-transition="to-explore"\]::view-transition-old\(library-content\)/);
-  assert.match(styles, /html\[data-view-transition="to-cards"\]::view-transition-new\(library-content\)/);
   assert.match(styles, /button,input,textarea,select\{font:inherit\}/);
   assert.match(styles, /@font-face\{\s*font-family:"IPL YaHei Balanced";\s*src:local\("Microsoft YaHei UI Light"\),local\("Microsoft YaHei Light"\);\s*font-style:normal;\s*font-weight:100 500/);
   assert.match(styles, /@font-face\{\s*font-family:"IPL YaHei Balanced";\s*src:local\("Microsoft YaHei UI"\),local\("Microsoft YaHei"\);\s*font-style:normal;\s*font-weight:501 900/);
