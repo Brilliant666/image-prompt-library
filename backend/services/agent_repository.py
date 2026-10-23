@@ -67,8 +67,16 @@ class AgentRepository:
         selected = next((p for p in profiles if p["id"] == config["textProfileId"]), None)
         if config["apiConfigMode"] != "off" and (not selected or not selected["configured"]):
             issues.append({"code": "configuration_incomplete", "field": "textProfileId", "message": "请选择已配置的文本 API 配置。"})
+        image_issues = []
+        if config["apiConfigMode"] == "hybrid":
+            image = next((p for p in profiles if p["id"] == config["imageProfileId"]), None)
+            if not image or not image["configured"]:
+                image_issues.append({"code": "configuration_incomplete", "field": "imageProfileId", "message": "请选择已配置的图片 API 配置；仍可发送纯文本消息。"})
+            elif not (config["imageModel"].strip() or image["model"].strip()):
+                image_issues.append({"code": "configuration_incomplete", "field": "imageModel", "message": "请选择图片模型，或设置该图片 API 配置的默认模型。"})
         return {"revision": row["revision"] if row else 0, "config": config, "profiles": profiles,
                 "ready": not issues, "issues": issues,
+                "imageReady": not issues and not image_issues, "imageIssues": image_issues,
                 "capabilities": {"modes": ["off", "native", "hybrid"], "maxInputImages": 4,
                                  "maxToolRounds": 50, "maxImageJobs": 20, "webSearch": True,
                                  "masks": config["apiConfigMode"] != "hybrid", "progressTransport": "poll"}}
@@ -107,10 +115,23 @@ class AgentRepository:
                          (payload.id, payload.title, now, now))
         return self.snapshot(payload.id)
 
-    def list_conversations(self, limit=50, cursor=None):
+    def list_conversations(self, limit=50, cursor=None, q=None):
         offset = int(cursor or 0)
+        query = (q or "").strip()
+        where, parameters = "c.deleted=0", []
+        if query:
+            # Search only visible prose; tool arguments and internal response JSON
+            # must not make an otherwise unrelated conversation match.
+            pattern = "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            where += """ AND (c.title LIKE ? ESCAPE '\\' OR EXISTS (
+                SELECT 1 FROM agent_rounds r WHERE r.conversation_id=c.id AND r.deleted=0
+                AND (json_extract(r.data, '$.prompt') LIKE ? ESCAPE '\\'
+                  OR json_extract(r.data, '$.assistantContent') LIKE ? ESCAPE '\\')
+            ))"""
+            parameters.extend([pattern, pattern, pattern])
         with connect(self.library) as conn:
-            rows = conn.execute("SELECT * FROM agent_conversations WHERE deleted=0 ORDER BY updated_at DESC,id LIMIT ? OFFSET ?", (limit + 1, offset)).fetchall()
+            rows = conn.execute(f"SELECT c.* FROM agent_conversations c WHERE {where} ORDER BY c.updated_at DESC,c.id LIMIT ? OFFSET ?",
+                                (*parameters, limit + 1, offset)).fetchall()
             values = []
             for row in rows[:limit]:
                 running = conn.execute("SELECT id FROM agent_requests WHERE conversation_id=? AND state IN ('queued','running','waiting_for_jobs','stop_requested') LIMIT 1", (row["id"],)).fetchone()
@@ -277,9 +298,8 @@ class AgentRepository:
             raise AgentError("configuration_incomplete", "请选择文本 API 配置和 Responses 模型。", 400)
         try:
             text = store.read(text_id)
-            image = store.read(config["imageProfileId"]) if config["apiConfigMode"] == "hybrid" else text
         except (ValueError, OpenAICompatibleError):
-            raise AgentError("configuration_incomplete", "所选 API 配置不存在。", 400) from None
+            raise AgentError("configuration_incomplete", "所选文本 API 配置不存在。", 400) from None
         if not text["api_key"] or not text["base_url"]:
             raise AgentError("configuration_incomplete", "文本 API 配置不完整。", 400)
         auth = body.authorization
@@ -289,18 +309,32 @@ class AgentRepository:
             raise AgentError("authorization_denied", "当前设置未启用网络搜索。", 400)
         if (not auth.allowImageGeneration and auth.maxImageJobs != 0) or (auth.allowImageGeneration and auth.maxImageJobs < 1):
             raise AgentError("authorization_denied", "生图授权与图片额度不一致。", 400)
+        image = text if config["apiConfigMode"] != "hybrid" else None
         if auth.allowImageGeneration and config["apiConfigMode"] == "hybrid":
-            if not image["api_key"] or not image["base_url"] or not (config["imageModel"] or image["model"]):
+            if not config["imageProfileId"]:
+                raise AgentError("configuration_incomplete", "请选择图片 API 配置。", 400)
+            try:
+                image = store.read(config["imageProfileId"])
+            except (ValueError, OpenAICompatibleError):
+                raise AgentError("configuration_incomplete", "所选图片 API 配置不存在。", 400) from None
+            model = config["imageModel"].strip() or image["model"].strip()
+            if not image["api_key"] or not image["base_url"] or not model:
                 raise AgentError("configuration_incomplete", "图像 API 配置不完整。", 400)
-            config["imageModel"] = config["imageModel"] or image["model"]
-        config.update(textProfileId=text["id"], imageProfileId=image["id"],
-                      textProfileFingerprint=public_profile_digest(text), imageProfileFingerprint=public_profile_digest(image),
-                      _profileDigests={text["id"]: fingerprint(text), image["id"]: fingerprint(image)})
+            config["imageModel"] = model
+        digests = {text["id"]: fingerprint(text)}
+        if image:
+            digests[image["id"]] = fingerprint(image)
+        config.update(textProfileId=text["id"], imageProfileId=image["id"] if image else None,
+                      textProfileFingerprint=public_profile_digest(text),
+                      imageProfileFingerprint=public_profile_digest(image) if image else None,
+                      _profileDigests=digests)
         return config
 
     def verified_profile(self, request, image=False):
         frozen = request["frozen"]
         pid = frozen["imageProfileId" if image else "textProfileId"]
+        if not pid:
+            raise AgentError("configuration_incomplete", "本轮未配置此 API，不能回退到其他供应商。")
         try:
             profile = OpenAICompatibleConfig(library_path=self.library).read(pid)
         except (ValueError, OpenAICompatibleError):

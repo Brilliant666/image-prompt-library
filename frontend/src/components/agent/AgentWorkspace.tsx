@@ -4,8 +4,8 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowDown, ArrowUp, Check, ChevronLeft, ChevronRight, Copy, Download, ImagePlus, LoaderCircle, MessageSquare, PanelLeftClose, PanelLeftOpen, Pencil, Plus, RotateCcw, Search, Settings, Square, Trash2, X } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import { AgentMarkdown } from './AgentMarkdown';
+import { useAgentConversations } from './useAgentConversations';
 import { api, mediaUrl } from '../../api/client';
 import { AgentApiError, agentApi, getAgentConfig, type AgentConfigResponse, type AgentConversationSummary, type AgentImage, type AgentImageParams, type AgentRound, type AgentRoundCreate, type AgentSnapshot } from '../../api/agentClient';
 import type { GenerationJobRecord } from '../../types';
@@ -22,6 +22,7 @@ import './AgentWorkspace.css';
 export interface AgentWorkspaceProps {
   active: boolean;
   onOpenSettings: () => void;
+  onProfileChange?: (profileId: string) => void;
   onOpenJob: (jobId: string) => void;
   onLibraryChanged: () => void;
   onJobsChanged?: () => void;
@@ -36,15 +37,6 @@ function safeStorageGet(key: string) { try { return localStorage.getItem(key); }
 function safeStorageSet(key: string, value: string) { try { localStorage.setItem(key, value); } catch { /* UI preferences may be unavailable; submission journal is handled separately. */ } }
 function errorText(reason: unknown) { return reason instanceof Error ? reason.message : '请求未完成'; }
 function sameOriginImage(url?: string | null) { if (!url) return ''; try { const value = new URL(url, location.origin); return value.origin === location.origin ? value.href : ''; } catch { return ''; } }
-
-function MarkdownMessage({ text }: { text: string }) {
-  return <div className="agent-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml components={{
-    a: ({ children, href }) => <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,
-    // A model cannot trigger arbitrary image fetches through Markdown. Actual
-    // images below are server-issued handles from the generation job store.
-    img: ({ alt }) => <span className="agent-help">[图片链接：{alt || '未自动加载'}]</span>,
-  }}>{text}</ReactMarkdown></div>;
-}
 
 function ResultCard({ job, preview, onOpen, onSaved, onError }: { job: GenerationJobRecord; preview?: AgentImage; onOpen: () => void; onSaved: () => void; onError: (value: string) => void }) {
   const [saving, setSaving] = useState(false);
@@ -65,10 +57,8 @@ function ResultCard({ job, preview, onOpen, onSaved, onError }: { job: Generatio
   </article>;
 }
 
-export default function AgentWorkspace({ active, onOpenSettings, onOpenJob, onLibraryChanged, onJobsChanged, focusConversationId, focusToken }: AgentWorkspaceProps) {
+export default function AgentWorkspace({ active, onOpenSettings, onProfileChange, onOpenJob, onLibraryChanged, onJobsChanged, focusConversationId, focusToken }: AgentWorkspaceProps) {
   const [config, setConfig] = useState<AgentConfigResponse | null>(null);
-  const [conversations, setConversations] = useState<AgentConversationSummary[]>([]);
-  const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [snapshot, setSnapshot] = useState<AgentSnapshot | null>(null);
   const [preferences, setPreferences] = useState(readLocalPreferences);
   const [activeId, setActiveId] = useState<string | null>(() => safeStorageGet(ACTIVE_KEY));
@@ -84,6 +74,7 @@ export default function AgentWorkspace({ active, onOpenSettings, onOpenJob, onLi
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [search, setSearch] = useState('');
+  const { rows: conversations, nextCursor, loading: searching, error: searchError, stale: searchStale, refresh: refreshList, upsert: upsertConversation, remove: removeConversation } = useAgentConversations(active, search);
   const [collapsed, setCollapsed] = useState(false);
   const [picker, setPicker] = useState(false);
   const [showMentions, setShowMentions] = useState(false);
@@ -111,6 +102,12 @@ export default function AgentWorkspace({ active, onOpenSettings, onOpenJob, onLi
   const uncertain = pending.find(entry => entry.conversationId === activeId);
   const inputLimit = config?.capabilities.maxInputImages ?? 4;
 
+  useEffect(() => { onProfileChange?.(activeProfileId); }, [activeProfileId, onProfileChange]);
+  useEffect(() => {
+    if (config?.config.apiConfigMode === 'hybrid' && !config.imageReady) setAllowImages(false);
+    if (config && (!config.config.webSearch || !config.capabilities.webSearch)) setAllowWebSearch(false);
+  }, [config]);
+
   useEffect(() => {
     if (focusConversationId) { setActiveId(focusConversationId); setDeleteTarget(null); }
   }, [focusConversationId, focusToken]);
@@ -119,32 +116,31 @@ export default function AgentWorkspace({ active, onOpenSettings, onOpenJob, onLi
     if (busy || uncertain) return;
     setDrafts(old => ({ ...old, [draftKey]: { ...(old[draftKey] || emptyDraft()), ...change } }));
   }
-  const refreshList = useCallback(async () => {
-    const result = await agentApi.conversations(); setConversations(result.conversations); setNextCursor(result.nextCursor);
-    return result.conversations;
-  }, []);
   const applySnapshot = useCallback((value: AgentSnapshot) => {
     if (activeIdRef.current === value.conversation.id) setSnapshot(old => !old || old.conversation.id !== value.conversation.id || value.revision >= old.revision ? value : old);
     const row: AgentConversationSummary = { id: value.conversation.id, title: value.conversation.title, activeRoundId: value.conversation.activeRoundId, createdAt: value.conversation.createdAt, updatedAt: value.conversation.updatedAt, roundCount: value.conversation.rounds.length, runningRequestId: isAgentRequestActive(value.request?.state) ? value.request!.id : null, revision: value.revision };
-    setConversations(old => [row, ...old.filter(item => item.id !== row.id)].sort((a, b) => b.updatedAt - a.updatedAt));
-  }, []);
+    upsertConversation(row);
+  }, [upsertConversation]);
   useEffect(() => {
     if (!active) return;
     let disposed = false;
     setError('');
-    void Promise.all([getAgentConfig(), refreshList()]).then(([value, rows]) => {
+    void getAgentConfig().then(value => {
       if (disposed) return;
       setConfig(value); setToolBudget(old => Math.min(old, value.config.maxToolRounds)); setImageBudget(old => Math.min(old, value.config.maxImageJobs));
-      if (!activeIdRef.current && rows.length) setActiveId(rows[0].id);
     }).catch(reason => { if (!disposed) setError(errorText(reason)); }).finally(() => { if (!disposed) setLoading(false); });
     const refreshConfig = () => { void getAgentConfig().then(value => {
       if (disposed) return;
       setConfig(value); setToolBudget(old => Math.min(old, value.config.maxToolRounds)); setImageBudget(old => Math.min(old, value.config.maxImageJobs));
       if (!value.config.webSearch || !value.capabilities.webSearch) setAllowWebSearch(false);
+      if (value.config.apiConfigMode === 'hybrid' && !value.imageReady) setAllowImages(false);
     }).catch(reason => { if (!disposed) setError(errorText(reason)); }); };
     window.addEventListener('ipl:agent-config-changed', refreshConfig);
     return () => { disposed = true; window.removeEventListener('ipl:agent-config-changed', refreshConfig); };
-  }, [active, refreshList]);
+  }, [active]);
+  useEffect(() => {
+    if (active && !search.trim() && !activeIdRef.current && conversations.length) setActiveId(conversations[0].id);
+  }, [active, search, conversations]);
   useEffect(() => {
     if (!activeId) { setSnapshot(null); try { localStorage.removeItem(ACTIVE_KEY); } catch { /* optional UI preference */ } return; }
     const sequence = ++requestSequence.current;
@@ -302,15 +298,19 @@ export default function AgentWorkspace({ active, onOpenSettings, onOpenJob, onLi
     <aside className="agent-conversations">
       <div className="agent-sidebar-head"><strong>创作会话</strong><button onClick={() => setCollapsed(true)} title="收起会话列表" aria-label="收起会话列表"><PanelLeftClose size={18} /></button></div>
       <button className="agent-new-conversation" disabled={busy} onClick={() => void newConversation()}><Plus size={17} />新建会话</button>
-      <label className="agent-conversation-search"><Search size={16} /><input aria-label="搜索会话" placeholder="搜索会话" value={search} onChange={event => setSearch(event.target.value)} /></label>
-      <nav>{conversations.filter(item => item.title.toLocaleLowerCase().includes(search.toLocaleLowerCase())).map(item => <div key={item.id} className={`agent-conversation-row ${item.id === activeId ? 'selected' : ''}`}>
+      <label className="agent-conversation-search"><Search size={16} /><input aria-label="搜索会话" placeholder="搜索标题、提问和回答" maxLength={200} value={search} onChange={event => setSearch(event.target.value)} /></label>
+      {searching && <p className="agent-help" role="status">读取会话列表…</p>}
+      {searchError && <p className="agent-error" role="alert">{searchError}<button onClick={() => void refreshList()}>重试</button></p>}
+      {search.trim() && searchStale && !searching && <button onClick={() => void refreshList()}>会话已更新，刷新搜索结果</button>}
+      {!searching && !searchError && search.trim() && !conversations.length && <p className="agent-help">没有匹配的会话</p>}
+      <nav aria-busy={searching}>{conversations.map(item => <div key={item.id} className={`agent-conversation-row ${item.id === activeId ? 'selected' : ''}`}>
         {renaming === item.id ? <form onSubmit={async event => { event.preventDefault(); try { const existing = await agentApi.conversation(item.id); const value = await agentApi.updateConversation(item.id, { expectedRevision: existing.revision, title: titleDraft }); applySnapshot(value); setRenaming(null); } catch (reason) { setError(errorText(reason)); } }}><input aria-label="会话名称" autoFocus value={titleDraft} onChange={event => setTitleDraft(event.target.value)} maxLength={200} /><button title="保存名称" type="submit"><Check size={15} /></button><button aria-label="取消重命名" type="button" onClick={() => setRenaming(null)}><X size={15} /></button></form> : <>
           <button className="agent-conversation-link" onClick={() => { setActiveId(item.id); setDeleteTarget(null); }}><span>{item.runningRequestId ? <LoaderCircle size={15} className="spin" /> : <MessageSquare size={15} />}{item.title}</span><small>{item.roundCount} 轮 · {new Date(item.updatedAt).toLocaleDateString()}</small></button>
           <div className="agent-conversation-actions"><button title="重命名会话" aria-label={`重命名 ${item.title}`} onClick={() => { setRenaming(item.id); setTitleDraft(item.title); }}><Pencil size={14} /></button><button title="删除会话" aria-label={`删除 ${item.title}`} onClick={() => setDeleteTarget(item.id)}><Trash2 size={14} /></button></div>
         </>}
-        {deleteTarget === item.id && <div className="agent-delete-confirm"><p>删除会话？画廊结果与 Library 资产会保留。</p><button onClick={async () => { try { await agentApi.deleteConversation(item.id); setConversations(old => old.filter(row => row.id !== item.id)); if (item.id === activeId) { setActiveId(null); setSnapshot(null); } setDeleteTarget(null); } catch (reason) { setError(errorText(reason)); } }}>确认删除</button><button onClick={() => setDeleteTarget(null)}>取消</button></div>}
+        {deleteTarget === item.id && <div className="agent-delete-confirm"><p>删除会话？画廊结果与 Library 资产会保留。</p><button onClick={async () => { try { await agentApi.deleteConversation(item.id); removeConversation(item.id); if (item.id === activeId) { setActiveId(null); setSnapshot(null); } setDeleteTarget(null); } catch (reason) { setError(errorText(reason)); } }}>确认删除</button><button onClick={() => setDeleteTarget(null)}>取消</button></div>}
       </div>)}</nav>
-      {nextCursor && <button onClick={async () => { try { const result = await agentApi.conversations(nextCursor); setConversations(old => [...old, ...result.conversations.filter(item => !old.some(row => row.id === item.id))]); setNextCursor(result.nextCursor); } catch (reason) { setError(errorText(reason)); } }}>加载更多会话</button>}
+      {nextCursor && <button disabled={searching} onClick={() => void refreshList(nextCursor)}>加载更多会话</button>}
     </aside>
     <main className="agent-main">
       <header className="agent-workspace-head"><div>{collapsed && <button onClick={() => setCollapsed(false)} aria-label="展开会话列表"><PanelLeftOpen size={18} /></button>}<strong>{current?.conversation.title || 'Agent'}</strong><span>{config?.config.apiConfigMode === 'hybrid' ? '混合工具模式' : config?.config.apiConfigMode === 'native' ? 'Responses 原生模式' : '跟随当前 API 配置'}</span></div><button onClick={onOpenSettings} title="Agent 设置"><Settings size={18} /><span>设置</span></button></header>
@@ -328,7 +328,7 @@ export default function AgentWorkspace({ active, onOpenSettings, onOpenJob, onLi
               <div className="agent-message-actions"><button title="复制原文" onClick={() => void copyTextToClipboard(round.prompt).then(ok => setNotice(ok ? '已复制原文' : '复制失败'))}><Copy size={15} /></button><button title="编辑重发为新分支" disabled={inFlight || busy || Boolean(uncertain)} onClick={() => void prepareEdit(round, 'edit')}><Pencil size={15} /></button><button title="重新生成为新分支" disabled={inFlight || busy || Boolean(uncertain)} onClick={() => void prepareEdit(round, 'regenerate')}><RotateCcw size={15} /></button>{siblings.length > 1 && <span className="agent-branch-controls"><button aria-label="上一分支" disabled={branchIndex === 0 || busy} onClick={() => void selectBranch(siblings[branchIndex - 1].id)}><ChevronLeft size={15} /></button>{branchIndex + 1} / {siblings.length}<button aria-label="下一分支" disabled={branchIndex === siblings.length - 1 || busy} onClick={() => void selectBranch(siblings[branchIndex + 1].id)}><ChevronRight size={15} /></button></span>}</div>
             </div>
             <div className="agent-assistant-message"><div className="agent-message-label">Agent {round.status === 'running' && <LoaderCircle size={14} className="spin" />}</div>
-              {blocks.map(block => block.type === 'text' ? <MarkdownMessage key={block.key} text={block.content} /> : block.type === 'image-task' ? <ResultCard key={block.key} job={block.task} preview={current!.images.find(image => image.id === (block.task.metadata?.agent as Record<string, unknown> | undefined)?.partialImageId)} onOpen={() => onOpenJob(block.task.id)} onSaved={() => { onLibraryChanged(); onJobsChanged?.(); void agentApi.conversation(current!.conversation.id).then(applySnapshot).catch(() => {}); }} onError={setError} /> : block.type === 'deleted-image-task' ? <p key={block.key} className="agent-missing-image">原图片任务已不可用，保留引用位置。</p> : <div key={block.key} className="agent-tool-status"><span>{block.name === 'web_search' ? '网络搜索' : block.name}</span><small>{statusText[current?.request?.toolCalls.find(call => call.callId === block.callId)?.state || block.state || ''] || (block.state === 'in_progress' ? '进行中' : '工具调用')}</small></div>)}
+              {blocks.map(block => block.type === 'text' ? <AgentMarkdown key={block.key} text={block.content} /> : block.type === 'image-task' ? <ResultCard key={block.key} job={block.task} preview={current!.images.find(image => image.id === (block.task.metadata?.agent as Record<string, unknown> | undefined)?.partialImageId)} onOpen={() => onOpenJob(block.task.id)} onSaved={() => { onLibraryChanged(); onJobsChanged?.(); void agentApi.conversation(current!.conversation.id).then(applySnapshot).catch(() => {}); }} onError={setError} /> : block.type === 'deleted-image-task' ? <p key={block.key} className="agent-missing-image">原图片任务已不可用，保留引用位置。</p> : <div key={block.key} className="agent-tool-status"><span>{block.name === 'web_search' ? '网络搜索' : block.name}</span><small>{statusText[current?.request?.toolCalls.find(call => call.callId === block.callId)?.state || block.state || ''] || (block.state === 'in_progress' ? '进行中' : '工具调用')}</small></div>)}
               {!blocks.length && round.status === 'running' && <p className="agent-help">等待模型响应…</p>}
               {round.error && <p className="agent-error">{round.error}</p>}
               {assistant?.content && <button className="agent-text-button" title="复制回答" onClick={() => void copyTextToClipboard(assistant.content).then(ok => setNotice(ok ? '已复制回答' : '复制失败'))}><Copy size={14} />复制回答</button>}
@@ -355,7 +355,8 @@ export default function AgentWorkspace({ active, onOpenSettings, onOpenJob, onLi
           <div className="agent-composer-toolbar"><div><button title="从 Library 或画廊选择图片" disabled={Boolean(uncertain) || uploading || draft.refs.length >= inputLimit} onClick={() => setPicker(true)}><ImagePlus size={18} /></button><button title="上传图片文件" disabled={Boolean(uncertain) || uploading || draft.refs.length >= inputLimit} onClick={() => fileInput.current?.click()}><Plus size={18} /></button><button title="引用图片" onClick={() => setShowMentions(value => !value)}>＠</button>{uploading && <LoaderCircle size={17} className="spin" />}</div><span className="agent-help">{draft.refs.length} / {inputLimit} 张参考</span><button className="agent-send" title={inFlight ? '停止后续调用' : '发送本轮'} aria-label={inFlight ? '停止后续调用' : '发送 Agent 消息'} disabled={inFlight ? busy : busy || uploading || !draft.text.trim() || Boolean(uncertain) || !config || (!config.ready && config.config.apiConfigMode !== 'off')} onClick={() => void (inFlight ? stop() : submit())}>{busy ? <LoaderCircle className="spin" size={18} /> : inFlight ? <Square size={17} /> : <ArrowUp size={19} />}</button></div>
         </div>
         <input ref={fileInput} type="file" accept="image/*" multiple hidden onChange={event => { const files = Array.from(event.target.files || []); event.target.value = ''; if (files.length) void addFiles(files); }} />
-        <div className="agent-authorization">{config?.config.webSearch && config.capabilities.webSearch && <label><input type="checkbox" checked={allowWebSearch} disabled={inFlight || Boolean(uncertain)} onChange={event => setAllowWebSearch(event.target.checked)} />本轮允许网络搜索</label>}<label><input type="checkbox" checked={allowImages} disabled={inFlight || Boolean(uncertain)} onChange={event => setAllowImages(event.target.checked)} />本轮允许生成图片</label><label>图片上限 <input type="number" aria-label="本轮图片上限" min={1} max={config?.config.maxImageJobs || 1} value={imageBudget} disabled={!allowImages || inFlight} onChange={event => setImageBudget(Math.max(1, Math.min(config?.config.maxImageJobs || 1, Number(event.target.value) || 1)))} /></label><label>工具轮次 <input type="number" aria-label="本轮工具轮次" min={1} max={config?.config.maxToolRounds || 1} value={toolBudget} disabled={inFlight} onChange={event => setToolBudget(Math.max(1, Math.min(config?.config.maxToolRounds || 1, Number(event.target.value) || 1)))} /></label></div>
+        <div className="agent-authorization">{config?.config.webSearch && config.capabilities.webSearch && <label><input type="checkbox" checked={allowWebSearch} disabled={inFlight || Boolean(uncertain)} onChange={event => setAllowWebSearch(event.target.checked)} />本轮允许网络搜索</label>}<label><input type="checkbox" checked={allowImages} disabled={inFlight || Boolean(uncertain) || config?.config.apiConfigMode === 'hybrid' && !config.imageReady} onChange={event => setAllowImages(event.target.checked)} />本轮允许生成图片</label><label>图片上限 <input type="number" aria-label="本轮图片上限" min={1} max={config?.config.maxImageJobs || 1} value={imageBudget} disabled={!allowImages || inFlight} onChange={event => setImageBudget(Math.max(1, Math.min(config?.config.maxImageJobs || 1, Number(event.target.value) || 1)))} /></label><label>工具轮次 <input type="number" aria-label="本轮工具轮次" min={1} max={config?.config.maxToolRounds || 1} value={toolBudget} disabled={inFlight} onChange={event => setToolBudget(Math.max(1, Math.min(config?.config.maxToolRounds || 1, Number(event.target.value) || 1)))} /></label></div>
+        {config?.config.apiConfigMode === 'hybrid' && !config.imageReady && <p className="agent-help">图片调用暂不可用：{config.imageIssues.map(issue => issue.message).join('；')}。文字讨论仍可使用。<button className="agent-text-button" onClick={onOpenSettings}>检查图片配置</button></p>}
         {config?.config.apiConfigMode === 'off' && <label className="agent-profile-select">本轮 API 配置<select value={activeProfileId} onChange={event => setActiveProfileId(event.target.value)}><option value="">选择配置</option>{config.profiles.map(profile => <option key={profile.id} value={profile.id}>{profile.display_name}</option>)}</select></label>}
         <details className="agent-image-params"><summary>图片请求设置 · {draft.params.size} · {draft.params.quality}</summary><div><label>尺寸<input aria-label="Agent 图片尺寸" list="agent-size-options" value={draft.params.size} onChange={event => updateDraft({ params: { ...draft.params, size: event.target.value } })} /><datalist id="agent-size-options">{COMPATIBLE_SIZE_OPTIONS.map(size => <option key={size} value={size}>{imageSizeLabel(size)}</option>)}</datalist></label><label>质量<select value={draft.params.quality} onChange={event => updateDraft({ params: { ...draft.params, quality: event.target.value } })}>{IMAGE25_QUALITIES.map(value => <option key={value}>{value}</option>)}</select></label><label>背景<select value={draft.params.background} onChange={event => updateDraft({ params: { ...draft.params, background: event.target.value } })}>{['auto', 'opaque', 'transparent'].map(value => <option key={value}>{value}</option>)}</select></label><label>格式<select value={draft.params.output_format} onChange={event => updateDraft({ params: { ...draft.params, output_format: event.target.value as AgentImageParams['output_format'] } })}>{['png', 'jpeg', 'webp'].map(value => <option key={value}>{value}</option>)}</select></label>{draft.params.output_format !== 'png' && <label>压缩（0–100）<input type="number" min={0} max={100} value={draft.params.output_compression ?? ''} onChange={event => updateDraft({ params: { ...draft.params, output_compression: event.target.value === '' ? null : Number(event.target.value) } })} /></label>}</div></details>
         <p className="agent-input-hint">{preferences.enterSubmit ? 'Enter 发送，Shift+Enter 换行' : 'Ctrl+Enter 发送，Enter 换行'} · 发送会调用所选文本模型，可能产生费用。配置保存与浏览不调用模型。</p>

@@ -12,3 +12,6 @@
 
 @media(min-width:621px) and (max-width:760px){.agent-workspace{height:calc(100dvh - var(--app-header-height,calc(115px + env(safe-area-inset-top))))}}
 @media(max-height:600px){.agent-workspace{min-height:540px}}
+
+.agent-markdown .katex-display{max-width:100%;overflow-x:auto;overflow-y:hidden;padding:.3em 0}
+.agent-markdown .katex{font-size:1.1em}

@@ -23,8 +23,9 @@ def save_config(payload: AgentConfigSave, request: Request):
 
 
 @router.get("/conversations")
-def list_conversations(request: Request, limit: int = Query(50, ge=1, le=100), cursor: str | None = Query(None, pattern=r"^\d+$")):
-    return repo(request).list_conversations(limit, cursor)
+def list_conversations(request: Request, limit: int = Query(50, ge=1, le=100), cursor: str | None = Query(None, pattern=r"^\d+$"),
+                       q: str | None = Query(None, max_length=200)):
+    return repo(request).list_conversations(limit, cursor, q)
 
 
 @router.post("/conversations")

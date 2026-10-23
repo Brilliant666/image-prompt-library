@@ -101,6 +101,7 @@ export default function App() {
   if (view === 'explore' || view === 'cards') libraryView.current = view;
   const viewScroll = useRef<Partial<Record<ViewMode, number>>>({});
   const [localPreferences, setLocalPreferences] = useState(readLocalPreferences);
+  const [agentProfileId, setAgentProfileId] = useState('');
   const [agentFocus,setAgentFocus]=useState<{id:string;token:number}>();
   const [galleryCommand, setGalleryCommand] = useState<GalleryCommand>();
   const [configSection, setConfigSection] = useState<'api'|'general'|'agent'|'capture'|'data'|'about'>();
@@ -505,7 +506,7 @@ export default function App() {
     : (updateStatus?.update_available && updateStatus.update_capability !== 'source' ? t('updateAvailable') : undefined);
   return <div className={`app ${view === 'explore' ? 'explore-mode' : 'cards-mode'}`}>
     <FiltersPanel t={t} open={filtersOpen} clusters={localizedClusters} total={libraryTotal} selected={clusterId} onSelect={handleFilterSelect} onClear={clearCluster} onClose={() => setFiltersOpen(false)} />
-    <ConfigPanel t={t} open={configOpen} focusProviders={focusConfigProviders} focusSection={configSection} localPreferences={localPreferences} onLocalPreferences={value => { setLocalPreferences(value); saveLocalPreferences(value); }} onClose={() => { closeConfig(); setConfigSection(undefined); setConfigurationRevision(value => value + 1); }} uiLanguage={uiLanguage} onUiLanguage={updateUiLanguage} preferredLanguage={preferredLanguage} onPreferredLanguage={updatePreferredLanguage} appearance={appearance} onAppearance={updateAppearance} defaultAiProvider={defaultAiProvider} onDefaultAiProvider={updateDefaultAiProvider} updateStatus={updateStatus} onRefreshUpdateStatus={refreshUpdateStatus} onUpdateInstalled={handleUpdateInstalled} onLibraryCleanup={saved} />
+    <ConfigPanel agentWorkspaceProfileId={agentProfileId} t={t} open={configOpen} focusProviders={focusConfigProviders} focusSection={configSection} localPreferences={localPreferences} onLocalPreferences={value => { setLocalPreferences(value); saveLocalPreferences(value); }} onClose={() => { closeConfig(); setConfigSection(undefined); setConfigurationRevision(value => value + 1); }} uiLanguage={uiLanguage} onUiLanguage={updateUiLanguage} preferredLanguage={preferredLanguage} onPreferredLanguage={updatePreferredLanguage} appearance={appearance} onAppearance={updateAppearance} defaultAiProvider={defaultAiProvider} onDefaultAiProvider={updateDefaultAiProvider} updateStatus={updateStatus} onRefreshUpdateStatus={refreshUpdateStatus} onUpdateInstalled={handleUpdateInstalled} onLibraryCleanup={saved} />
     <div className="app-content" inert={drawerModalOpen}>
     {!hasChosenUiLanguage && (
       <div ref={firstRunLanguageRef} className="first-run-language-overlay" role="dialog" aria-modal="true" aria-labelledby="first-run-language-title" tabIndex={-1} onKeyDown={handleFirstRunLanguageKeyDown}>
@@ -547,7 +548,7 @@ export default function App() {
     </main>
     {!isDemoMode && <>
       <GalleryWorkspace active={view === 'gallery'} queueOpen={galleryQueueOpen} onQueueOpenChange={setGalleryQueueOpen} t={t} preferences={localPreferences} libraryScope={appConfig?.library_path} command={galleryCommand} focusJobId={focusedGenerationJobId} onCloseDetail={() => setFocusedGenerationJobId(undefined)} refreshKey={generationQueueRefreshKey} configurationRevision={configurationRevision} promptVariablesEnabled={Boolean(appConfig?.features?.camelot?.percival)} promptLanguage={preferredLanguage === 'origin' ? uiLanguage : preferredLanguage} preferredProvider={defaultAiProvider} onOpenAgent={id => {setAgentFocus({id,token:Date.now()}); updateView('agent');}} onOpenSettings={openProviders} onAccepted={(id, autoTitle) => { saved(); setDetailId(id); if (autoTitle) trackGalleryTitle(id); }} onQueueChanged={() => setGenerationQueueRefreshKey(value => value + 1)} />
-      <AgentWorkspace focusConversationId={agentFocus?.id} focusToken={agentFocus?.token} active={view === 'agent'} onOpenSettings={() => { setFocusConfigProviders(false); setConfigSection('agent'); setConfigOpen(true); }} onOpenJob={id => {setFocusedGenerationJobId(id); updateView('gallery');}} onLibraryChanged={saved} onJobsChanged={() => setGenerationQueueRefreshKey(value => value + 1)} />
+      <AgentWorkspace onProfileChange={setAgentProfileId} focusConversationId={agentFocus?.id} focusToken={agentFocus?.token} active={view === 'agent'} onOpenSettings={() => { setFocusConfigProviders(false); setConfigSection('agent'); setConfigOpen(true); }} onOpenJob={id => {setFocusedGenerationJobId(id); updateView('gallery');}} onLibraryChanged={saved} onJobsChanged={() => setGenerationQueueRefreshKey(value => value + 1)} />
     </>}
     </div>
     {view === 'cards' && selectionMode && !isDemoMode && (

@@ -21,6 +21,8 @@ export interface AgentConfigResponse {
   profiles: OpenAICompatibleProfile[];
   capabilities: { modes: Array<AgentConfig['apiConfigMode']>; maxInputImages: number; maxToolRounds: number; maxImageJobs: number; webSearch: boolean; masks: boolean; progressTransport: 'poll' };
   ready: boolean;
+  imageReady: boolean;
+  imageIssues: Array<{ code: string; field: string | null; message: string }>;
   issues: Array<{ code: string; field: string | null; message: string }>;
 }
 export interface AgentImage {
@@ -111,7 +113,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 export const getAgentConfig = (signal?: AbortSignal) => request<AgentConfigResponse>('/config', { signal });
 export const saveAgentConfig = (expectedRevision: number, config: AgentConfig, signal?: AbortSignal) => request<AgentConfigResponse>('/config', { method: 'PUT', signal, body: JSON.stringify({ expectedRevision, config }) });
 export const agentApi = {
-  conversations: (cursor?: string, signal?: AbortSignal) => request<{ conversations: AgentConversationSummary[]; nextCursor: string | null }>(`/conversations?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, { signal }),
+  conversations: (cursor?: string, signal?: AbortSignal, query?: string) => request<{ conversations: AgentConversationSummary[]; nextCursor: string | null }>(`/conversations?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}${query?.trim() ? `&q=${encodeURIComponent(query.trim())}` : ''}`, { signal }),
   createConversation: (id: string, title?: string) => request<AgentSnapshot>('/conversations', { method: 'POST', body: JSON.stringify({ id, title }) }),
   conversation: (id: string, signal?: AbortSignal) => request<AgentSnapshot>(`/conversations/${encodeURIComponent(id)}`, { signal }),
   updateConversation: (id: string, payload: { expectedRevision: number; title?: string; activeRoundId?: string | null }) => request<AgentSnapshot>(`/conversations/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(payload) }),

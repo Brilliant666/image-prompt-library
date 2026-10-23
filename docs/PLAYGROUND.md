@@ -133,6 +133,11 @@ closing the page cannot accidentally turn it into a new paid request.
 
 Choose a full text model ID and a compatible API profile in Agent settings.
 Saving these settings does not test the endpoint or spend model credits.
+The model fields show the saved catalog for each bound profile, including the
+profile selected in the workspace when using Current API mode. Opening settings
+reads the local cache; **Refresh models** explicitly reads the provider's model
+list. Catalog changes never replace a manually entered or historical model ID.
+A listed model is not proof of Responses or image-tool compatibility.
 
 - **Hybrid**: Responses text/tool calls use the text profile. Validated
   `generate_image`, `generate_image_batch` and `continue_generation` calls create
@@ -148,6 +153,16 @@ Image generation is off for a new turn until **Allow images for this turn** is
 selected. The turn freezes its image limit and maximum Responses steps; web search
 also needs both its configuration switch and explicit turn authorization. These
 limits bound the application's dispatches, not a provider's price or billing.
+Hybrid text-only turns do not require an image profile. Text and image readiness
+are shown separately; an absent image profile blocks image authorization, without
+blocking text discussion or silently selecting another provider.
+
+Conversation search covers titles, user prompts and assistant text across the
+saved history, with pagination. It does not search tool arguments. Background
+conversation updates leave the current search pages in place and offer a refresh.
+Saved answers support inline `$...$` and block `$$...$$` math; the math formatting
+setting controls instructions to the model, while existing formulas remain readable.
+Code spans remain literal, and answer text cannot load arbitrary remote images.
 
 Only selected reference images and the selected conversation branch are sent.
 `@图1` addresses a current attachment; `@第2轮图1` addresses an output on the

@@ -84,6 +84,7 @@ export default function ConfigPanel({
   open,
   focusProviders = false,
   focusSection,
+  agentWorkspaceProfileId,
   localPreferences,
   onLocalPreferences,
   t,
@@ -104,6 +105,7 @@ export default function ConfigPanel({
   open: boolean;
   focusProviders?: boolean;
   focusSection?: SettingsSection;
+  agentWorkspaceProfileId?: string;
   localPreferences?: LocalPreferences;
   onLocalPreferences?: (preferences: LocalPreferences) => void;
   t: Translator;
@@ -580,7 +582,7 @@ export default function ConfigPanel({
 
             </div>
             <div role="tabpanel" id="settings-panel-agent" aria-labelledby="settings-tab-agent" hidden={activeSection !== 'agent'}>
-              {open && !isDemoMode ? <AgentSettings uiLanguage={uiLanguage} active={activeSection === 'agent'} /> : <p className="muted">{en ? 'Agent settings are available in the local application.' : 'Agent 配置请在本机应用中使用。'}</p>}
+              {open && !isDemoMode ? <AgentSettings workspaceProfileId={agentWorkspaceProfileId} uiLanguage={uiLanguage} active={activeSection === 'agent'} /> : <p className="muted">{en ? 'Agent settings are available in the local application.' : 'Agent 配置请在本机应用中使用。'}</p>}
             </div>
             <div role="tabpanel" id="settings-panel-capture" aria-labelledby="settings-tab-capture" hidden={activeSection !== 'capture'}>
               {open && !isDemoMode && <BrowserCaptureSettings uiLanguage={uiLanguage} />}
