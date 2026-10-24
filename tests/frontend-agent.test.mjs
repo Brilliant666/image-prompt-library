@@ -70,6 +70,31 @@ test('assistant output follows text/tool/text order and never renders hidden rea
   assert.ok(!JSON.stringify(blocks).includes('private reasoning'));
 });
 
+test('tool captions use readable labels without exposing internal function names', () => {
+  for (const [name, label] of [['generate_image', '生成图片'], ['generate_image_batch', '批量生成图片'], ['image_generation', '生成图片'], ['continue_generation', '继续生成图片'], ['web_search', '网络搜索'], ['read_agent_skill', '读取创作技能']]) {
+    assert.equal(response.getAgentToolLabel(name), label);
+  }
+  assert.equal(response.getAgentToolLabel('unknown_internal_function'), '执行工具');
+});
+
+test('structured later-step deltas preserve text/tool/image order through the final snapshot', () => {
+  const data = { ...round('stream', null, ['job']), responseOutput: [
+    { type: 'message', id: 'before', content: [{ type: 'output_text', text: '正在生成。' }] },
+    { type: 'function_call', call_id: 'image-call', name: 'generate_image_batch' },
+    { type: 'function_call_output', call_id: 'image-call', output: '{}' },
+    { type: 'message', id: 'after', content: [{ type: 'output_text', text: '图片已' }] },
+  ] };
+  const tasks = [{ id: 'job', metadata: { agent: { agentBatchCallId: 'image-call' } } }];
+  const streamed = response.getAgentAssistantBlocks(data, tasks, '正在生成。\n\n图片已');
+  assert.deepEqual(streamed.map(item => item.type), ['text', 'tool', 'image-task', 'text']);
+  assert.deepEqual(streamed.filter(item => item.type === 'text').map(item => item.content), ['正在生成。', '图片已']);
+  data.responseOutput.push({ type: 'message', id: 'after', content: [{ type: 'output_text', text: '图片已完成。' }] });
+  const completed = response.getAgentAssistantBlocks(data, tasks, '正在生成。\n\n图片已完成。');
+  assert.deepEqual(completed.map(item => item.type), ['text', 'tool', 'image-task', 'text']);
+  assert.deepEqual(completed.filter(item => item.type === 'text').map(item => item.content), ['正在生成。', '图片已完成。']);
+  assert.equal(completed.at(-1).key, streamed.at(-1).key);
+});
+
 test('duplicate tool events do not duplicate image cards, missing slots stay visible', () => {
   const data = { ...round('r', null, ['gone', 'j1', 'j1']), responseOutput: [
     { type: 'function_call', call_id: 'c', name: 'generate_image_batch' },
@@ -77,6 +102,18 @@ test('duplicate tool events do not duplicate image cards, missing slots stay vis
   ] };
   const blocks = response.getAgentAssistantBlocks(data, [{ id: 'j1', metadata: { agent: { agentBatchCallId: 'c' } } }], '');
   assert.deepEqual(blocks.map(item => item.type), ['tool', 'deleted-image-task', 'image-task']);
+});
+
+test('read-only skill progress completes only after a matching local tool receipt', () => {
+  const call = { type: 'function_call', call_id: 'skill-1', name: 'read_agent_skill' };
+  const data = { ...round('skill'), responseOutput: [call] };
+  assert.notEqual(response.getAgentAssistantBlocks(data, [], '')[0].state, 'completed');
+  data.responseOutput.push({ type: 'function_call_output', call_id: 'skill-1', output: '{}' });
+  const blocks = response.getAgentAssistantBlocks(data, [], '');
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0].name, 'read_agent_skill');
+  assert.equal(blocks[0].state, 'completed');
+  assert.ok(!blocks.some(block => block.type === 'image-task'));
 });
 
 test('replayed message snapshots replace partial text in place instead of duplicating it', () => {
@@ -146,6 +183,14 @@ test('uncertain submission restoration preserves frozen request ID, exact origin
   assert.throws(() => submission.savePendingAgentSubmission(store, { ...pending, payload: { ...pending.payload, prompt: 'changed' } }), /不能改变/);
   submission.clearPendingAgentSubmission(store, 'frozen');
   assert.deepEqual(submission.readPendingAgentSubmissions(store), []);
+});
+
+test('acknowledging an Agent draft clears only the submitted content and retains full image settings', () => {
+  const draft = { text: '  exact\n', refs: [{ reference: { kind: 'upload', uploadId: 'u' }, label: 'image', url: '/preview' }], params: { size: '1536x1024', quality: 'max', background: 'transparent', output_format: 'webp', output_compression: 0 }, origin: 'edit', editId: 'old-round' };
+  const snapshot = structuredClone(draft);
+  assert.deepEqual(submission.acknowledgeAgentDraft(draft, true), { ...draft, text: '', refs: [], origin: 'send', editId: null });
+  assert.deepEqual(submission.acknowledgeAgentDraft(draft, false), { ...draft, origin: 'send', editId: null });
+  assert.deepEqual(draft, snapshot);
 });
 
 test('pending restoration is read-only and does not submit or mint IDs', () => {
@@ -250,6 +295,7 @@ function pickerHarness(t) {
     react: hooks, 'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'fragment' }, 'lucide-react': new Proxy({}, { get: (_, key) => key }),
     '../../api/client': { api: { items: async () => ({ items, total: 2 }), generationJobs: async () => ({ jobs: [], total: 0 }), item: () => replies.shift().promise }, mediaUrl: path => `/media/${path}` },
     '../../utils/playground/agentImageReferences': refs, '../../hooks/useModalFocus': { useModalFocus: () => ({ containerRef: null, handleModalKeyDown() {} }) },
+    './AgentReferencePicker.css': {},
   };
   const module = { exports: {} };
   new Function('require', 'module', 'exports', 'setTimeout', 'clearTimeout', pickerJs)(name => { assert.ok(name in deps, `unmocked picker dependency: ${name}`); return deps[name]; }, module, module.exports, callback => { timers.set(++timerId, callback); return timerId; }, id => timers.delete(id));

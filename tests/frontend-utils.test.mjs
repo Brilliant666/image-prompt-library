@@ -17,7 +17,7 @@ const {
   removeSearchSortOperator,
 } = await importTypescript('../frontend/src/utils/searchSort.ts');
 const { resolveOriginalPrompt, resolvePromptText } = await importTypescript('../frontend/src/utils/prompts.ts');
-const { downloadFileName, imageDisplayPath, imageThumbnailPath, selectPrimaryImage } = await importTypescript('../frontend/src/utils/images.ts');
+const { downloadFileName, imageCardSources, imageDisplayPath, imageThumbnailPath, selectPrimaryImage } = await importTypescript('../frontend/src/utils/images.ts');
 const { generationFailure, generationModerationGuidance } = await importTypescript('../frontend/src/utils/generationFailures.ts');
 const { generationSetProgressText, providerPauseSeconds } = await importTypescript('../frontend/src/utils/generationSets.ts');
 const { generationAspectRatio } = await importTypescript('../frontend/src/utils/generationAspectRatio.ts');
@@ -111,6 +111,25 @@ test('image helpers select result images and produce safe download names', () =>
   assert.equal(imageThumbnailPath({ ...result, thumb_path: 'thumb.webp' }), 'thumb.webp');
   assert.equal(imageThumbnailPath({ ...result, thumb_path: undefined }), 'preview.webp');
   assert.equal(downloadFileName('  Poster / Study  ', 'preview.webp?size=large'), 'poster-study.webp');
+});
+
+test('card image candidates match bounded portrait and landscape derivatives without upscaling', () => {
+  const image = { original_path: 'original.png', thumb_path: 'thumb.webp', preview_path: 'preview.webp', width: 2000, height: 3000 };
+  assert.deepEqual(imageCardSources(image), { src: 'thumb.webp', candidates: [{ path: 'thumb.webp', width: 280 }, { path: 'preview.webp', width: 933 }] });
+  assert.deepEqual(imageCardSources({ ...image, width: 3000, height: 2000 }), { src: 'thumb.webp', candidates: [{ path: 'thumb.webp', width: 420 }, { path: 'preview.webp', width: 1400 }] });
+  assert.deepEqual(imageCardSources({ ...image, width: 200, height: 300 }), { src: 'thumb.webp', candidates: [] });
+  assert.deepEqual(imageCardSources({ ...image, preview_path: undefined }), { src: 'thumb.webp', candidates: [{ path: 'thumb.webp', width: 280 }, { path: 'original.png', width: 2000 }] });
+  assert.deepEqual(imageCardSources({ ...image, preview_path: image.thumb_path }), { src: 'thumb.webp', candidates: [] });
+});
+
+test('legacy card images retain display fallback when metadata cannot describe responsive candidates', () => {
+  const image = { original_path: 'original.png', thumb_path: 'thumb.webp', preview_path: 'preview.webp', width: 2000, height: 3000 };
+  for (const change of [{ thumb_path: undefined }, { width: undefined }, { height: 0 }, { width: -1 }, { height: Infinity }, { width: NaN }]) {
+    assert.deepEqual(imageCardSources({ ...image, ...change }), { src: 'preview.webp', candidates: [] });
+  }
+  assert.deepEqual(imageCardSources({ original_path: 'original.png' }), { src: 'original.png', candidates: [] });
+  assert.deepEqual(imageCardSources({ thumb_path: 'thumb.webp' }), { src: 'thumb.webp', candidates: [] });
+  assert.deepEqual(imageCardSources(), { src: '', candidates: [] });
 });
 
 test('batch review slots retain accepted target metadata and result image paths', () => {

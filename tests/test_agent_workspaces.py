@@ -1,5 +1,6 @@
 import base64
 from contextlib import contextmanager
+from concurrent.futures import Future
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 import json
@@ -25,7 +26,7 @@ def image_bytes(color="orange", mode="RGB"):
 
 
 @contextmanager
-def provider(mode="hybrid"):
+def provider(mode="hybrid", *, response_model=None, stream_text=False, created_model=None):
     requests = []
     echo = mode.startswith("echo_")
     mode = mode.removeprefix("echo_")
@@ -52,6 +53,8 @@ def provider(mode="hybrid"):
                 else:
                     output = [{"id": f"msg_{calls}", "type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "完成"}]}]
                 response = {"id": f"resp_{calls}", "output": output}
+                if response_model is not None:
+                    response["model"] = response_model
                 if mode == "json_failed":
                     response.update(status="failed", error={"message": "unit-test-key-not-real"})
             else:
@@ -65,7 +68,14 @@ def provider(mode="hybrid"):
                         item["revised_prompt"] = "draw unit-test-key-not-real"
                     elif item["type"] == "function_call" and mode == "hybrid":
                         item["arguments"] = json.dumps({"id": "one", "prompt": "draw unit-test-key-not-real"}).replace("unit-test-key-not-real", "\\u0075nit-test-key-not-real")
-            if mode in {"native_sse", "slow_native"}:
+            if stream_text:
+                events = [
+                    {"type": "response.created", "response": {"id": response["id"], "model": created_model}},
+                    {"type": "response.output_text.delta", "delta": "完成"},
+                    {"type": "response.completed", "response": response},
+                ]
+                data = "".join("data: " + json.dumps(event) + "\n\n" for event in events).encode()
+            elif mode in {"native_sse", "slow_native"}:
                 image = response["output"][0]
                 message = {"id": "message_1", "type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "unit-test-key-not-real" if echo else "先说明，再生成。"}]}
                 response["output"] = [{k: v for k, v in message.items() if k != "id"}, image]
@@ -83,7 +93,7 @@ def provider(mode="hybrid"):
             else:
                 data = json.dumps(response).encode()
             self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream" if mode in {"native_sse", "slow_native"} else "application/json")
+            self.send_header("Content-Type", "text/event-stream" if stream_text or mode in {"native_sse", "slow_native"} else "application/json")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             if mode == "slow_native":
@@ -202,7 +212,8 @@ def test_text_authorization_cannot_be_bypassed_by_tool_output(isolated):
         assert result["request"]["state"] == "failed", result
         assert not result["jobs"]
         assert len(requests) == 1
-        assert requests[0][1]["tools"] == []
+        assert [tool.get("name") for tool in requests[0][1]["tools"]] == ["read_agent_skill"]
+        assert all(tool["type"] == "function" for tool in requests[0][1]["tools"])
 
 
 def test_branch_path_and_original_prompt_survive_reload(isolated):
@@ -510,6 +521,7 @@ def test_queued_child_is_submitted_once_and_losing_worker_cannot_fail_owner(isol
         class HeldExecutor:
             def submit(self, *args):
                 submitted.append(args)
+                return Future()
         with monkeypatch.context() as hold:
             hold.setattr(generation_queue, "_executor", HeldExecutor())
             try:

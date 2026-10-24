@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { mediaUrl } from '../api/client';
 import type { ClusterRecord, ImageRecord, ItemSortMode, ItemSummary } from '../types';
 import type { Translator } from '../utils/i18n';
@@ -44,6 +44,10 @@ export default function ExploreView({
   onOpen,
   onCopyPrompt,
   onAdd,
+  hasMore: hasMorePages = false,
+  loadingMore = false,
+  loadMoreError,
+  onLoadMore,
 }: {
   t: Translator;
   clusters: ClusterRecord[];
@@ -58,29 +62,38 @@ export default function ExploreView({
   onOpen: (id: string) => void;
   onCopyPrompt: (item: ItemSummary) => void;
   onAdd?: () => void;
+  hasMore?: boolean;
+  loadingMore?: boolean;
+  loadMoreError?: string;
+  onLoadMore?: () => void;
 }) {
   const [visibleCount, setVisibleCount] = useState(EXPLORE_PAGE_SIZE);
   const loadMoreRef = useRef<HTMLButtonElement | null>(null);
   const nonEmptyClusters = useMemo(() => clusters.filter(cluster => cluster.count > 0), [clusters]);
   const previewMetadata = useMemo(() => previewEntries(items), [items]);
   const visibleItems = useMemo(() => items.slice(0, visibleCount), [items, visibleCount]);
-  const hasMore = hasActiveSearch && visibleCount < items.length;
+  const hasMore = hasActiveSearch && (visibleCount < items.length || hasMorePages);
+  const showMore = useCallback(() => {
+    if (loading || loadingMore) return;
+    setVisibleCount(count => count + EXPLORE_PAGE_SIZE);
+    if (visibleCount + EXPLORE_PAGE_SIZE > items.length && hasMorePages) onLoadMore?.();
+  }, [loading, loadingMore, visibleCount, items.length, hasMorePages, onLoadMore]);
 
   useEffect(() => {
     setVisibleCount(EXPLORE_PAGE_SIZE);
-  }, [hasActiveSearch, searchQuery, items]);
+  }, [hasActiveSearch, searchQuery, sort]);
 
   useEffect(() => {
     const target = loadMoreRef.current;
-    if (!target || !hasMore || typeof IntersectionObserver === 'undefined') return undefined;
+    if (!target || !hasMore || loading || loadingMore || loadMoreError || typeof IntersectionObserver === 'undefined') return undefined;
     const observer = new IntersectionObserver((entries) => {
       if (entries.some(entry => entry.isIntersecting)) {
-        setVisibleCount(count => Math.min(items.length, count + EXPLORE_PAGE_SIZE));
+        showMore();
       }
     }, { rootMargin: '480px 0px' });
     observer.observe(target);
     return () => observer.disconnect();
-  }, [hasMore, items.length, visibleCount]);
+  }, [hasMore, loading, loadingMore, loadMoreError, showMore]);
 
   if (loading && !items.length) {
     return (
@@ -147,14 +160,16 @@ export default function ExploreView({
                 />
               ))}
             </div>
+            {loadMoreError && <p className="error" role="alert">{t('loadFailed')}</p>}
             {hasMore && (
               <button
                 ref={loadMoreRef}
                 type="button"
                 className="explore-load-more"
-                onClick={() => setVisibleCount(count => Math.min(items.length, count + EXPLORE_PAGE_SIZE))}
+                onClick={showMore}
+                disabled={loading || loadingMore}
               >
-                {t('more')}
+                {t(loadingMore ? 'loading' : loadMoreError ? 'retry' : 'more')}
               </button>
             )}
           </>

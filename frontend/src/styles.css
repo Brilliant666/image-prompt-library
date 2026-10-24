@@ -632,34 +632,6 @@ body{
 .app{min-height:100dvh}
 .app-content{min-height:100dvh}
 .content-plane{min-width:0}
-.content-plane.to-explore,.content-plane.to-cards{will-change:transform,opacity}
-.content-plane.to-explore{animation:content-plane-from-left 220ms var(--studio-ease-out) both}
-.content-plane.to-cards{animation:content-plane-from-right 220ms var(--studio-ease-out) both}
-@keyframes content-plane-from-left{from{opacity:.78;transform:translateX(-10px)}to{opacity:1;transform:translateX(0)}}
-@keyframes content-plane-from-right{from{opacity:.78;transform:translateX(10px)}to{opacity:1;transform:translateX(0)}}
-html[data-view-transition]{view-transition-name:none}
-html[data-view-transition] .content-plane{view-transition-name:library-content}
-html[data-view-transition] .chrome{view-transition-name:library-chrome}
-html[data-view-transition] .app-command-dock{view-transition-name:library-command-dock}
-::view-transition-group(library-content),
-::view-transition-group(library-chrome),
-::view-transition-group(library-command-dock),
-::view-transition-old(library-chrome),
-::view-transition-new(library-chrome),
-::view-transition-old(library-command-dock),
-::view-transition-new(library-command-dock){animation:none}
-::view-transition-old(library-chrome),
-::view-transition-new(library-chrome),
-::view-transition-old(library-command-dock),
-::view-transition-new(library-command-dock){mix-blend-mode:normal}
-html[data-view-transition="to-explore"]::view-transition-old(library-content){animation:content-plane-old-to-right 210ms var(--studio-ease-out) both}
-html[data-view-transition="to-explore"]::view-transition-new(library-content){animation:content-plane-new-from-left 210ms var(--studio-ease-out) both}
-html[data-view-transition="to-cards"]::view-transition-old(library-content){animation:content-plane-old-to-left 210ms var(--studio-ease-out) both}
-html[data-view-transition="to-cards"]::view-transition-new(library-content){animation:content-plane-new-from-right 210ms var(--studio-ease-out) both}
-@keyframes content-plane-old-to-right{to{opacity:0;transform:translateX(8px)}}
-@keyframes content-plane-old-to-left{to{opacity:0;transform:translateX(-8px)}}
-@keyframes content-plane-new-from-left{from{opacity:0;transform:translateX(-10px)}}
-@keyframes content-plane-new-from-right{from{opacity:0;transform:translateX(10px)}}
 .chrome,.app-main{
   --ink:var(--studio-ink);
   --muted:var(--studio-muted);
@@ -1049,7 +1021,7 @@ button.explore-collection-preview:focus-visible{outline:2px solid var(--studio-a
   padding:0 7px 0 10px;
   border:1px solid var(--studio-hairline);
   border-radius:9px;
-  background:rgba(251,248,241,.66);
+  background:var(--studio-surface);
   cursor:pointer;
   touch-action:manipulation;
 }
@@ -2090,7 +2062,6 @@ body:has(.modal-backdrop),body:has(.drawer.open),body:has(.generation-queue-draw
   .detail.modal .detail-fullscreen-frame:fullscreen .detail-fullscreen-close,
   .detail.modal .detail-fullscreen-frame.is-mobile-fullscreen .detail-fullscreen-close,
   .detail.modal .modal-hero.is-mobile-fullscreen .detail-fullscreen-close{animation:none!important}
-  ::view-transition-old(library-content),::view-transition-new(library-content){animation:none!important}
 }
 
 html:lang(zh-Hant) .drawer-eyebrow,

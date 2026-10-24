@@ -243,15 +243,31 @@ export default function ConfigPanel({
     if (activeElement instanceof HTMLElement && !drawerRef.current?.contains(activeElement)) {
       openerRef.current = activeElement;
     }
-    const frame = window.requestAnimationFrame(() => {
+    const drawer = drawerRef.current;
+    const focusDrawer = () => {
+      if (!drawer?.isConnected || drawer.contains(document.activeElement)) return;
+      const focusedModal = document.activeElement instanceof HTMLElement
+        ? document.activeElement.closest('[role="dialog"][aria-modal="true"]') : null;
+      if (focusedModal && focusedModal !== drawer && focusedModal.getAttribute('aria-hidden') !== 'true') return;
       if (focusProviders && !focusSection) {
         scrollIntoViewRespectingMotion(providersSectionRef.current);
         providersSectionRef.current?.focus({ preventScroll: true });
       } else {
         closeButtonRef.current?.focus({ preventScroll: true });
       }
-    });
-    return () => window.cancelAnimationFrame(frame);
+    };
+    // A first-frame focus can be rejected while the opening visibility
+    // transition is still hidden. Retry when this drawer becomes visible,
+    // without a timer or moving a focus the user has already placed inside it.
+    const onMotionEnd = (event: Event) => { if (event.target === drawer) focusDrawer(); };
+    drawer?.addEventListener('transitionend', onMotionEnd);
+    drawer?.addEventListener('animationend', onMotionEnd);
+    const frame = window.requestAnimationFrame(focusDrawer);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      drawer?.removeEventListener('transitionend', onMotionEnd);
+      drawer?.removeEventListener('animationend', onMotionEnd);
+    };
   }, [open, focusProviders, focusSection]);
 
   useEffect(() => () => {

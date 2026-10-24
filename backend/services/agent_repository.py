@@ -50,6 +50,80 @@ def public_profile_digest(profile):
     return fingerprint({k: profile.get(k) for k in ("id", "base_url", "model", "timeout")})
 
 
+def safe_model_label(value, secrets=()):
+    """Keep only bounded display text; model metadata must never echo credentials."""
+    if not isinstance(value, str):
+        return None
+    for secret in secrets:
+        if secret:
+            value = value.replace(secret, "[redacted]")
+    return "".join(character for character in value if character.isprintable()).strip()[:256] or None
+
+
+def model_info(frozen, round_data):
+    saved = round_data.get("modelInfo", {})
+    return {"requestedModel": safe_model_label(frozen.get("textModel")),
+            "providerName": safe_model_label(frozen.get("_textProviderName")),
+            "returnedModels": [label for value in saved.get("returnedModels", [])
+                               if (label := safe_model_label(value))][:50]}
+
+
+TOKEN_FIELDS = ("inputTokens", "outputTokens", "totalTokens", "cachedInputTokens", "reasoningTokens")
+
+
+def response_usage(payload):
+    """Only numeric provider token counts belong in public response details."""
+    usage = payload.get("usage") if isinstance(payload, dict) else None
+    usage = usage if isinstance(usage, dict) else {}
+    inputs = usage.get("input_tokens_details")
+    outputs = usage.get("output_tokens_details")
+    values = (usage.get("input_tokens"), usage.get("output_tokens"), usage.get("total_tokens"),
+              inputs.get("cached_tokens") if isinstance(inputs, dict) else None,
+              outputs.get("reasoning_tokens") if isinstance(outputs, dict) else None)
+    return {key: value if type(value) is int and 0 <= value <= 2 ** 53 - 1 else None
+            for key, value in zip(TOKEN_FIELDS, values)}
+
+
+def public_reasoning_summaries(payload, secrets=()):
+    """Expose explicit provider summaries, never reasoning content or opaque state."""
+    output = payload.get("output") if isinstance(payload, dict) else None
+    summaries = []
+    shortened = "\n（摘要过长，仅显示部分）"
+    for item in output if isinstance(output, list) else []:
+        if not isinstance(item, dict) or item.get("type") != "reasoning":
+            continue
+        parts = item.get("summary")
+        for part in parts if isinstance(parts, list) else []:
+            if not isinstance(part, dict) or part.get("type") != "summary_text" or not isinstance(part.get("text"), str):
+                continue
+            text = part["text"]
+            for secret in secrets:
+                if secret:
+                    text = text.replace(secret, "[redacted]")
+            text = "".join(c for c in text if c.isprintable() or c in "\n\t").strip()
+            if len(text) > 4000:
+                text = text[:4000 - len(shortened)] + shortened
+            if text and text not in summaries:
+                if len(summaries) >= 8:
+                    if not summaries[-1].endswith(shortened):
+                        summaries[-1] = summaries[-1][:4000 - len(shortened)] + shortened
+                    return summaries
+                summaries.append(text)
+    return summaries
+
+
+def aggregate_response_usage(steps):
+    # An unknown counter is not zero, including a started call without a receipt.
+    counts = [item["usage"] for item in steps]
+    totals = {}
+    for field in TOKEN_FIELDS:
+        values = [item.get(field) for item in counts]
+        total = sum(values) if counts and all(value is not None for value in values) else None
+        totals[field] = total if total is not None and total <= 2 ** 53 - 1 else None
+    return {**totals, "reportedSteps": sum(any(value is not None for value in item.values()) for item in counts),
+            "totalSteps": len(steps), "complete": bool(steps) and all(totals[field] is not None for field in TOKEN_FIELDS[:3])}
+
+
 class AgentRepository:
     def __init__(self, library_path):
         self.library = Path(library_path)
@@ -79,7 +153,7 @@ class AgentRepository:
                 "imageReady": not issues and not image_issues, "imageIssues": image_issues,
                 "capabilities": {"modes": ["off", "native", "hybrid"], "maxInputImages": 4,
                                  "maxToolRounds": 50, "maxImageJobs": 20, "webSearch": True,
-                                 "masks": config["apiConfigMode"] != "hybrid", "progressTransport": "poll"}}
+                                 "masks": config["apiConfigMode"] != "hybrid", "progressTransport": "sse"}}
 
     def save_config(self, payload):
         with connect(self.library) as conn:
@@ -309,8 +383,17 @@ class AgentRepository:
             raise AgentError("authorization_denied", "当前设置未启用网络搜索。", 400)
         if (not auth.allowImageGeneration and auth.maxImageJobs != 0) or (auth.allowImageGeneration and auth.maxImageJobs < 1):
             raise AgentError("authorization_denied", "生图授权与图片额度不一致。", 400)
+        selection = body.imageConfig
+        if selection is not None:
+            if config["apiConfigMode"] != "hybrid" and selection.profileId is not None:
+                raise AgentError("capability_unsupported", "原生生图使用文本 API 配置，不能指定独立图片供应商。", 400)
+            if selection.profileId is not None:
+                config["imageProfileId"] = selection.profileId
+            config["imageModel"] = selection.model.strip()
         image = text if config["apiConfigMode"] != "hybrid" else None
-        if auth.allowImageGeneration and config["apiConfigMode"] == "hybrid":
+        # A turn-local selection is validated and frozen even for text-only
+        # requests; it never grants permission to create an image job.
+        if (auth.allowImageGeneration or selection is not None) and config["apiConfigMode"] == "hybrid":
             if not config["imageProfileId"]:
                 raise AgentError("configuration_incomplete", "请选择图片 API 配置。", 400)
             try:
@@ -327,6 +410,7 @@ class AgentRepository:
         config.update(textProfileId=text["id"], imageProfileId=image["id"] if image else None,
                       textProfileFingerprint=public_profile_digest(text),
                       imageProfileFingerprint=public_profile_digest(image) if image else None,
+                      _textProviderName=safe_model_label(text.get("display_name"), [text["api_key"]]),
                       _profileDigests=digests)
         return config
 
@@ -446,13 +530,19 @@ class AgentRepository:
             value["steps"] = [dict(r) for r in conn.execute("SELECT * FROM agent_steps WHERE request_id=? ORDER BY step", (request_id,))]
         return value
 
-    def update(self, request_id, *, state=None, output=None, text=None, response_id=None, error=None, outcome=None):
+    def update(self, request_id, *, state=None, output=None, text=None, response_id=None, error=None, outcome=None, returned_model=None):
         with connect(self.library) as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute("SELECT * FROM agent_requests WHERE id=?", (request_id,)).fetchone()
             if row["stop_requested"] and state not in {None, "stopped"}:
                 state = "stopped"
             round_data = json.loads(conn.execute("SELECT data FROM agent_rounds WHERE id=?", (row["round_id"],)).fetchone()[0])
+            if returned_model is not None:
+                info = model_info(json.loads(row["frozen"]), round_data)
+                label = safe_model_label(returned_model)
+                if label and label not in info["returnedModels"]:
+                    info["returnedModels"] = (info["returnedModels"] + [label])[:50]
+                round_data["modelInfo"] = info
             if output is not None:
                 round_data["responseOutput"] = output
             if text is not None:
@@ -469,12 +559,72 @@ class AgentRepository:
                          (state or row["state"], encoded(error) if error else row["error"], outcome or row["upstream_outcome"], milliseconds(), request_id))
             self._touch(conn, row["conversation_id"])
 
+    def record_response_details(self, request_id, step, payload=None, *, native_job_id=None, secrets=()):
+        """Upsert one physical Responses call; duplicate SSE receipts cannot add usage."""
+        identity = "image:" + native_job_id if native_job_id else f"model:{step}"
+        payload = payload if isinstance(payload, dict) else {}
+        with connect(self.library) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            request = conn.execute("SELECT conversation_id,round_id,usage FROM agent_requests WHERE id=?", (request_id,)).fetchone()
+            round_data = json.loads(conn.execute("SELECT data FROM agent_rounds WHERE id=?", (request["round_id"],)).fetchone()[0])
+            details = round_data.setdefault("responseDetails", {"version": 1, "steps": [], "skills": []})
+            # A safe resume after an application update may have earlier steps
+            # without receipts. Keep their usage unknown rather than claiming
+            # that the newly instrumented calls cover the complete round.
+            started = json.loads(request["usage"])["responseStepsStarted"]
+            known = {item["id"] for item in details["steps"]}
+            for index in range(1, started + 1):
+                if f"model:{index}" not in known:
+                    details["steps"].append({"id": f"model:{index}", "step": index, "kind": "model",
+                                             "responseId": None, "model": None, "usage": response_usage({}), "summaries": []})
+            previous = next((item for item in details["steps"] if item["id"] == identity), None)
+            if previous is None:
+                previous = {"id": identity, "step": step, "kind": "native_image" if native_job_id else "model",
+                            "responseId": None, "model": None, "usage": response_usage({}), "summaries": []}
+                details["steps"].append(previous)
+            for key, value in response_usage(payload).items():
+                if value is not None:
+                    previous["usage"][key] = value
+            for key in ("model", "responseId"):
+                value = safe_model_label(payload.get("id" if key == "responseId" else key), secrets)
+                if value:
+                    previous[key] = value
+            summaries = public_reasoning_summaries(payload, secrets)
+            if summaries:
+                previous["summaries"] = summaries
+            details["usage"] = aggregate_response_usage(details["steps"])
+            self._save_round(conn, round_data)
+            self._touch(conn, request["conversation_id"])
+
+    def record_skill_read(self, request_id, result):
+        # Only bundled attribution is public; the skill body stays in tool history.
+        fields = ("skill", "section", "title", "source", "revision", "license")
+        value = {key: safe_model_label(result.get(key)) for key in fields}
+        if not all(value.values()):
+            return
+        with connect(self.library) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            request = conn.execute("SELECT conversation_id,round_id FROM agent_requests WHERE id=?", (request_id,)).fetchone()
+            round_data = json.loads(conn.execute("SELECT data FROM agent_rounds WHERE id=?", (request["round_id"],)).fetchone()[0])
+            details = round_data.setdefault("responseDetails", {"version": 1, "steps": [], "skills": []})
+            if value not in details["skills"]:
+                details["skills"].append(value)
+            details["usage"] = aggregate_response_usage(details["steps"])
+            self._save_round(conn, round_data)
+            self._touch(conn, request["conversation_id"])
+
     def snapshot(self, cid=None, request_id=None):
         request = self.request(request_id) if request_id else None
         cid = cid or request["conversation_id"]
         with connect(self.library) as conn:
             conversation = self._conversation(conn, cid)
             rounds = self._rounds(conn, cid)
+            # Read historical identities from their own request, never today's
+            # profile. Older requests do not claim a provider name was recorded.
+            frozen_configs = {row["id"]: json.loads(row["frozen"]) for row in conn.execute(
+                "SELECT id,frozen FROM agent_requests WHERE conversation_id=?", (cid,))}
+            for round_data in rounds:
+                round_data["modelInfo"] = model_info(frozen_configs.get(round_data["requestId"], {}), round_data)
             if request is None and rounds:
                 current = next((r for r in rounds if r["id"] == conversation["active_round_id"]), rounds[-1])
                 request = self.request(current["requestId"])
@@ -515,6 +665,7 @@ class AgentRepository:
                     call["state"], call["error"] = "failed", job.get("error") if job else "图片已删除"
             request_view = {"id": request["id"], "conversationId": request["conversation_id"], "roundId": request["round_id"],
                             "state": request["state"], "frozenConfig": {k: v for k, v in request["frozen"].items() if not k.startswith("_")},
+                            "modelInfo": model_info(request["frozen"], request["round"]),
                             "params": request["body"]["params"], "authorization": request["body"]["authorization"], "usage": request["usage"], "toolCalls": list(calls.values()),
                             "canResume": request["state"] == "interrupted" and request["upstream_outcome"] != "unknown" and not request["stop_requested"],
                             "recoveryReason": request["error"]["message"] if request["error"] else None,
@@ -526,6 +677,20 @@ class AgentRepository:
                 "conversation": {"id": cid, "title": conversation["title"], "activeRoundId": conversation["active_round_id"],
                                  "createdAt": conversation["created_at"], "updatedAt": conversation["updated_at"], "rounds": rounds, "messages": messages},
                 "request": request_view, "jobs": [_sanitize_generation_job_record(GenerationJobRecord(**j)).model_dump() for j in jobs.values()], "images": list(assets.values())}
+
+    def progress_token(self, request_id):
+        """Read a small change marker without assembling images or full history."""
+        with connect(self.library) as conn:
+            row = conn.execute("""SELECT c.revision,r.state,r.updated_at,a.deleted
+                FROM agent_requests r JOIN agent_conversations c ON c.id=r.conversation_id
+                JOIN agent_rounds a ON a.id=r.round_id
+                WHERE r.id=? AND c.deleted=0""", (request_id,)).fetchone()
+            if row is None or row["deleted"]:
+                raise AgentError("not_found", "请求不存在。", 404)
+            jobs = conn.execute("""SELECT j.id,j.status,j.updated_at FROM agent_tool_jobs t
+                LEFT JOIN generation_jobs j ON j.id=t.job_id WHERE t.request_id=?
+                ORDER BY t.job_id""", (request_id,)).fetchall()
+            return tuple(row), tuple(tuple(job) for job in jobs)
 
     def stop(self, request_id):
         request = self.request(request_id)

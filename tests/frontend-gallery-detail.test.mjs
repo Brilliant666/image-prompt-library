@@ -17,6 +17,7 @@ function evaluate(js, dependencies, clock = {}) {
   return module.exports;
 }
 const component = await compile('../frontend/src/components/gallery/DetailModal.tsx');
+const agentGalleryBridge = evaluate(await compile('../frontend/src/utils/agentGalleryBridge.ts'), {});
 const recipe = evaluate(await compile('../frontend/src/utils/galleryRecipe.ts'), { './compatibleRecipe': {}, './compatibleProfiles': {}, './promptTemplateVariables': {} });
 const inputUtils = evaluate(await compile('../frontend/src/utils/recipeInputs.ts'), {});
 function descendants(node) {
@@ -43,6 +44,7 @@ function harness(t, job, overrides = {}) {
     'lucide-react': new Proxy({}, { get: (_, key) => key }),
     '../../api/client': { api, mediaUrl: path => `/media/${path}` },
     '../../utils/galleryRecipe': recipe, '../../utils/recipeInputs': inputUtils,
+    '../../utils/agentGalleryBridge': agentGalleryBridge,
     '../../utils/clipboard': { copyTextToClipboard: async text => { events.copies.push(text); return typeof overrides.copyResult === 'function' ? overrides.copyResult() : overrides.copyResult ?? true; } },
     '../../hooks/useModalFocus': { useModalFocus: () => ({ containerRef: {}, handleModalKeyDown() {} }) },
     '../GenerationResultSummary': { GenerationResultSummary: 'GenerationResultSummary' }, './DetailModal.css': {},

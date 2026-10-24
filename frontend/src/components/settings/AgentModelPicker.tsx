@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
 import { ChevronDown, Check, RefreshCw } from 'lucide-react';
 import { api } from '../../api/client';
 import type { ModelCatalog, OpenAICompatibleProfile } from '../../types';
+import { profileModelChoices } from '../../utils/profileSettings';
 import './AgentModelPicker.css';
 
 // Sharing an in-flight discovery prevents the text and image fields from
@@ -9,9 +10,9 @@ import './AgentModelPicker.css';
 const refreshes = new Map<string, Promise<ModelCatalog>>();
 const emptyCatalog = (): ModelCatalog => ({ models: [], fetched_at: null, checked_at: null, error: null });
 
-export default function AgentModelPicker({ label, value, onChange, profile, active, en, disabled = false, unavailableHint }: {
+export default function AgentModelPicker({ label, value, onChange, profile, active, en, disabled = false, unavailableHint, imageRecommendations = false }: {
   label: string; value: string; onChange: (value: string) => void;
-  profile?: OpenAICompatibleProfile; active: boolean; en: boolean; disabled?: boolean; unavailableHint?: string;
+  profile?: OpenAICompatibleProfile; active: boolean; en: boolean; disabled?: boolean; unavailableHint?: string; imageRecommendations?: boolean;
 }) {
   const id = useId();
   const [catalog, setCatalog] = useState<ModelCatalog>(profile?.model_catalog || emptyCatalog);
@@ -86,7 +87,10 @@ export default function AgentModelPicker({ label, value, onChange, profile, acti
     const next = index < 0 ? event.key === 'ArrowDown' ? 0 : options.length - 1 : (index + (event.key === 'ArrowDown' ? 1 : -1) + options.length) % options.length;
     options[next]?.focus();
   };
-  const options = catalog.models.filter(model => model.id.toLocaleLowerCase().includes(query.toLocaleLowerCase()));
+  const candidates = imageRecommendations
+    ? profileModelChoices(profile ? { ...profile, model_catalog: catalog } : undefined, value).map(id => catalog.models.find(model => model.id === id) || { id, image_generation: null })
+    : catalog.models;
+  const options = candidates.filter(model => model.id.toLocaleLowerCase().includes(query.toLocaleLowerCase()));
   return <div className="agent-model-picker" ref={root} onBlur={event => { if (!root.current?.contains(event.relatedTarget as Node | null)) setOpen(false); }}>
     <label className="settings-field" htmlFor={id}><span>{label}</span></label>
     <div className="agent-model-input-row">
@@ -101,7 +105,7 @@ export default function AgentModelPicker({ label, value, onChange, profile, acti
         {options.map(model => <button type="button" role="option" aria-selected={model.id === value} key={model.id} onClick={() => { onChange(model.id); setOpen(false); input.current?.focus(); }}><span>{model.id}<small>{model.image_generation === true ? en ? 'Image generation declared' : '接口声明支持生图' : model.image_generation === false ? en ? 'Image generation not declared' : '接口未声明支持生图' : en ? 'Capabilities unspecified' : '能力未声明'}</small></span>{model.id === value && <Check size={16} aria-hidden="true" />}</button>)}
       </div>
       {!options.length && <p className="settings-help">{en ? 'No matching cached models. You can enter a model ID above.' : '暂无匹配的缓存模型，可在上方手动填写模型 ID。'}</p>}
-      <p className="settings-help">{en ? 'The catalog does not verify Responses or image-tool support. Refresh reads only the model list; it does not run the Agent.' : '清单不代表已验证 Responses 或生图工具支持。刷新仅读取模型列表，不运行 Agent。'}</p>
+      <p className="settings-help">{imageRecommendations ? en ? 'Recommends gpt-image models, keeping your current selection. Manual model IDs are supported. Refresh only reads the catalog.' : '仅推荐 gpt-image 系列，保留当前选择，也可手填完整模型 ID。刷新仅读取模型清单。' : en ? 'The catalog does not verify Responses or image-tool support. Refresh reads only the model list; it does not run the Agent.' : '清单不代表已验证 Responses 或生图工具支持。刷新仅读取模型列表，不运行 Agent。'}</p>
     </div>}
   </div>;
 }

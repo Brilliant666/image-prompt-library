@@ -1,5 +1,5 @@
 import type { TitleSuggestionProvider, OpenAICompatibleConfig, OpenAICompatibleProfiles, AppConfig, AppUpdateRequest, AppUpdateResult, AppUpdateStatus, CleanupApplyRequest, CleanupApplyResult, CleanupPreview, ClusterRecord, CodexNativeAuthPollRequest, CodexNativeAuthPollResponse, CodexNativeAuthStart, GenerationJobAcceptAsNewItemPayload, GenerationJobAcceptResult, GenerationJobCreate, GenerationJobList, GenerationJobRecord, GenerationJobRetryResult, GenerationJobSetCreate, GenerationJobSetRecord, GenerationProviderStatus, GrokOAuthPollRequest, ItemBatchRequest, ItemBatchResult, ItemCreate, ItemDetail, ItemImageUpdate, ItemList, ItemSortMode, ItemSummary, ProviderDeviceAuthStart, TagRecord, TitleSuggestionRequest, TitleSuggestionResponse, UploadImageRole } from '../types';
-import type { ModelCatalog } from '../types';
+import type { ImageRecord, ItemUpdate, ModelCatalog } from '../types';
 import { readJson } from './readJson';
 import { DEFAULT_ITEM_SORT } from '../utils/searchSort';
 import { captureFormData, type CaptureLanguageResult, type CaptureRequest } from '../utils/quickCapture';
@@ -185,7 +185,7 @@ export const api = isDemoMode ? {
   createItem: (_payload: ItemCreate) => demoReadOnly(),
   capture: (_payload: CaptureRequest) => demoReadOnly(),
   detectCaptureLanguage: (_text: string, _signal?: AbortSignal): Promise<CaptureLanguageResult> => demoReadOnly(),
-  updateItem: (_id: string, _payload: Partial<ItemCreate>) => demoReadOnly(),
+  updateItem: (_id: string, _payload: ItemUpdate) => demoReadOnly(),
   deleteItem: (_id: string) => demoReadOnly(),
   restoreItem: (_id: string) => demoReadOnly(),
   permanentlyDeleteItem: (_id: string) => demoReadOnly(),
@@ -299,13 +299,13 @@ export const api = isDemoMode ? {
   createItem: (payload: ItemCreate) => json<ItemDetail>('/api/items', { method: 'POST', body: JSON.stringify(payload) }),
   capture: createCaptureRequest,
   detectCaptureLanguage: (text: string, signal?: AbortSignal) => json<CaptureLanguageResult>('/api/captures/detect-language', { method: 'POST', body: JSON.stringify({ text }), signal }),
-  updateItem: (id: string, payload: Partial<ItemCreate>) => json<ItemDetail>(`/api/items/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+  updateItem: (id: string, payload: ItemUpdate) => json<ItemDetail>(`/api/items/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   deleteItem: (id: string) => json<ItemDetail>(`/api/items/${id}`, { method: 'DELETE' }),
   restoreItem: (id: string) => json<ItemDetail>(`/api/items/${id}/restore`, { method: 'POST' }),
   permanentlyDeleteItem: (id: string) => json<ItemDetail>(`/api/items/${id}/permanent?confirmed=true`, { method: 'DELETE' }),
   batchItems: (payload: ItemBatchRequest) => json<ItemBatchResult>('/api/items/batch', { method: 'POST', body: JSON.stringify(payload) }),
   favorite: (id: string) => json<ItemDetail>(`/api/items/${id}/favorite`, { method: 'POST' }),
-  uploadImage: (id: string, file: File, role: UploadImageRole = 'result_image') => { const fd = new FormData(); fd.set('file', file); fd.set('role', role); return json(`/api/items/${id}/images`, { method: 'POST', body: fd }); },
+  uploadImage: (id: string, file: File, role: UploadImageRole = 'result_image') => { const fd = new FormData(); fd.set('file', file); fd.set('role', role); return json<ImageRecord>(`/api/items/${id}/images`, { method: 'POST', body: fd }); },
   updateImages: (id: string, images: ItemImageUpdate[]) => json<ItemDetail>(`/api/items/${id}/images`, { method: 'PUT', body: JSON.stringify({ images }) }),
   generationProviders: () => readJson<GenerationProviderStatus[]>('/api/generation-providers'),
   openAICompatibleProfiles: () => readJson<OpenAICompatibleProfiles>('/api/generation-providers/openai-compatible/profiles'),

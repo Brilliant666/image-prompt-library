@@ -1,9 +1,9 @@
 import { useLayoutEffect, useRef, useState } from 'react';
-import { ChevronDown } from 'lucide-react';
 import type { ItemSortMode, ItemSummary } from '../types';
 import type { Translator } from '../utils/i18n';
 import ItemCard from './ItemCard';
 import ScopeHeader from './ScopeHeader';
+import ToolbarSelect from './ToolbarSelect';
 import './LibraryCardLayout.css';
 
 type CardLayout = 'vertical' | 'horizontal';
@@ -33,6 +33,10 @@ export default function CardsView({
   clusterName,
   hasActiveSearch = false,
   onClearCluster,
+  hasMore = false,
+  loadingMore = false,
+  loadMoreError,
+  onLoadMore,
 }: {
   items: ItemSummary[];
   loading?: boolean;
@@ -53,6 +57,10 @@ export default function CardsView({
   clusterName?: string;
   hasActiveSearch?: boolean;
   onClearCluster: () => void;
+  hasMore?: boolean;
+  loadingMore?: boolean;
+  loadMoreError?: string;
+  onLoadMore?: () => void;
 }) {
   const [layout, setLayout] = useState<CardLayout>(loadCardLayout);
   const [columnCount, setColumnCount] = useState(1);
@@ -64,6 +72,8 @@ export default function CardsView({
     if (layout !== 'horizontal' || !grid) return;
     const measureColumns = () => {
       const width = grid.getBoundingClientRect().width;
+      // Hidden views have no measurable width; keep card parents stable until visible.
+      if (width <= 0) return;
       // Match the existing vertical CSS columns and sparse-collection breakpoints.
       const count = window.innerWidth <= 400 ? 1
         : window.innerWidth <= 760 ? (sparseCount === 1 ? 1 : 2)
@@ -82,16 +92,9 @@ export default function CardsView({
     setLayout(next);
     try { window.localStorage.setItem(CARD_LAYOUT_KEY, next); } catch { /* Keep the in-session choice if storage is unavailable. */ }
   };
-  const layoutControl = <label className="scope-sort-control library-layout-control">
-    <span className="scope-sort-prefix">{t('libraryCardLayout')}</span>
-    <span className="scope-sort-picker">
-      <select className="scope-sort-select" aria-label={t('libraryCardLayout')} value={layout} onChange={event => changeLayout(event.currentTarget.value)}>
-        <option value="vertical">{t('libraryVerticalLayout')}</option>
-        <option value="horizontal">{t('libraryHorizontalLayout')}</option>
-      </select>
-      <ChevronDown size={14} aria-hidden="true" />
-    </span>
-  </label>;
+  const layoutControl = <ToolbarSelect<CardLayout> className="scope-sort-control library-layout-control"
+    label={t('libraryCardLayout')} prefix={t('libraryCardLayout')} value={layout} onChange={changeLayout}
+    options={[{ value: 'vertical', label: t('libraryVerticalLayout') }, { value: 'horizontal', label: t('libraryHorizontalLayout') }]} />;
   const showActions = Boolean(onFavorite && onEdit) && !onToggleSelection;
   if (!items.length && loading) {
     return (
@@ -167,7 +170,7 @@ export default function CardsView({
   }
 
   const renderCard = (item: ItemSummary) => (
-    <ItemCard key={item.id} t={t} item={item} onOpen={onOpen} onFavorite={onFavorite} onEdit={onEdit} editBusy={editingItemId === item.id} onToggleSelection={onToggleSelection} isSelecting={Boolean(onToggleSelection)} isSelected={Boolean(selectedIds?.has(item.id))} onCopyPrompt={onCopyPrompt} showActions={showActions} />
+    <ItemCard key={item.id} t={t} item={item} imageSizes={sparseCount ? '100vw' : undefined} onOpen={onOpen} onFavorite={onFavorite} onEdit={onEdit} editBusy={editingItemId === item.id} onToggleSelection={onToggleSelection} isSelecting={Boolean(onToggleSelection)} isSelected={Boolean(selectedIds?.has(item.id))} onCopyPrompt={onCopyPrompt} showActions={showActions} />
   );
 
   return (
@@ -190,6 +193,10 @@ export default function CardsView({
           </div>)
           : items.map(renderCard)}
       </section>
+      {loadMoreError && <p className="error" role="alert">{t('loadFailed')}</p>}
+      {hasMore && <button type="button" className="explore-load-more" onClick={onLoadMore} disabled={loading || loadingMore}>
+        {t(loadingMore ? 'loading' : loadMoreError ? 'retry' : 'more')}
+      </button>}
     </>
   );
 }

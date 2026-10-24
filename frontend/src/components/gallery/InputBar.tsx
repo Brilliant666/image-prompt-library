@@ -5,7 +5,8 @@ import { api, mediaUrl } from '../../api/client';
 import type { GenerationJobRecord, GenerationProviderStatus, GenerationSetCount, ItemDetail, ModelCatalog, OpenAICompatibleProfile } from '../../types';
 import type { Translator } from '../../utils/i18n';
 import type { LocalPreferences } from '../../utils/localPreferences';
-import { resolveAuto4k, clearCompatibleTransportOverrides, IMAGE25_QUALITIES } from '../../utils/compatibleRecipe';
+import { resolveAuto4k, clearCompatibleTransportOverrides, compatibleValidation, IMAGE25_QUALITIES } from '../../utils/compatibleRecipe';
+import { agentJobSource, type GalleryImageSettings } from '../../utils/agentGalleryBridge';
 import { readGenerationPreference, writeGenerationPreference, lastGenerationProfile } from '../../utils/generationPreferences';
 import { isGptImageModelName, profileModelChoices } from '../../utils/profileSettings';
 import { recipeInputs, restoreRecipeInputs, type RecipeInput } from '../../utils/recipeInputs';
@@ -17,14 +18,14 @@ import { extractPromptTemplateVariableRecords, resolvePromptTemplate } from '../
 import './InputBar.css';
 
 export interface GalleryCommand {id:number;item?:ItemDetail;imageId?:string;job?:GenerationJobRecord;editResult?:boolean}
-interface Props {command?:GalleryCommand;preferences:LocalPreferences;t:Translator;active:boolean;onCreated:(jobs?:GenerationJobRecord[])=>void;onOpenSettings:()=>void;configurationRevision:number;promptVariablesEnabled?:boolean;promptLanguage?:string;preferredProvider?:string;onOpenAgent?:(id:string)=>void}
+interface Props {command?:GalleryCommand;preferences:LocalPreferences;t:Translator;active:boolean;onCreated:(jobs?:GenerationJobRecord[])=>void;onOpenSettings:()=>void;configurationRevision:number;promptVariablesEnabled?:boolean;promptLanguage?:string;preferredProvider?:string;onOpenAgent?:(id:string)=>void;onImageSettingsChange?:(settings:GalleryImageSettings)=>void;onSendToAgent?:(job:GenerationJobRecord,intent:'reference'|'conversation')=>void}
 export function imageDataUrl(blob: Blob): Promise<string> {return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result));reader.onerror=()=>reject(new Error('图片读取失败'));reader.readAsDataURL(blob);});}
 async function verifiedInput(input:RecipeInput) {
   let data=input.dataUrl;
   if(!data){let url=input.resultPath?mediaUrl(input.resultPath):'';if(!url&&input.sourceItemId&&input.imageId){const image=(await api.item(input.sourceItemId)).images.find(candidate=>candidate.id===input.imageId);if(image)url=mediaUrl(image.original_path);}if(!url)throw new Error('参考图缺失');const result=await fetch(url);if(!result.ok)throw new Error('参考图无法读取');data=await imageDataUrl(await result.blob());}
   const image=new Image();image.src=data;await image.decode();return data;
 }
-export default function InputBar({command,preferences,t,active,onCreated,onOpenSettings,configurationRevision,promptVariablesEnabled=false,promptLanguage,preferredProvider,onOpenAgent}:Props) {
+export default function InputBar({command,preferences,t,active,onCreated,onOpenSettings,configurationRevision,promptVariablesEnabled=false,promptLanguage,preferredProvider,onOpenAgent,onImageSettingsChange,onSendToAgent}:Props) {
   const [draft,setDraft]=useState<GalleryDraft>(emptyGalleryDraft),[providers,setProviders]=useState<GenerationProviderStatus[]>([]),[profiles,setProfiles]=useState<OpenAICompatibleProfile[]>([]);
   const [loading,setLoading]=useState(true),[refreshing,setRefreshing]=useState(false),[reading,setReading]=useState(false),[busy,setBusy]=useState(false),[error,setError]=useState(''),[uncertain,setUncertain]=useState(false),[count,setCount]=useState<GenerationSetCount>(1);
   const [referenceSize,setReferenceSize]=useState<{width:number;height:number}>();
@@ -38,8 +39,9 @@ export default function InputBar({command,preferences,t,active,onCreated,onOpenS
   const fileReadSequence=useRef(0),pendingFiles=useRef(false);
   const mounted=useRef(true);
   const catalogUpdates=useRef(new Map<string,ModelCatalog>());
+  const reportedImageSettings=useRef('');
   // Every intentional edit owns the draft from this point onward. Pending history,
-  // attachment and first-load callbacks may only write to their original epoch.
+  // attachment, submission and first-load callbacks may only write to their original epoch.
   const beginEdit=()=>{editRevision.current++;readSequence.current++;consumedCommand.current=command?.id;setReading(pendingFiles.current);};
   const editDraft=(update:GalleryDraft|((current:GalleryDraft)=>GalleryDraft))=>{beginEdit();setDraft(update);};
   useEffect(()=>{mounted.current=true;return()=>{mounted.current=false;readSequence.current++;fileReadSequence.current++;};},[]);
@@ -52,7 +54,19 @@ export default function InputBar({command,preferences,t,active,onCreated,onOpenS
   // must not invalidate an accepted recipe command or an in-flight file read.
   useEffect(()=>{let alive=true;catalogUpdates.current.clear();if(!initialized.current)setLoading(true);setRefreshing(true);Promise.all([api.generationProviders(),api.openAICompatibleProfiles()]).then(async([available,store])=>{
     if(!alive)return;setProviders(available.filter(p=>p.provider!=='manual_upload'));setProfiles(store.profiles.map(profile=>catalogUpdates.current.has(profile.id)?{...profile,model_catalog:catalogUpdates.current.get(profile.id)}:profile));
-    if(!initialized.current){let restored:GalleryDraft|undefined;if(preferences.persistInputOnRestart&&editRevision.current===0){try{restored=await readGalleryDraft();}catch{if(alive&&editRevision.current===0)setError('无法恢复本地草稿；已保存的任务不受影响');}}if(!alive)return;initialized.current=true;if(editRevision.current!==0)return;
+    if(!initialized.current){
+      let restored:GalleryDraft|undefined;
+      if(preferences.persistInputOnRestart&&editRevision.current===0){
+        try{
+          restored=await readGalleryDraft();
+          // IndexedDB keeps Library identities, never an arbitrary saved preview URL.
+          // Reuse recipe verification to resolve the local original and keep failed
+          // references as explicit slots instead of silently submitting without them.
+          if(restored&&alive&&editRevision.current===0)restored={...restored,inputs:await restoreRecipeInputs(restored.inputs,verifiedInput)};
+        }catch{if(alive&&editRevision.current===0)setError('无法恢复本地草稿；已保存的任务不受影响');}
+      }
+      if(!alive)return;initialized.current=true;if(editRevision.current!==0)return;
+      if(restored?.inputs.some(input=>input.missing))setError('部分参考图无法恢复，请重新添加或明确移除缺失图片后再生成');
       const selected=store.profiles.find(p=>p.id===lastGenerationProfile(localStorage))||store.profiles.find(p=>p.id===store.default_profile_id);
       const preferred=available.find(p=>p.provider===preferredProvider&&p.can_generate);
       const fallback=preferred?.provider||(selected?'openai_compatible':available.find(p=>p.can_generate)?.provider)||'openai_compatible';
@@ -95,13 +109,13 @@ export default function InputBar({command,preferences,t,active,onCreated,onOpenS
     window.addEventListener('ipl:generation-preference-reset',reset);
     return()=>window.removeEventListener('ipl:generation-preference-reset',reset);
   },[profiles,draft.provider,draft.profileId]);
-  useEffect(()=>{if(!active||!command||loading||consumedCommand.current===command.id)return;consumedCommand.current=command.id;fileReadSequence.current++;pendingFiles.current=false;const sequence=++readSequence.current;const current=()=>mounted.current&&sequence===readSequence.current;setReading(true);setError('');
+  useEffect(()=>{if(!active||!command||loading||consumedCommand.current===command.id)return;consumedCommand.current=command.id;editRevision.current++;fileReadSequence.current++;pendingFiles.current=false;const sequence=++readSequence.current;const current=()=>mounted.current&&sequence===readSequence.current;setReading(true);setError('');
     void (async()=>{
       let job=command.job;
       const selected=command.item?libraryRecipeImage(command.item,command.imageId):undefined;
       if(!job&&selected?.generation_provider){try{job=await api.generationJobForImage(selected.id);}catch{if(current()){setDraft({...emptyGalleryDraft(),prompt:command.item?.prompts.find(p=>p.is_original)?.text||command.item?.prompts[0]?.text||'',sourceItemId:command.item?.id,inputs:[{id:'missing-recipe',name:'原始参考图不可用',source:'uploaded',previewUrl:'',missing:true}]});throw new Error('历史生成配方缺失；请明确补齐参考图和参数');}return;}}
       if(!current())return;
-      if(job&&['agent_native','agent_native_batch'].includes(job.provider)){const agent=job.metadata?.agent as {conversationId?:string}|undefined;if(current()&&agent?.conversationId&&onOpenAgent){onOpenAgent(agent.conversationId);return;}throw new Error('此结果由 Agent Responses 生成，请在 Agent 会话中继续创作，或明确选择图片 API 开始新任务。');}
+      if(job&&['agent_native','agent_native_batch'].includes(job.provider)){if(onSendToAgent){onSendToAgent(job,command.editResult?'reference':'conversation');return;}const agent=agentJobSource(job);if(agent&&onOpenAgent){onOpenAgent(agent.conversationId);return;}throw new Error('此结果由 Agent Responses 生成，请在 Agent 会话中继续创作，或明确选择图片 API 开始新任务。');}
       if(job){let inputs=recipeInputs(job,mediaUrl);if(command.editResult){if(!job.result_path)throw new Error('结果图片不可用');inputs=[{id:`result-${job.id}`,name:job.id,source:'generated_result',resultPath:job.result_path,previewUrl:mediaUrl(job.result_path)}];}
         const frozen=await restoreRecipeInputs(inputs,verifiedInput);if(current())setDraft(draftFromJob(job,frozen));
       }else if(command.item){const item=command.item;const inputs=selected?[{id:`library-${selected.id}`,name:item.title,source:'library' as const,previewUrl:mediaUrl(selected.original_path),imageId:selected.id,sourceItemId:item.id}]:[];if(current())setDraft(previous=>({...previous,prompt:item.prompts.find(p=>p.is_original)?.text||item.prompts.find(p=>p.is_primary)?.text||item.prompts[0]?.text||'',sourceItemId:item.id,promptLanguage:item.prompts.find(p=>p.is_original)?.language,templateValues:undefined,inputs}));}
@@ -116,16 +130,50 @@ export default function InputBar({command,preferences,t,active,onCreated,onOpenS
     setReading(true);setError('');try{const added=await Promise.all(files.map(async file=>{if(!file.type.startsWith('image/')||file.size>30*1024*1024)throw new Error('请选择 30 MB 内的图片文件');const dataUrl=await imageDataUrl(file);const image=new Image();image.src=dataUrl;await image.decode();return{id:crypto.randomUUID(),name:file.name,source:'uploaded' as const,previewUrl:dataUrl,dataUrl};}));if(current())setDraft(current=>{const remaining=[...added];return{...current,inputs:[...current.inputs.map(input=>input.missing&&remaining.length?remaining.shift()!:input),...remaining]};});}catch(e){if(current())setError(String(e));}finally{if(current()){pendingFiles.current=false;setReading(false);}}
   }
   async function submit() {
-    if(submitLock.current||busy||reading||loading||refreshing||uncertain||!ready)return;submitLock.current=true;setBusy(true);setError('');let posted=false;
+    if(submitLock.current||busy||reading||loading||refreshing||uncertain||!ready)return;submitLock.current=true;const submittedRevision=editRevision.current;setBusy(true);setError('');let posted=false;
     try{let dimensions: {width:number;height:number}|undefined;if(draft.provider==='openai_compatible'&&draft.recipe.size_mode==='auto4k'&&draft.inputs[0]){const data=await verifiedInput(draft.inputs[0]);const image=new Image();image.src=data;await image.decode();dimensions={width:image.naturalWidth,height:image.naturalHeight};}
       const payload=galleryPayload({...draft,promptLanguage:draft.promptLanguage||promptLanguage},limit,dimensions,promptVariablesEnabled);posted=true;
       const created=count===1?[await api.createGenerationJob(payload)]:(await api.createGenerationSet({job:payload,count})).jobs;
       onCreated(created);
-      if(preferences.clearInputAfterSubmit)setDraft(current=>({...current,prompt:'',inputs:[],sourceItemId:undefined}));setPanel('');
+      // A newer edit or accepted restore (even while its images are loading)
+      // owns the composer. This receipt only clears the draft it submitted.
+      if(mounted.current&&editRevision.current===submittedRevision){
+        if(preferences.clearInputAfterSubmit)setDraft(current=>editRevision.current===submittedRevision?{...current,prompt:'',inputs:[],sourceItemId:undefined}:current);
+        setPanel('');
+      }
     }catch(e){setError(String(e));if(posted){setUncertain(true);setError(`${String(e)} · 未自动重试。先查看历史确认是否已创建任务，再决定是否再次提交。`);}}
     finally{submitLock.current=false;setBusy(false);}
   }
   const variables=promptVariablesEnabled?extractPromptTemplateVariableRecords(draft.prompt):[];
+  useEffect(()=>{
+    if(!onImageSettingsChange)return;
+    let size=draft.recipe.size;
+    let unavailable:string|undefined;
+    const model=draft.recipe.model.trim();
+    if(loading||refreshing||reading)unavailable='画廊配置或参考图正在读取，请稍后使用。';
+    else if(draft.provider!=='openai_compatible')unavailable='当前画廊供应商不能直接用于 Agent 图片接口，请选择 API 配置。';
+    else if(!ready||!model)unavailable='请先完成画廊图片 API 配置并选择生图模型。';
+    else if(draft.inputs.some(input=>input.missing))unavailable='请先补齐或移除画廊中缺失的参考图。';
+    else if(draft.recipe.size_mode==='auto4k'){
+      const templateVariables=promptVariablesEnabled?extractPromptTemplateVariableRecords(draft.prompt):[];
+      if(templateVariables.some(variable=>!draft.templateValues?.[variable.key]?.trim()))unavailable='请先填写画廊提示词变量，再确定自动比例。';
+      else{
+        const prompt=templateVariables.length?resolvePromptTemplate(draft.prompt,draft.templateValues||{}):draft.prompt;
+        const resolved=resolveAuto4k(prompt,measuredReferenceSize);
+        if('error' in resolved)unavailable='画廊提示词存在多个冲突比例，请先确定本轮比例。';
+        else if(resolved.source!=='prompt'&&draft.inputs.length&&!measuredReferenceSize)unavailable=referenceStatus==='error'?'无法读取画廊首张参考图比例，请重新选择图片。':'正在读取画廊首张参考图比例，请稍后使用。';
+        else size=resolved.size;
+      }
+    }
+    const validation=compatibleValidation({...draft.recipe,model,size});
+    if(!unavailable&&validation)unavailable=t(validation);
+    // Transfer only image settings; a historical transport override never owns
+    // the Agent's endpoint, credentials, streaming or response format.
+    const params:GalleryImageSettings['params']={size,quality:draft.recipe.quality,background:draft.recipe.background,output_format:draft.recipe.output_format as GalleryImageSettings['params']['output_format'],...(draft.recipe.output_format!=='png'&&draft.recipe.output_compression!==undefined?{output_compression:draft.recipe.output_compression}:{}),...(draft.recipe.moderation!==undefined?{moderation:draft.recipe.moderation}:{})};
+    const settings:GalleryImageSettings={provider:draft.provider,profileId:draft.profileId,model,params,...(unavailable?{unavailable}:{})};
+    const signature=JSON.stringify(settings);
+    if(signature!==reportedImageSettings.current){reportedImageSettings.current=signature;onImageSettingsChange(settings);}
+  },[onImageSettingsChange,draft.provider,draft.profileId,draft.recipe,draft.prompt,draft.templateValues,draft.inputs,ready,loading,refreshing,reading,promptVariablesEnabled,measuredReferenceSize,referenceStatus,t]);
   const sizePreview=draft.provider==='openai_compatible'&&draft.recipe.size_mode==='auto4k'?resolveAuto4k(variables.length?resolvePromptTemplate(draft.prompt,draft.templateValues||{}):draft.prompt,referenceSize):undefined;
   const models=draft.provider==='openai_compatible'?profileModelChoices(profile,draft.recipe.model):[...new Set([draft.recipe.model,provider?.default_image_model||'',...(provider?.image_models||[])].map(model=>model.trim()).filter(Boolean))];
   const catalog=draft.provider==='openai_compatible'?profile?.model_catalog:undefined;

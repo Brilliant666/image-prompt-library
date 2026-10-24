@@ -5,6 +5,10 @@ import ts from 'typescript';
 
 const transpile = async name => ts.transpileModule(await readFile(new URL(`../frontend/src/components/settings/${name}.tsx`, import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
 const [pickerCode, settingsCode] = await Promise.all(['AgentModelPicker', 'AgentSettings'].map(transpile));
+const profileSettingsCode = ts.transpileModule(await readFile(new URL('../frontend/src/utils/profileSettings.ts', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+const profileSettingsModule = { exports: {} };
+new Function('module', 'exports', profileSettingsCode)(profileSettingsModule, profileSettingsModule.exports);
+const imageOptionsCode = ts.transpileModule(await readFile(new URL('../frontend/src/components/agent/AgentImageOptions.tsx', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const nodes = node => !node || typeof node !== 'object' ? [] : [node, ...[node.props?.children].flat(Infinity).flatMap(nodes)];
 const text = node => node == null || typeof node === 'boolean' ? '' : typeof node !== 'object' ? String(node) : [node.props?.children].flat(Infinity).map(text).join('');
@@ -24,7 +28,7 @@ function harness(t, code, dependencies, initialProps, eventTarget = new EventTar
   };
   const jsx = (type, props) => ({ type, props });
   const window = { addEventListener: (...args) => eventTarget.addEventListener(...args), removeEventListener: (...args) => eventTarget.removeEventListener(...args), dispatchEvent(event) { events.push(event); return eventTarget.dispatchEvent(event); } };
-  const deps = { react: hooks, 'react/jsx-runtime': { jsx, jsxs: jsx }, 'lucide-react': new Proxy({}, { get: (_, key) => key }), './AgentModelPicker.css': {}, ...dependencies };
+  const deps = { react: hooks, 'react/jsx-runtime': { jsx, jsxs: jsx }, 'lucide-react': new Proxy({}, { get: (_, key) => key }), './AgentModelPicker.css': {}, '../../utils/profileSettings': profileSettingsModule.exports, ...dependencies };
   const module = { exports: {} };
   const document = { activeElement: null };
   new Function('require', 'module', 'exports', 'window', 'document', code)(name => { assert.ok(name in deps, `Unmocked dependency: ${name}`); return deps[name]; }, module, module.exports, window, document);
@@ -117,6 +121,97 @@ test('model search lets composition keys pass and arrows navigate options only a
   assert.equal(focused, 1); assert.equal(prevented, 1);
   keydown({ key: 'Enter', keyCode: 13, nativeEvent: {}, target: { tagName: 'INPUT' }, preventDefault() { prevented++; } });
   assert.equal(prevented, 2, 'catalog search must not submit the enclosing settings form');
+});
+
+test('image recommendation mode reuses Gallery filtering and preserves custom selections without changing full text catalogs', async t => {
+  const h = picker(t, { imageRecommendations: true }); await h.flush(); h.open(); await h.flush();
+  assert.deepEqual(h.find('button', props => props.role === 'option').map(props => text({ props }).replace('能力未声明', '')), ['historical-manual-model', 'gpt-image-a']);
+  h.update({ value: 'new-custom-image-model' }); await h.flush();
+  assert.ok(h.text().includes('new-custom-image-model'));
+  assert.ok(!h.text().includes('reasoning-a'));
+  assert.equal(h.calls.filter(([kind]) => kind === 'refresh').length, 0);
+  h.update({ imageRecommendations: false }); await h.flush();
+  assert.ok(h.text().includes('reasoning-a'), 'native and text pickers retain the complete cached model catalog');
+});
+
+function imageOptions(t, overrides = {}) {
+  const select = () => null, model = () => null;
+  const changes = [], copies = [], resets = [], sizes = [];
+  const params = { size: '1024x1024', quality: 'high', background: 'auto', output_format: 'webp', output_compression: 87, moderation: 'low' };
+  const config = { revision: 3, config: { apiConfigMode: 'hybrid', textProfileId: 'a', imageProfileId: 'b', textModel: 'text-model', imageModel: '' }, profiles: [profile('a'), profile('b')], capabilities: {}, ready: true, imageReady: true, issues: [], imageIssues: [] };
+  let h;
+  h = harness(t, imageOptionsCode, { '../ToolbarSelect': select, '../settings/AgentModelPicker': model, './AgentImageOptions.css': {} }, {
+    config, activeProfileId: 'a', params, galleryAvailable: true, onChange(change) { changes.push(change); h.update({ ...(change.params ? { params: change.params } : {}), ...(change.imageConfig ? { selection: change.imageConfig } : {}) }); },
+    onUseGallery() { copies.push(true); }, onResetSelection() { resets.push(true); h.update({ selection: undefined }); }, onChooseSize() { sizes.push(true); }, ...overrides,
+  });
+  return { ...h, changes, copies, resets, sizes, config, fields: () => h.find(select), models: () => h.find(model) };
+}
+
+test('image options keeps text routing independent while selecting an image provider and preserving manual models and other parameters', async t => {
+  const h = imageOptions(t); await h.flush();
+  assert.ok(h.text().includes('Profile a · text-model'));
+  assert.ok(h.text().includes('b-image · 供应商默认模型'));
+  assert.equal(h.models()[0].profile.id, 'b'); assert.equal(h.models()[0].imageRecommendations, true);
+  h.models()[0].onChange('historical-image-model'); await h.flush();
+  h.fields().find(field => field.label === '生图供应商').onChange('a'); await h.flush();
+  assert.deepEqual(h.changes.at(-1), { imageConfig: { profileId: 'a', model: 'historical-image-model' } });
+  assert.equal(h.models()[0].value, 'historical-image-model');
+  h.fields().find(field => field.label === '图片质量').onChange('max'); await h.flush();
+  assert.deepEqual(h.changes.at(-1), { params: { size: '1024x1024', quality: 'max', background: 'auto', output_format: 'webp', output_compression: 87, moderation: 'low' } });
+  assert.equal(h.find('select').length, 0, 'all visible choices use project controls');
+});
+
+for (const selection of [{ model: '' }, { profileId: null, model: '' }]) {
+  test(`image options resolves ${'profileId' in selection ? 'null' : 'omitted'} image profile to the same configured supplier used by requests`, async t => {
+    const h = imageOptions(t, { selection }); await h.flush();
+    assert.equal(h.fields().find(field => field.label === '生图供应商').value, 'b');
+    assert.equal(h.models()[0].profile.id, 'b');
+    assert.ok(h.text().includes('b-image · 供应商默认模型'));
+    assert.deepEqual(h.changes, [], 'rendering a fallback does not rewrite the draft');
+    h.models()[0].onChange('manual-override'); await h.flush();
+    assert.deepEqual(h.changes.at(-1), { imageConfig: { profileId: 'b', model: 'manual-override' } });
+    assert.ok(h.text().includes('Profile a · text-model'), 'text routing remains independent');
+  });
+}
+
+test('image options opens parent size dialog and copies Gallery only on explicit action, while reset leaves image parameters intact', async t => {
+  const h = imageOptions(t, { selection: { profileId: 'b', model: 'my-image' }, sizeMode: 'auto4k' }); await h.flush();
+  assert.deepEqual(h.copies, []); assert.ok(h.text().includes('4K · 自动比例'));
+  h.find('button', props => props['aria-label'] === '设置图像尺寸')[0].onClick();
+  assert.equal(h.sizes.length, 1); assert.deepEqual(h.changes, []);
+  h.find('button', props => text({ props }) === '使用画廊当前生图设置')[0].onClick();
+  assert.equal(h.copies.length, 1);
+  h.find('button', props => text({ props }).includes('恢复 Agent 默认模型'))[0].onClick(); await h.flush();
+  assert.equal(h.resets.length, 1); assert.deepEqual(h.changes, []);
+  assert.equal(h.fields().find(field => field.label === '图片质量').value, 'high');
+  assert.equal(h.models()[0].value, '');
+});
+
+test('native and current API modes use Responses image tools without Gallery Images configuration or gpt-image catalog filtering', async t => {
+  const h = imageOptions(t); await h.flush();
+  h.update({ config: { ...h.config, config: { ...h.config.config, apiConfigMode: 'native' } } }); await h.flush();
+  assert.equal(h.fields().some(field => field.label === '生图供应商'), false);
+  assert.equal(h.models()[0].profile.id, 'a'); assert.equal(h.models()[0].imageRecommendations, false);
+  const copy = h.find('button', props => text({ props }) === '使用画廊当前生图设置')[0];
+  assert.equal(copy.disabled, true); copy.onClick(); assert.deepEqual(h.copies, []);
+  h.models()[0].onChange('native-tool-model'); await h.flush();
+  assert.deepEqual(h.changes.at(-1), { imageConfig: { model: 'native-tool-model' } });
+  h.update({ activeProfileId: 'b', config: { ...h.config, config: { ...h.config.config, apiConfigMode: 'off' } } }); await h.flush();
+  assert.equal(h.models()[0].profile.id, 'b');
+});
+
+test('image options disables mutations during submission and preserves compression when PNG hides its field', async t => {
+  const h = imageOptions(t); await h.flush();
+  h.fields().find(field => field.label === '图片格式').onChange('png'); await h.flush();
+  assert.equal(h.find('input', props => props.type === 'number').length, 0);
+  assert.equal(h.changes.at(-1).params.output_compression, 87);
+  h.update({ disabled: true }); await h.flush();
+  const before = h.changes.length;
+  h.fields().find(field => field.label === '图片质量').onChange('low');
+  h.models()[0].onChange('ignored-model');
+  h.find('button', props => props['aria-label'] === '设置图像尺寸')[0].onClick();
+  assert.equal(h.changes.length, before); assert.deepEqual(h.sizes, []);
+  assert.ok(h.fields().every(field => field.disabled)); assert.equal(h.models()[0].disabled, true);
 });
 
 const agentConfig = { apiConfigMode: 'hybrid', textProfileId: 'a', imageProfileId: 'b', textModel: 'typed-text', imageModel: 'typed-image', reasoningEffort: 'high', stream: true, partialImages: 2, maxToolRounds: 4, maxImageJobs: 3, webSearch: false, mathFormattingPrompt: true };

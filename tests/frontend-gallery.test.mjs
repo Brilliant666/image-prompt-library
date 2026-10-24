@@ -21,6 +21,7 @@ async function loadTs(relative) {
   return module.exports;
 }
 const recipe = await loadTs('../frontend/src/utils/galleryRecipe.ts');
+const agentGalleryBridge = await loadTs('../frontend/src/utils/agentGalleryBridge.ts');
 const drafts = await loadTs('../frontend/src/utils/galleryDraft.ts');
 const compatible = await loadTs('../frontend/src/utils/compatibleRecipe.ts');
 const references = await loadTs('../frontend/src/utils/recipeInputs.ts');
@@ -218,6 +219,7 @@ function inputHarness(t, overrides = {}, apiOverrides = {}, environment = {}) {
     react: hooks, 'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'fragment' }, 'lucide-react': new Proxy({}, { get: (_, key) => key }),
     '../../api/client': { api, mediaUrl: path => `/media/${path}` }, '../../utils/compatibleRecipe': compatible,
     '../../utils/generationPreferences': preferences, '../../utils/recipeInputs': references, '../../utils/galleryRecipe': recipe,
+    '../../utils/agentGalleryBridge': agentGalleryBridge,
     '../../utils/profileSettings': profileSettings,
     '../../utils/promptTemplateVariables': templates,
     '../../utils/galleryDraft': { readGalleryDraft: environment.readGalleryDraft || (async () => undefined), saveGalleryDraft: async value => state.persisted.push(value) },
@@ -275,6 +277,86 @@ test('actual InputBar submit callback locks two same-tick clicks and clears inpu
   assert.equal(harness.find('textarea', '画廊提示词').value, originalPrompt);
   pending.resolve(historicalJob()); await harness.flush();
   assert.equal(harness.find('textarea', '画廊提示词').value, ''); assert.equal(harness.state.created, 1);
+});
+
+for (const count of [1, 3]) test(`late confirmed submission preserves a newer Library recipe and its attachments (${count})`, async t => {
+  const pending = deferred(), posts = [], created = [];
+  const h = inputHarness(t, { preferences: { clearInputAfterSubmit: true }, onCreated: jobs => created.push(jobs) }, {
+    createGenerationJob: payload => { posts.push(payload); return pending.promise; },
+    createGenerationSet: payload => { posts.push(payload.job); return pending.promise; },
+  });
+  await h.flush();
+  h.find('textarea', '画廊提示词').onChange({ target: { value: 'old submitted prompt' } }); await h.flush();
+  await chooseCount(h, count);
+  h.find('button', '生成图片').onClick(); await h.flush();
+  h.update({ active: false }); await h.flush();
+  const item = { id: 'new-library-item', title: 'New source', prompts: [{ text: '  new Library prompt\n', is_original: true, language: 'en' }], images: [{ id: 'new-library-image', role: 'reference_image', original_path: 'originals/new.png' }] };
+  h.update({ active: true, command: { id: 90401, item, imageId: 'new-library-image' } }); await h.flush();
+  h.find('button', '请求模型 gateway-original-alias').onClick(); await h.flush();
+  const before = h.find('textarea', '画廊提示词').value;
+  const imagesBefore = children(h.tree).filter(node => node.type === 'img').map(node => node.props.src);
+  const records = Array.from({ length: count }, (_, index) => historicalJob({ id: `confirmed-old-${index}` }));
+  pending.resolve(count === 1 ? records[0] : { jobs: records }); await h.flush();
+  assert.deepEqual(created, [records], 'the old request still reports its confirmed jobs exactly once');
+  assert.equal(h.find('textarea', '画廊提示词').value, before);
+  assert.equal(before, item.prompts[0].text);
+  assert.deepEqual(children(h.tree).filter(node => node.type === 'img').map(node => node.props.src), imagesBefore);
+  assert.deepEqual(imagesBefore, ['/media/originals/new.png']);
+  h.find('button', '解除关联');
+  assert.equal(h.find('input', '请求模型完整 ID').value, 'gateway-original-alias', 'the old reply must not close a newly opened panel');
+  assert.equal(h.find('button', '生成图片')['aria-busy'], false);
+  assert.equal(h.find('button', '生成图片').disabled, false);
+  assert.equal(posts.length, 1, 'restoration and receipt handling never submit a second job');
+});
+
+for (const phase of ['metadata', 'reference']) test(`old submission cannot clear the draft while a newer ${phase} restore is pending`, async t => {
+  const submit = deferred(), restore = deferred();
+  const h = inputHarness(t, { preferences: { clearInputAfterSubmit: true } }, {
+    createGenerationJob: () => submit.promise,
+    generationJobForImage: () => restore.promise,
+  }, { decode: () => phase === 'reference' ? restore.promise : undefined });
+  await h.flush();
+  h.find('textarea', '画廊提示词').onChange({ target: { value: 'submitted prompt still visible' } }); await h.flush();
+  h.find('button', '生成图片').onClick(); await h.flush();
+  const job = historicalJob({ prompt_text: 'new restored prompt', parameters: { ...historicalJob().parameters, input_images: [{ id: 'new-ref', data_url: 'data:image/png;base64,new-reference' }] } });
+  const item = { id: 'new-item', images: [{ id: 'new-image', role: 'reference_image', generation_provider: 'openai_compatible' }], prompts: [] };
+  h.update({ command: phase === 'metadata' ? { id: 90402, item, imageId: 'new-image' } : { id: 90402, job } }); await h.flush();
+  submit.resolve(historicalJob()); await h.flush();
+  assert.equal(h.find('textarea', '画廊提示词').value, 'submitted prompt still visible', 'an accepted pending command already owns this draft');
+  assert.equal(h.find('button', '生成图片')['aria-busy'], false);
+  assert.equal(h.find('button', '生成图片').disabled, true, 'pending recipe restoration remains active');
+  restore.resolve(phase === 'metadata' ? job : undefined); await h.flush();
+  assert.equal(h.find('textarea', '画廊提示词').value, 'new restored prompt');
+  assert.deepEqual(children(h.tree).filter(node => node.type === 'img').map(node => node.props.src), ['data:image/png;base64,new-reference']);
+  assert.equal(h.find('button', '生成图片').disabled, false);
+  assert.equal(h.state.created, 1);
+});
+
+test('a model edit during submission preserves the entire draft and the new model after receipt', async t => {
+  const pending = deferred(), posts = [];
+  const job = historicalJob({ parameters: { ...historicalJob().parameters, stream: false, partial_images: 0, response_format: 'auto', base_url_mode: 'custom', input_images: [{ id: 'keep-ref', data_url: 'data:image/png;base64,keep-ref' }] } });
+  const h = inputHarness(t, { preferences: { clearInputAfterSubmit: true }, command: { id: 90403, job } }, { createGenerationJob: payload => { posts.push(payload); return pending.promise; } });
+  await h.flush();
+  h.find('button', '生成图片').onClick(); await h.flush();
+  h.find('button', '请求模型 gateway-original-alias').onClick(); await h.flush();
+  h.find('input', '请求模型完整 ID').onChange({ target: { value: 'newly-selected-model' } }); await h.flush();
+  pending.resolve(historicalJob()); await h.flush();
+  assert.equal(h.find('textarea', '画廊提示词').value, originalPrompt);
+  assert.equal(h.find('input', '请求模型完整 ID').value, 'newly-selected-model');
+  assert.deepEqual(children(h.tree).filter(node => node.type === 'img').map(node => node.props.src), ['data:image/png;base64,keep-ref']);
+  assert.equal(h.find('button', '生成图片').disabled, false);
+  assert.equal(h.state.created, 1);
+  h.find('button', '生成图片').onClick(); await h.flush();
+  assert.equal(posts.length, 2);
+  assert.equal(posts[1].prompt_text, originalPrompt);
+  assert.equal(posts[1].model, 'newly-selected-model');
+  assert.deepEqual(posts[1].parameters.input_images.map(image => image.id), ['keep-ref']);
+  assert.equal(posts[1].parameters.stream, false);
+  assert.equal(posts[1].parameters.partial_images, 0);
+  assert.equal(posts[1].parameters.response_format, 'auto');
+  assert.equal(posts[1].parameters.base_url_mode, 'custom');
+  assert.equal(posts[1].parameters.size, job.parameters.size);
+  assert.equal(posts[1].parameters.quality, job.parameters.quality);
 });
 
 test('gallery model suggestions follow the current API list and retain a restored historical model', async t => {
@@ -570,6 +652,117 @@ for (const phase of ['providers', 'stored-draft']) test(`late ${phase} initializ
   assert.equal(h.state.posts.length, 0);
 });
 
+const persistedLibraryDraft = (inputs = [1, 2].map(index => ({ id: `library-slot-${index}`, name: `Library reference ${index}`, source: 'library', sourceItemId: `local-item-${index}`, imageId: `local-image-${index}`, previewUrl: `https://untrusted.invalid/old-preview-${index}.png` }))) => drafts.validateGalleryDraft({
+  ...recipe.draftFromJob(historicalJob({ parameters: { ...historicalJob().parameters, stream: false, partial_images: 0, response_format: 'auto', base_url_mode: 'custom' } }), inputs),
+  sourceItemId: 'source-item', promptLanguage: 'en', templateValues: { subject: 'unchanged subject' },
+});
+const localImageItem = index => ({ id: `local-item-${index}`, images: [{ id: `local-image-${index}`, original_path: `originals/synthetic-${index}.png` }] });
+
+test('persisted Library references hydrate verified original previews in order before submission', async t => {
+  const first = deferred(), second = deferred(), requests = [], lookups = [];
+  t.mock.method(globalThis, 'fetch', async url => { requests.push(url); return { ok: true, blob: async () => ({ dataUrl: `data:image/png;base64,original-${url.endsWith('1.png') ? 'one' : 'two'}` }) }; });
+  const stored = persistedLibraryDraft();
+  assert.deepEqual(stored.inputs.map(value => value.previewUrl), ['', ''], 'stored arbitrary preview URLs must not be trusted');
+  const h = inputHarness(t, { preferences: { persistInputOnRestart: true } }, {
+    item: id => { lookups.push(id); return id === 'local-item-1' ? first.promise : second.promise; },
+  }, { readGalleryDraft: async () => stored, readFile: blob => blob.dataUrl });
+  await h.flush();
+  assert.deepEqual(lookups, ['local-item-1', 'local-item-2']);
+  assert.equal(h.find('button', '生成图片').disabled, true);
+  second.resolve(localImageItem(2)); await h.flush();
+  assert.equal(h.find('button', '生成图片').disabled, true, 'wait for all ordered references');
+  first.resolve(localImageItem(1)); await h.flush();
+  assert.deepEqual(children(h.tree).filter(node => node.type === 'img').map(node => node.props.src), ['data:image/png;base64,original-one', 'data:image/png;base64,original-two']);
+  assert.deepEqual(requests.sort(), ['/media/originals/synthetic-1.png', '/media/originals/synthetic-2.png']);
+  assert.equal(h.find('textarea', '画廊提示词').value, originalPrompt);
+  assert.equal(h.find('button', '生成图片').disabled, false);
+  h.find('button', '解除关联');
+  assert.equal(h.state.posts.length, 0, 'draft recovery does not generate anything');
+  h.find('button', '生成图片').onClick(); await h.flush();
+  const payload = h.state.posts[0];
+  assert.equal(payload.prompt_text, originalPrompt);
+  assert.equal(payload.model, stored.recipe.model);
+  assert.equal(payload.parameters.quality, stored.recipe.quality);
+  assert.deepEqual(payload.parameters.input_images.map(value => [value.id, value.data_url, value.source_item_id]), [['library-slot-1', 'data:image/png;base64,original-one', 'local-item-1'], ['library-slot-2', 'data:image/png;base64,original-two', 'local-item-2']]);
+  assert.deepEqual(Object.fromEntries(['stream', 'partial_images', 'response_format', 'base_url_mode'].map(key => [key, payload.parameters[key]])), { stream: false, partial_images: 0, response_format: 'auto', base_url_mode: 'custom' });
+});
+
+for (const failure of ['metadata-rejected', 'image-missing', 'media-rejected', 'file-read', 'decode']) test(`persisted Library reference ${failure} keeps an explicit missing slot and blocks generation`, async t => {
+  const requests = [];
+  t.mock.method(globalThis, 'fetch', async url => { requests.push(url); return { ok: failure !== 'media-rejected', blob: async () => ({ dataUrl: 'data:image/png;base64,unreadable' }) }; });
+  const stored = persistedLibraryDraft([input('keep-original'), { id: 'missing-library', name: 'Library original', source: 'library', sourceItemId: 'local-item-2', imageId: 'local-image-2', previewUrl: 'https://untrusted.invalid/fallback.png' }]);
+  const h = inputHarness(t, { preferences: { persistInputOnRestart: true } }, {
+    item: async () => { if (failure === 'metadata-rejected') throw Error('local item unavailable'); return failure === 'image-missing' ? { images: [{ id: 'different-image', original_path: 'originals/wrong.png' }] } : localImageItem(2); },
+  }, { readGalleryDraft: async () => stored, readFile: blob => { if (failure === 'file-read') throw Error('read failed'); return blob.dataUrl; }, decode: async src => { if (failure === 'decode' && src.endsWith(',unreadable')) throw Error('invalid image'); } });
+  await h.flush();
+  assert.deepEqual(children(h.tree).filter(node => node.type === 'img').map(node => node.props.src), ['data:image/png;base64,keep-original']);
+  assert.ok(children(h.tree).some(node => node.props?.className === 'missing'), 'failed reference stays in its original slot');
+  h.find('button', '移除参考图 2');
+  assert.equal(h.find('textarea', '画廊提示词').value, originalPrompt);
+  assert.equal(h.find('button', '生成图片').disabled, true);
+  h.find('button', '生成图片').onClick(); await h.flush(); assert.equal(h.state.posts.length, 0);
+  assert.ok(requests.every(url => url === '/media/originals/synthetic-2.png'));
+  h.find('button', '移除参考图 2').onClick(); await h.flush();
+  h.find('button', '生成图片').onClick(); await h.flush();
+  assert.equal(h.state.posts.length, 1);
+  assert.equal(h.state.posts[0].parameters.input_images[0].data_url, 'data:image/png;base64,keep-original');
+});
+
+for (const edit of ['prompt', 'model', 'attachment']) test(`late persisted Library hydration preserves a newer ${edit} edit`, async t => {
+  const pending = deferred();
+  t.mock.method(globalThis, 'fetch', async () => ({ ok: true, blob: async () => ({ dataUrl: 'data:image/png;base64,old-original' }) }));
+  const h = inputHarness(t, { preferences: { persistInputOnRestart: true } }, { item: () => pending.promise }, { readGalleryDraft: async () => persistedLibraryDraft([persistedLibraryDraft().inputs[0]]), readFile: blob => blob.dataUrl });
+  await h.flush();
+  if (edit === 'prompt') h.find('textarea', '画廊提示词').onChange({ target: { value: 'accepted new prompt' } });
+  else if (edit === 'model') { children(h.tree).find(node => node.type === 'button' && node.props.className?.includes('pg-param-model')).props.onClick(); await h.flush(); h.find('input', '请求模型完整 ID').onChange({ target: { value: 'accepted-new-model' } }); }
+  else { h.find('button', '添加参考图').onClick(); await h.flush(); h.find('button', '从 Library 或画廊选择参考图').onClick(); await h.flush(); children(h.tree).find(node => node.type === 'ReferencePicker').props.onSelect(input('new-reference')); }
+  await h.flush(); pending.resolve(localImageItem(1)); await h.flush();
+  assert.equal(h.find('textarea', '画廊提示词').value, edit === 'prompt' ? 'accepted new prompt' : '');
+  assert.deepEqual(children(h.tree).filter(node => node.type === 'img').map(node => node.props.src), edit === 'attachment' ? ['data:image/png;base64,new-reference'] : []);
+  if (edit === 'model') assert.equal(h.find('input', '请求模型完整 ID').value, 'accepted-new-model');
+  assert.equal(h.state.posts.length, 0);
+});
+
+test('a newer settings initialization owns restored Library references when old metadata arrives late', async t => {
+  const pending = deferred(); let reads = 0;
+  t.mock.method(globalThis, 'fetch', async () => ({ ok: true, blob: async () => ({ dataUrl: 'data:image/png;base64,old-original' }) }));
+  const h = inputHarness(t, { preferences: { persistInputOnRestart: true } }, { item: () => pending.promise }, {
+    readGalleryDraft: async () => ++reads === 1 ? persistedLibraryDraft([persistedLibraryDraft().inputs[0]]) : { ...persistedLibraryDraft([input('latest-original')]), prompt: 'latest disk prompt' }, readFile: blob => blob.dataUrl,
+  });
+  await h.flush(); h.update({ configurationRevision: 1 }); await h.flush();
+  pending.resolve(localImageItem(1)); await h.flush();
+  assert.equal(reads, 2);
+  assert.equal(h.find('textarea', '画廊提示词').value, 'latest disk prompt');
+  assert.deepEqual(children(h.tree).filter(node => node.type === 'img').map(node => node.props.src), ['data:image/png;base64,latest-original']);
+  assert.equal(h.find('button', '生成图片').disabled, false);
+});
+
+test('a new recipe command wins over pending persisted Library hydration without submitting', async t => {
+  const pending = deferred();
+  t.mock.method(globalThis, 'fetch', async () => ({ ok: true, blob: async () => ({ dataUrl: 'data:image/png;base64,old-original' }) }));
+  const h = inputHarness(t, { preferences: { persistInputOnRestart: true } }, { item: () => pending.promise }, { readGalleryDraft: async () => persistedLibraryDraft([persistedLibraryDraft().inputs[0]]), readFile: blob => blob.dataUrl });
+  await h.flush();
+  h.update({ command: { id: 2900, job: historicalJob({ prompt_text: 'new command prompt', parameters: { ...historicalJob().parameters, input_images: [{ id: 'new-command-input', data_url: 'data:image/png;base64,new-command-original' }] } }) } }); await h.flush();
+  pending.resolve(localImageItem(1)); await h.flush();
+  await h.flush(); // The newly accepted command verifies its own reference after initialization.
+  assert.equal(h.find('textarea', '画廊提示词').value, 'new command prompt');
+  assert.deepEqual(children(h.tree).filter(node => node.type === 'img').map(node => node.props.src), ['data:image/png;base64,new-command-original']);
+  assert.equal(h.find('button', '生成图片').disabled, false);
+  assert.equal(h.state.posts.length, 0);
+});
+
+test('switching workspaces during first Library draft hydration finishes without permanent loading', async t => {
+  const pending = deferred();
+  t.mock.method(globalThis, 'fetch', async () => ({ ok: true, blob: async () => ({ dataUrl: 'data:image/png;base64,restored-original' }) }));
+  const h = inputHarness(t, { preferences: { persistInputOnRestart: true } }, { item: () => pending.promise }, { readGalleryDraft: async () => persistedLibraryDraft([persistedLibraryDraft().inputs[0]]), readFile: blob => blob.dataUrl });
+  await h.flush(); h.update({ active: false }); await h.flush();
+  pending.resolve(localImageItem(1)); await h.flush(); h.update({ active: true }); await h.flush();
+  assert.equal(h.find('textarea', '画廊提示词').value, originalPrompt);
+  assert.deepEqual(children(h.tree).filter(node => node.type === 'img').map(node => node.props.src), ['data:image/png;base64,restored-original']);
+  assert.equal(h.find('button', '生成图片').disabled, false);
+  assert.equal(h.state.posts.length, 0);
+});
+
 const composerChip = (h, name) => children(h.tree).find(node => node.type === 'button' && node.props.className?.includes(`pg-param-${name}`)).props;
 const pendingEdits = {
   'dropped prompt': async h => { h.find('textarea', '画廊提示词').onDrop({ preventDefault() {}, dataTransfer: { files: [], getData: type => type === 'text/plain' ? '\nnew text' : '' } }); return payload => assert.equal(payload.prompt_text, 'current {{subject}}\nnew text'); },
@@ -798,6 +991,8 @@ function workspaceHarness(t, api, overrides = {}, environment = {}) {
   const deps = { react: hooks, 'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'fragment' }, 'lucide-react': new Proxy({}, { get: (_, key) => key }),
     fflate: { zipSync: environment.zipSync || (() => { throw Error('download not part of this test'); }) }, '../../api/client': { api, mediaUrl: path => `/media/${path}` },
     '../../utils/galleryRecipe': recipe, './InputBar': { __esModule: true, default: 'InputBar' }, './TaskGrid': { __esModule: true, default: 'TaskGrid' }, './DetailModal': { __esModule: true, default: 'DetailModal' }, './Lightbox': { __esModule: true, default: 'Lightbox' }, './GalleryWorkspace.css': {},
+    '../../utils/agentGalleryBridge': agentGalleryBridge,
+    '../ToolbarSelect': { __esModule: true, default: 'ToolbarSelect' },
     '../../utils/generationSiblings': generationSiblings,
     '../../utils/galleryHistory': history,
     '../../utils/generationQueueHistory': queueHistory,
@@ -900,18 +1095,18 @@ test('gallery starts with all states and persists explicit grouped filtering bef
   const harness = workspaceHarness(t, api); await harness.flush();
   assert.deepEqual(harness.node('TaskGrid').jobs.map(job => job.id), all.map(job => job.id));
   assert.equal(calls[0].prepare_references, false);
-  harness.node('select', props => props['aria-label'] === '任务状态筛选').onChange({ target: { value: 'successful' } }); await harness.flush();
+  harness.node('ToolbarSelect', props => props.label === '任务状态筛选').onChange('successful'); await harness.flush();
   assert.deepEqual(harness.node('TaskGrid').jobs.map(job => job.id), ['succeeded', 'accepted']);
   assert.equal(calls.at(-1).statuses, 'succeeded,accepted');
-  harness.node('select', props => props['aria-label'] === '任务状态筛选').onChange({ target: { value: 'accepted' } }); await harness.flush();
+  harness.node('ToolbarSelect', props => props.label === '任务状态筛选').onChange('accepted'); await harness.flush();
   assert.deepEqual(harness.node('TaskGrid').jobs.map(job => job.id), ['accepted']);
   assert.equal(calls.at(-1).statuses, 'accepted');
-  harness.node('select', props => props['aria-label'] === '任务状态筛选').onChange({ target: { value: 'active' } }); await harness.flush();
+  harness.node('ToolbarSelect', props => props.label === '任务状态筛选').onChange('active'); await harness.flush();
   assert.deepEqual(harness.node('TaskGrid').jobs.map(job => job.id), ['running', 'queued']);
   assert.equal(calls.at(-1).statuses, 'queued,running');
   assert.equal(history.readGalleryFilter(), 'active');
   const reopened = workspaceHarness(t, api); await reopened.flush();
-  assert.equal(reopened.node('select', props => props['aria-label'] === '任务状态筛选').value, 'active');
+  assert.equal(reopened.node('ToolbarSelect', props => props.label === '任务状态筛选').value, 'active');
 });
 
 test('successful-only gallery returns to all states to show newly submitted jobs immediately', async t => {
@@ -924,7 +1119,7 @@ test('successful-only gallery returns to all states to show newly submitted jobs
   harness.node('input', props => props['aria-label'] === '搜索生成历史').onChange({ target: { value: 'other prompt' } }); await harness.flush();
   const created = historicalJob({ status: 'queued' });
   harness.node('InputBar').onCreated([created]); await harness.flush();
-  assert.equal(harness.node('select', props => props['aria-label'] === '任务状态筛选').value, '');
+  assert.equal(harness.node('ToolbarSelect', props => props.label === '任务状态筛选').value, '');
   assert.equal(history.readGalleryFilter(), '');
   assert.equal(harness.node('input', props => props['aria-label'] === '搜索生成历史').value, '');
   assert.deepEqual(harness.node('TaskGrid').jobs.map(job => job.id), [created.id]);
@@ -942,10 +1137,10 @@ test('filter changes retain matching cards during delayed reads and expose only 
   let calls = 0;
   const h = workspaceHarness(t, { generationJobs: () => ++calls === 1 ? Promise.resolve({ jobs: [historicalJob(), failed], total: 2 }) : pending.promise });
   await h.flush();
-  const filter = () => h.node('select', props => props['aria-label'] === '任务状态筛选');
+  const filter = () => h.node('ToolbarSelect', props => props.label === '任务状态筛选');
   assert.equal(filter().value, '');
-  assert.deepEqual(children(h.tree).filter(node => node.type === 'option').map(node => node.props.value), ['', 'active', 'successful', 'accepted', 'failed']);
-  filter().onChange({ target: { value: 'failed' } }); await h.flush();
+  assert.deepEqual(filter().options.map(option => option.value), ['', 'active', 'successful', 'accepted', 'failed']);
+  filter().onChange('failed'); await h.flush();
   assert.deepEqual(h.node('TaskGrid')?.jobs.map(job => job.id), ['failed-visible']);
   assert.equal(children(h.tree).some(node => node.props?.children === '加载生成历史…'), false);
   pending.resolve({ jobs: [failed], total: 1 }); await h.flush();
@@ -967,10 +1162,10 @@ test('returning from failed to all restores the loaded page immediately while fr
   h.node('button', props => props.className === 'pg-load-more').onClick(); await h.flush();
   assert.equal(h.node('TaskGrid').jobs.length, 96);
   const command = h.node('InputBar').command;
-  h.node('select').onChange({ target: { value: 'failed' } }); await h.flush();
+  h.node('ToolbarSelect').onChange('failed'); await h.flush();
   assert.equal(h.node('TaskGrid').jobs.length, 1);
   delayed = true;
-  h.node('select').onChange({ target: { value: '' } }); await h.flush();
+  h.node('ToolbarSelect').onChange(''); await h.flush();
   assert.equal(h.node('TaskGrid').jobs.length, 96, 'all previously loaded cards return before the API resolves');
   assert.equal(calls.at(-1).limit, 96, 'background refresh must not collapse an expanded page to 48');
   assert.deepEqual(h.node('button', props => props.className === 'pg-load-more').children, ['已加载 ', 96, ' / ', 120, ' · 加载更多']);
@@ -988,10 +1183,10 @@ test('empty filtered results can return instantly to all and late filter reads c
     return ++failedReads === 1 ? Promise.resolve({ jobs: [], total: 0 }) : lateFailed.promise;
   } });
   await h.flush();
-  h.node('select').onChange({ target: { value: 'failed' } }); await h.flush();
+  h.node('ToolbarSelect').onChange('failed'); await h.flush();
   assert.equal(h.node('TaskGrid'), undefined);
   h.node('button', props => props['aria-label'] === '刷新生成历史').onClick(); await h.flush();
-  h.node('select').onChange({ target: { value: '' } }); await h.flush();
+  h.node('ToolbarSelect').onChange(''); await h.flush();
   assert.deepEqual(h.node('TaskGrid')?.jobs.map(job => job.id), [success.id]);
   lateFailed.resolve({ jobs: [historicalJob({ id: 'late-failure', status: 'failed' })], total: 1 }); await h.flush();
   assert.deepEqual(h.node('TaskGrid').jobs.map(job => job.id), [success.id]);
@@ -1007,10 +1202,10 @@ for(const change of ['library', 'mutation']) test(`filter page cache is invalida
     return Promise.resolve({ jobs: !isAllGallery(params) ? [failed] : [old, failed], total: !isAllGallery(params) ? 1 : 2 });
   } }, { libraryScope: 'library-a' });
   await h.flush();
-  h.node('select').onChange({ target: { value: 'failed' } }); await h.flush();
+  h.node('ToolbarSelect').onChange('failed'); await h.flush();
   changed = true;
   h.update(change === 'library' ? { libraryScope: 'library-b' } : { refreshKey: 1 }); await h.flush();
-  h.node('select').onChange({ target: { value: '' } }); await h.flush();
+  h.node('ToolbarSelect').onChange(''); await h.flush();
   assert.equal(h.node('TaskGrid'), undefined, 'an invalidated All snapshot must not resurrect old records');
   assert.equal(h.node('button', props => props.className === 'pg-load-more'), undefined, 'old totals are not reused');
   assert.equal(h.node('h2').children, '正在更新生成历史', 'uncached pending reads do not claim the library is empty');
@@ -1026,7 +1221,7 @@ test('a confirmed submission invalidates old filter snapshots and survives retur
   const h = workspaceHarness(t, { generationJobs: params => submitted ? pending.promise
     : Promise.resolve({ jobs: !isAllGallery(params) ? [failed] : [old, failed], total: !isAllGallery(params) ? 1 : 2 }) });
   await h.flush();
-  h.node('select').onChange({ target: { value: 'failed' } }); await h.flush();
+  h.node('ToolbarSelect').onChange('failed'); await h.flush();
   submitted = true;
   h.node('InputBar').onCreated([created]); await h.flush();
   assert.equal(h.node('TaskGrid').jobs[0].id, created.id, 'a cached All page cannot replace the new server record');
@@ -1046,7 +1241,7 @@ test('queue mutations invalidate every gallery filter and pending reads without 
     return reads === 3 ? stale.promise : reads === 4 ? freshFailed.promise : freshAll.promise;
   } }, { libraryScope: 'library', onQueueChanged: () => changes++ });
   await h.flush();
-  h.node('select').onChange({ target: { value: 'failed' } }); await h.flush();
+  h.node('ToolbarSelect').onChange('failed'); await h.flush();
   h.node('button', props => props['aria-label'] === '刷新生成历史').onClick(); await h.flush();
   h.node('GenerationQueueDrawer').onChanged(); await h.flush();
   assert.equal(changes, 0, 'the queue refreshes itself; do not bounce its mutation back through the global refresh key');
@@ -1054,7 +1249,7 @@ test('queue mutations invalidate every gallery filter and pending reads without 
   assert.equal(h.node('GenerationQueueDrawer').refreshKey, 0, 'the queue does not receive a redundant refresh notification');
   stale.resolve({ jobs: [historicalJob({ id: 'stale-failed', status: 'failed' })], total: 1 }); await h.flush();
   assert.deepEqual(h.node('TaskGrid').jobs.map(job => job.id), [failed.id], 'the pre-mutation read is invalidated');
-  h.node('select').onChange({ target: { value: '' } }); await h.flush();
+  h.node('ToolbarSelect').onChange(''); await h.flush();
   assert.deepEqual(h.node('TaskGrid').jobs.map(job => job.id), [failed.id], 'the cached All page cannot resurrect the discarded success');
   assert.equal(h.node('button', props => props.className === 'pg-load-more'), undefined);
   freshFailed.resolve({ jobs: [], total: 0 }); await h.flush();
@@ -1097,7 +1292,7 @@ test('authoritative post-creation results remove completed tasks from a newly se
   const queued = historicalJob({ id: 'new-job', status: 'queued' });
   const h = workspaceHarness(t, { generationJobs: () => ++calls === 1 ? Promise.resolve({ jobs: [], total: 0 }) : calls === 2 ? pending.promise : filtered.promise });
   await h.flush(); h.node('InputBar').onCreated([queued]); await h.flush();
-  h.node('select', props => props['aria-label'] === '任务状态筛选').onChange({ target: { value: 'active' } }); await h.flush();
+  h.node('ToolbarSelect', props => props.label === '任务状态筛选').onChange('active'); await h.flush();
   assert.deepEqual(h.node('TaskGrid').jobs.map(job => job.id), ['new-job']);
   filtered.resolve({ jobs: [], total: 0 }); await h.flush();
   assert.equal(h.node('TaskGrid'), undefined, 'a task completed before this authoritative read is no longer pinned as queued');
@@ -1125,8 +1320,8 @@ test('returning to a pending filter starts a fresh read instead of sharing its o
     pendingReads.set(key, pending); return pending;
   } });
   await h.flush();
-  h.node('select', props => props['aria-label'] === '任务状态筛选').onChange({ target: { value: 'failed' } }); await h.flush();
-  h.node('select', props => props['aria-label'] === '任务状态筛选').onChange({ target: { value: '' } }); await h.flush();
+  h.node('ToolbarSelect', props => props.label === '任务状态筛选').onChange('failed'); await h.flush();
+  h.node('ToolbarSelect', props => props.label === '任务状态筛选').onChange(''); await h.flush();
   assert.equal(calls.at(-1).fresh, true);
   latest.resolve({ jobs: [historicalJob({ id: 'latest' })], total: 1 }); await h.flush();
   old.resolve({ jobs: [historicalJob({ id: 'obsolete' })], total: 1 }); await h.flush();
@@ -1156,7 +1351,7 @@ test('late history for an old filter cannot replace the new filter or its cache'
   const failed = historicalJob({ id: 'failed', status: 'failed' });
   const harness = workspaceHarness(t, { generationJobs: params => params.statuses === 'succeeded,accepted' ? old.promise : Promise.resolve({ jobs: [failed], total: 1 }) }, { libraryScope: 'library-a' });
   await harness.flush();
-  harness.node('select', props => props['aria-label'] === '任务状态筛选').onChange({ target: { value: 'failed' } }); await harness.flush();
+  harness.node('ToolbarSelect', props => props.label === '任务状态筛选').onChange('failed'); await harness.flush();
   old.resolve({ jobs: [historicalJob()], total: 1 }); await harness.flush();
   assert.deepEqual(harness.node('TaskGrid').jobs.map(job => job.id), ['failed']);
   assert.deepEqual(history.readGalleryHistory('library-a', 'failed').jobs.map(job => job.id), ['failed']);

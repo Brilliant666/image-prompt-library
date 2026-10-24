@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
-import { Check, Copy, Download, ImagePlus, RotateCcw, Square, X } from 'lucide-react';
+import { Check, Copy, Download, ImagePlus, RotateCcw, Square, X, MessageSquare } from 'lucide-react';
 import { api, mediaUrl } from '../../api/client';
 import type { GenerationJobRecord, ItemSummary } from '../../types';
 import type { Translator } from '../../utils/i18n';
 import { galleryJobPrompt, galleryStatus } from '../../utils/galleryRecipe';
+import { agentJobSource } from '../../utils/agentGalleryBridge';
 import { recipeInputs } from '../../utils/recipeInputs';
 import { copyTextToClipboard } from '../../utils/clipboard';
 import { useModalFocus } from '../../hooks/useModalFocus';
@@ -17,6 +18,7 @@ interface Props {
   onChange: () => void;
   onAccepted: (itemId: string, autoTitle?: boolean) => void;
   onReuse: (job: GenerationJobRecord, edit?: boolean) => void;
+  onSendToAgent?: (job: GenerationJobRecord, intent: 'reference' | 'conversation') => void;
   onLightbox: () => void;
 }
 
@@ -35,7 +37,7 @@ function parameter(value: unknown) {
     ? String(value) : '未记录';
 }
 
-export default function DetailModal({ job, t, onClose, onChange, onAccepted, onReuse, onLightbox }: Props) {
+export default function DetailModal({ job, t, onClose, onChange, onAccepted, onReuse, onSendToAgent, onLightbox }: Props) {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [title, setTitle] = useState('');
@@ -81,6 +83,7 @@ export default function DetailModal({ job, t, onClose, onChange, onAccepted, onR
   }, [copied]);
 
   const canUse = Boolean(job.result_path && ['succeeded', 'accepted'].includes(job.status));
+  const agentSource = agentJobSource(job);
   const prompt = galleryJobPrompt(job);
   const inputs = recipeInputs(job, mediaUrl);
   const requested = { ...job.parameters, ...record(job.metadata?.requested) };
@@ -144,6 +147,7 @@ export default function DetailModal({ job, t, onClose, onChange, onAccepted, onR
         <div className="pg-detail-info">
           <div className="pg-detail-scroll">
             <div className="pg-detail-heading"><span>生成详情</span><span className={`pg-detail-status ${job.status}`}>{status}</span></div>
+            {agentSource && (onSendToAgent ? <button className="pg-detail-agent-source" aria-label="返回 Agent 会话" onClick={() => onSendToAgent(job, 'conversation')}><MessageSquare size={14}/>来自 Agent · 返回会话</button> : <p className="pg-detail-agent-source">来自 Agent</p>)}
             <section className="pg-detail-section" aria-label="输入内容">
               <div className="pg-detail-section-heading"><h3>输入内容</h3><button className={`pg-detail-copy${copied ? ' is-copied' : ''}`} aria-label={copied ? '已复制提示词' : '复制提示词'} title={copied ? '已复制提示词' : '复制提示词'} onClick={() => void copyPrompt()}>{copied ? <Check size={16}/> : <Copy size={16}/>}<span role="status" aria-live="polite">{copied ? '已复制' : '复制'}</span></button></div>
               <p className="pg-full-prompt">{prompt}</p>
@@ -189,6 +193,7 @@ export default function DetailModal({ job, t, onClose, onChange, onAccepted, onR
             <div className="pg-detail-actions">
               <button className="pg-detail-reuse" onClick={() => onReuse(job)}><RotateCcw size={16}/>恢复配方</button>
               <button disabled={!canUse} onClick={() => onReuse(job, true)}><ImagePlus size={16}/>继续编辑</button>
+              {canUse && onSendToAgent && <button onClick={() => onSendToAgent(job, 'reference')}><MessageSquare size={16}/>带到 Agent 继续</button>}
               {canUse && !job.accepted_image_id && <button className="pg-detail-save" aria-expanded={saveOpen} onClick={() => setSaveOpen(!saveOpen)}>{saveOpen ? '取消收录' : '保存到 Library'}</button>}
               {['queued', 'running'].includes(job.status) && <button disabled={busy} onClick={() => { setBusy(true); void api.cancelGenerationJob(job.id).then(onChange).catch(e => setError(String(e))).finally(() => setBusy(false)); }}><Square size={14}/>停止任务</button>}
             </div>

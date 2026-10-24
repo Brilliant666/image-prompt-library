@@ -81,7 +81,8 @@ def test_native_windows_smoke_and_ci_contract():
 
 
 @pytest.mark.parametrize("dirty_kind", ("tracked", "untracked"))
-@pytest.mark.parametrize("relative_path", ("backend/main.py", "licenses/Playground-MIT.txt"))
+@pytest.mark.parametrize("relative_path", ("backend/main.py", "licenses/Playground-MIT.txt",
+                                          "licenses/agent-skills/LICENSE.gpt-image.txt"))
 def test_native_windows_smoke_refuses_dirty_packaged_source(tmp_path: Path, dirty_kind: str, relative_path: str):
     source_root = tmp_path / "source"
     tracked = source_root / relative_path
@@ -624,6 +625,9 @@ Assert-VersionPayload -Root {powershell_literal(destination)} -ExpectedVersion '
     assert (destination / "sample-data" / "manifests").is_dir()
     assert (destination / "LICENSE").is_file()
     assert (destination / "licenses" / "Playground-MIT.txt").read_bytes() == (ROOT / "licenses" / "Playground-MIT.txt").read_bytes()
+    for name in ("LICENSE.image-prompt-reverse.txt", "LICENSE.gpt-image.txt"):
+        relative = Path("licenses/agent-skills") / name
+        assert (destination / relative).read_bytes() == (ROOT / relative).read_bytes()
     assert not any(path.exists() for path in repo_artifacts)
 
 

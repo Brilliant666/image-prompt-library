@@ -16,6 +16,7 @@ function evaluate(js, dependencies, timers = globalThis) {
   return module.exports;
 }
 const component = await compile('../frontend/src/components/gallery/TaskGrid.tsx');
+const agentGalleryBridge = evaluate(await compile('../frontend/src/utils/agentGalleryBridge.ts'), {});
 const recipe = evaluate(await compile('../frontend/src/utils/galleryRecipe.ts'), {
   './compatibleRecipe': {}, './compatibleProfiles': {}, './promptTemplateVariables': {},
 });
@@ -46,6 +47,7 @@ function render(t, job, selected = new Set(), copy = async () => true) {
     'lucide-react': new Proxy({}, { get: (_, key) => key }),
     '../../api/client': { mediaUrl: path => `/media/${path}` },
     '../../utils/galleryRecipe': recipe,
+    '../../utils/agentGalleryBridge': agentGalleryBridge,
     '../../utils/galleryCardMeta': cardMeta,
     '../../utils/playground/virtualGrid': gridMath,
     '../../utils/playground/useVirtualGrid': { useVirtualGrid: (_grid, count, scroll) => {

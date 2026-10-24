@@ -102,7 +102,7 @@ export default function AgentSettings({ uiLanguage, active, workspaceProfileId }
         <option value="">{en ? 'Provider default' : '接口默认'}</option>{['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].map(value => <option key={value} value={value}>{value}</option>)}
       </select></label>
       <div className="settings-field-grid">
-        <label className="settings-field"><span>{en ? 'Maximum tool rounds' : '最大工具调用轮数'}</span><input type="number" min={1} max={saved.capabilities.maxToolRounds} required value={form.maxToolRounds} onChange={event => change('maxToolRounds', Number(event.target.value))} /></label>
+        <label className="settings-field"><span>{en ? 'Maximum model steps' : '最大模型步骤'}</span><input type="number" min={1} max={saved.capabilities.maxToolRounds} required value={form.maxToolRounds} onChange={event => change('maxToolRounds', Number(event.target.value))} /><small className="settings-help">{en ? 'Includes text responses and follow-up responses after tools.' : '包含文字响应，以及工具执行后的后续响应。'}</small></label>
         <label className="settings-field"><span>{en ? 'Maximum image jobs per request' : '每次请求最多生图任务'}</span><input type="number" min={1} max={saved.capabilities.maxImageJobs} required value={form.maxImageJobs} onChange={event => change('maxImageJobs', Number(event.target.value))} /></label>
       </div>
       <div className="settings-preference"><label className="settings-switch-row"><span>{en ? 'Streaming response' : '流式响应'}</span><input type="checkbox" role="switch" checked={form.stream} onChange={event => change('stream', event.target.checked)} /></label></div>
