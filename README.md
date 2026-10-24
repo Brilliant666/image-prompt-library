@@ -13,6 +13,8 @@ Your library uses local SQLite and local image files. Saving, browsing, searchin
 
 > **Independent maintenance:** maintained by [Brilliant666](https://github.com/Brilliant666/image-prompt-library), based on [EddieTYP/image-prompt-library](https://github.com/EddieTYP/image-prompt-library) **v0.11.2**. This repository is maintained from source; no release installer is offered. Do not overwrite this edition with an upstream installer or updater. This README describes the accompanying source, not a promise that every feature is in a published release or your installed copy. See [maintenance and setup](docs/INDEPENDENT_MAINTENANCE.md).
 
+Upstream history: [v0.11.0 — Grok OAuth](docs/releases/v0.11.0.md) and [v0.11.2 — direct Images requests](docs/releases/v0.11.2.md) are retained as historical release notes from the original project, not current releases of this independent repository. Follow the source-maintenance instructions above rather than upstream installation or update commands.
+
 <details>
 <summary>📷 Preview the library — historical public screenshots</summary>
 

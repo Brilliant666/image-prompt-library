@@ -16,6 +16,7 @@ import pytest
 
 from backend.db import init_db
 from backend.repositories import ItemRepository
+from readme_contract import assert_source_maintenance_notice
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -548,7 +549,7 @@ def test_readme_prefers_independent_source_maintenance_and_preserves_historical_
 
     assert "## Quick start" in readme
     assert "docs/INDEPENDENT_MAINTENANCE.md" in readme
-    assert "No release installer is offered" in readme
+    assert_source_maintenance_notice(readme, "README.md")
     assert "raw.githubusercontent.com/EddieTYP" not in readme
     assert "npm ci" in maintenance
     assert "npm run build" in maintenance

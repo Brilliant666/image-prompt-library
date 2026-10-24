@@ -13,6 +13,8 @@
 
 > **獨立維護：** 由 [Brilliant666](https://github.com/Brilliant666/image-prompt-library) 維護，基於 [EddieTYP/image-prompt-library](https://github.com/EddieTYP/image-prompt-library) **v0.11.2**。本倉庫目前以原始碼維護，尚未提供發行安裝程式。請勿使用上游安裝或更新程式覆蓋此版本。本 README 描述隨附的原始碼，不代表每項功能都已包含在公開發行版或你目前安裝的副本中。詳見[維護與啟動說明](docs/INDEPENDENT_MAINTENANCE.md)。
 
+上游歷史：[v0.11.0 — Grok OAuth](docs/releases/v0.11.0.md) 與 [v0.11.2 — 直接 Images 請求](docs/releases/v0.11.2.md) 保留原專案的歷史發行說明，並非本獨立倉庫的目前發行版。請依上方原始碼維護步驟操作，不要執行上游安裝或更新指令。
+
 <details>
 <summary>📷 預覽圖庫——歷史公開截圖</summary>
 
