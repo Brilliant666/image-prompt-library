@@ -1,13 +1,16 @@
-import { Filter, Search, Settings, Plus, Trash2 } from 'lucide-react';
+import { Filter, Search, Settings, Plus, Trash2, X } from 'lucide-react';
 import headerLogo from '../assets/header-logo.png';
 import type { ViewMode } from '../types';
 import type { Translator } from '../utils/i18n';
 import ViewToggle from './ViewToggle';
+import './SearchScope.css';
 
 interface Props {
   q: string;
   t: Translator;
   queryFilterChips: string[];
+  collectionName?: string;
+  onClearCollection: () => void;
   updateBadgeLabel?: string;
   onQ: (v: string) => void;
   view: ViewMode;
@@ -27,6 +30,8 @@ export default function TopBar({
   q,
   t,
   queryFilterChips,
+  collectionName,
+  onClearCollection,
   updateBadgeLabel,
   onQ,
   view,
@@ -41,7 +46,7 @@ export default function TopBar({
   hasActiveFilter = false,
   modalOpen = false,
 }: Props) {
-  const hasActiveSearch = Boolean(queryFilterChips.length);
+  const hasVisibleFilters = Boolean(queryFilterChips.length || collectionName);
   const isLibraryView = view === 'explore' || view === 'cards';
 
   return (
@@ -93,9 +98,23 @@ export default function TopBar({
           {view === 'cards' && onTrash && <button type="button" className="vista-button filter-button library-trash-trigger" onClick={onTrash} aria-label={trashLabel} title={trashLabel} aria-haspopup="dialog"><Trash2 size={18} /><span className="filter-label">{trashLabel}</span></button>}
         </div>
 
-        {hasActiveSearch && isLibraryView && (
+        {hasVisibleFilters && isLibraryView && (
           <div className="status-row mobile-status-view-row">
             <div className="active-filter-strip" aria-label={t('currentFilters')}>
+              {collectionName && (
+                <span className="chip collection-scope-chip">
+                  <span className="collection-scope-label">{t('collectionChip')}: {collectionName}</span>
+                  <button
+                    type="button"
+                    className="collection-scope-clear"
+                    onClick={onClearCollection}
+                    aria-label={`${t('clearCollectionFilter')}: ${collectionName}`}
+                    title={`${t('clearCollectionFilter')}: ${collectionName}`}
+                  >
+                    <X size={15} aria-hidden="true" />
+                  </button>
+                </span>
+              )}
               {queryFilterChips.map(chip => <span key={chip} className="chip query-filter-chip">{chip}</span>)}
             </div>
           </div>

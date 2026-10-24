@@ -39,7 +39,9 @@ git push -u origin HEAD
 
 当前采用源码维护，尚未建立本仓库 Releases。安装上游发行包的更新入口暂停；不要运行来源仓库的远程一键安装命令。未来更新通过本仓库审查后的源码提交完成，不自动合并上游。上游链接保留用于来源、发布历史和致谢，不代表当前定制版的更新源。
 
-CI 对 `codex/sub2api-images` 和 `main` 的推送及 PR 执行现有测试、应用构建与示例构建。Pages 发布、Release 发布和依赖发行包的安装冒烟工作流保留原定义，但使用 job 级 `if: ${{ false }}` 停用；Pages 也移除了推送触发。没有配置公网部署或自动同步。建立自己的发行策略后再明确启用相关流程。
+CI 对 `main` 和历史分支 `codex/sub2api-images` 的推送，以及以 `main`、`codex/sub2api-images` 或 `feat/quick-capture` 为目标的 PR 运行，也可手动触发。当前启用三个 job：`test`（后端、前端、浏览器扩展测试及应用/示例构建）、`windows-installer`（安装器合同测试及 Windows 原生安装冒烟）和 `macos-backup-restore`（备份恢复合同测试）。功能分支向 `main` 提交 PR 即进入这套检查。
+
+Pages 发布、Release 发布和依赖已发布安装包的 Release candidate 安装/更新/回退冒烟工作流使用 job 级 `if: ${{ false }}` 停用；这些流程只保留手动触发入口。CI 内从源码验证 Windows 安装器的冒烟仍启用。建立自己的发行策略后再明确启用发布流程；当前没有自动发布或上游同步。
 
 ## 依赖审计（2026-10-10）
 
@@ -47,4 +49,4 @@ CI 对 `codex/sub2api-images` 和 `main` 的推送及 PR 执行现有测试、�
 
 ## 数据边界
 
-Git 只保存源码、测试、锁文件、文档和无密钥配置示例。个人 SQLite、原图、缩略图、生成结果、供应商凭据、OAuth 状态、日志、依赖目录与备份不应上传。已跟踪的上游测试素材和文档图片继续保留。供应商配置说明见 [OpenAI 兼容图片供应商](OPENAI_COMPATIBLE.md)。
+Git 只保存源码、测试、锁文件、文档和无密钥配置示例。个人 SQLite、原图、缩略图、生成结果、供应商凭据、OAuth 状态、日志、依赖目录与备份不应上传。已跟踪的上游测试素材和文档图片继续保留。当前画廊和 Agent 用法见 [Playground 工作区](PLAYGROUND.md)，供应商配置说明见 [OpenAI 兼容图片供应商](OPENAI_COMPATIBLE.md)。

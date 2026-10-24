@@ -1,7 +1,8 @@
-import { useId, type ReactNode } from 'react';
-import { ArrowLeft, ChevronDown } from 'lucide-react';
+import type { ReactNode } from 'react';
+import { ArrowLeft } from 'lucide-react';
 import type { ItemSortMode } from '../types';
 import type { Translator } from '../utils/i18n';
+import ToolbarSelect from './ToolbarSelect';
 
 export default function ScopeHeader({
   t,
@@ -25,7 +26,6 @@ export default function ScopeHeader({
   extraControls?: ReactNode;
 }) {
   const showSort = Boolean(sort && onSort);
-  const sortId = useId();
 
   return (
     <header className={`scope-header${onBack ? ' has-back' : ''}${extraControls ? ' has-extra-controls' : ''}`}>
@@ -46,27 +46,16 @@ export default function ScopeHeader({
             </button>
           )}
           {showSort && (
-            <label className="scope-sort-control" htmlFor={sortId}>
-              <span className="scope-sort-prefix">{t('sortChip')}</span>
-              <span className="scope-sort-picker">
-                <select
-                  id={sortId}
-                  className="scope-sort-select"
-                  value={sort}
-                  onChange={event => onSort?.(event.currentTarget.value as ItemSortMode)}
-                  aria-label={t('sortChip')}
-                >
-                  <option value="updated_desc">{t('sortByUpdated')}</option>
-                  <option value="created_desc">{t('sortByCreated')}</option>
-                  <option value="created_asc">{t('sortByOldest')}</option>
-                  <option value="title_asc">{t('sortByTitle')}</option>
-                  <option value="title_desc">{t('sortByTitleDesc')}</option>
-                  <option value="source_asc">{t('sortBySource')}</option>
-                  <option value="model_asc">{t('sortByModel')}</option>
-                </select>
-                <ChevronDown size={14} aria-hidden="true" />
-              </span>
-            </label>
+            <ToolbarSelect<ItemSortMode> className="scope-sort-control" label={t('sortChip')} prefix={t('sortChip')}
+              value={sort!} onChange={value => onSort?.(value)} options={[
+                { value: 'updated_desc', label: t('sortByUpdated') },
+                { value: 'created_desc', label: t('sortByCreated') },
+                { value: 'created_asc', label: t('sortByOldest') },
+                { value: 'title_asc', label: t('sortByTitle') },
+                { value: 'title_desc', label: t('sortByTitleDesc') },
+                { value: 'source_asc', label: t('sortBySource') },
+                { value: 'model_asc', label: t('sortByModel') },
+              ]} />
           )}
           {extraControls}
         </div>

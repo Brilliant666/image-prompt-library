@@ -6,6 +6,7 @@ import type { ClusterRecord, ImageRecord, ItemDetail, TagRecord, AiProvider, Upl
 import { imageThumbnailPath } from '../utils/images';
 import type { Translator } from '../utils/i18n';
 import SuggestedTitleField from './SuggestedTitleField';
+import CollectionPicker, { type CollectionSelection } from './CollectionPicker';
 import { mergeEditorPrompts } from '../utils/editorPrompts';
 import { CAPTURE_IMAGE_ACCEPT, captureImageError } from '../utils/quickCapture';
 
@@ -62,7 +63,7 @@ export default function ItemEditorModal({
   const [author, setAuthor] = useState(item ? item.author || '' : 'User');
   const [sourceUrl, setSourceUrl] = useState(item?.source_url || '');
   const [notes, setNotes] = useState(item?.notes || '');
-  const [cluster, setCluster] = useState(item?.cluster?.name || '');
+  const [collection, setCollection] = useState<CollectionSelection>({ id: item?.cluster?.id || null, name: item?.cluster?.name || '' });
   const [tags, setTags] = useState(item?.tags.map(t => t.name).join(', ') || '');
   const [zhHantPrompt, setZhHantPrompt] = useState(initialTraditionalPrompt(item));
   const [zhHansPrompt, setZhHansPrompt] = useState(promptText(item, 'zh_hans'));
@@ -77,6 +78,7 @@ export default function ItemEditorModal({
   const [draggingImageRole, setDraggingImageRole] = useState<UploadImageRole>();
   const [pasteImageRole, setPasteImageRole] = useState<UploadImageRole>('result_image');
   const [imageDrafts, setImageDrafts] = useState<ImageRecord[]>(item?.images || []);
+  const [needsImageReconcile, setNeedsImageReconcile] = useState(false);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [isClosing, setIsClosing] = useState(false);
@@ -104,6 +106,7 @@ export default function ItemEditorModal({
   const missingRequiredImage = !hasExistingResultImage && !resultFile;
   const [saveError, setSaveError] = useState('');
   const imageInputBusy = saving || deleting || isClosing;
+  const imageListBusy = imageInputBusy || needsImageReconcile;
   const acceptImageFiles = (files: File[], role: UploadImageRole) => {
     if (imageInputBusy || !files.length) return;
     const problem = captureImageError(files);
@@ -144,11 +147,6 @@ export default function ItemEditorModal({
     if (files.length) acceptImageFiles(files, role);
     else setSaveError(t('editorImageFileOnly'));
   };
-  const filteredClusters = useMemo(() => {
-    const query = cluster.trim().toLowerCase();
-    if (!query) return clusters.slice(0, 8);
-    return clusters.filter(c => c.name.toLowerCase().includes(query)).slice(0, 8);
-  }, [cluster, clusters]);
   const filteredTags = useMemo(() => {
     const selected = new Set(tags.split(',').map(t => t.trim()).filter(Boolean));
     const query = tags.split(',').pop()?.trim().toLowerCase() || '';
@@ -173,6 +171,7 @@ export default function ItemEditorModal({
     ...images.filter(image => image.role === 'reference_image'),
   ];
   const updateImageRole = (imageId: string, role: UploadImageRole) => {
+    if (imageListBusy) return;
     setSaveError('');
     const image = imageDrafts.find(candidate => candidate.id === imageId);
     if (!image || image.role === role) return;
@@ -183,6 +182,7 @@ export default function ItemEditorModal({
     setImageDrafts(current => normalizeImageDrafts(current.map(candidate => candidate.id === imageId ? { ...candidate, role } : candidate)));
   };
   const moveImage = (imageId: string, direction: -1 | 1) => {
+    if (imageListBusy) return;
     setImageDrafts(current => {
       const index = current.findIndex(image => image.id === imageId);
       if (index < 0) return current;
@@ -199,6 +199,7 @@ export default function ItemEditorModal({
     });
   };
   const makePrimaryImage = (imageId: string) => {
+    if (imageListBusy) return;
     setImageDrafts(current => {
       const selected = current.find(image => image.id === imageId && image.role !== 'reference_image');
       if (!selected) return current;
@@ -206,6 +207,7 @@ export default function ItemEditorModal({
     });
   };
   const removeImage = (imageId: string) => {
+    if (imageListBusy) return;
     setSaveError('');
     const image = imageDrafts.find(candidate => candidate.id === imageId);
     if (image?.role !== 'reference_image' && imageDrafts.filter(candidate => candidate.role !== 'reference_image').length === 1) {
@@ -216,53 +218,75 @@ export default function ItemEditorModal({
   };
 
   const save = async () => {
-    if (!title.trim() || !hasPrompt || missingRequiredImage || saving || deleting) return;
+    if (!title.trim() || !hasPrompt || (missingRequiredImage && !needsImageReconcile) || saving || deleting) return;
     setSaving(true);
     setSaveError('');
     try {
+      // A failed readback leaves the server image list unknown. Refresh it before
+      // any retry writes; never replace it with the pre-upload image draft.
+      let currentItem = persistedItem;
+      if (needsImageReconcile && currentItem) {
+        currentItem = await api.item(currentItem.id);
+        setPersistedItem(currentItem);
+        setImageDrafts(currentItem.images);
+        setNeedsImageReconcile(false);
+        if (!currentItem.images.some(image => image.role !== 'reference_image') && !resultFile) {
+          setSaveError(t('resultImageRequired'));
+          return;
+        }
+      }
       const prompts = mergeEditorPrompts(item?.prompts || [], {
         en: englishPrompt, zh_hant: zhHantPrompt, zh_hans: zhHansPrompt,
       }, extraPromptTexts, originalLanguage);
-      const unchangedPrompts = item && JSON.stringify(prompts) === JSON.stringify(item.prompts.map(({ language, text, is_original, is_primary, provenance }) => ({ language, text, is_original, is_primary, provenance })));
+      // Metadata can already be saved when a later image operation fails.
+      // Compare with that acknowledgement, not the snapshot that opened the editor.
+      const unchangedPrompts = currentItem && JSON.stringify(prompts) === JSON.stringify(currentItem.prompts.map(({ language, text, is_original, is_primary, provenance }) => ({ language, text, is_original, is_primary, provenance })));
       const payload = {
         title: title.trim(),
         model: model.trim() || undefined,
         author: author.trim() || null,
         source_url: sourceUrl.trim() || undefined,
         notes: notes.trim() || undefined,
-        cluster_name: cluster.trim() || undefined,
+        ...(collection.id ? { cluster_id: collection.id } : collection.name.trim() ? { cluster_name: collection.name.trim() } : { cluster_id: null }),
         tags: tags.split(',').map(t => t.trim()).filter(Boolean),
         ...(unchangedPrompts ? {} : { prompts }),
       };
-      const createdNewItem = !persistedItem;
-      let saved = persistedItem ? await api.updateItem(persistedItem.id, payload) : await api.createItem({ ...payload, prompts });
-      if (persistedItem && imageDraftChanged) {
+      const createdNewItem = !currentItem;
+      let saved = currentItem ? await api.updateItem(currentItem.id, {
+        ...payload,
+        model: model.trim(),
+        source_url: sourceUrl.trim() || null,
+        notes: notes.trim() || null,
+      }) : await api.createItem({ ...payload, prompts });
+      setPersistedItem(saved);
+      if (currentItem && !needsImageReconcile && imageDraftChanged) {
         saved = await api.updateImages(saved.id, imageDrafts.map(image => ({ id: image.id, role: image.role || 'result_image' })));
       }
       setPersistedItem(saved);
       setImageDrafts(saved.images);
-      let resultUploaded = false;
-      let referenceUploaded = false;
+      let uploadedResultId: string | undefined;
+      let uploadedReferenceId: string | undefined;
       try {
         if (resultFile) {
-          await api.uploadImage(saved.id, resultFile, 'result_image');
-          resultUploaded = true;
+          uploadedResultId = (await api.uploadImage(saved.id, resultFile, 'result_image')).id;
         }
         if (referenceFile) {
-          await api.uploadImage(saved.id, referenceFile, 'reference_image');
-          referenceUploaded = true;
+          uploadedReferenceId = (await api.uploadImage(saved.id, referenceFile, 'reference_image')).id;
         }
       } catch {
         if (createdNewItem) {
           try {
             await api.deleteItem(saved.id);
             setPersistedItem(undefined);
+            setImageDrafts([]);
             setSaveError(t('imageUploadFailed'));
           } catch {
             const reconciled = await api.item(saved.id).catch(() => undefined);
             setPersistedItem(reconciled || saved);
-            if (resultUploaded && reconciled?.images.some(image => image.role === 'result_image')) setResultFile(undefined);
-            if (referenceUploaded && reconciled?.images.some(image => image.role === 'reference_image')) setReferenceFile(undefined);
+            if (reconciled) setImageDrafts(reconciled.images);
+            setNeedsImageReconcile(!reconciled);
+            if (uploadedResultId) setResultFile(undefined);
+            if (uploadedReferenceId) setReferenceFile(undefined);
             onSaved();
             setSaveError(t('saveRollbackFailed'));
           }
@@ -270,8 +294,10 @@ export default function ItemEditorModal({
         }
         const reconciled = await api.item(saved.id).catch(() => undefined);
         setPersistedItem(reconciled || saved);
-        if (resultUploaded && reconciled?.images.some(image => image.role === 'result_image')) setResultFile(undefined);
-        if (referenceUploaded && reconciled?.images.some(image => image.role === 'reference_image')) setReferenceFile(undefined);
+        if (reconciled) setImageDrafts(reconciled.images);
+        setNeedsImageReconcile(!reconciled);
+        if (uploadedResultId) setResultFile(undefined);
+        if (uploadedReferenceId) setReferenceFile(undefined);
         onSaved();
         setSaveError(t('savePartiallyCompleted'));
         return;
@@ -326,13 +352,7 @@ export default function ItemEditorModal({
 
         <div className="editor-grid">
           <SuggestedTitleField className="field field-title" value={title} promptText={titleSuggestionPrompt} provider={defaultAiProvider} t={t} onChange={setTitle} autoFocus />
-          <label className="field">
-            <span>{t('collection')}</span>
-            <input list="collection-suggestions" placeholder={t('collectionPlaceholder')} value={cluster} onChange={e => setCluster(e.target.value)} />
-            <datalist id="collection-suggestions">
-              {filteredClusters.map(collection => <option key={collection.id} value={collection.name} />)}
-            </datalist>
-          </label>
+          <CollectionPicker value={collection} collections={clusters} onChange={setCollection} disabled={imageInputBusy} t={t} />
           <label className="field">
             <span>{t('imageGeneratedFrom')}</span>
             <input placeholder={t('notReported')} value={model} onChange={e => setModel(e.target.value)} />
@@ -400,16 +420,16 @@ export default function ItemEditorModal({
                       </div>
                       <label>
                         <span>{t('imageRole')}</span>
-                        <select value={role} onChange={event => updateImageRole(image.id, event.target.value as UploadImageRole)}>
+                        <select value={role} disabled={imageListBusy} onChange={event => updateImageRole(image.id, event.target.value as UploadImageRole)}>
                           <option value="result_image">{t('result')}</option>
                           <option value="reference_image">{t('reference')}</option>
                         </select>
                       </label>
                       <div className="item-image-manager-actions">
-                        <button type="button" onClick={() => makePrimaryImage(image.id)} disabled={role === 'reference_image' || isPrimary} aria-label={t('setPrimaryImage')} title={t('setPrimaryImage')}><Star size={16} /></button>
-                        <button type="button" onClick={() => moveImage(image.id, -1)} disabled={roleIndex <= 0} aria-label={t('moveImageEarlier')} title={t('moveImageEarlier')}><ChevronLeft size={17} /></button>
-                        <button type="button" onClick={() => moveImage(image.id, 1)} disabled={roleIndex >= sameRole.length - 1} aria-label={t('moveImageLater')} title={t('moveImageLater')}><ChevronRight size={17} /></button>
-                        <button type="button" className="remove" onClick={() => removeImage(image.id)} aria-label={t('removeImage')} title={t('removeImage')}><Trash2 size={16} /></button>
+                        <button type="button" onClick={() => makePrimaryImage(image.id)} disabled={imageListBusy || role === 'reference_image' || isPrimary} aria-label={t('setPrimaryImage')} title={t('setPrimaryImage')}><Star size={16} /></button>
+                        <button type="button" onClick={() => moveImage(image.id, -1)} disabled={imageListBusy || roleIndex <= 0} aria-label={t('moveImageEarlier')} title={t('moveImageEarlier')}><ChevronLeft size={17} /></button>
+                        <button type="button" onClick={() => moveImage(image.id, 1)} disabled={imageListBusy || roleIndex >= sameRole.length - 1} aria-label={t('moveImageLater')} title={t('moveImageLater')}><ChevronRight size={17} /></button>
+                        <button type="button" className="remove" disabled={imageListBusy} onClick={() => removeImage(image.id)} aria-label={t('removeImage')} title={t('removeImage')}><Trash2 size={16} /></button>
                       </div>
                       <span className="item-image-position">{index + 1}</span>
                     </article>
@@ -453,7 +473,7 @@ export default function ItemEditorModal({
         <div className="editor-actions">
           {allowDelete && persistedItem && <details className="editor-more-actions"><summary>{t('moreActions')}</summary><button className="danger" disabled={deleting || saving} onClick={deleteReference}><Trash2 size={16} /> {t('deleteReference')}</button></details>}
           <button className="secondary" disabled={deleting || saving} onClick={handleClose}>{t('cancel')}</button>
-          <button className="primary" disabled={!title.trim() || !hasPrompt || missingRequiredImage || saving || deleting} onClick={save}>{saving ? t('saving') : t('saveReference')}</button>
+          <button className="primary" disabled={!title.trim() || !hasPrompt || (missingRequiredImage && !needsImageReconcile) || saving || deleting} onClick={save}>{saving ? t('saving') : t('saveReference')}</button>
         </div>
       </div>
     </div>

@@ -1,8 +1,16 @@
 # Development Guide
 
-Use this path if you want to develop the app, inspect the maintained `codex/sub2api-images` branch, or run from a checkout.
+Use this path to develop the app or run from a checkout. `main` is the integration
+branch; develop changes on a feature branch and submit a pull request to `main`.
+The former `codex/sub2api-images` branch is retained as history.
 
 ## Source setup
+
+Use Python 3.10+ and Node.js 24. The commands below are for macOS/Linux; Windows
+PowerShell setup is documented in [Independent maintenance](INDEPENDENT_MAINTENANCE.md#从源码开发与启动).
+Choose a library path and confirm that no other instance is using it before
+starting. A checkout and an installed application are separate copies; editing
+source does not update an existing installation.
 
 ```bash
 git clone https://github.com/Brilliant666/image-prompt-library.git
@@ -61,6 +69,10 @@ BACKUP_DIR=./backups
 
 `IMAGE_PROMPT_LIBRARY_PATH` controls where your private database and images live. The default `./library` is repo-local and intentionally ignored by git. For long-term personal use, you may prefer a durable path such as `~/ImagePromptLibrary`.
 
+These `.env` loading rules apply to the POSIX helper scripts. When launching
+`python -m uvicorn` directly, set environment variables in that shell; the backend
+does not automatically load the checkout's `.env` file.
+
 ## Data layout
 
 Runtime data lives under `IMAGE_PROMPT_LIBRARY_PATH`:
@@ -83,6 +95,11 @@ Do not commit runtime `library/` data to git. It is your private prompt/image co
 3. Add a title, prompt text, collection, optional tags, and a required result image.
 4. Save the card.
 5. Use Explore/Library, search, filters, and detail view to browse and copy prompts later.
+
+For the current Gallery generation composer and Agent conversations, see
+[Playground workspaces](PLAYGROUND.md). [The older generation guide](GENERATION.md)
+describes OAuth generation; API-key profiles are documented in
+[OpenAI-compatible providers](OPENAI_COMPATIBLE.md).
 
 ## Portable backup and safe restore
 

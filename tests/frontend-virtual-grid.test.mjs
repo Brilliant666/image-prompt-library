@@ -162,6 +162,7 @@ test('TaskGrid passes the supplied scrollRef to virtualization while retaining g
     '../../utils/playground/useVirtualGrid': { useVirtualGrid: (...args) => { calls.push(args); return { startIndex: 6, endIndex: 8, paddingTop: 330, paddingBottom: 0, metricsRef: { current: metrics } }; } },
     '../../utils/galleryRecipe': { galleryJobPrompt: job => job.prompt_text, galleryStatus: {} }, '../../utils/clipboard': {},
     '../../utils/galleryCardMeta': { galleryImageDimensions: () => undefined, galleryTaskElapsed: () => undefined },
+    '../../utils/agentGalleryBridge': { agentJobSource: () => undefined },
   };
   const TaskGrid = evaluate(taskGridJs, dependencies).default;
   const jobs = Array.from({ length: 20 }, (_, i) => ({ id: `job-${i}`, prompt_text: `prompt-${i}`, status: 'queued' }));

@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { AgentApiError, getAgentConfig, saveAgentConfig, type AgentConfig, type AgentConfigResponse } from '../../api/agentClient';
 import type { UiLanguage } from '../../types';
+import AgentModelPicker from './AgentModelPicker';
 
-export default function AgentSettings({ uiLanguage, active }: { uiLanguage: UiLanguage; active: boolean }) {
+export default function AgentSettings({ uiLanguage, active, workspaceProfileId }: { uiLanguage: UiLanguage; active: boolean; workspaceProfileId?: string }) {
   const en = uiLanguage === 'en';
   const [saved, setSaved] = useState<AgentConfigResponse>();
   const [form, setForm] = useState<AgentConfig>();
@@ -60,11 +61,25 @@ export default function AgentSettings({ uiLanguage, active }: { uiLanguage: UiLa
       {saved?.profiles.map(profile => <option key={profile.id} value={profile.id}>{profile.display_name}{!profile.configured ? en ? ' · incomplete' : ' · 待完善' : ''}</option>)}
     </select>
   </label>;
+  const imageIssueHint = (field: string | null) => field === 'imageProfileId'
+    ? en ? 'Select a configured image API profile.' : '请选择已配置的图片 API 配置。'
+    : field === 'imageModel'
+      ? en ? 'Enter an image model, or set the image profile’s default model.' : '请填写图片模型，或设置图片配置的默认模型。'
+      : en ? 'Check the selected image API profile and model.' : '请检查所选图片接口和模型。';
+  const textProfile = saved?.profiles.find(profile => profile.id === (form?.apiConfigMode === 'off' ? workspaceProfileId : form?.textProfileId));
+  const imageProfile = form?.apiConfigMode === 'hybrid' ? saved?.profiles.find(profile => profile.id === form.imageProfileId) : textProfile;
   return <section className="setting-group agent-settings">
     <h3>{en ? 'Agent configuration' : 'Agent 配置'}</h3>
     <p className="muted">{en ? 'Use the API profiles registered in API settings. Keys remain on the server. Saving settings does not run the Agent.' : '使用「API 配置」中的接口，密钥保留在服务端。保存配置不会运行 Agent。'}</p>
     {saved && <div className="settings-status" role="status">
-      <strong>{saved.ready ? en ? 'Configuration complete' : '配置完整' : en ? 'Configuration needs attention' : '配置待完善'}</strong>
+      <p>{en ? 'Saved configuration' : '已保存配置'}{dirty && (en ? ' · Changes below are not applied yet.' : ' · 下方未保存的修改尚未应用。')}</p>
+      <strong>{saved.ready ? en ? 'Text configuration available' : '文字配置可用' : en ? 'Text configuration needs attention' : '文字配置待完善'}</strong>
+      {saved.config.apiConfigMode === 'hybrid' && <>
+        <p><strong>{saved.imageReady ? en ? 'Image configuration available' : '图片配置可用' : en ? 'Image configuration needs attention' : '图片配置待完善'}</strong></p>
+        {(saved.imageIssues || []).map((issue, index) => <p key={`${issue.field}-${index}`}>{imageIssueHint(issue.field)}</p>)}
+        {!saved.imageReady && !saved.imageIssues?.length && <p>{en ? 'Complete the text configuration before using image tools.' : '使用生图工具前请先完善文字配置。'}</p>}
+        {saved.ready && !saved.imageReady && <p>{en ? 'Text-only conversations remain available.' : '仍可进行纯文字对话。'}</p>}
+      </>}
       <p>{en ? 'Configuration is not proof of a successful provider call.' : '配置完整不代表实际调用已验证成功。'}</p>
       {saved.issues.length > 0 && <p>{en ? 'Check the selected API profiles and model names before starting a conversation.' : '开始对话前请检查所选接口、模型名称及运行方式。'}</p>}
     </div>}
@@ -78,15 +93,16 @@ export default function AgentSettings({ uiLanguage, active }: { uiLanguage: UiLa
       </label>
       <p className="settings-help">{en ? 'Current API follows the profile selected in the workspace. Native uses Responses with image generation. Hybrid uses a text model and a separate image API.' : '关闭时跟随工作区当前接口。原生通过 Responses 的生图工具生成图片；混合由文本模型调用独立图片接口。'}</p>
       {form.apiConfigMode !== 'off' && profileField('textProfileId', en ? 'Text model API profile' : '文本模型 API 配置')}
-      <label className="settings-field"><span>{en ? 'Text / reasoning model' : '文本 / 推理模型'}</span><input value={form.textModel} maxLength={120} spellCheck={false} onChange={event => change('textModel', event.target.value)} placeholder={en ? 'Full model ID supported by this API' : '此接口支持的完整模型 ID'} /></label>
+      <AgentModelPicker label={en ? 'Text / reasoning model' : '文本 / 推理模型'} value={form.textModel} onChange={value => change('textModel', value)} profile={textProfile} active={active} en={en} disabled={busy} unavailableHint={form.apiConfigMode === 'off' ? en ? 'This mode follows the API profile selected in the Agent workspace. Enter the full model ID supported by that profile.' : '此模式跟随 Agent 工作区选择的接口，请填写该接口支持的完整模型 ID。' : undefined} />
       <p className="settings-help">{en ? 'The selected endpoint must support the Responses API. Model names are never silently replaced.' : '所选接口必须支持 Responses API；模型名称不会自动替换。'}</p>
       {form.apiConfigMode === 'hybrid' && profileField('imageProfileId', en ? 'Image model API profile' : '图片模型 API 配置')}
-      <label className="settings-field"><span>{en ? 'Image model' : '图片模型'}</span><input value={form.imageModel} maxLength={120} spellCheck={false} onChange={event => change('imageModel', event.target.value)} placeholder={en ? 'Full image model ID' : '完整图片模型 ID'} /></label>
+      <AgentModelPicker label={en ? 'Image model' : '图片模型'} value={form.imageModel} onChange={value => change('imageModel', value)} profile={imageProfile} active={active} en={en} disabled={busy} unavailableHint={form.apiConfigMode === 'off' ? en ? 'Follows the workspace API. Leave blank to use its image-tool default.' : '跟随工作区接口，留空使用其生图工具默认模型。' : undefined} />
+      <p className="settings-help">{form.apiConfigMode === 'hybrid' ? en ? 'Leave blank to use the selected image profile’s default model. The image API must support the Images API.' : '留空使用所选图片配置的默认模型，图片接口需要支持 Images API。' : en ? 'The image model is passed to the Responses image-generation tool. Leave blank to use its default; not every model in the catalog supports this tool.' : '图片模型用于 Responses 生图工具。留空使用工具默认值，目录中的模型不一定支持该工具。'}</p>
       <label className="settings-field settings-field-row"><span>{en ? 'Reasoning effort' : '推理强度'}</span><select value={form.reasoningEffort || ''} onChange={event => change('reasoningEffort', (event.target.value || null) as AgentConfig['reasoningEffort'])}>
         <option value="">{en ? 'Provider default' : '接口默认'}</option>{['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].map(value => <option key={value} value={value}>{value}</option>)}
       </select></label>
       <div className="settings-field-grid">
-        <label className="settings-field"><span>{en ? 'Maximum tool rounds' : '最大工具调用轮数'}</span><input type="number" min={1} max={saved.capabilities.maxToolRounds} required value={form.maxToolRounds} onChange={event => change('maxToolRounds', Number(event.target.value))} /></label>
+        <label className="settings-field"><span>{en ? 'Maximum model steps' : '最大模型步骤'}</span><input type="number" min={1} max={saved.capabilities.maxToolRounds} required value={form.maxToolRounds} onChange={event => change('maxToolRounds', Number(event.target.value))} /><small className="settings-help">{en ? 'Includes text responses and follow-up responses after tools.' : '包含文字响应，以及工具执行后的后续响应。'}</small></label>
         <label className="settings-field"><span>{en ? 'Maximum image jobs per request' : '每次请求最多生图任务'}</span><input type="number" min={1} max={saved.capabilities.maxImageJobs} required value={form.maxImageJobs} onChange={event => change('maxImageJobs', Number(event.target.value))} /></label>
       </div>
       <div className="settings-preference"><label className="settings-switch-row"><span>{en ? 'Streaming response' : '流式响应'}</span><input type="checkbox" role="switch" checked={form.stream} onChange={event => change('stream', event.target.checked)} /></label></div>

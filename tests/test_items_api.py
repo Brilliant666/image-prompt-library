@@ -703,7 +703,102 @@ def test_editing_last_item_out_of_collection_removes_empty_collection(tmp_path):
         assert conn.execute("SELECT name FROM clusters").fetchall()[0]["name"] == "New Collection"
 
 
-def test_listing_clusters_removes_existing_empty_collections(tmp_path):
+@pytest.mark.parametrize("clear_fields", [[], ["model"], ["source_url"], ["notes"], ["model", "source_url", "notes"]])
+def test_item_metadata_clear_round_trip_preserves_other_fields_and_originals(tmp_path, clear_fields):
+    c = client(tmp_path)
+    library = tmp_path / "library"
+    original_prompt = "  Synthetic original prompt\r\nKeep whitespace.\n\t "
+    created = c.post("/api/items", json=create_payload(
+        notes="Saved note", author="Synthetic author", favorite=True, rating=4,
+        prompts=[{"language": "en", "text": original_prompt, "is_primary": True, "is_original": True}],
+    )).json()
+    item_id = created["id"]
+    original_files = []
+    for role, color in [("result_image", (120, 40, 220)), ("reference_image", (1, 2, 3))]:
+        content = png_bytes(color=color)
+        uploaded = c.post(f"/api/items/{item_id}/images", data={"role": role},
+                          files={"file": (f"{role}.png", content, "image/png")})
+        assert uploaded.status_code == 200
+        original_files.append((library / uploaded.json()["original_path"], content))
+    before = c.get(f"/api/items/{item_id}").json()
+    cleared = {"model": "", "source_url": None, "notes": None}
+    response = c.patch(f"/api/items/{item_id}", json={field: cleared[field] for field in clear_fields})
+    assert response.status_code == 200
+    persisted = c.get(f"/api/items/{item_id}").json()
+    for field in ("title", "model", "source_name", "source_url", "notes", "author", "favorite", "rating", "archived", "cluster", "tags", "prompts", "images"):
+        expected = cleared[field] if field in clear_fields else before[field]
+        assert response.json()[field] == expected
+        assert persisted[field] == expected
+    assert persisted["prompts"][0]["text"] == original_prompt
+    for path, content in original_files:
+        assert path.read_bytes() == content
+
+
+@pytest.mark.parametrize("collection_edit", ["omitted", "same_id", "other_id", "clear", "new_name"])
+def test_item_collection_edit_contract_preserves_original_assets(tmp_path, collection_edit):
+    c = client(tmp_path)
+    library = tmp_path / "library"
+    original_prompt = "  Synthetic portrait prompt\r\nKeep original whitespace.\n\t "
+    created = c.post("/api/items", json=create_payload(
+        cluster_name="Source collection",
+        prompts=[{"language": "en", "text": original_prompt, "is_primary": True, "is_original": True}],
+    )).json()
+    source_id = created["cluster"]["id"]
+    c.post("/api/items", json=create_payload(title="Keep source collection", cluster_id=source_id))
+    target = c.post("/api/items", json=create_payload(title="Target member", cluster_name="Target collection")).json()
+    target_id = target["cluster"]["id"]
+    with connect(library) as conn:
+        conn.execute("UPDATE clusters SET names=? WHERE id=?", ('{"zh_hans":"人物"}', source_id))
+        conn.execute("UPDATE clusters SET names=? WHERE id=?", ('{"zh_hans":"环境人像"}', target_id))
+        conn.commit()
+
+    original_files = []
+    for role, color in [("result_image", (120, 40, 220)), ("reference_image", (1, 2, 3))]:
+        content = png_bytes(color=color)
+        uploaded = c.post(
+            f"/api/items/{created['id']}/images",
+            data={"role": role},
+            files={"file": (f"{role}.png", content, "image/png")},
+        )
+        assert uploaded.status_code == 200
+        original_files.append((library / uploaded.json()["original_path"], content))
+    before = c.get(f"/api/items/{created['id']}").json()
+    assert next(prompt for prompt in before["prompts"] if prompt["is_original"])["text"] == original_prompt
+
+    collection_payloads = {
+        "omitted": {},
+        "same_id": {"cluster_id": source_id},
+        "other_id": {"cluster_id": target_id},
+        "clear": {"cluster_id": None},
+        "new_name": {"cluster_name": "New collection"},
+    }
+    response = c.patch(f"/api/items/{created['id']}", json=collection_payloads[collection_edit])
+    assert response.status_code == 200
+    after = response.json()
+    persisted = c.get(f"/api/items/{created['id']}").json()
+    assert persisted["cluster"] == after["cluster"]
+    if collection_edit == "clear":
+        assert after["cluster"] is None
+    elif collection_edit == "new_name":
+        assert after["cluster"]["name"] == "New collection"
+        assert after["cluster"]["id"] not in {source_id, target_id}
+    else:
+        expected_id = target_id if collection_edit == "other_id" else source_id
+        assert after["cluster"]["id"] == expected_id
+        assert after["cluster"]["names"]["zh_hans"] == ("环境人像" if collection_edit == "other_id" else "人物")
+
+    expected_collections = {"Source collection", "Target collection"}
+    if collection_edit == "new_name":
+        expected_collections.add("New collection")
+    assert {cluster["name"] for cluster in c.get("/api/clusters").json()} == expected_collections
+    for field in ("title", "model", "author", "notes", "source_name", "source_url", "prompts", "tags", "images"):
+        assert after[field] == before[field]
+        assert persisted[field] == before[field]
+    for path, content in original_files:
+        assert path.read_bytes() == content
+
+
+def test_listing_clusters_hides_empty_collections_without_deleting_them(tmp_path):
     c = client(tmp_path)
     library = tmp_path / "library"
     c.post("/api/items", json=create_payload(cluster_name="Keep Collection"))
@@ -720,7 +815,46 @@ def test_listing_clusters_removes_existing_empty_collections(tmp_path):
 
     assert [cluster["name"] for cluster in clusters] == ["Keep Collection"]
     with connect(library) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM clusters WHERE name=?", (old_name,)).fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM clusters WHERE name=?", (old_name,)).fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_archiving_last_collection_member_preserves_identity_and_metadata(tmp_path, batch):
+    c = client(tmp_path)
+    library = tmp_path / "library"
+    created = c.post("/api/items", json=create_payload(cluster_name="Keep Me")).json()
+    item_id, cluster_id = created["id"], created["cluster"]["id"]
+    with connect(library) as conn:
+        conn.execute("UPDATE clusters SET names=?, description=?, sort_order=? WHERE id=?",
+                     ('{"zh_hans":"保留分类","en":"Keep Me"}', "Collection description", 7, cluster_id))
+        conn.commit()
+        before = dict(conn.execute("SELECT * FROM clusters WHERE id=?", (cluster_id,)).fetchone())
+
+    if batch:
+        assert c.post("/api/items/batch", json={"item_ids": [item_id], "action": "archive"}).json()["changed"] == 1
+    else:
+        assert c.patch(f"/api/items/{item_id}", json={"archived": True}).status_code == 200
+    assert c.get("/api/clusters").json() == []
+    archived = c.get(f"/api/items/{item_id}").json()
+    assert archived["cluster"] is not None
+    assert archived["cluster"]["id"] == cluster_id
+
+    # Cleanup caused by another item's move must not remove archived references.
+    other = c.post("/api/items", json=create_payload(title="Other item", cluster_name="Temporary")).json()
+    assert c.patch(f"/api/items/{other['id']}", json={"cluster_id": None}).status_code == 200
+    if batch:
+        assert c.post("/api/items/batch", json={"item_ids": [item_id], "action": "unarchive"}).json()["changed"] == 1
+    else:
+        assert c.patch(f"/api/items/{item_id}", json={"archived": False}).status_code == 200
+    restored = c.get(f"/api/items/{item_id}").json()
+    assert restored["cluster"] == archived["cluster"]
+    assert restored["prompts"] == archived["prompts"]
+    listed = c.get("/api/clusters").json()
+    assert len(listed) == 1
+    assert listed[0]["id"] == cluster_id
+    assert listed[0]["count"] == 1
+    with connect(library) as conn:
+        assert dict(conn.execute("SELECT * FROM clusters WHERE id=?", (cluster_id,)).fetchone()) == before
 
 
 def test_create_simplified_prompt_adds_traditional_prompt(tmp_path):

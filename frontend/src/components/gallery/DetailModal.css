@@ -77,3 +77,5 @@
 .pg-save-heading { font-weight:500;font-size:13px; }
 .pg-detail-refined .pg-save-form .pg-save-mode { justify-self:start;width:auto;padding:3px 0;border:0;background:transparent;color:var(--muted);font-size:11px; }
 .pg-detail-refined .pg-save-form .pg-save-mode:hover:not(:disabled) { color:var(--accent); }
+.pg-detail-refined .pg-detail-agent-source { display:inline-flex;align-items:center;gap:6px;margin:0 0 16px;padding:0;border:0;background:transparent;color:var(--accent);font-size:12px; }
+.pg-detail-refined button.pg-detail-agent-source:hover { text-decoration:underline; }

@@ -19,8 +19,10 @@ export interface AgentConfigResponse {
   revision: number;
   config: AgentConfig;
   profiles: OpenAICompatibleProfile[];
-  capabilities: { modes: Array<AgentConfig['apiConfigMode']>; maxInputImages: number; maxToolRounds: number; maxImageJobs: number; webSearch: boolean; masks: boolean; progressTransport: 'poll' };
+  capabilities: { modes: Array<AgentConfig['apiConfigMode']>; maxInputImages: number; maxToolRounds: number; maxImageJobs: number; webSearch: boolean; masks: boolean; progressTransport: 'poll' | 'sse' };
   ready: boolean;
+  imageReady: boolean;
+  imageIssues: Array<{ code: string; field: string | null; message: string }>;
   issues: Array<{ code: string; field: string | null; message: string }>;
 }
 export interface AgentImage {
@@ -32,12 +34,36 @@ export interface AgentOutputItem {
   id?: string; type: string; call_id?: string; name?: string; status?: string;
   arguments?: string; content?: Array<{ type: string; text?: string; refusal?: string; annotations?: Array<{ type: string; url?: string; title?: string }> }>;
 }
+export interface AgentModelInfo {
+  requestedModel: string | null;
+  providerName: string | null;
+  returnedModels: string[];
+}
+export interface AgentTokenUsage {
+  inputTokens: number | null;
+  outputTokens: number | null;
+  totalTokens: number | null;
+  cachedInputTokens: number | null;
+  reasoningTokens: number | null;
+}
+export interface AgentResponseDetails {
+  version: 1;
+  steps: Array<{
+    id: string; step: number; kind: 'model' | 'native_image';
+    responseId: string | null; model: string | null;
+    usage: AgentTokenUsage; summaries: string[];
+  }>;
+  usage: AgentTokenUsage & { reportedSteps: number; totalSteps: number; complete: boolean };
+  skills: Array<{ skill: string; section: string; title: string; source: string; revision: string; license: string }>;
+}
 export interface AgentRound {
   id: string; index: number; parentRoundId: string | null; userMessageId: string; assistantMessageId?: string;
   prompt: string; inputImageIds: string[]; maskTargetImageId: string | null; maskImageId: string | null;
   outputTaskIds: string[]; responseId?: string; responseOutput?: AgentOutputItem[];
   status: 'running' | 'done' | 'error'; error: string | null; createdAt: number; finishedAt: number | null;
   requestId: string; derivedFromRoundId?: string | null;
+  modelInfo?: AgentModelInfo;
+  responseDetails?: AgentResponseDetails;
 }
 export interface AgentMessage {
   id: string; role: 'user' | 'assistant'; content: string; roundId: string;
@@ -60,6 +86,7 @@ export interface AgentRoundCreate {
   origin: 'send' | 'edit' | 'regenerate'; derivedFromRoundId?: string | null;
   prompt: string; refs: AgentReference[]; mask?: { targetRefIndex: number; uploadId: string } | null;
   configRevision: number; activeProfileId?: string | null; params: AgentImageParams;
+  imageConfig?: { profileId?: string | null; model: string };
   authorization: { scope: 'this_request'; allowImageGeneration: boolean; allowWebSearch: boolean; maxToolRounds: number; maxImageJobs: number };
 }
 export interface AgentToolCall {
@@ -75,6 +102,7 @@ export interface AgentRequest {
   authorization: AgentRoundCreate['authorization'];
   usage: { responseStepsStarted: number; imageJobsCreated: number };
   toolCalls: AgentToolCall[];
+  modelInfo?: AgentModelInfo;
   canResume: boolean; recoveryReason: string | null; upstreamOutcome: 'not_sent' | 'known' | 'unknown';
   stopRequested: boolean; upstreamMayContinue: boolean; error: { code: string; message: string } | null;
 }
@@ -110,8 +138,52 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 export const getAgentConfig = (signal?: AbortSignal) => request<AgentConfigResponse>('/config', { signal });
 export const saveAgentConfig = (expectedRevision: number, config: AgentConfig, signal?: AbortSignal) => request<AgentConfigResponse>('/config', { method: 'PUT', signal, body: JSON.stringify({ expectedRevision, config }) });
+
+// Observe an already accepted request. Reconnection/fallback may only read it;
+// they must never retry the provider POST or recreate a conversation/round.
+export function watchAgentRequest(id: string, onSnapshot: (value: AgentSnapshot) => void, onError: (reason: unknown) => void, useStream = true): () => void {
+  let disposed = false;
+  let source: EventSource | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let watchdog: ReturnType<typeof setTimeout> | undefined;
+  let polling = false;
+  const controller = new AbortController();
+  const active = (value: AgentSnapshot) => ['queued', 'running', 'waiting_for_jobs', 'stop_requested'].includes(value.request?.state || '');
+  const stopStream = () => { source?.close(); source = undefined; clearTimeout(watchdog); };
+  const close = () => { disposed = true; stopStream(); clearTimeout(timer); controller.abort(); };
+  const accept = (value: AgentSnapshot) => {
+    if (disposed || value.request?.id !== id) return;
+    onSnapshot(value);
+    if (!active(value)) close();
+  };
+  const poll = async () => {
+    try { accept(await agentApi.request(id, controller.signal)); }
+    catch (reason) { if (!disposed) onError(reason); }
+    if (!disposed) timer = setTimeout(poll, 1200);
+  };
+  const fallback = () => {
+    if (disposed || polling) return;
+    polling = true; stopStream(); void poll();
+  };
+  const heartbeat = () => { if (disposed || polling) return; clearTimeout(watchdog); watchdog = setTimeout(fallback, 20_000); };
+  if (useStream && typeof EventSource !== 'undefined') {
+    try {
+      source = new EventSource(`/api/agent/requests/${encodeURIComponent(id)}/events`);
+      source.addEventListener('snapshot', event => {
+        if (disposed || polling) return;
+        try { const value = JSON.parse((event as MessageEvent).data) as AgentSnapshot; heartbeat(); accept(value); }
+        catch { fallback(); }
+      });
+      source.addEventListener('heartbeat', heartbeat);
+      source.onerror = fallback;
+      heartbeat();
+    } catch { fallback(); }
+  } else fallback();
+  return close;
+}
+
 export const agentApi = {
-  conversations: (cursor?: string, signal?: AbortSignal) => request<{ conversations: AgentConversationSummary[]; nextCursor: string | null }>(`/conversations?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, { signal }),
+  conversations: (cursor?: string, signal?: AbortSignal, query?: string) => request<{ conversations: AgentConversationSummary[]; nextCursor: string | null }>(`/conversations?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}${query?.trim() ? `&q=${encodeURIComponent(query.trim())}` : ''}`, { signal }),
   createConversation: (id: string, title?: string) => request<AgentSnapshot>('/conversations', { method: 'POST', body: JSON.stringify({ id, title }) }),
   conversation: (id: string, signal?: AbortSignal) => request<AgentSnapshot>(`/conversations/${encodeURIComponent(id)}`, { signal }),
   updateConversation: (id: string, payload: { expectedRevision: number; title?: string; activeRoundId?: string | null }) => request<AgentSnapshot>(`/conversations/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(payload) }),

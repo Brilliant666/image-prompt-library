@@ -11,3 +11,12 @@ Playground workspace components and interaction helpers are adapted from
 CookSleep/gpt_image_playground, commit 1e9d5af60aadd9117a835cc2da43908b8e3370dd.
 Copyright (c) 2026 CookSleep. Licensed under MIT; the complete license is in
 licenses/Playground-MIT.txt. See docs/PLAYGROUND.md for the adaptation scope.
+
+Bundled Agent image-prompt guidance includes translated and condensed adaptations
+of LunarXuan/image-prompt-reverse, commit
+4dead0a32e2312e56a14ebf3658ee75c9b865055 (GPL-3.0), and
+wuyoscar/GPT-Image2-Skill, commit
+9f8aa1a44a4a5c0f5a5d6e45eed564b3e2d5b87f (MIT, Copyright (c) 2026 Wuyoscar).
+Complete upstream licenses are in licenses/agent-skills/. Source links and
+adaptation boundaries are documented in docs/agent-skills/README.md in the source
+repository. Upstream command-line tools and example images are not bundled.

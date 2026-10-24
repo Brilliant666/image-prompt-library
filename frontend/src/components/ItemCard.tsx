@@ -3,7 +3,7 @@ import type { KeyboardEvent, MouseEvent } from 'react';
 import { Check, Copy, Download, Heart, LoaderCircle, MoreHorizontal, Pencil } from 'lucide-react';
 import { mediaUrl } from '../api/client';
 import type { ItemSummary } from '../types';
-import { downloadFileName, imageDisplayPath, selectPrimaryImage } from '../utils/images';
+import { downloadFileName, imageCardSources, imageOriginalPath, selectPrimaryImage } from '../utils/images';
 import type { Translator } from '../utils/i18n';
 
 export default function ItemCard({
@@ -18,6 +18,7 @@ export default function ItemCard({
   showActions = true,
   isSelecting = false,
   isSelected = false,
+  imageSizes = '(max-width: 520px) 100vw, (max-width: 760px) 50vw, 320px',
 }: {
   item: ItemSummary;
   t: Translator;
@@ -30,13 +31,17 @@ export default function ItemCard({
   showActions?: boolean;
   isSelecting?: boolean;
   isSelected?: boolean;
+  imageSizes?: string;
 }) {
   const [moreOpen, setMoreOpen] = useState(false);
   const moreShellRef = useRef<HTMLSpanElement | null>(null);
   const moreButtonRef = useRef<HTMLButtonElement | null>(null);
   const moreMenuRef = useRef<HTMLDivElement | null>(null);
   const primaryImage = selectPrimaryImage([item.first_image]);
-  const imagePath = imageDisplayPath(primaryImage);
+  const cardImage = imageCardSources(primaryImage);
+  const imagePath = cardImage.src;
+  const downloadPath = imageOriginalPath(primaryImage);
+  const imageSrcSet = cardImage.candidates.map(candidate => `${mediaUrl(candidate.path)} ${candidate.width}w`).join(', ') || undefined;
   const imageAspectRatio = primaryImage?.width && primaryImage?.height
     ? `${primaryImage.width} / ${primaryImage.height}`
     : undefined;
@@ -145,6 +150,8 @@ export default function ItemCard({
           <div className={`card-image-frame ${imageAspectRatio ? 'has-reserved-ratio' : 'natural-ratio'}`} style={{ aspectRatio: imageAspectRatio }}>
             <img
               src={mediaUrl(imagePath)}
+              srcSet={imageSrcSet}
+              sizes={imageSrcSet ? imageSizes : undefined}
               loading="lazy"
               decoding="async"
               width={primaryImage?.width || undefined}
@@ -161,7 +168,7 @@ export default function ItemCard({
         )}
         {!isSelecting && <div className={`card-actions${moreOpen ? ' is-menu-open' : ''}`} role="group" aria-label={t('itemActions')}>
           <button className="hover-action card-action-copy" onClick={copyPrompt} aria-label={t('copyPrompt')} title={t('copyPrompt')}><Copy size={15} /></button>
-          {hasDownload && <a className="hover-action card-action-secondary" href={mediaUrl(primaryImage!.original_path || imagePath!)} download={downloadFileName(item.title, primaryImage!.original_path || imagePath!)} onClick={download} aria-label={downloadLabel} title={downloadLabel}><Download size={15} /></a>}
+          {hasDownload && <a className="hover-action card-action-secondary" href={mediaUrl(downloadPath)} download={downloadFileName(item.title, downloadPath)} onClick={download} aria-label={downloadLabel} title={downloadLabel}><Download size={15} /></a>}
           {showActions && onFavorite && <button className="hover-action card-action-secondary" onClick={favorite} aria-label={favoriteLabel} title={favoriteLabel}><Heart size={15} fill={item.favorite ? 'currentColor' : 'none'} /></button>}
           {showActions && onEdit && <button className="hover-action card-action-secondary" onClick={edit} aria-label={t('edit')} title={t('edit')} disabled={editBusy} aria-busy={editBusy}>{editBusy ? <LoaderCircle className="spin" size={15} /> : <Pencil size={15} />}</button>}
           {hasMoreActions && (
@@ -171,7 +178,7 @@ export default function ItemCard({
               </button>
               {moreOpen && (
                 <div ref={moreMenuRef} className="card-action-menu" role="menu" aria-label={moreActionsLabel} onKeyDown={moveMenuFocus}>
-                  {hasDownload && <a className="card-action-menu-item" role="menuitem" tabIndex={-1} href={mediaUrl(primaryImage!.original_path || imagePath!)} download={downloadFileName(item.title, primaryImage!.original_path || imagePath!)} onClick={download}><Download size={16} /><span>{downloadLabel}</span></a>}
+                  {hasDownload && <a className="card-action-menu-item" role="menuitem" tabIndex={-1} href={mediaUrl(downloadPath)} download={downloadFileName(item.title, downloadPath)} onClick={download}><Download size={16} /><span>{downloadLabel}</span></a>}
                   {showActions && onFavorite && <button className="card-action-menu-item" role="menuitem" tabIndex={-1} type="button" onClick={favorite}><Heart size={16} fill={item.favorite ? 'currentColor' : 'none'} /><span>{favoriteLabel}</span></button>}
                   {showActions && onEdit && <button className="card-action-menu-item" role="menuitem" tabIndex={-1} type="button" onClick={edit} disabled={editBusy} aria-busy={editBusy}>{editBusy ? <LoaderCircle className="spin" size={16} /> : <Pencil size={16} />}<span>{t('edit')}</span></button>}
                 </div>

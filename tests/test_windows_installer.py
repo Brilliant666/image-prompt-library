@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 from PIL import Image
+from readme_contract import assert_source_maintenance_notice
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -81,7 +82,8 @@ def test_native_windows_smoke_and_ci_contract():
 
 
 @pytest.mark.parametrize("dirty_kind", ("tracked", "untracked"))
-@pytest.mark.parametrize("relative_path", ("backend/main.py", "licenses/Playground-MIT.txt"))
+@pytest.mark.parametrize("relative_path", ("backend/main.py", "licenses/Playground-MIT.txt",
+                                          "licenses/agent-skills/LICENSE.gpt-image.txt"))
 def test_native_windows_smoke_refuses_dirty_packaged_source(tmp_path: Path, dirty_kind: str, relative_path: str):
     source_root = tmp_path / "source"
     tracked = source_root / relative_path
@@ -624,6 +626,9 @@ Assert-VersionPayload -Root {powershell_literal(destination)} -ExpectedVersion '
     assert (destination / "sample-data" / "manifests").is_dir()
     assert (destination / "LICENSE").is_file()
     assert (destination / "licenses" / "Playground-MIT.txt").read_bytes() == (ROOT / "licenses" / "Playground-MIT.txt").read_bytes()
+    for name in ("LICENSE.image-prompt-reverse.txt", "LICENSE.gpt-image.txt"):
+        relative = Path("licenses/agent-skills") / name
+        assert (destination / relative).read_bytes() == (ROOT / relative).read_bytes()
     assert not any(path.exists() for path in repo_artifacts)
 
 
@@ -4353,16 +4358,16 @@ try {{ Invoke-Install }} catch {{ $failure = $_.Exception.Message }}
 
 
 def test_public_docs_explain_windows_python_prerequisite_and_installation():
-    readmes = [read("README.md"), read("README_zh-TW.md"), read("README_zh-CN.md")]
+    readmes = {name: read(name) for name in ("README.md", "README_zh-TW.md", "README_zh-CN.md")}
     installation = read("docs/INSTALLATION.md")
     troubleshooting = read("docs/TROUBLESHOOTING.md")
     roadmap = read("ROADMAP.md")
     release = read("docs/releases/v0.8.0.md")
-    for document in readmes:
+    for filename, document in readmes.items():
         assert "Python 3.10+" in document
         assert "Node.js 24" in document
         assert "docs/INDEPENDENT_MAINTENANCE.md" in document
-        assert "No release installer is offered" in document
+        assert_source_maintenance_notice(document, filename)
         assert "raw.githubusercontent.com/EddieTYP" not in document
         assert "releases/tag/v0.7.10" not in document
     maintenance = read("docs/INDEPENDENT_MAINTENANCE.md")

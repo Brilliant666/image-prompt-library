@@ -1308,6 +1308,42 @@ class GenerationJobRepository:
                 prepared.append((data, name, source_image_id, generation_provider, generation_model))
         return prepared
 
+    def _library_agent_prompt(
+        self, job: GenerationJobRecord, text: str, prepared: list[PreparedReferenceImage],
+    ) -> tuple[str, dict]:
+        """Resolve only linked Agent markers; keep the original recipe untouched."""
+        agent = job.metadata.get("agent")
+        specs = self._input_image_specs(job)
+        if not isinstance(agent, dict) or not agent.get("requestId") or len(specs) != len(prepared):
+            return text, {}
+        with connect(self.library_path) as conn:
+            linked = conn.execute(
+                "SELECT 1 FROM agent_tool_jobs WHERE job_id=? AND request_id=?",
+                (job.id, agent["requestId"]),
+            ).fetchone()
+        if linked is None:
+            return text, {}
+        labels: dict[str, str] = {}
+        image_labels: dict[str, str] = {}
+        references = []
+        for index, (spec, image) in enumerate(zip(specs, prepared), start=1):
+            sha = hashlib.sha256(image[0]).hexdigest()
+            # The Library image store deduplicates identical reference bytes.
+            label = image_labels.setdefault(sha, f"参考图{len(image_labels) + 1}")
+            ref_id = spec.get("name")
+            if not isinstance(ref_id, str) or not re.fullmatch(r"round-\d+-(?:image|reference)-\d+", ref_id):
+                continue
+            if ref_id in labels:
+                # An ambiguous mapping must never silently choose a different image.
+                return text, {}
+            labels[ref_id] = label
+            references.append({"id": ref_id, "label": label, "input_index": index, "sha256": sha})
+        marker = re.compile(r'''<ref\s+id=(["'])(round-\d+-(?:image|reference)-\d+)\1\s*/>''')
+        readable = marker.sub(lambda match: f"【{labels[match[2]]}】" if match[2] in labels else match[0], text)
+        if readable == text:
+            return text, {}
+        return readable, {"agent_reference_prompt": {"raw_text": text, "references": references}}
+
     def _remove_unreferenced_image_files(self, paths: set[str]) -> None:
         if not paths:
             return
@@ -1884,6 +1920,7 @@ class GenerationJobRepository:
                 if key in job.metadata:
                     provenance[key] = sanitize_generation_parameters({key: job.metadata[key]}, redact_image_data=True)[key]
         try:
+            input_reference_images = self._prepare_input_reference_images(job, claim_token=claim_token)
             if overrides.prompts:
                 prompts = []
                 for index, prompt in enumerate(overrides.prompts):
@@ -1897,12 +1934,13 @@ class GenerationJobRepository:
                         provenance=prompt_provenance,
                     ))
             else:
+                prompt_text, reference_provenance = self._library_agent_prompt(job, prompt_text, input_reference_images)
                 prompts = [PromptIn(
                     language=job.prompt_language or "en",
                     text=prompt_text,
                     is_primary=True,
                     is_original=True,
-                    provenance=provenance,
+                    provenance={**provenance, **reference_provenance},
                 )]
         except Exception:
             self._release_acceptance(job_id, claim_token)
@@ -1914,7 +1952,6 @@ class GenerationJobRepository:
         created_images: list[tuple[object, StoredImageInput]] = []
         finalized = False
         try:
-            input_reference_images = self._prepare_input_reference_images(job, claim_token=claim_token)
             self._require_acceptance_claim(job.id, claim_token)
             result_image = self._prepare_result_image(job)
             self._require_acceptance_claim(job.id, claim_token)

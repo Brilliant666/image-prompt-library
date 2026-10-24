@@ -12,6 +12,14 @@ export type AgentAssistantBlock =
   | { type: 'deleted-image-task'; key: string; taskId: string }
   | { type: 'tool'; key: string; callId: string; name: string; state?: string };
 
+export function getAgentToolLabel(name: string): string {
+  const labels: Record<string, string> = {
+    generate_image: '生成图片', generate_image_batch: '批量生成图片', image_generation: '生成图片',
+    continue_generation: '继续生成图片', web_search: '网络搜索', read_agent_skill: '读取创作技能',
+  };
+  return labels[name] || '执行工具';
+}
+
 function matchesCall(task: GenerationJobRecord, item: AgentOutputItem) {
   const link = task.metadata?.agent as Record<string, unknown> | undefined;
   const callId = item.type === 'image_generation_call' ? item.id : item.call_id;
@@ -70,7 +78,8 @@ export function getAgentAssistantBlocks(round: AgentRound, tasks: GenerationJobR
     const id = item.call_id || item.id || `call-${index}`;
     if (calls.has(id)) continue;
     calls.add(id);
-    blocks.push({ type: 'tool', key: `tool:${id}`, callId: id, name: item.type === 'web_search_call' ? 'web_search' : item.name || 'image_generation', state: item.status });
+    const skillCompleted = item.name === 'read_agent_skill' && output.some(result => result.type === 'function_call_output' && result.call_id === id);
+    blocks.push({ type: 'tool', key: `tool:${id}`, callId: id, name: item.type === 'web_search_call' ? 'web_search' : item.name || 'image_generation', state: skillCompleted ? 'completed' : item.status });
     const matchingSlots = slots.filter(slot => slot.task && matchesCall(slot.task, item));
     // A missing slot retains its place before the next still-identifiable call.
     const firstIndex = matchingSlots.length ? slots.indexOf(matchingSlots[0]) : -1;

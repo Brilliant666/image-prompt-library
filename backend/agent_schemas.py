@@ -67,6 +67,11 @@ class AgentAuthorization(AgentModel):
     maxImageJobs: int = Field(ge=0, le=20)
 
 
+class AgentImageConfig(AgentModel):
+    profileId: str | None = Field(default=None, min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_-]+$")
+    model: str = Field(max_length=200)
+
+
 class AgentRoundCreate(AgentModel):
     requestId: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
     expectedRevision: int = Field(ge=0)
@@ -78,6 +83,7 @@ class AgentRoundCreate(AgentModel):
     mask: AgentMask | None = None
     configRevision: int = Field(ge=0)
     activeProfileId: str | None = None
+    imageConfig: AgentImageConfig | None = None
     params: AgentParams = Field(default_factory=AgentParams)
     authorization: AgentAuthorization
 

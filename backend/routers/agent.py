@@ -1,11 +1,17 @@
+import asyncio
+import time
+
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 
 from backend.agent_schemas import AgentConfigSave, AgentConversationCreate, AgentConversationPatch, AgentResume, AgentRoundCreate
 from backend.services.agent_execution import schedule_request, stop_request
-from backend.services.agent_repository import AgentRepository
+from backend.services.agent_repository import ACTIVE_STATES, AgentError, AgentRepository, encoded
 
 router = APIRouter(prefix="/agent", tags=["agent"])
+PROGRESS_INTERVAL = 0.15
+PROGRESS_HEARTBEAT = 10.0
 
 
 def repo(request):
@@ -23,8 +29,9 @@ def save_config(payload: AgentConfigSave, request: Request):
 
 
 @router.get("/conversations")
-def list_conversations(request: Request, limit: int = Query(50, ge=1, le=100), cursor: str | None = Query(None, pattern=r"^\d+$")):
-    return repo(request).list_conversations(limit, cursor)
+def list_conversations(request: Request, limit: int = Query(50, ge=1, le=100), cursor: str | None = Query(None, pattern=r"^\d+$"),
+                       q: str | None = Query(None, max_length=200)):
+    return repo(request).list_conversations(limit, cursor, q)
 
 
 @router.post("/conversations")
@@ -63,6 +70,45 @@ def delete_round(conversation_id: str, round_id: str, request: Request):
 @router.get("/requests/{request_id}")
 def get_request(request_id: str, request: Request):
     return repo(request).snapshot(request_id=request_id)
+
+
+async def progress_events(request, repository, request_id, token, snapshot):
+    """Observe durable progress only. Disconnecting never cancels or retries work."""
+    last_sent = time.monotonic()
+    while not await request.is_disconnected():
+        if snapshot is not None:
+            yield "event: snapshot\ndata: " + encoded(snapshot) + "\n\n"
+            last_sent = time.monotonic()
+            if snapshot["request"]["state"] not in ACTIVE_STATES:
+                return
+            snapshot = None
+        elif time.monotonic() - last_sent >= PROGRESS_HEARTBEAT:
+            yield "event: heartbeat\ndata: {}\n\n"
+            last_sent = time.monotonic()
+        await asyncio.sleep(PROGRESS_INTERVAL)
+        if await request.is_disconnected():
+            return
+        try:
+            current = await run_in_threadpool(repository.progress_token, request_id)
+            if current != token:
+                # Capture the marker before the snapshot so an update during
+                # assembly is observed again rather than accidentally skipped.
+                token = current
+                snapshot = await run_in_threadpool(repository.snapshot, request_id=request_id)
+        except AgentError:
+            # A removed conversation is no longer observable. The browser can
+            # reconcile its selection through the ordinary GET fallback.
+            return
+
+
+@router.get("/requests/{request_id}/events")
+async def get_request_events(request_id: str, request: Request):
+    repository = await run_in_threadpool(repo, request)
+    token = await run_in_threadpool(repository.progress_token, request_id)
+    snapshot = await run_in_threadpool(repository.snapshot, request_id=request_id)
+    return StreamingResponse(progress_events(request, repository, request_id, token, snapshot),
+                             media_type="text/event-stream",
+                             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
 
 @router.post("/requests/{request_id}/stop")

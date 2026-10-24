@@ -5,10 +5,16 @@ export interface AgentDraft {
   text: string;
   refs: ReferenceChoice[];
   params: AgentRoundCreate['params'];
+  imageConfig?: AgentRoundCreate['imageConfig'];
+  sizeMode?: 'auto4k';
   editId: string | null;
   origin: AgentRoundCreate['origin'];
 }
 export const AGENT_DRAFT_KEY = 'ipl.agent.drafts.v1';
+
+export function acknowledgeAgentDraft(draft: AgentDraft, clearInput: boolean): AgentDraft {
+  return { ...draft, ...(clearInput ? { text: '', refs: [] } : {}), origin: 'send', editId: null };
+}
 
 export function readAgentDrafts(storage: Pick<Storage, 'getItem'>, enabled: boolean): Record<string, AgentDraft> {
   if (!enabled) return {};
@@ -40,6 +46,7 @@ export function draftFromPendingAgentSubmission(entry: PendingAgentSubmission, p
       return prior ? structuredClone(prior) : { reference: structuredClone(reference), label: '已冻结的参考图', url: '' };
     }),
     params: structuredClone(payload.params),
+    ...(payload.imageConfig ? { imageConfig: structuredClone(payload.imageConfig) } : {}),
     editId: payload.derivedFromRoundId || null,
     origin: payload.origin,
   };

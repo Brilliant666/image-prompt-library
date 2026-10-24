@@ -47,12 +47,13 @@ can be selected, downloaded as originals in a ZIP, inspected in the zoomable
 lightbox, restored for another request, or saved as a new Library reference or
 attached to an existing reference. Clearing a generation result does not delete
 an already accepted Library image. Protected Agent references remain usable.
-History starts with 48 results. **Only successful** is the default, including
-results already saved to Library; choose **Success and failure**, **All states**
-or an individual state to inspect other jobs. The browser remembers this choice.
-Status filtering happens before server pagination. Text search covers loaded
-pages, and **Load more** makes older pages available. Failed jobs remain in the
-queue and database; filtering never deletes them.
+History starts with 48 results. **All states** is the default; choose **In progress**,
+**Success**, **Accepted** or **Failed** to narrow the list. Success includes results
+already saved to Library. The browser remembers this choice. Cleared results are
+hidden from Gallery pages and counts, while their task records and original
+requests remain in execution history. Status filtering happens before server
+pagination. Text search covers loaded pages, and **Load more** makes older pages
+available. Filtering never deletes jobs.
 
 Refreshing the page can display the previous list while checking the server.
 This tab-local cache is scoped to the library and filter, expires after 30
@@ -133,6 +134,28 @@ closing the page cannot accidentally turn it into a new paid request.
 
 Choose a full text model ID and a compatible API profile in Agent settings.
 Saving these settings does not test the endpoint or spend model credits.
+The Agent header shows the provider and model for the next submission. Each
+round's model details retain its requested model and any model IDs reported by
+the response, independently of later settings changes. Older records without
+returned model metadata remain unknown; a gateway's reported ID does not verify
+its internal routing.
+
+Agent chat defaults to **Enter to send**, **Shift+Enter for a new line**, and
+clearing the submitted text/references after the local server accepts the round.
+Image parameters remain selected. Input method composition never submits, and
+failed or uncertain submissions retain their draft. Agent shortcuts and clearing
+preferences are independent from Gallery under **Settings → Input and workflow**.
+
+The browser receives durable response progress over a local SSE connection.
+If this connection is unavailable, it falls back to read-only polling of the
+same request; reconnecting never resends a provider request. The displayed model
+step count includes text-only responses and is not a count of tool calls.
+
+The model fields show the saved catalog for each bound profile, including the
+profile selected in the workspace when using Current API mode. Opening settings
+reads the local cache; **Refresh models** explicitly reads the provider's model
+list. Catalog changes never replace a manually entered or historical model ID.
+A listed model is not proof of Responses or image-tool compatibility.
 
 - **Hybrid**: Responses text/tool calls use the text profile. Validated
   `generate_image`, `generate_image_batch` and `continue_generation` calls create
@@ -148,6 +171,39 @@ Image generation is off for a new turn until **Allow images for this turn** is
 selected. The turn freezes its image limit and maximum Responses steps; web search
 also needs both its configuration switch and explicit turn authorization. These
 limits bound the application's dispatches, not a provider's price or billing.
+Hybrid text-only turns do not require an image profile. Text and image readiness
+are shown separately; an absent image profile blocks image authorization, without
+blocking text discussion or silently selecting another provider.
+
+**Turn options → Image generation settings** shows the text route separately
+from the image provider and model. In Hybrid mode, the image selection can be
+overridden for this draft without changing saved provider defaults. The image
+catalog recommends `gpt-image` models while retaining manual and historical
+IDs; Native and Current API modes retain their Responses image-tool route.
+Size, quality, background, format and moderation use the Gallery controls.
+Automatic 4K sizing resolves the current prompt ratio or first reference image
+before sending, then stores the concrete dimensions with the request.
+
+**Use Gallery image settings** explicitly copies the current valid Images API
+selection and parameters. It leaves both prompts and reference lists unchanged
+and does not enable image generation. OAuth and Responses image-tool routes
+cannot be substituted by this action. An accepted request freezes this selection;
+later configuration changes cannot silently reroute it.
+
+Generated images can be added to the next Agent draft with **Add as a reference**.
+Gallery cards and details offer **Continue in Agent**; Agent outputs also identify
+their source conversation and round. Returning to the source selects that branch,
+while bringing an ordinary Gallery result adds it to the current draft. Existing
+text, parameters and attachments are preserved, duplicates are not added, and a
+full or unconfirmed draft is not overwritten. These actions never send a message
+or generate an image automatically.
+
+Conversation search covers titles, user prompts and assistant text across the
+saved history, with pagination. It does not search tool arguments. Background
+conversation updates leave the current search pages in place and offer a refresh.
+Saved answers support inline `$...$` and block `$$...$$` math; the math formatting
+setting controls instructions to the model, while existing formulas remain readable.
+Code spans remain literal, and answer text cannot load arbitrary remote images.
 
 Only selected reference images and the selected conversation branch are sent.
 `@图1` addresses a current attachment; `@第2轮图1` addresses an output on the
@@ -181,7 +237,7 @@ errors. Provider-origin diagnostics and persisted response fields are sanitized.
 | `AgentWorkspace`, conversation/reference/response helpers | Adapted branch, mention, message and tool-result semantics; server-owned request lifecycle | Local HTTP JSON/SSE and browser verification; real providers unverified |
 | `SettingsModal`, settings/profile interactions | Grouped dialog, list edit/copy/order, local workflow preferences | Local tests and browser verification |
 | Native Responses image tool | Shared result validation and storage, no second Images request | Implemented and mock-tested; real provider support unverified |
-| Streaming text / partial images | Server processes SSE and UI polls durable progress | Mock-tested; real provider streaming unverified |
+| Streaming text / partial images | Server processes SSE and pushes durable progress to the UI, with read-only polling fallback | Mock-tested; real provider streaming unverified |
 | Web search | Explicitly authorized Responses built-in tool and citation display | Implemented; no paid search performed |
 | Native transparency | Existing background/format parameters and alpha-preserving original/derived files | Local synthetic tests; real provider support unverified |
 | Mask editing | Native mask upload/target validation protocol | Backend tests only; source paint/mask editor UI not ported |
@@ -194,6 +250,28 @@ errors. Provider-origin diagnostics and persisted response fields are sanitized.
 The source browser IndexedDB asset database, direct provider-key handling and
 front-end scheduler are intentionally replaced by the existing backend contracts.
 No extra Node service or second asset library is introduced.
+
+## Agent request efficiency
+
+Clear prompt-writing, image reverse-engineering and image-edit tasks receive the
+relevant built-in skill sections with the first model request. Ordinary chat
+receives only the short catalog; additional sections remain available through the
+read-only skill tool. Loading guidance never enables generation or search.
+
+An explicit current-image or historical-image reference narrows the image bytes
+sent to the text model. Ambiguous references and comparisons retain the full image
+context. Text history, tool results, branch reference IDs and stored originals
+remain intact. Available images omitted from a particular request are marked
+separately from removed images.
+
+A single image tool can explicitly declare that its images finish the request.
+After all results succeed and the tool receipt is saved, Agent can complete
+without another text-only summary call. Missing declarations, analysis or
+multi-stage requests keep the normal continuation path. Failure and stop states
+never become successful completion through this shortcut.
+
+Answer details show reported input/output usage and loaded skills. Missing fields
+are hidden, and per-call information and source attribution are expandable.
 
 ## Persistence, backups and compatibility
 

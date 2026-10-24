@@ -4,6 +4,7 @@ import { api, mediaUrl } from '../../api/client';
 import type { GenerationJobRecord, ItemDetail, ItemSummary } from '../../types';
 import { referenceKey, type ReferenceChoice } from '../../utils/playground/agentImageReferences';
 import { useModalFocus } from '../../hooks/useModalFocus';
+import './AgentReferencePicker.css';
 
 export function AgentReferencePicker({ onClose, onSelect, remaining }: { onClose: () => void; onSelect: (items: ReferenceChoice[]) => void; remaining: number }) {
   const [tab, setTab] = useState<'library' | 'gallery'>('library');
@@ -60,28 +61,35 @@ export function AgentReferencePicker({ onClose, onSelect, remaining }: { onClose
     setSelected(old => old.some(item => referenceKey(item.reference) === referenceKey(choice.reference)) ? old.filter(item => referenceKey(item.reference) !== referenceKey(choice.reference)) : old.length < remaining ? [...old, choice] : old);
   }
   return <div className="agent-modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) close(); }}>
-    <div className="agent-reference-picker" role="dialog" aria-modal="true" aria-label="选择引用图片" ref={containerRef} onKeyDown={handleModalKeyDown}>
-      <header><strong>{detail ? detail.title : '选择引用图片'}</strong><button type="button" aria-label="关闭选择图片" onClick={close}><X size={19} /></button></header>
-      <div className="agent-picker-toolbar">{detail ? <button onClick={leaveDetail}><ArrowLeft size={16} />返回列表</button> : <>
-        <button className={tab === 'library' ? 'selected' : ''} onClick={() => changeTab('library')}>Library</button>
-        <button className={tab === 'gallery' ? 'selected' : ''} onClick={() => changeTab('gallery')}>画廊</button>
-        <label><Search size={16} /><input aria-label="搜索引用图片" value={query} onChange={event => { leaveDetail(); setQuery(event.target.value); setPage(0); }} placeholder={tab === 'library' ? '搜索 Library' : '筛选已加载的生成结果'} /></label>
-      </>}</div>
-      <p className="agent-help">仅选中的图片会加入本轮上下文。还可选 {Math.max(0, remaining - selected.length)} 张。</p>
-      {error && <p role="alert" className="agent-error">{error}</p>}
-      <div className="agent-picker-grid">{choices.map(choice => {
-        const key = referenceKey(choice.reference);
-        const chosen = selected.some(item => referenceKey(item.reference) === key);
-        const item = !detail && tab === 'library' ? items.find(item => item.first_image?.id === (choice.reference as { imageId: string }).imageId) : null;
-        return <div key={key} className={chosen ? 'chosen' : ''}>
-          <button type="button" onClick={() => toggle(choice)} aria-pressed={chosen} aria-label={`选择 ${choice.label}`}><img src={choice.url} alt={choice.label} loading="lazy" /><span>{chosen && <Check size={15} />}{choice.label}</span></button>
-          {item && <button className="agent-text-button" onClick={() => void openDetail(item.id)}>查看此条目的全部图片</button>}
-        </div>;
-      })}</div>
-      {loading && <p className="agent-help"><LoaderCircle size={16} className="spin" />读取中…</p>}
-      {!loading && !choices.length && <p className="agent-help">没有可选图片。</p>}
-      {!detail && total > (page + 1) * 60 && <button disabled={loading} onClick={() => setPage(value => value + 1)}>加载更多（已读取 {Math.min((page + 1) * 60, total)} / {total} 条）</button>}
-      <footer><button onClick={close}>取消</button><button className="agent-primary" disabled={!selected.length} onClick={() => { onSelect(selected); close(); }}>添加 {selected.length} 张</button></footer>
+    <div className="agent-reference-picker agent-reference-picker-layout" role="dialog" aria-modal="true" aria-label="选择引用图片" ref={containerRef} onKeyDown={handleModalKeyDown}>
+      <header className="agent-picker-header">
+        <div className="agent-picker-title"><strong>{detail ? detail.title : '选择引用图片'}</strong><button type="button" aria-label="关闭选择图片" onClick={close}><X size={19} /></button></div>
+        <div className="agent-picker-toolbar">{detail ? <button onClick={leaveDetail}><ArrowLeft size={16} />返回列表</button> : <>
+          <button className={tab === 'library' ? 'selected' : ''} onClick={() => changeTab('library')}>Library</button>
+          <button className={tab === 'gallery' ? 'selected' : ''} onClick={() => changeTab('gallery')}>画廊</button>
+          <label><Search size={16} /><input aria-label="搜索引用图片" value={query} onChange={event => { leaveDetail(); setQuery(event.target.value); setPage(0); }} placeholder={tab === 'library' ? '搜索 Library' : '筛选已加载的生成结果'} /></label>
+        </>}</div>
+        <p className="agent-help">仅选中的图片会加入本轮上下文。</p>
+      </header>
+      <div className="agent-picker-content">
+        {error && <p role="alert" className="agent-error">{error}</p>}
+        <div className="agent-picker-grid">{choices.map(choice => {
+          const key = referenceKey(choice.reference);
+          const chosen = selected.some(item => referenceKey(item.reference) === key);
+          const item = !detail && tab === 'library' ? items.find(item => item.first_image?.id === (choice.reference as { imageId: string }).imageId) : null;
+          return <div key={key} className={chosen ? 'chosen' : ''}>
+            <button type="button" onClick={() => toggle(choice)} aria-pressed={chosen} aria-label={`选择 ${choice.label}`}><img src={choice.url} alt={choice.label} loading="lazy" /><span>{chosen && <Check size={15} />}{choice.label}</span></button>
+            {item && <button className="agent-text-button" onClick={() => void openDetail(item.id)}>查看此条目的全部图片</button>}
+          </div>;
+        })}</div>
+        {loading && <p className="agent-help"><LoaderCircle size={16} className="spin" />读取中…</p>}
+        {!loading && !choices.length && <p className="agent-help">没有可选图片。</p>}
+        {!detail && total > (page + 1) * 60 && <button disabled={loading} onClick={() => setPage(value => value + 1)}>加载更多（已读取 {Math.min((page + 1) * 60, total)} / {total} 条）</button>}
+      </div>
+      <footer className="agent-picker-footer">
+        <span className="agent-picker-selection" role="status" aria-live="polite">已选 {selected.length} / {remaining} 张</span>
+        <div className="agent-picker-actions"><button type="button" onClick={close}>取消</button><button type="button" className="agent-primary" disabled={!selected.length} onClick={() => { onSelect(selected); close(); }}>添加 {selected.length} 张</button></div>
+      </footer>
     </div>
   </div>;
 }

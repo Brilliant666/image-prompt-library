@@ -1,0 +1,96 @@
+.agent-reference-picker.agent-reference-picker-layout {
+  box-sizing: border-box;
+  min-height: 0;
+  max-height: min(760px, calc(100dvh - 40px));
+  overflow: hidden;
+  gap: 0;
+}
+
+.agent-reference-picker-layout > .agent-picker-header {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+  padding-bottom: 12px;
+}
+
+.agent-picker-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  gap: 12px;
+}
+
+.agent-picker-title strong {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.agent-picker-title > button {
+  flex-shrink: 0;
+}
+
+.agent-reference-picker-layout .agent-picker-toolbar label {
+  min-width: 150px;
+}
+
+.agent-picker-header .agent-help {
+  margin: 0;
+}
+
+.agent-picker-content {
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  flex: 1 1 auto;
+  padding: 2px;
+  scrollbar-gutter: stable;
+}
+
+.agent-reference-picker-layout > .agent-picker-footer {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin-top: 12px;
+  padding-top: 12px;
+}
+
+.agent-picker-selection {
+  color: var(--studio-muted, var(--muted));
+  font-size: 12px;
+}
+
+.agent-picker-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 9px;
+  margin-left: auto;
+}
+
+@media (max-width: 620px) {
+  .agent-reference-picker.agent-reference-picker-layout {
+    max-height: calc(100dvh - 20px);
+  }
+
+  .agent-reference-picker-layout .agent-picker-toolbar label {
+    margin-left: 0;
+    flex-basis: 100%;
+  }
+
+  .agent-reference-picker-layout > .agent-picker-header {
+    gap: 8px;
+    padding-bottom: 8px;
+  }
+
+  .agent-reference-picker-layout > .agent-picker-footer {
+    margin-top: 8px;
+    padding-top: 8px;
+  }
+}

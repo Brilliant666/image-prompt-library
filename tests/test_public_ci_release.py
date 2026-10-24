@@ -1,6 +1,8 @@
 from pathlib import Path
 import re
 
+from readme_contract import assert_source_maintenance_notice, assert_upstream_release_history, assert_grok_readme_features
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -243,11 +245,8 @@ def test_v010_release_docs_define_stable_update_behavior():
     notes = notes_path.read_text(encoding="utf-8")
     current_notes = (ROOT / "docs" / "releases" / "v0.11.2.md").read_text(encoding="utf-8")
     installation = (ROOT / "docs" / "INSTALLATION.md").read_text(encoding="utf-8")
-    readmes = (
-        (ROOT / "README.md").read_text(encoding="utf-8"),
-        (ROOT / "README_zh-TW.md").read_text(encoding="utf-8"),
-        (ROOT / "README_zh-CN.md").read_text(encoding="utf-8"),
-    )
+    readme_names = ("README.md", "README_zh-TW.md", "README_zh-CN.md")
+    readmes = [(ROOT / name).read_text(encoding="utf-8") for name in readme_names]
     posix_installer = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
     windows_installer = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
 
@@ -266,10 +265,10 @@ def test_v010_release_docs_define_stable_update_behavior():
     assert "stable promotion" not in notes.lower()
     assert "## Release gate" not in notes
     assert "No paid generation request" not in notes
-    for readme in readmes:
+    for filename, readme in zip(readme_names, readmes):
         assert "**v0.11.2**" in readme
-        assert "independently maintained" in readme
-        assert "No release installer is offered" in readme
+        assert_source_maintenance_notice(readme, filename)
+        assert_upstream_release_history(readme, filename)
     assert "`v0.10.0` is the current stable release" not in readmes[0]
     assert "`v0.10.0` 已是目前 stable release" not in readmes[1]
     assert "`v0.10.0` 已是当前 stable release" not in readmes[2]
@@ -277,7 +276,9 @@ def test_v010_release_docs_define_stable_update_behavior():
     assert "`v0.10.2` 已是目前 stable release" not in readmes[1]
     assert "`v0.10.2` 已是当前 stable release" not in readmes[2]
     for readme in readmes:
-        assert "candidate" not in readme.lower()
+        # Model candidates are valid content; only release-candidate claims are stale.
+        assert "prerelease candidate" not in readme.lower()
+        assert "release candidate" not in readme.lower()
         assert "release gate" not in readme.lower()
     assert 'release.get("prerelease")' in posix_installer
     assert "$candidate.prerelease" in windows_installer
@@ -318,10 +319,8 @@ def test_v011_docs_preserve_grok_release_history():
 
     for filename in ("README.md", "README_zh-TW.md", "README_zh-CN.md"):
         readme = (ROOT / filename).read_text(encoding="utf-8")
-        for label in ("Grok OAuth", "Default AI provider", "Suggest title", "via Grok"):
-            assert label in readme
-        assert "v0.11.0" in readme
-        assert "docs/releases/v0.11.0.md" in readme
+        assert_grok_readme_features(readme, filename)
+        assert_upstream_release_history(readme, filename)
         assert "docs/assets/screenshots/generation-grok-provider.png" in readme
 
 
@@ -341,8 +340,7 @@ def test_v0112_release_notes_explain_direct_images_and_limitations():
         assert text in notes
     for filename in ("README.md", "README_zh-TW.md", "README_zh-CN.md"):
         readme = (ROOT / filename).read_text(encoding="utf-8")
-        assert "docs/releases/v0.11.2.md" in readme
-        assert "> **v0.11.2 " in readme
+        assert_upstream_release_history(readme, filename)
         for stale_label in ("Next-release change", "下一版改動", "下一版改动"):
             assert stale_label not in readme
     assert "next release" not in (ROOT / "docs" / "GENERATION.md").read_text(encoding="utf-8").lower()

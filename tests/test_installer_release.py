@@ -16,6 +16,7 @@ import pytest
 
 from backend.db import init_db
 from backend.repositories import ItemRepository
+from readme_contract import assert_source_maintenance_notice
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -548,7 +549,7 @@ def test_readme_prefers_independent_source_maintenance_and_preserves_historical_
 
     assert "## Quick start" in readme
     assert "docs/INDEPENDENT_MAINTENANCE.md" in readme
-    assert "No release installer is offered" in readme
+    assert_source_maintenance_notice(readme, "README.md")
     assert "raw.githubusercontent.com/EddieTYP" not in readme
     assert "npm ci" in maintenance
     assert "npm run build" in maintenance
@@ -613,6 +614,13 @@ def test_package_release_creates_manifest_and_excludes_private_runtime_data(tmp_
     assert "frontend/dist/index.html" in listing
     with tarfile.open(tarball_path, "r:gz") as archive:
         index_html = archive.extractfile("frontend/dist/index.html").read().decode("utf-8")
+        skill_notices = {
+            "licenses/agent-skills/LICENSE.image-prompt-reverse.txt",
+            "licenses/agent-skills/LICENSE.gpt-image.txt",
+        }
+        for name in skill_notices:
+            assert archive.extractfile(name).read() == (ROOT / name).read_bytes()
+        assert not any(member.name.startswith("docs/") for member in archive.getmembers())
     assert '/image-prompt-library/assets/' not in index_html
     assert '/assets/' in index_html
     assert "frontend/dist/assets/" in listing
@@ -679,7 +687,8 @@ def test_package_release_creates_manifest_and_excludes_private_runtime_data(tmp_
     assert ".pyc" not in listing
 
 
-@pytest.mark.parametrize("dirty_relative", ("backend/main.py", "vite.config.ts", "tsconfig.json"))
+@pytest.mark.parametrize("dirty_relative", ("backend/main.py", "vite.config.ts", "tsconfig.json",
+                                           "licenses/agent-skills/LICENSE.gpt-image.txt"))
 def test_package_release_rejects_implicit_source_sha_for_dirty_packaged_input(tmp_path, dirty_relative):
     source = tmp_path / "source"
     (source / "scripts").mkdir(parents=True)
