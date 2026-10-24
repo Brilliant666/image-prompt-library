@@ -47,12 +47,13 @@ can be selected, downloaded as originals in a ZIP, inspected in the zoomable
 lightbox, restored for another request, or saved as a new Library reference or
 attached to an existing reference. Clearing a generation result does not delete
 an already accepted Library image. Protected Agent references remain usable.
-History starts with 48 results. **Only successful** is the default, including
-results already saved to Library; choose **Success and failure**, **All states**
-or an individual state to inspect other jobs. The browser remembers this choice.
-Status filtering happens before server pagination. Text search covers loaded
-pages, and **Load more** makes older pages available. Failed jobs remain in the
-queue and database; filtering never deletes them.
+History starts with 48 results. **All states** is the default; choose **In progress**,
+**Success**, **Accepted** or **Failed** to narrow the list. Success includes results
+already saved to Library. The browser remembers this choice. Cleared results are
+hidden from Gallery pages and counts, while their task records and original
+requests remain in execution history. Status filtering happens before server
+pagination. Text search covers loaded pages, and **Load more** makes older pages
+available. Filtering never deletes jobs.
 
 Refreshing the page can display the previous list while checking the server.
 This tab-local cache is scoped to the library and filter, expires after 30
