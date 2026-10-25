@@ -219,7 +219,11 @@ def refs_for_request(repo, request):
             for jid in r["outputTaskIds"]:
                 try:
                     outputs.append(repo.resolve_ref({"kind": "job", "jobId": jid}))
-                except AgentError:
+                except AgentError as exc:
+                    if exc.code != "reference_missing":
+                        # Corrupt established snapshots must not silently turn
+                        # into absent pixels or be replaced from another source.
+                        raise
                     outputs.append(None)
         for i, asset_id in enumerate(outputs):
             refs[f"round-{r['index']}-image-{i + 1}"] = asset_id

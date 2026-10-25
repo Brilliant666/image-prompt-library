@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import argparse
 import base64
+from collections import Counter
 from contextlib import contextmanager
 from io import BytesIO
 import json
+import hashlib
 import os
 from pathlib import Path
 import platform
@@ -122,6 +124,33 @@ def body_metrics(body, wire_bytes):
             "tools_json_bytes": len(encoded(body["tools"]).encode())}
 
 
+def asset_inventory(repo):
+    """Count actual recursive files separately from logical asset rows.
+
+    Keep paths internal: stdout exposes only aggregate measurements. Hash real
+    bytes so nested storage, unreferenced files and duplicate copies cannot make
+    a storage optimization appear more effective than it is.
+    """
+    root = repo.library / "generation-references" / "agent"
+    files = {path.relative_to(repo.library).as_posix(): path
+             for path in root.rglob("*") if path.is_file()} if root.exists() else {}
+    hashes = Counter(hashlib.sha256(path.read_bytes()).hexdigest() for path in files.values())
+    with connect(repo.library) as conn:
+        assets = conn.execute("SELECT path,sha256 FROM agent_assets").fetchall()
+    conn.close()
+    paths = {row[0] for row in assets}
+    return {
+        "agent_asset_rows": len(assets),
+        "distinct_frozen_image_hashes": len({row[1] for row in assets}),
+        "frozen_original_files": len(files),
+        "distinct_physical_image_hashes": len(hashes),
+        "frozen_original_file_bytes": sum(path.stat().st_size for path in files.values()),
+        "duplicate_physical_image_files": sum(count - 1 for count in hashes.values()),
+        "unreferenced_agent_files": len(set(files) - paths),
+        "missing_agent_asset_files": sum(not (repo.library / row[0]).is_file() for row in assets),
+    }, set(files)
+
+
 def create_round(repo, n, parent, asset_id=None):
     return repo.create_round("synthetic", AgentRoundCreate.model_validate({
         "requestId": f"request-{n}", "expectedRevision": repo.snapshot("synthetic")["revision"],
@@ -196,7 +225,9 @@ def scenario(root, checkpoints, repeats, with_images):
                 skills = selected_skill_sections(PROMPT + f"Round {n}.", with_images, PROMPT if n > 1 else None)
                 with connect(repo.library) as conn:
                     history_bytes = conn.execute("SELECT sum(length(CAST(history AS BLOB))) FROM agent_requests").fetchone()[0]
+                inventory, _ = asset_inventory(repo)
                 rows.append({"scenario": "image_history" if with_images else "text_history", "rounds": n,
+                    **inventory,
                     **body_metrics(body, wire_bytes), "historical_image_bytes": (n - 1) * len(image) if with_images else 0,
                     "preloaded_skill_sections": [f"{s['skill']}/{s['section']}" for s in skills],
                     "preloaded_skill_content_bytes": sum(len(s["content"].encode()) for s in skills),
