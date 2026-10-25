@@ -219,7 +219,11 @@ def refs_for_request(repo, request):
             for jid in r["outputTaskIds"]:
                 try:
                     outputs.append(repo.resolve_ref({"kind": "job", "jobId": jid}))
-                except AgentError:
+                except AgentError as exc:
+                    if exc.code != "reference_missing":
+                        # Corrupt established snapshots must not silently turn
+                        # into absent pixels or be replaced from another source.
+                        raise
                     outputs.append(None)
         for i, asset_id in enumerate(outputs):
             refs[f"round-{r['index']}-image-{i + 1}"] = asset_id
@@ -450,7 +454,7 @@ def call_responses(repo, request_id, step, refs, *, body_override=None, native_c
         mask = context_image_url(repo, request["round"]["maskImageId"]) if request["round"].get("maskImageId") else None
         input_items = build_input(repo, request, refs) if body_override is None else None
     except AgentError as exc:
-        if exc.code == "reference_missing":
+        if exc.code in {"reference_missing", "frozen_reference_invalid"}:
             # This preflight runs before HTTP, so failure is safely known.
             repo.update(request_id, outcome="known")
         raise

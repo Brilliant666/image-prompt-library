@@ -369,6 +369,8 @@ def _validate_schema_contract(conn: sqlite3.Connection, ledger: list[str]) -> No
                                 "agent_steps", "agent_tool_jobs", "agent_assets", "agent_resumes"})
     if migration_count >= 16:
         required_tables.add("gallery_title_jobs")
+    if migration_count >= 18:
+        required_tables.add("agent_frozen_sources")
     schema_objects = {
         str(row[0]): (str(row[1]), str(row[2] or ""))
         for row in conn.execute("SELECT name, type, sql FROM sqlite_master WHERE type IN ('table', 'view')")
@@ -417,6 +419,8 @@ def _validate_schema_contract(conn: sqlite3.Connection, ledger: list[str]) -> No
         }
     if migration_count >= 17:
         required_columns.setdefault("items", set()).add("deleted_at")
+    if migration_count >= 18:
+        required_columns["agent_frozen_sources"] = {"source_key", "asset_id"}
     for table, expected in required_columns.items():
         actual = {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
         missing_columns = sorted(expected - actual)

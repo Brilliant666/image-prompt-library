@@ -333,7 +333,125 @@ class AgentRepository:
                 "url": "/media/" + quote(asset["path"], safe="/") if available else None, "thumbnailUrl": None,
                 "width": asset["width"], "height": asset["height"], "mimeType": asset["mime_type"], "sha256": asset["sha256"]}
 
-    def resolve_ref(self, ref):
+    def _check_frozen_asset(self, asset, source_key):
+        """Never repair an established snapshot from a possibly changed source."""
+        try:
+            if not asset or encoded(json.loads(asset["source"])) != source_key or asset["kind"] != "reference":
+                raise ValueError("snapshot identity mismatch")
+            path, _ = resolve_generation_input_image_path(
+                self.library, asset["path"], allowed_roots={"generation-references"})
+            if hashlib.sha256(path.read_bytes()).hexdigest() != asset["sha256"]:
+                raise ValueError("snapshot bytes changed")
+        except (ValueError, OSError, KeyError):
+            raise AgentError("frozen_reference_invalid", "已冻结的参考图片缺失或损坏；不会用其他图片替换。", 400) from None
+        return asset["id"]
+
+    def _freeze_source(self, ref, legacy_asset_id=None):
+        source_key = encoded(ref)
+        # Serialize the first freeze across threads/processes. Atomic file replace
+        # precedes the transaction commit, so a visible mapping always has complete
+        # bytes. A crash before commit leaves one deterministic, unreferenced file;
+        # retry validates the original source and uses that same path, not a new UUID.
+        with connect(self.library) as conn:
+            lookup = "SELECT a.* FROM agent_frozen_sources f JOIN agent_assets a ON a.id=f.asset_id WHERE f.source_key=?"
+            mapped = conn.execute(lookup, (source_key,)).fetchone()
+            if mapped:
+                return self._check_frozen_asset(mapped, source_key)
+            # Most reads reuse immutable snapshots without taking a writer lock.
+            # On a miss, another request may win before this transaction starts.
+            conn.execute("BEGIN IMMEDIATE")
+            mapped = conn.execute(lookup, (source_key,)).fetchone()
+            if mapped:
+                return self._check_frozen_asset(mapped, source_key)
+            if legacy_asset_id:
+                legacy = conn.execute("SELECT * FROM agent_assets WHERE id=?", (legacy_asset_id,)).fetchone()
+                asset_id = self._check_frozen_asset(legacy, source_key)
+                conn.execute("INSERT INTO agent_frozen_sources(source_key,asset_id) VALUES(?,?)", (source_key, asset_id))
+                return asset_id
+            try:
+                if ref["kind"] == "library":
+                    _, path, _ = self.jobs.resolve_library_reference(ref["imageId"])
+                else:
+                    job = self.jobs.get_job(ref["jobId"])
+                    if job.status not in {"succeeded", "accepted"} or not job.result_path:
+                        raise KeyError(ref["jobId"])
+                    path, _ = resolve_generation_input_image_path(self.library, job.result_path)
+                data = path.read_bytes()
+            except (KeyError, ValueError, OSError):
+                raise AgentError("reference_missing", "参考图片已删除或尚未生成。", 400) from None
+            if len(data) > 30 * 1024 * 1024:
+                raise AgentError("invalid_reference", "参考图片不能超过 30 MiB。", 413)
+            try:
+                _validate_storeable_image_bytes(data)
+                with Image.open(BytesIO(data)) as im:
+                    fmt, width, height = im.format, im.width, im.height
+                suffix = {"PNG": "png", "JPEG": "jpg", "WEBP": "webp"}[fmt]
+            except (ValueError, KeyError, OSError):
+                raise AgentError("invalid_reference", "参考图片不是有效的 PNG、JPEG 或 WebP。", 400) from None
+            source_digest = hashlib.sha256(source_key.encode("utf-8")).hexdigest()
+            asset_id = "agentimg_frozen_" + source_digest
+            relative = f"generation-references/agent/frozen/{source_digest}.{suffix}"
+            frozen_path = resolve_generation_write_path(self.library, relative, allowed_root="generation-references")
+            frozen_path.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write_bytes(frozen_path, data)
+            conn.execute("INSERT INTO agent_assets VALUES(?,?,?,?,?,?,?,?,?)", (asset_id, source_key, relative,
+                         Image.MIME[fmt], width, height, hashlib.sha256(data).hexdigest(), milliseconds(), "reference"))
+            conn.execute("INSERT INTO agent_frozen_sources(source_key,asset_id) VALUES(?,?)", (source_key, asset_id))
+            return asset_id
+
+    def _legacy_frozen_assets(self, history):
+        """Adopt only proven snapshots from this parent's already-frozen ancestry.
+
+        Native previews have the same source job ID, so searching agent_assets by
+        source alone is unsafe. One parent-history read supplies all candidates;
+        no startup rewrite or scan of every conversation/request is necessary.
+        """
+        if not history:
+            return {}
+        candidates = {}
+        with connect(self.library) as conn:
+            row = conn.execute("SELECT history FROM agent_requests WHERE id=?", (history[-1]["requestId"],)).fetchone()
+            # Persisted input IDs are also proven references, including Library
+            # images whose originals have since been deleted. Uploads and masks
+            # retain their separate ownership and never become source mappings.
+            input_ids = list({aid for item in history for aid in item["inputImageIds"]})
+            for asset in conn.execute("SELECT a.id,a.source FROM agent_assets a JOIN json_each(?) i ON i.value=a.id WHERE a.kind='reference' ORDER BY a.created_at,a.id",
+                                      (encoded(input_ids),)):
+                source = json.loads(asset["source"])
+                if source.get("kind") in {"job", "library"}:
+                    candidates.setdefault(encoded(source), asset["id"])
+        if not row:
+            return candidates
+        candidates.update(self._output_snapshot_candidates(history, [json.loads(row[0])]))
+        return candidates
+
+    @staticmethod
+    def _output_snapshot_candidates(history, snapshots):
+        ancestors = {item["id"]: item for item in history}
+        candidates = {}
+        for item in (item for snapshot in snapshots for item in snapshot):
+            ancestor = ancestors.get(item.get("id"))
+            if not ancestor:
+                continue
+            for index, asset_id in enumerate(item.get("frozenOutputImages") or []):
+                jobs = ancestor["outputTaskIds"]
+                old_jobs = item.get("outputTaskIds", [])
+                if asset_id and index < len(jobs) and index < len(old_jobs) and jobs[index] == old_jobs[index]:
+                    candidates.setdefault(encoded({"kind": "job", "jobId": jobs[index]}), asset_id)
+        return candidates
+
+    def _legacy_ancestor_outputs(self, cid, history):
+        # Only used after a missing live source and a cheap matching-asset check.
+        # An old parent may have lost its snapshot after Gallery cleanup, while
+        # an earlier request on this exact branch still owns the original bytes.
+        # Fetch the ancestry in ONE query, never all conversations/per-source scans.
+        request_ids = encoded([item["requestId"] for item in history])
+        with connect(self.library) as conn:
+            rows = conn.execute("SELECT history FROM agent_requests WHERE conversation_id=? AND id IN (SELECT value FROM json_each(?)) ORDER BY created_at DESC,id DESC",
+                                (cid, request_ids)).fetchall()
+        return self._output_snapshot_candidates(history, [json.loads(row[0]) for row in rows])
+
+    def resolve_ref(self, ref, *, legacy_asset_id=None):
         ref = ref.model_dump(exclude_none=True) if hasattr(ref, "model_dump") else ref
         key = {"library": "imageId", "job": "jobId", "upload": "uploadId"}.get(ref.get("kind"))
         if not key or set(ref) != {"kind", key} or not ref.get(key):
@@ -344,22 +462,17 @@ class AgentRepository:
                 raise AgentError("invalid_reference", "上传图片标识无效。", 400)
             resolve_generation_input_image_path(self.library, asset["path"])
             return asset["id"]
-        try:
-            if ref["kind"] == "library":
-                _, path, _ = self.jobs.resolve_library_reference(ref[key])
-            else:
-                job = self.jobs.get_job(ref[key])
-                if job.status not in {"succeeded", "accepted"} or not job.result_path:
-                    raise KeyError(ref[key])
-                path, _ = resolve_generation_input_image_path(self.library, job.result_path)
-        except (KeyError, ValueError):
-            raise AgentError("reference_missing", "参考图片已删除或尚未生成。", 400) from None
-        return self.store_asset(path.read_bytes(), ref)["id"]
+        return self._freeze_source(ref, legacy_asset_id)
 
     def data_url(self, asset_id):
         asset = self.asset(asset_id)
         path, mime = resolve_generation_input_image_path(self.library, asset["path"])
-        return f"data:{mime};base64," + base64.b64encode(path.read_bytes()).decode("ascii")
+        data = path.read_bytes()
+        # Persisted request histories bypass resolve_ref. Verify their original
+        # bytes as well, before any paid request can observe a changed image.
+        if hashlib.sha256(data).hexdigest() != asset["sha256"]:
+            raise AgentError("frozen_reference_invalid", "已冻结的参考图片缺失或损坏；不会用其他图片替换。", 400)
+        return f"data:{mime};base64," + base64.b64encode(data).decode("ascii")
 
     def resolve_config(self, body):
         document = self.config()
@@ -461,7 +574,32 @@ class AgentRepository:
             if original:
                 original_request = self.request(original["requestId"])
                 reuse_inputs = original_request["body"].get("refs", []) == serialized["refs"]
-        inputs = list(original["inputImageIds"]) if reuse_inputs else [self.resolve_ref(ref) for ref in body.refs]
+        history = self.path(rounds, body.parentRoundId)
+        legacy_outputs = self._legacy_frozen_assets(history)
+        ancestral_outputs = None
+
+        def resolve_frozen(ref):
+            nonlocal ancestral_outputs
+            ref = ref.model_dump(exclude_none=True) if hasattr(ref, "model_dump") else ref
+            source_key = encoded(ref)
+            try:
+                return self.resolve_ref(ref, legacy_asset_id=legacy_outputs.get(source_key))
+            except AgentError as exc:
+                if exc.code != "reference_missing" or ref.get("kind") != "job" or not history:
+                    raise
+                if ancestral_outputs is None:
+                    with connect(self.library) as conn:
+                        possible = conn.execute("SELECT 1 FROM agent_assets WHERE source=? AND kind='reference' LIMIT 1", (source_key,)).fetchone()
+                    if not possible:
+                        raise
+                    ancestral_outputs = self._legacy_ancestor_outputs(cid, history)
+                candidate = ancestral_outputs.get(source_key)
+                if not candidate:
+                    raise
+                return self.resolve_ref(ref, legacy_asset_id=candidate)
+
+        inputs = list(original["inputImageIds"]) if reuse_inputs else [
+            resolve_frozen(ref) for ref in body.refs]
         for aid in inputs:
             asset = self.asset(aid)
             resolve_generation_input_image_path(self.library, asset["path"])
@@ -480,13 +618,15 @@ class AgentRepository:
             with Image.open(self.library / mask["path"]) as mask_image:
                 if "A" not in mask_image.getbands() and "transparency" not in mask_image.info:
                     raise AgentError("invalid_reference", "遮罩必须包含透明通道。", 400)
-        history = self.path(rounds, body.parentRoundId)
         for historical in history:
             historical["frozenOutputImages"] = []
             for jid in historical["outputTaskIds"]:
                 try:
-                    historical["frozenOutputImages"].append(self.resolve_ref({"kind": "job", "jobId": jid}))
-                except AgentError:
+                    ref = {"kind": "job", "jobId": jid}
+                    historical["frozenOutputImages"].append(resolve_frozen(ref))
+                except AgentError as exc:
+                    if exc.code != "reference_missing":
+                        raise
                     historical["frozenOutputImages"].append(None)
         for match in ROUND_MENTION.finditer(body.prompt):
             index, slot = int(match[1]) - 1, int(match[2]) - 1

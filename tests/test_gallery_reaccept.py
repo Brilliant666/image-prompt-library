@@ -93,6 +93,8 @@ def test_migration_repairs_legacy_deleted_receipt_once(tmp_path):
     # Recreate the pre-receipt-trigger schema and its physical deletion behavior.
     # Current application writes must not be run against an obsolete schema.
     with db.connect(library) as conn:
+        conn.execute("DROP TABLE agent_frozen_sources")
+        conn.execute("DROP INDEX idx_agent_assets_source_kind")
         conn.execute("DROP INDEX idx_items_deleted_at")
         conn.execute("ALTER TABLE items DROP COLUMN deleted_at")
         conn.execute("DROP TABLE gallery_title_jobs")

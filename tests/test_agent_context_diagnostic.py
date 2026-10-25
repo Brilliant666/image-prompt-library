@@ -1,5 +1,6 @@
 """Check offline diagnostic measurements, not provider latency/cache efficacy."""
 import json
+import hashlib
 import os
 from pathlib import Path
 import socket
@@ -109,13 +110,45 @@ def test_output_snapshot_counts_actual_frozen_original_copies():
     assert result["provider_cache"] == "not measured"
     for row in result["rows"]:
         n = row["rounds"]
-        copies = n * (n - 1) // 2
+        copies = n - 1
         assert row["completed_output_jobs"] == row["result_original_files"] == n
         assert row["agent_asset_rows"] == row["frozen_original_files"] == copies
         assert row["distinct_frozen_image_hashes"] == n - 1
         assert row["frozen_original_file_bytes"] == copies * row["synthetic_png_bytes_per_result"]
+        assert row["distinct_physical_image_hashes"] == copies
+        assert row["duplicate_physical_image_files"] == 0
+        assert row["unreferenced_agent_files"] == row["missing_agent_asset_files"] == 0
+        assert row["cumulative_new_frozen_original_files"] == copies
+        assert row["new_frozen_original_files_this_round"] == (1 if n > 1 else 0)
+        assert row["request_replay_new_files"] == 0
+        assert row["image_occurrences"] == copies
+        assert row["attached_image_bytes"] == copies * row["synthetic_png_bytes_per_result"]
+        assert row["request_json_bytes"] > row["image_base64_bytes"]
         assert row["result_original_file_bytes"] == n * row["synthetic_png_bytes_per_result"]
-        for operation in ("create_round_once", "snapshot"):
+        for operation in ("create_round_once", "snapshot", "request_replay"):
             cost = row[operation]
             assert cost["connections"] > 0
             assert cost["statements"] >= cost["selects"] > 0
+
+
+def test_inventory_counts_nested_files_duplicate_bytes_and_unreferenced_files(tmp_path):
+    with diagnostic.isolated_repository(tmp_path / "isolated") as repo:
+        original = result_diagnostic.synthetic_png(42)
+        asset = repo.store_asset(original, None)
+        path = repo.library / repo.asset(asset["id"])["path"]
+        duplicate = path.parent / "nested" / "deep" / "unreferenced.png"
+        duplicate.parent.mkdir(parents=True)
+        duplicate.write_bytes(original)
+        inventory, paths = diagnostic.asset_inventory(repo)
+        assert inventory["agent_asset_rows"] == 1
+        assert inventory["frozen_original_files"] == len(paths) == 2
+        assert inventory["distinct_frozen_image_hashes"] == 1
+        assert inventory["distinct_physical_image_hashes"] == 1
+        assert inventory["duplicate_physical_image_files"] == 1
+        assert inventory["unreferenced_agent_files"] == 1
+        assert inventory["frozen_original_file_bytes"] == 2 * len(original)
+        assert repo.asset(asset["id"])["sha256"] == hashlib.sha256(original).hexdigest()
+        path.unlink()
+        inventory, paths = diagnostic.asset_inventory(repo)
+        assert inventory["frozen_original_files"] == 1
+        assert inventory["missing_agent_asset_files"] == 1
