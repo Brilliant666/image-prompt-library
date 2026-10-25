@@ -358,7 +358,7 @@ def test_saved_request_detects_changed_snapshot_before_any_upstream_post(repo, m
         execution.call_responses(repo, "saved", 1, execution.refs_for_request(repo, request))
     assert failure.value.code == "frozen_reference_invalid"
     assert posts == []
-    assert repo.request("saved")["upstream_outcome"] == "not_sent"
+    assert repo.request("saved")["upstream_outcome"] == "known"
     assert repo.jobs.get_job(repo.request("root")["round"]["outputTaskIds"][0]).status == "succeeded"
 
 

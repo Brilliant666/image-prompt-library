@@ -454,7 +454,7 @@ def call_responses(repo, request_id, step, refs, *, body_override=None, native_c
         mask = context_image_url(repo, request["round"]["maskImageId"]) if request["round"].get("maskImageId") else None
         input_items = build_input(repo, request, refs) if body_override is None else None
     except AgentError as exc:
-        if exc.code == "reference_missing":
+        if exc.code in {"reference_missing", "frozen_reference_invalid"}:
             # This preflight runs before HTTP, so failure is safely known.
             repo.update(request_id, outcome="known")
         raise
