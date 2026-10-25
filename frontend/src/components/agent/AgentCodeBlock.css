@@ -1,0 +1,46 @@
+.agent-markdown .agent-code-block {
+  max-width: 100%;
+  margin: 12px 0;
+  overflow: hidden;
+  border: 1px solid var(--ag-border, var(--border));
+  border-radius: 10px;
+  background: var(--ag-soft, var(--surface-soft));
+}
+
+.agent-code-block-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  padding: 4px 7px;
+  border-bottom: 1px solid var(--ag-border, var(--border));
+}
+
+.agent-code-block .agent-code-block-toolbar button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 7px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ag-muted, var(--muted));
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.agent-code-block-toolbar button:hover {
+  color: var(--ag-text, var(--ink));
+  background: var(--ag-surface, var(--surface));
+}
+
+.agent-code-block-toolbar button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.agent-markdown .agent-code-block pre {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}

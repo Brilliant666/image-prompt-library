@@ -214,7 +214,7 @@ test('image options disables mutations during submission and preserves compressi
   assert.ok(h.fields().every(field => field.disabled)); assert.equal(h.models()[0].disabled, true);
 });
 
-const agentConfig = { apiConfigMode: 'hybrid', textProfileId: 'a', imageProfileId: 'b', textModel: 'typed-text', imageModel: 'typed-image', reasoningEffort: 'high', stream: true, partialImages: 2, maxToolRounds: 4, maxImageJobs: 3, webSearch: false, mathFormattingPrompt: true };
+const agentConfig = { apiConfigMode: 'hybrid', textProfileId: 'a', imageProfileId: 'b', textModel: 'typed-text', imageModel: 'typed-image', reasoningEffort: 'high', stream: true, partialImages: 2, maxToolRounds: 4, maxImageJobs: 3, webSearch: false, mathFormattingPrompt: true, professionalPromptWorkflows: true };
 const settings = (t, config = agentConfig, status = {}) => {
   const saves = [], marker = () => null;
   const value = { revision: 5, config, profiles: [profile('a'), profile('b')], capabilities: { modes: ['off', 'native', 'hybrid'], maxToolRounds: 50, maxImageJobs: 20, webSearch: true }, ready: true, issues: [], imageReady: true, imageIssues: [], ...status };
@@ -277,4 +277,90 @@ test('missing text readiness is not described as a ready text-only configuration
   assert.ok(statusText.includes('文字配置待完善'));
   assert.ok(statusText.includes('先完善文字配置'));
   assert.ok(!statusText.includes('仍可进行纯文字对话'));
+});
+
+test('professional workflow switch uses the actual client to persist only the chosen setting without paid calls', async t => {
+  const clientCode = ts.transpileModule(await readFile(new URL('../frontend/src/api/agentClient.ts', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+  const calls = [], marker = () => null;
+  let stored = { revision: 5, config: { ...agentConfig }, profiles: [profile('a'), profile('b')], capabilities: { modes: ['off', 'native', 'hybrid'], maxToolRounds: 50, maxImageJobs: 20, webSearch: true }, ready: true, issues: [], imageReady: true, imageIssues: [] };
+  const module = { exports: {} };
+  const fetchLocal = async (url, init) => {
+    assert.equal(url, '/api/agent/config', 'settings may never dispatch text, image, search, or discovery calls');
+    calls.push(init.method || 'GET');
+    if (init.method === 'PUT') {
+      const payload = JSON.parse(init.body);
+      assert.equal(payload.expectedRevision, stored.revision);
+      stored = { ...stored, revision: stored.revision + 1, config: payload.config };
+    }
+    return { ok: true, json: async () => structuredClone(stored) };
+  };
+  new Function('module', 'exports', 'fetch', clientCode)(module, module.exports, fetchLocal);
+  const open = () => harness(t, settingsCode, { './AgentModelPicker': marker, '../../api/agentClient': module.exports }, { uiLanguage: 'zh_hans', active: true });
+  let h = open(); await h.flush();
+  const switchFor = current => current.all().find(node => node.type === 'label' && text(node).includes('启用图片提示词专业工作流')).props.children.find(node => node.type === 'input').props;
+  assert.equal(switchFor(h).checked, true);
+  assert.match(h.text(), /关闭后仍可正常聊天、分析图片/);
+  switchFor(h).onChange({ target: { checked: false } }); await h.flush();
+  assert.equal(stored.config.professionalPromptWorkflows, true, 'unsaved choices must not apply');
+  assert.deepEqual(calls, ['GET']);
+  await h.find('form')[0].onSubmit({ preventDefault() {} }); await h.flush();
+  assert.deepEqual(stored.config, { ...agentConfig, professionalPromptWorkflows: false });
+  assert.deepEqual(h.events.map(event => event.type), ['ipl:agent-config-changed']);
+  assert.match(h.text(), /没有发送模型请求/);
+  h.unmount();
+  h = open(); await h.flush();
+  assert.equal(switchFor(h).checked, false, 'reopening reads the persisted preference');
+  switchFor(h).onChange({ target: { checked: true } }); await h.flush();
+  await h.find('form')[0].onSubmit({ preventDefault() {} }); await h.flush();
+  assert.deepEqual(stored.config, agentConfig);
+  assert.deepEqual(calls, ['GET', 'PUT', 'GET', 'PUT']);
+});
+
+test('unsaved workflow choice follows existing discard and inactive settings rules', async t => {
+  const h = settings(t); await h.flush();
+  const control = () => h.all().find(node => node.type === 'label' && text(node).includes('启用图片提示词专业工作流')).props.children.find(node => node.type === 'input').props;
+  control().onChange({ target: { checked: false } }); await h.flush();
+  h.fields()[0].onChange('unsaved-text-model'); await h.flush();
+  h.update({ active: false }); await h.flush(); h.update({ active: true }); await h.flush();
+  assert.equal(control().checked, false);
+  assert.equal(h.fields()[0].value, 'unsaved-text-model');
+  h.find('button', props => text({ props }) === '放弃修改')[0].onClick(); await h.flush();
+  assert.equal(control().checked, true);
+  assert.equal(h.fields()[0].value, agentConfig.textModel);
+  assert.deepEqual(h.saves, []);
+});
+
+test('a successful delayed settings save survives close and notifies the application without updating either unmounted or reopened draft UI', async t => {
+  const pending = deferred(), signals = [], marker = () => null;
+  const value = { revision: 5, config: agentConfig, profiles: [profile('a'), profile('b')], capabilities: { modes: ['off', 'native', 'hybrid'], maxToolRounds: 50, maxImageJobs: 20 }, ready: true, issues: [], imageReady: true, imageIssues: [] };
+  const api = { AgentApiError: Error, getAgentConfig: async () => value, saveAgentConfig(revision, config, signal) { signals.push(signal); return pending.promise; } };
+  const open = () => harness(t, settingsCode, { './AgentModelPicker': marker, '../../api/agentClient': api }, { uiLanguage: 'zh_hans', active: true });
+  const first = open(); await first.flush();
+  first.find(marker)[0].onChange('saved-after-close'); await first.flush();
+  const saving = first.find('form')[0].onSubmit({ preventDefault() {} }); await first.flush(); first.unmount();
+  const reopened = open(); await reopened.flush();
+  reopened.find(marker)[0].onChange('new-unsaved-draft'); await reopened.flush();
+  pending.resolve({ ...value, revision: 6, config: { ...agentConfig, textModel: 'saved-after-close' } });
+  await saving; await first.flush(); await reopened.flush();
+  assert.equal(signals.length, 1, 'a save must never be automatically replayed');
+  assert.equal(signals[0]?.aborted || false, false, 'unmount must not discard the saved configuration receipt');
+  assert.deepEqual(first.events.map(event => event.type), ['ipl:agent-config-changed']);
+  assert.equal(first.lateUpdates, 0);
+  assert.equal(reopened.find(marker)[0].value, 'new-unsaved-draft');
+  assert.deepEqual(reopened.events, []);
+});
+
+test('failed settings saves after close do not announce success or replay and reads still abort on unmount', async t => {
+  const saveReply = deferred(), readReply = deferred(), reads = [], saves = [];
+  const value = { revision: 5, config: agentConfig, profiles: [], capabilities: { modes: ['off', 'native', 'hybrid'] }, ready: true, issues: [] };
+  const api = { AgentApiError: Error, getAgentConfig(signal) { reads.push(signal); return reads.length === 1 ? Promise.resolve(value) : readReply.promise; }, saveAgentConfig(...args) { saves.push(args); return saveReply.promise; } };
+  const open = () => harness(t, settingsCode, { './AgentModelPicker': () => null, '../../api/agentClient': api }, { uiLanguage: 'zh_hans', active: true });
+  const first = open(); await first.flush();
+  const saving = first.find('form')[0].onSubmit({ preventDefault() {} }); first.unmount();
+  saveReply.reject(Error('unconfirmed response')); await saving; await first.flush();
+  assert.equal(saves.length, 1); assert.deepEqual(first.events, []); assert.equal(first.lateUpdates, 0);
+  const loading = open(); loading.unmount();
+  assert.equal(reads[1].aborted, true);
+  readReply.resolve(value); await loading.flush();
+  assert.deepEqual(loading.events, []); assert.equal(loading.lateUpdates, 0);
 });

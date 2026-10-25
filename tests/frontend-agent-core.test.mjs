@@ -22,10 +22,19 @@ function instantiate(js, deps, globals = {}) {
   return module.exports;
 }
 const markdownJs = await compile('../frontend/src/components/agent/AgentMarkdown.tsx');
+const codeBlockJs = await compile('../frontend/src/components/agent/AgentCodeBlock.tsx');
+const clipboardJs = await compile('../frontend/src/utils/clipboard.ts');
+const { AgentCodeBlock } = instantiate(codeBlockJs, {
+  react: React, 'react/jsx-runtime': jsxRuntime,
+  'lucide-react': { Copy: () => null, Check: () => null },
+  '../../utils/clipboard': { copyTextToClipboard: async () => { throw new Error('Static rendering must not copy'); } },
+  './AgentCodeBlock.css': {},
+});
 const { AgentMarkdown } = instantiate(markdownJs, {
   'react/jsx-runtime': jsxRuntime, 'react-markdown': { __esModule: true, default: ReactMarkdown },
   'remark-gfm': { __esModule: true, default: remarkGfm }, 'remark-math': { __esModule: true, default: remarkMath },
   'rehype-katex': { __esModule: true, default: rehypeKatex }, 'katex/dist/katex.min.css': {},
+  './AgentCodeBlock': { AgentCodeBlock },
 });
 const html = text => renderToStaticMarkup(React.createElement(AgentMarkdown, { text }));
 test('actual Agent markdown renders inline/display math and preserves code and ordinary Markdown', () => {
@@ -47,6 +56,42 @@ test('math macros cannot leak between messages, and excessive expansion is bound
   html('$\\gdef\\persisted{SECRET}\\persisted$');
   assert.doesNotMatch(html('$\\persisted$'), /SECRET/);
   assert.match(html('$\\def\\loop{\\loop}\\loop$'), /katex-error/);
+});
+
+test('actual markdown offers a separate copy control for each fenced prompt while keeping prose and inline code separate', () => {
+  const output = html('原始分析。\n\n```text\n  中文提示词\n\n第二段  \n```\n\n优化说明。\n\n```text\nEnglish prompt.\n```\n\n`inline`');
+  assert.equal((output.match(/aria-label="复制文本"/g) || []).length, 2);
+  assert.match(output, /<pre><code class="language-text">  中文提示词\n\n第二段  \n<\/code><\/pre>/);
+  assert.match(output, /<p>原始分析。<\/p>/);
+  assert.match(output, /<p>优化说明。<\/p>/);
+  assert.match(output, /<code>inline<\/code>/);
+});
+
+test('production code-block callback copies only exact displayed text and retains whitespace; late clipboard receipts do not update an unmounted block', async () => {
+  const slots = [], cleanups = [], writes = [], timers = new Map();
+  let cursor = 0, tree, timerId = 0, late = 0, unmounted = false;
+  const pending = deferred();
+  const hooks = {
+    useRef(value) { const index = cursor++; return slots[index] ||= { current: value }; },
+    useState(value) { const index = cursor++; if (!(index in slots)) slots[index] = value; return [slots[index], next => { if (unmounted) late++; slots[index] = next; }]; },
+    useEffect(effect) { const index = cursor++; if (!(index in slots)) { slots[index] = true; cleanups.push(effect()); } },
+  };
+  const jsx = (type, props) => ({ type, props });
+  const clipboard = instantiate(clipboardJs, {}, { navigator: { clipboard: { writeText: text => { writes.push(text); return writes.length === 1 ? Promise.resolve() : pending.promise; } } } });
+  const { AgentCodeBlock: Component } = instantiate(codeBlockJs, {
+    react: hooks, 'react/jsx-runtime': { jsx, jsxs: jsx }, 'lucide-react': { Copy: 'copy', Check: 'check' },
+    '../../utils/clipboard': clipboard, './AgentCodeBlock.css': {},
+  }, { setTimeout: callback => { timers.set(++timerId, callback); return timerId; }, clearTimeout: id => timers.delete(id) });
+  const text = '  第一段\n\nSecond paragraph  \n\t<literal> & text\n';
+  const render = () => { cursor = 0; tree = Component({ children: jsx('code', { children: text }) }); nodes(tree).find(node => node.type === 'pre').props.ref.current = { textContent: text }; };
+  render(); nodes(tree).find(node => node.type === 'button').props.onClick(); await Promise.resolve(); await Promise.resolve(); render();
+  assert.deepEqual(writes, [text]);
+  assert.ok(JSON.stringify(tree).includes('已复制'));
+  assert.equal(timers.size, 1);
+  nodes(tree).find(node => node.type === 'button').props.onClick();
+  unmounted = true; cleanups.forEach(cleanup => cleanup?.()); pending.resolve(true);
+  await Promise.resolve(); await Promise.resolve();
+  assert.deepEqual(writes, [text, text]); assert.equal(timers.size, 0); assert.equal(late, 0);
 });
 
 const listJs = await compile('../frontend/src/components/agent/useAgentConversations.ts');
@@ -101,7 +146,7 @@ function harness(t, options = {}) {
     request(id) { const reply = deferred(); requestReads.push({ id, ...reply }); return reply.promise; },
   };
   class AgentApiError extends Error { constructor(status, message) { super(message); this.status = status; } }
-  const client = { AgentApiError, agentApi, getAgentConfig: async () => { configReads++; return config; }, watchAgentRequest(id, next, error, useSse) { const watcher = { id, next, error, useSse, stopped: false }; watchers.push(watcher); return () => { watcher.stopped = true; }; } };
+  const client = { AgentApiError, agentApi, getAgentConfig: async () => { configReads++; return options.getAgentConfig ? options.getAgentConfig() : config; }, watchAgentRequest(id, next, error, useSse) { const watcher = { id, next, error, useSse, stopped: false }; watchers.push(watcher); return () => { watcher.stopped = true; }; } };
   const submission = instantiate(submissionJs, {}, globalMocks);
   const inputPreferences = instantiate(inputPreferencesJs, {}, globalMocks);
   const list = instantiate(listJs, { react: hooks, '../../api/agentClient': client }, globalMocks);
@@ -145,10 +190,10 @@ function harness(t, options = {}) {
   const close = async () => { find('button', p => p['aria-label'] === '关闭 Agent 面板')[0].onClick(); await flush(); };
   const unmount = () => { if (unmounted) return; unmounted = true; slots.forEach(slot => slot?.cleanup?.()); };
   render(); t.after(unmount);
-  return { calls, find, open, close, root, profileChanges, panelFocusCalls, settingsOpens, flush, unmount, submissions, creations, requestReads, watchers, snapshot, storage, AgentApiError, inputPreferences, jobReads, conversationReads, conversationUpdates, imageDecodes, scrollObservers,
+  return { calls, find, open, close, root, profileChanges, panelFocusCalls, settingsOpens, flush, unmount, submissions, creations, requestReads, watchers, snapshot, storage, AgentApiError, inputPreferences, jobReads, conversationReads, conversationUpdates, imageDecodes, scrollObservers, window: globalMocks.window,
     updateProps(next) { props = { ...props, ...next }; render(); }, queueJobRead() { const reply = deferred(); jobReplies.push(reply); return reply; },
     resultCard() { const card = nodes(tree).find(node => typeof node.type === 'function' && node.type.name === 'ResultCard'); assert.ok(card, 'actual result card should be rendered'); const savedCursor = cursor; cursor = slots.length; const content = card.type(card.props); cursor = savedCursor; return nodes(content); },
-    setConfig(value) { config = { ...config, ...value }; }, show() { active = true; render(); }, get late() { return late; }, get pendingTimers() { return timers.size; }, get configReads() { return configReads; }, hide() { active = false; render(); } };
+    setConfig(value) { config = { ...config, ...value }; }, dispatch(name) { globalMocks.window.dispatchEvent({ type: name }); }, show() { active = true; render(); }, get late() { return late; }, get pendingTimers() { return timers.size; }, get configReads() { return configReads; }, hide() { active = false; render(); } };
 }
 const row = id => ({ id, title: `Title ${id}`, updatedAt: 10, roundCount: 2 });
 const result = (ids, nextCursor = null) => ({ conversations: ids.map(row), nextCursor });
@@ -262,6 +307,82 @@ test('reactivating the actual workspace revokes an invalid image permission with
 
 const params = { size: '1536x1024', quality: 'max', background: 'transparent', output_format: 'webp', output_compression: 0 };
 const savedDraft = h => JSON.parse(h.storage.get('ipl.agent.drafts.v1')).current;
+test('professional workflow config events preserve the current workspace draft, references and image configuration without creating or submitting a conversation', async t => {
+  const selection = { profileId: 'image', model: 'manual-image-model' };
+  const h = harness(t, { draft: { text: '  Exact prompt\n\nKeep this original.  ', params, imageConfig: selection } });
+  const config = { apiConfigMode: 'hybrid', textProfileId: 'text', textModel: 'text-model', imageProfileId: 'image', imageModel: 'gpt-image-default', maxToolRounds: 5, maxImageJobs: 2, webSearch: false, professionalPromptWorkflows: true };
+  await h.flush();
+  h.setConfig({ config, imageReady: true, imageIssues: [], profiles: [imageProfile('text'), imageProfile('image')] });
+  h.dispatch('ipl:agent-config-changed'); await h.flush();
+  const before = structuredClone(savedDraft(h));
+  const reads = h.configReads;
+  for (const enabled of [false, true]) {
+    h.setConfig({ config: { ...config, professionalPromptWorkflows: enabled } });
+    h.dispatch('ipl:agent-config-changed'); await h.flush();
+    assert.deepEqual(savedDraft(h), before);
+    assert.equal(h.find('textarea')[0].value, before.text);
+    assert.equal(h.find('img')[0].src, before.refs[0].url);
+    assert.deepEqual(savedDraft(h).params, params);
+    assert.deepEqual(savedDraft(h).imageConfig, selection);
+    assert.equal(h.submissions.length, 0); assert.equal(h.creations.length, 0); assert.equal(h.requestReads.length, 0);
+  }
+  assert.equal(h.configReads, reads + 2);
+});
+
+test('actual settings save receipt after close refreshes workspace revision while preserving draft and attachments until the user sends', async t => {
+  const calls = [], receipt = deferred(), marker = () => null;
+  const config = { apiConfigMode: 'hybrid', textProfileId: 'text', textModel: 'text-model', imageProfileId: 'image', imageModel: 'gpt-image-default', maxToolRounds: 5, maxImageJobs: 2, webSearch: false, stream: true, professionalPromptWorkflows: true };
+  let stored = { revision: 5, config, imageReady: true, imageIssues: [], ready: true, issues: [], profiles: ['text', 'image'].map(id => ({ id, display_name: id, model: `gpt-image-${id}`, configured: true })), capabilities: { modes: ['off', 'native', 'hybrid'], maxToolRounds: 50, maxImageJobs: 20, maxInputImages: 4 } };
+  const api = instantiate(await compile('../frontend/src/api/agentClient.ts'), {}, { fetch: async (url, init) => {
+    assert.equal(url, '/api/agent/config', 'only saved configuration may be fetched; no provider calls');
+    calls.push(init.method || 'GET');
+    if (init.method === 'PUT') {
+      const body = JSON.parse(init.body);
+      assert.equal(body.expectedRevision, 5);
+      stored = { ...stored, revision: 6, config: body.config };
+      const aborted = new Promise((resolve, reject) => init.signal?.addEventListener('abort', () => reject(new Error('aborted response'))));
+      await Promise.race([receipt.promise, aborted]);
+    }
+    return { ok: true, json: async () => structuredClone(stored) };
+  } });
+  const selection = { profileId: 'image', model: 'manual-image-model' };
+  const h = harness(t, { getAgentConfig: api.getAgentConfig, draft: { text: '  Exact prompt\n\nKeep original.  ', params, imageConfig: selection } });
+  await h.flush(); const before = structuredClone(savedDraft(h));
+  // Mount the production settings component with its own hook lifetime and the
+  // same application event target as the already mounted workspace.
+  const slots = [], effects = [];
+  let cursor = 0, dirty = false, tree, closed = false, late = 0;
+  const hooks = {
+    useState(initial) { const index = cursor++; if (!(index in slots)) slots[index] = initial; return [slots[index], value => { if (closed) late++; slots[index] = typeof value === 'function' ? value(slots[index]) : value; dirty = true; }]; },
+    useRef(initial) { const index = cursor++; return slots[index] ||= { current: initial }; },
+    useEffect(effect, deps) { const index = cursor++, old = slots[index]; if (!old || deps.some((value, n) => value !== old.deps[n])) { slots[index] = { deps }; effects.push(() => { old?.cleanup?.(); slots[index].cleanup = effect(); }); } },
+  };
+  const jsx = (type, props) => ({ type, props });
+  const Settings = instantiate(await compile('../frontend/src/components/settings/AgentSettings.tsx'), { react: hooks, 'react/jsx-runtime': { jsx, jsxs: jsx }, '../../api/agentClient': api, './AgentModelPicker': marker }, { window: h.window }).default;
+  const render = () => { cursor = 0; dirty = false; tree = Settings({ uiLanguage: 'zh_hans', active: true }); effects.splice(0).forEach(effect => effect()); };
+  const flush = async () => { for (let n = 0; n < 30; n++) { if (dirty && !closed) render(); await Promise.resolve(); } };
+  const close = () => { if (closed) return; closed = true; slots.forEach(slot => slot?.cleanup?.()); };
+  t.after(close); render(); await flush();
+  const label = nodes(tree).find(node => node.type === 'label' && node.props.children?.[0]?.props?.children === '启用图片提示词专业工作流');
+  nodes(label).find(node => node.type === 'input').props.onChange({ target: { checked: false } }); await flush();
+  const saving = nodes(tree).find(node => node.type === 'form').props.onSubmit({ preventDefault() {} });
+  await flush(); close();
+  assert.equal(stored.revision, 6, 'the backend has committed while its receipt is delayed');
+  receipt.resolve(); await saving; await flush(); await h.flush();
+  assert.equal(late, 0);
+  assert.deepEqual(calls, ['GET', 'GET', 'PUT', 'GET'], 'one successful receipt causes one local config refresh, never a replayed PUT');
+  assert.deepEqual(savedDraft(h), before);
+  assert.equal(h.find('textarea')[0].value, before.text); assert.equal(h.find('img')[0].src, before.refs[0].url);
+  assert.deepEqual(savedDraft(h).params, params); assert.deepEqual(savedDraft(h).imageConfig, selection);
+  assert.equal(h.submissions.length, 0); assert.equal(h.creations.length, 0);
+  h.find('button', props => props['aria-label'] === '发送 Agent 消息')[0].onClick(); await h.flush();
+  assert.equal(h.submissions.length, 1); assert.equal(h.creations.length, 0);
+  assert.equal(h.submissions[0].payload.configRevision, 6);
+  assert.equal(h.submissions[0].payload.prompt, before.text);
+  assert.deepEqual(h.submissions[0].payload.refs, before.refs.map(ref => ref.reference));
+  assert.deepEqual(h.submissions[0].payload.params, params);
+  assert.deepEqual(h.submissions[0].payload.imageConfig, selection);
+});
 function keyEvent(extra = {}) {
   const event = { key: 'Enter', ctrlKey: false, metaKey: false, shiftKey: false, nativeEvent: { isComposing: false, keyCode: 13 }, prevented: false, preventDefault() { this.prevented = true; }, ...extra };
   return event;
