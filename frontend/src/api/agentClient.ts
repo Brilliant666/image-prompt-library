@@ -14,6 +14,7 @@ export interface AgentConfig {
   maxImageJobs: number;
   webSearch: boolean;
   mathFormattingPrompt: boolean;
+  professionalPromptWorkflows: boolean;
 }
 export interface AgentConfigResponse {
   revision: number;

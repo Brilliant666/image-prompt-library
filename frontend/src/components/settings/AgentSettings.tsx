@@ -38,13 +38,14 @@ export default function AgentSettings({ uiLanguage, active, workspaceProfileId }
     if (inFlight.current || !form || !saved) return;
     inFlight.current = true;
     const request = ++epoch.current;
-    controller.current = new AbortController();
     setBusy(true); setMessage('');
     try {
-      const value = await saveAgentConfig(saved.revision, form, controller.current.signal);
+      // A started save can commit after the settings dialog closes. Keep its
+      // receipt alive so mounted workspaces can reload the saved revision.
+      const value = await saveAgentConfig(saved.revision, form);
+      window.dispatchEvent(new Event('ipl:agent-config-changed'));
       if (request !== epoch.current) return;
       setSaved(value); setForm({ ...value.config });
-      window.dispatchEvent(new Event('ipl:agent-config-changed'));
       setMessage(en ? 'Settings saved locally. No model request was sent.' : '已保存本地配置，没有发送模型请求。');
     } catch (error) {
       if (request === epoch.current) setMessage(error instanceof AgentApiError && error.status === 409
@@ -106,6 +107,7 @@ export default function AgentSettings({ uiLanguage, active, workspaceProfileId }
         <label className="settings-field"><span>{en ? 'Maximum image jobs per request' : '每次请求最多生图任务'}</span><input type="number" min={1} max={saved.capabilities.maxImageJobs} required value={form.maxImageJobs} onChange={event => change('maxImageJobs', Number(event.target.value))} /></label>
       </div>
       <div className="settings-preference"><label className="settings-switch-row"><span>{en ? 'Streaming response' : '流式响应'}</span><input type="checkbox" role="switch" checked={form.stream} onChange={event => change('stream', event.target.checked)} /></label></div>
+      <div className="settings-preference"><label className="settings-switch-row"><span>{en ? 'Enable professional image-prompt workflows' : '启用图片提示词专业工作流'}</span><input type="checkbox" role="switch" checked={form.professionalPromptWorkflows} onChange={event => change('professionalPromptWorkflows', event.target.checked)} /></label><p className="settings-help">{en ? 'Use the built-in image-prompt-reverse and GPT Image skills when needed for prompt creation, reverse prompting and optimization. Turning this off preserves normal chat, visual input and explicitly authorized image generation.' : '按需使用内置图片反推与 GPT Image 技能，辅助提示词创作、反推和优化。关闭后仍可正常聊天、分析图片，并在明确授权后生图。'}</p></div>
       <label className="settings-field settings-field-row"><span>{en ? 'Partial image previews' : '生成中预览图数量'}</span><select value={form.partialImages} onChange={event => change('partialImages', Number(event.target.value) as AgentConfig['partialImages'])}>{[0, 1, 2, 3].map(value => <option key={value} value={value}>{value}</option>)}</select></label>
       <div className="settings-preference"><label className="settings-switch-row"><span>{en ? 'Web search' : '网络搜索'}</span><input type="checkbox" role="switch" disabled={!saved.capabilities.webSearch} checked={form.webSearch} onChange={event => change('webSearch', event.target.checked)} /></label><p className="settings-help">{en ? 'Allow web search when you explicitly authorize a conversation request. Provider charges may apply.' : '在你明确授权的对话请求中允许网络搜索，可能消耗接口额度。'}</p></div>
       <div className="settings-preference"><label className="settings-switch-row"><span>{en ? 'Math formatting instructions' : '公式格式提示'}</span><input type="checkbox" role="switch" checked={form.mathFormattingPrompt} onChange={event => change('mathFormattingPrompt', event.target.checked)} /></label><p className="settings-help">{en ? 'Ask the text model to format mathematical expressions consistently.' : '提示文本模型使用统一的数学公式格式。'}</p></div>

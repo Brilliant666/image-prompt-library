@@ -20,6 +20,7 @@ class AgentConfig(AgentModel):
     maxImageJobs: int = Field(default=4, ge=1, le=20)
     webSearch: bool = False
     mathFormattingPrompt: bool = True
+    professionalPromptWorkflows: bool = True
 
 
 class AgentConfigSave(AgentModel):
