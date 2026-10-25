@@ -10,7 +10,7 @@ import json
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from threading import RLock
 from uuid import uuid4
 
@@ -22,7 +22,7 @@ from backend.services.agent_repository import (
     ACTIVE_STATES, AgentError, AgentRepository, REF_TAG, ROUND_MENTION, encoded, milliseconds, safe_model_label,
 )
 from backend.services.agent_skills import read_agent_skill, selected_skill_sections, skill_catalog_instructions, skill_tool
-from backend.services.agent_context import select_context_images
+from backend.services.agent_context import select_context_images, validate_context_references
 
 _executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="agent-turn")
 _lock = RLock()
@@ -30,6 +30,78 @@ _futures = {}
 _clients = {}
 _closing = set()
 MAX_RESPONSE_BYTES = 80 * 1024 * 1024
+
+
+@contextmanager
+def response_stream(client, *args, is_complete, **kwargs):
+    """A validated terminal receipt outranks subsequent transport teardown."""
+    try:
+        with client.stream(*args, **kwargs) as response:
+            yield response
+    except httpx.TransportError:
+        if not is_complete():
+            raise
+
+
+def validate_response_payload(payload, *, require_completed=False):
+    if not isinstance(payload, dict) or not isinstance(payload.get("output", []), list):
+        raise AgentError("upstream_error", "Responses 返回格式无效。")
+    status = payload.get("status")
+    if payload.get("error") or status not in ({"completed"} if require_completed else {None, "completed"}):
+        raise AgentError("upstream_error", "Responses 未成功完成；已保留已有结果，不会自动重试。")
+    return payload
+
+
+def read_native_response(response, check_running):
+    """Read one bounded response without retrying or accepting partial images."""
+    size = 0
+    if "text/event-stream" not in response.headers.get("content-type", ""):
+        chunks = []
+        for chunk in response.iter_bytes():
+            check_running()
+            size += len(chunk)
+            if size > MAX_RESPONSE_BYTES:
+                raise AgentError("upstream_error", "原生图片数据过大。")
+            chunks.append(chunk)
+        return validate_response_payload(json.loads(b"".join(chunks)), require_completed=True)
+
+    data_lines, output = [], {}
+
+    def consume():
+        if not data_lines:
+            return None
+        data = "\n".join(data_lines)
+        data_lines.clear()
+        if data == "[DONE]":
+            return None
+        event = json.loads(data)
+        check_running()
+        kind = event.get("type")
+        if kind in {"error", "response.failed", "response.incomplete"}:
+            raise AgentError("upstream_error", "原生图片响应未成功完成；不会自动重试。")
+        if kind == "response.output_item.done":
+            item = event.get("item")
+            if isinstance(item, dict) and item.get("id"):
+                output[item["id"]] = item
+        if kind == "response.completed":
+            payload = validate_response_payload(event.get("response"), require_completed=True)
+            return payload if "output" in payload else {**payload, "output": list(output.values())}
+        return None
+
+    for line in response.iter_lines():
+        size += len(line.encode("utf-8"))
+        if size > MAX_RESPONSE_BYTES:
+            raise AgentError("upstream_error", "原生图片数据过大。")
+        if not line:
+            payload = consume()
+            if payload is not None:
+                return payload
+        elif line.startswith("data:"):
+            data_lines.append(line[5:].lstrip(" "))
+    payload = consume()
+    if payload is None:
+        raise AgentError("upstream_outcome_unknown", "原生图片流已断开，未收到最终结果；不会自动重试。")
+    return payload
 
 
 def key_for(library, request_id):
@@ -154,14 +226,27 @@ def refs_for_request(repo, request):
     return refs
 
 
+def context_image_url(repo, asset_id):
+    from backend.services.generation_jobs import GenerationJobConflict
+    try:
+        return repo.data_url(asset_id)
+    except (GenerationJobConflict, KeyError, OSError):
+        raise AgentError("reference_missing", "引用的图片不存在或已清理。", 400) from None
+
+
 def build_input(repo, request, refs):
+    try:
+        validate_context_references(request, refs)
+    except ValueError as exc:
+        raise AgentError("reference_missing", str(exc), 400) from None
     items = []
     selected = select_context_images(request, refs)
 
     def image_content(aid, ref_id):
         if selected is not None and aid not in selected:
             return [{"type": "input_text", "text": f'<available_ref id="{ref_id}" image_not_attached="true" />'}]
-        return [{"type": "input_image", "image_url": repo.data_url(aid)},
+        url = context_image_url(repo, aid)
+        return [{"type": "input_image", "image_url": url},
                 {"type": "input_text", "text": f'<ref id="{ref_id}" />'}]
     target = request["round"].get("maskTargetImageId")
     if request["round"].get("maskImageId") and target:
@@ -169,7 +254,7 @@ def build_input(repo, request, refs):
         index = request["round"]["inputImageIds"].index(target) + 1
         items.append({"role": "user", "content": [
             {"type": "input_text", "text": f'The mask applies to <ref id="round-{request["round"]["index"]}-reference-{index}" />.'},
-            {"type": "input_image", "image_url": repo.data_url(target)},
+            {"type": "input_image", "image_url": context_image_url(repo, target)},
         ]})
     for r in [*request["history"], request["round"]]:
         prompt = re.sub(r"\u2065[^\u2064]*", "", r["prompt"]).replace("\u2063", "").replace("\u2064", "")
@@ -307,14 +392,12 @@ def native_image(repo, request_id, step, item, refs, secrets=()):
     result = item.get("result")
     if isinstance(result, dict):
         result = next((result[k] for k in ("b64_json", "base64", "image", "data") if isinstance(result.get(k), str)), None)
-    if item.get("status") in {"failed", "incomplete"}:
+    if item.get("status") in {"failed", "incomplete", "cancelled"}:
         return repo.jobs.mark_failed(job.id, "原生图像工具未能生成图片。")
+    if item.get("status") != "completed":
+        return repo.jobs.mark_running(job.id) if job.status == "queued" else job
     if not isinstance(result, str) or not result:
-        if item.get("status") == "completed":
-            return repo.jobs.mark_failed(job.id, "原生图像工具已完成但未返回图片。")
-        if job.status == "queued":
-            return repo.jobs.mark_running(job.id)
-        return job
+        return repo.jobs.mark_failed(job.id, "原生图像工具已完成但未返回图片。")
     try:
         data = base64.b64decode(result.split(",", 1)[-1] if result.startswith("data:") else result, validate=True)
     except ValueError:
@@ -336,9 +419,16 @@ def call_responses(repo, request_id, step, refs, *, body_override=None, native_c
     profile = repo.verified_profile(request)
     config = request["frozen"]
     secret = profile["api_key"]
-    mask = repo.data_url(request["round"]["maskImageId"]) if request["round"].get("maskImageId") else None
+    try:
+        mask = context_image_url(repo, request["round"]["maskImageId"]) if request["round"].get("maskImageId") else None
+        input_items = build_input(repo, request, refs) if body_override is None else None
+    except AgentError as exc:
+        if exc.code == "reference_missing":
+            # This preflight runs before HTTP, so failure is safely known.
+            repo.update(request_id, outcome="known")
+        raise
     body = body_override or {
-        "model": config["textModel"], "input": build_input(repo, request, refs), "stream": config["stream"],
+        "model": config["textModel"], "input": input_items, "stream": config["stream"],
         "instructions": "You are an image-generation assistant. Generate only when requested. Use one image per tool call, never collage. "
                         "For dependent images, generate the prerequisite first then call continue_generation. Independent images use generate_image_batch. "
                         "Use only provided <ref id=\"...\" /> tags in image prompts. Never print internal XML tags in visible text. "
@@ -370,9 +460,11 @@ def call_responses(repo, request_id, step, refs, *, body_override=None, native_c
     elif any(t["type"] == "web_search" for t in body.get("tools", [])):
         body["max_tool_calls"] = 1
     base_output = request["round"]["responseOutput"]
-    current_output, completed, streamed = [], None, ""
+    current_output, completed = [], None
     stream_item_ids = {}
+    pending_native_images = {}
     provisional_message_ids = set()
+    seen_delta_events, completed_message_ids = set(), set()
     byte_count = 0
 
     def publish(items):
@@ -388,7 +480,7 @@ def call_responses(repo, request_id, step, refs, *, body_override=None, native_c
                     item["id"] = f"agent-output-{request_id}-{step}-{i}"
                 current_output = merge_output(current_output, [item])
         combined = merge_output(base_output, current_output)
-        repo.update(request_id, output=combined, text=output_text(combined) or (output_text(base_output) + redact(streamed, [secret])))
+        repo.update(request_id, output=combined, text=output_text(combined))
 
     def handle_payload(payload):
         nonlocal current_output
@@ -397,9 +489,14 @@ def call_responses(repo, request_id, step, refs, *, body_override=None, native_c
         record_model(payload)
         repo.record_response_details(request_id, step, payload, secrets=[secret])
         output = payload.get("output", [])
-        if not isinstance(output, list):
-            raise AgentError("upstream_error", "Responses output 返回格式无效。")
-        for item in output:
+        contains_image = isinstance(output, list) and any(isinstance(item, dict) and item.get("type") == "image_generation_call" for item in output)
+        try:
+            validate_response_payload(payload, require_completed=bool(pending_native_images) or contains_image)
+        except AgentError:
+            repo.update(request_id, outcome="known")
+            raise
+        check_active(repo, request_id)
+        for item in output if "output" in payload else pending_native_images.values():
             if isinstance(item, dict) and item.get("type") == "image_generation_call":
                 native_image(repo, request_id, step, item, refs, [secret])
         if output:
@@ -410,10 +507,7 @@ def call_responses(repo, request_id, step, refs, *, body_override=None, native_c
                     item["id"] = candidate.get("id") if candidate and candidate.get("id") else f"agent-output-{request_id}-{step}-{i}"
             current_output = clean
             combined = merge_output(base_output, current_output)
-            repo.update(request_id, output=combined, text=output_text(combined) or (output_text(base_output) + redact(streamed, [secret])))
-        if payload.get("error") or payload.get("status") in {"failed", "incomplete", "cancelled"}:
-            repo.update(request_id, outcome="known")
-            raise AgentError("upstream_error", "Responses 未成功完成；已保留已有结果，不会自动重试。")
+            repo.update(request_id, output=combined, text=output_text(combined))
         return payload
 
     def record_model(payload):
@@ -431,7 +525,7 @@ def call_responses(repo, request_id, step, refs, *, body_override=None, native_c
         repo.record_response_details(request_id, step)
         for skill in skills:
             repo.record_skill_read(request_id, skill)
-        with client.stream("POST", profile["base_url"].rstrip("/") + "/responses",
+        with response_stream(client, "POST", profile["base_url"].rstrip("/") + "/responses", is_complete=lambda: completed is not None,
                            headers={"Authorization": "Bearer " + secret, "Content-Type": "application/json"}, json=body) as response:
             if not response.is_success:
                 # Never interpolate arbitrary upstream bodies/headers into errors.
@@ -447,13 +541,14 @@ def call_responses(repo, request_id, step, refs, *, body_override=None, native_c
                     chunks.append(chunk)
                 completed = handle_payload(json.loads(b"".join(chunks)))
             else:
-                data_lines = []
+                data_lines, sse_event_id = [], None
                 def consume():
-                    nonlocal completed, streamed, byte_count
+                    nonlocal completed, sse_event_id
                     if not data_lines:
                         return
                     data = "\n".join(data_lines)
                     data_lines.clear()
+                    event_id, sse_event_id = sse_event_id, None
                     if data == "[DONE]":
                         return
                     event = json.loads(data)
@@ -467,22 +562,39 @@ def call_responses(repo, request_id, step, refs, *, body_override=None, native_c
                         raise AgentError("upstream_error", "Responses 流未成功完成；不会自动重试。")
                     if kind == "response.output_text.delta":
                         delta = str(event.get("delta", ""))
-                        streamed += delta
                         slot = event.get("output_index", 0)
+                        index = event.get("content_index", 0)
+                        if not isinstance(slot, int) or isinstance(slot, bool) or not 0 <= slot < 4096:
+                            raise AgentError("upstream_error", "Responses 输出索引无效。")
+                        if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < 256:
+                            raise AgentError("upstream_error", "Responses 文本片段索引无效。")
+                        sequence = event.get("sequence_number")
+                        label = event_id or event.get("event_id")
+                        event_key = ("sequence", sequence, slot, index) if isinstance(sequence, int) and not isinstance(sequence, bool) and sequence >= 0 else (
+                            ("event", label, slot, index) if isinstance(label, str) and label else None)
+                        # Content is not an identity: two legitimate events may
+                        # contain the same words. Slots survive late message IDs.
+                        duplicate = event_key is not None and event_key in seen_delta_events
+                        if event_key is not None:
+                            seen_delta_events.add(event_key)
                         previous_id = stream_item_ids.get(slot)
                         identity = redact(event.get("item_id"), [secret]) or stream_item_ids.get(slot)
                         if identity and previous_id in provisional_message_ids and identity != previous_id:
                             current_output[:] = [{**o, "id": identity} if o.get("id") == previous_id else o for o in current_output]
                             provisional_message_ids.discard(previous_id)
-                        message = next((o for o in reversed(current_output) if o.get("type") == "message" and (not identity or o.get("id") == identity)), None)
+                            stream_item_ids[slot] = identity
+                        if duplicate:
+                            # A retransmission can still establish a late ID.
+                            publish([])
+                            return
+                        if identity in completed_message_ids:
+                            return
+                        message = next((o for o in reversed(current_output) if o.get("type") == "message" and o.get("id") == identity), None)
                         message = dict(message) if message else {"id": identity or f"agent-output-{request_id}-{step}-text-{slot}", "type": "message", "role": "assistant"}
                         if not identity:
                             provisional_message_ids.add(message["id"])
                         stream_item_ids[slot] = message["id"]
                         content = [dict(p) for p in message.get("content", [])]
-                        index = event.get("content_index", 0)
-                        if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < 256:
-                            raise AgentError("upstream_error", "Responses 文本片段索引无效。")
                         while len(content) <= index:
                             content.append({"type": "output_text", "text": ""})
                         content[index] = {**content[index], "type": "output_text", "text": content[index].get("text", "") + delta}
@@ -492,10 +604,22 @@ def call_responses(repo, request_id, step, refs, *, body_override=None, native_c
                         item = event.get("item")
                         if isinstance(item, dict):
                             if item.get("type") == "image_generation_call":
-                                native_image(repo, request_id, step, item, refs, [secret])
+                                if item.get("id") and (kind == "response.output_item.done" or item["id"] not in pending_native_images):
+                                    pending_native_images[item["id"]] = item
+                                # Item completion is not response completion.
+                                # Keep a running job until the final receipt is
+                                # validated, even if bytes arrived in this item.
+                                native_image(repo, request_id, step, {**item, "status": "in_progress", "result": None}, refs, [secret])
                             item = safe_output([item], [secret])[0]
                             slot = event.get("output_index", 0)
                             provisional = stream_item_ids.get(slot)
+                            if item.get("type") == "message" and kind == "response.output_item.added":
+                                prior_ids = {item.get("id")}
+                                if provisional in provisional_message_ids:
+                                    prior_ids.add(provisional)
+                                prior = next((o for o in current_output if o.get("id") in prior_ids and o.get("type") == "message"), {})
+                                if prior.get("content"):
+                                    item = {**item, "content": prior["content"]}
                             if item.get("type") == "message" and item.get("id") and provisional in provisional_message_ids and provisional != item["id"]:
                                 # Some gateways omit IDs from deltas but supply
                                 # them on done. Replace the provisional node in
@@ -507,6 +631,8 @@ def call_responses(repo, request_id, step, refs, *, body_override=None, native_c
                                 provisional_message_ids.discard(provisional)
                             if item.get("id"):
                                 stream_item_ids[slot] = item["id"]
+                                if kind == "response.output_item.done" and item.get("type") == "message":
+                                    completed_message_ids.add(item["id"])
                             publish([item])
                     if kind == "response.image_generation_call.partial_image":
                         # Partial bytes are not persisted in the conversation JSON.
@@ -526,29 +652,35 @@ def call_responses(repo, request_id, step, refs, *, body_override=None, native_c
                         publish([{"type": "web_search_call", "id": event.get("item_id"),
                                   "status": "completed" if kind.endswith("completed") else "failed" if kind.endswith("failed") else "in_progress"}])
                     if kind == "response.completed":
-                        completed = handle_payload(event.get("response"))
+                        payload = event.get("response")
+                        # The event supplies finality for gateways omitting status.
+                        if isinstance(payload, dict) and "status" not in payload:
+                            payload = {**payload, "status": "completed"}
+                        completed = handle_payload(payload)
                 for line in response.iter_lines():
                     byte_count += len(line.encode("utf-8"))
                     if byte_count > MAX_RESPONSE_BYTES:
                         raise AgentError("upstream_error", "Responses 数据过大。")
                     if line == "":
                         consume()
+                        if completed is not None:
+                            break
                     elif line.startswith("data:"):
                         data_lines.append(line[5:].lstrip(" "))
-                consume()
+                    elif line.startswith("id:"):
+                        sse_event_id = line[3:].strip()
+                if completed is None:
+                    consume()
         if completed is None:
             raise AgentError("upstream_outcome_unknown", "Responses 流已断开，未收到最终结果；不会自动重试。")
         final = current_output
-        # Some gateways omit output in the completion event; keep streamed items.
-        if not final:
-            final = current_output
-        if not output_text(final) and streamed:
-            final.append({"id": f"agent-output-{request_id}-{step}-text", "type": "message", "role": "assistant", "content": [{"type": "output_text", "text": redact(streamed, [secret])}]})
+        # Completion may omit output; current_output retains the streamed items.
         # Some gateways send public summaries in output-item events only.
         repo.record_response_details(request_id, step, {**completed, "output": final}, secrets=[secret])
         return final, redact(completed.get("id"), [secret])
     finally:
-        client.close()
+        with suppress(httpx.TransportError):
+            client.close()
         with _lock:
             if _clients.get(key) is client:
                 _clients.pop(key, None)
@@ -825,34 +957,35 @@ class NativeAgentImageProvider:
                     "tools": [image_tool], "tool_choice": {"type": "image_generation"}, "max_tool_calls": 1}
             check_active(repo, request_id)
             repo.record_response_details(request_id, link.get("step", 1), native_job_id=job_id)
-            with httpx.Client(timeout=httpx.Timeout(profile["timeout"], connect=min(10, profile["timeout"])), follow_redirects=False,
-                              transport=httpx.HTTPTransport(retries=0)) as client:
-                with _lock:
-                    _clients[key] = client
-                # This provider never retries a POST, including after a timeout.
-                with client.stream("POST", profile["base_url"].rstrip("/") + "/responses", headers={"Authorization": "Bearer " + profile["api_key"]}, json=body) as response:
-                    if not response.is_success:
-                        raise AgentError("upstream_error", f"原生图片接口返回 HTTP {response.status_code}。")
-                    chunks, size = [], 0
-                    for chunk in response.iter_bytes():
-                        check_active(repo, request_id)
-                        size += len(chunk)
-                        if size > MAX_RESPONSE_BYTES:
-                            raise AgentError("upstream_error", "原生图片数据过大。")
-                        chunks.append(chunk)
-                    payload = json.loads(b"".join(chunks))
+            client = httpx.Client(timeout=httpx.Timeout(profile["timeout"], connect=min(10, profile["timeout"])), follow_redirects=False,
+                                  transport=httpx.HTTPTransport(retries=0))
+            with _lock:
+                _clients[key] = client
+            payload = None
+            # No image is staged until a successful final response is validated.
+            with response_stream(client, "POST", profile["base_url"].rstrip("/") + "/responses", is_complete=lambda: payload is not None,
+                                 headers={"Authorization": "Bearer " + profile["api_key"]}, json=body) as response:
+                if not response.is_success:
+                    raise AgentError("upstream_error", f"原生图片接口返回 HTTP {response.status_code}。")
+                payload = read_native_response(response, lambda: check_active(repo, request_id))
             repo.record_response_details(request_id, link.get("step", 1), payload, native_job_id=job_id, secrets=[profile["api_key"]])
-            images = [item for item in payload.get("output", []) if isinstance(item, dict) and item.get("type") == "image_generation_call" and item.get("result")]
-            if len(images) != 1:
+            images = [item for item in payload.get("output", []) if isinstance(item, dict) and item.get("type") == "image_generation_call"]
+            if len(images) != 1 or images[0].get("status") != "completed" or not images[0].get("result"):
                 raise AgentError("upstream_error", "原生单图任务未返回恰好一张图片。")
             value = images[0]["result"]
             if isinstance(value, dict):
                 value = next((value[k] for k in ("b64_json", "base64", "image", "data") if isinstance(value.get(k), str)), None)
-            data = base64.b64decode(value.split(",", 1)[-1] if value.startswith("data:") else value, validate=True)
             from PIL import Image
             from io import BytesIO
-            with Image.open(BytesIO(data)) as image:
-                extension = {"PNG": "png", "JPEG": "jpg", "WEBP": "webp"}.get(image.format, "png")
+            try:
+                if not isinstance(value, str) or not value:
+                    raise ValueError("missing image bytes")
+                data = base64.b64decode(value.split(",", 1)[-1] if value.startswith("data:") else value, validate=True)
+                with Image.open(BytesIO(data)) as image:
+                    image.verify()
+                    extension = {"PNG": "png", "JPEG": "jpg", "WEBP": "webp"}.get(image.format, "png")
+            except (ValueError, OSError):
+                raise AgentError("upstream_error", "原生图片结果无法解码。") from None
             check_active(repo, request_id)
             return repo.jobs.stage_result(job_id, data, "native." + extension,
                                          {"provider": "agent_native_batch", "requested": {k: v for k, v in image_tool.items() if k not in {"type", "action"}}, "response": {"response_id": redact(payload.get("id"), [profile["api_key"]])}})
@@ -863,6 +996,9 @@ class NativeAgentImageProvider:
                 fail_unstarted_agent_job(repo, job_id, exc.message if isinstance(exc, AgentError) else "原生图片请求未完成；不会自动重试。")
             raise
         finally:
+            if client:
+                with suppress(httpx.TransportError):
+                    client.close()
             with _lock:
                 if _clients.get(key) is client:
                     _clients.pop(key, None)

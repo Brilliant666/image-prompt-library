@@ -52,7 +52,7 @@ def provider(mode="hybrid", *, response_model=None, stream_text=False, created_m
                     output = [{"id": "fc_1", "call_id": "call_one", "type": "function_call", "name": "generate_image", "arguments": json.dumps({"id": "one", "prompt": "one orange square"})}]
                 else:
                     output = [{"id": f"msg_{calls}", "type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "完成"}]}]
-                response = {"id": f"resp_{calls}", "output": output}
+                response = {"id": f"resp_{calls}", "status": "completed", "output": output}
                 if response_model is not None:
                     response["model"] = response_model
                 if mode == "json_failed":

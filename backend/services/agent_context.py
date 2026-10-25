@@ -9,16 +9,9 @@ import re
 
 _ROUND_MENTION = re.compile(r"@(?:第)?(\d+)轮图(\d+)")
 _CURRENT_MENTION = re.compile(r"@图(\d+)")
-_REF_TAG = re.compile(r"<ref\b[^>]*\bid=[\"'](round-\d+-(?:image|reference)-\d+)[\"'][^>]*\s*/?>")
+_REF_TAG = re.compile(r"<ref\b[^>]*\bid=[\"']([^\"']+)[\"'][^>]*\s*/?>")
 _REF_ID = re.compile(r"round-([1-9]\d*)-(?:image|reference)-([1-9]\d*)")
 _UNRESOLVED_REFERENCE = re.compile(r"@|</?ref|round-\d|图\s*[一二三四五六七八九十\d]+|第\s*[一二三四五六七八九十\d]+\s*(?:张|幅|轮)", re.I)
-_AMBIGUOUS_HISTORY = re.compile(
-    r"之前|以前|此前|先前|上一|上次|上张|上图|刚才|刚刚|前面|前一|最初|原先|原来|上面|上述|"
-    r"那张|那些|那幅|这几张|这些图|这些照片|所有图|全部图|比较|对比|同样|相同|一样|继续|接着|延续|"
-    r"\b(?:previous|earlier|before|above|last|compare|comparison|contrast|versus|vs|difference|continue|again|same|those|both)\b|"
-    r"\b(?:first|second|third|fourth|other)\s+(?:image|photo|picture)s?\b|\b(?:image|photo|picture)\s*\d+\b",
-    re.I,
-)
 _PLAIN_TEXT = re.compile(
     r"(?:你好|您好|嗨|哈喽|早上好|下午好|晚上好|hello|hi|hey|"
     r"你(?:现在|当前)?(?:是|用的是什么|使用的是什么)(?:什么|哪个)?模型|"
@@ -31,14 +24,8 @@ _PLAIN_TEXT = re.compile(
 )
 
 
-def select_context_images(request, refs):
-    """Return required asset IDs, or ``None`` when narrowing is uncertain.
-
-    Current attachments or valid explicit mentions establish an image scope.
-    Additional historical/relational wording cancels that scope conservatively.
-    Without an explicit scope, only a small whole-message allowlist of plain
-    greetings and model/skill questions can omit historical images.
-    """
+def _reference_scope(request, refs):
+    """Resolve structured references without guessing natural-language intent."""
     if not isinstance(request, dict) or not isinstance(refs, dict):
         return None
     current = request.get("round")
@@ -72,7 +59,7 @@ def select_context_images(request, refs):
     def round_mention(match):
         # A fractional/range suffix is not an unambiguous image identifier.
         nonlocal invalid
-        if prompt[match.end():match.end() + 1] in {".", "/", "／"}:
+        if re.match(r"[./／]\d", prompt[match.end():]):
             invalid = True
         try:
             return resolve(f"round-{int(match[1])}-image-{int(match[2])}")
@@ -94,13 +81,40 @@ def select_context_images(request, refs):
         else:
             explicit = True
             selected.add(inputs[slot - 1])
-        if prompt[match.end():match.end() + 1] in {".", "/", "／"}:
+        if re.match(r"[./／]\d", prompt[match.end():]):
             invalid = True
         return " "
 
     prompt = _CURRENT_MENTION.sub(current_mention, prompt)
     prompt = _REF_TAG.sub(lambda match: resolve(match[1]), prompt)
-    if invalid or _UNRESOLVED_REFERENCE.search(prompt) or _AMBIGUOUS_HISTORY.search(prompt):
+    return current, selected, explicit, prompt, invalid
+
+
+def validate_context_references(request, refs):
+    """Reject explicit references that cannot bind to this request's branch.
+
+    Only the current instruction is checked: a historical turn can legitimately
+    describe a result that has since been removed. Asset bytes are validated by
+    the request builder before the upstream POST.
+    """
+    scope = _reference_scope(request, refs)
+    if scope is not None and scope[4]:
+        raise ValueError("引用的图片不存在、已清理或不属于当前分支。")
+
+
+def select_context_images(request, refs):
+    """Return required asset IDs, or ``None`` when narrowing is uncertain.
+
+    An attachment or a mention does not prove that other images are irrelevant.
+    Natural language may refer to any ancestor without recognizable keywords, so
+    it retains branch pixels. Only reference-only messages and a small complete
+    plain-text allowlist provide enough evidence to narrow the image context.
+    """
+    scope = _reference_scope(request, refs)
+    if scope is None:
+        return None
+    current, selected, explicit, prompt, invalid = scope
+    if invalid or _UNRESOLVED_REFERENCE.search(prompt):
         return None
 
     # Generated images in the current execution chain remain available to a
@@ -111,16 +125,16 @@ def select_context_images(request, refs):
             if not isinstance(aid, str) or not aid:
                 return None
             selected.add(aid)
-    current_output = re.compile(rf"round-{index}-image-[1-9]\d*")
+    current_output = re.compile(rf"round-{current['index']}-image-[1-9]\d*")
     for ref, aid in refs.items():
         if isinstance(ref, str) and current_output.fullmatch(ref):
             if not isinstance(aid, str) or not aid:
                 return None
             selected.add(aid)
 
-    if inputs or explicit:
-        return selected
     plain = re.sub(r"[\s，,。.!！?？；;：:]+", " ", prompt).strip()
+    if explicit:
+        return selected if not plain else None
     # Chinese spaces are optional; English phrase spacing remains meaningful.
     if _PLAIN_TEXT.fullmatch(plain) or _PLAIN_TEXT.fullmatch(plain.replace(" ", "")):
         return selected

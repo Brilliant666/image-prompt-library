@@ -127,8 +127,8 @@ def test_late_real_message_identity_cannot_bypass_secret_redaction(repo, monkeyp
     assert repo.request("request")["round"]["assistantContent"] == "[redacted]"
 
 
-@pytest.mark.parametrize(("prompt", "expected"), [("根据参考图修改背景", ["current"]), ("你好", []), ("比较之前的图片", ["old", "generated", "current"])])
-def test_actual_input_narrows_bytes_but_keeps_text_and_tool_pairs(prompt, expected):
+@pytest.mark.parametrize(("prompt", "expected"), [("根据参考图修改背景", ["old", "generated", "current"]), ("你好", []), ("比较之前的图片", ["old", "generated", "current"])])
+def test_actual_input_preserves_uncertain_images_text_and_tool_pairs(prompt, expected):
     class Images:
         def data_url(self, aid):
             return "data:image/png;base64," + aid
