@@ -3,7 +3,7 @@ import copy
 
 import pytest
 
-from backend.services.agent_context import select_context_images
+from backend.services.agent_context import select_context_images, validate_context_references
 
 
 def request(prompt, inputs=()):
@@ -16,21 +16,22 @@ REFS = {"round-1-image-1": "old-output", "round-1-reference-1": "old-input",
 
 
 @pytest.mark.parametrize("prompt", ["根据参考图生成一张照片", "修改 @图1 的背景", "Describe this attached image."])
-def test_current_attachments_limit_image_bytes_without_mutating_history(prompt):
+def test_current_attachments_do_not_prove_history_is_irrelevant(prompt):
     value = request(prompt, ["current"])
     before, refs = copy.deepcopy(value), copy.deepcopy(REFS)
-    assert select_context_images(value, refs) == {"current"}
+    assert select_context_images(value, refs) is None
     assert value == before and refs == REFS
 
 
-@pytest.mark.parametrize("prompt", ["编辑 @第1轮图1", "修改 @1轮图1", '编辑 <ref id="round-1-image-1" />',
-                                     "编辑 <ref id='round-1-reference-1' />"])
+@pytest.mark.parametrize("prompt", ["@第1轮图1", "@1轮图1", "@第1轮图1.", '<ref id="round-1-image-1" />',
+                                     "<ref id='round-1-reference-1' />"])
 def test_explicit_historical_reference_limits_to_its_frozen_asset(prompt):
     assert select_context_images(request(prompt), REFS) == {"old-input" if "reference" in prompt else "old-output"}
+    validate_context_references(request(prompt), REFS)
 
 
 def test_current_explicit_mask_and_generated_assets_are_all_kept():
-    value = request("将 @图1 与 @第1轮图1 融合", ["current", "second-current"])
+    value = request("@图1 @第1轮图1", ["current", "second-current"])
     value["round"].update(maskTargetImageId="current", maskImageId="mask")
     refs = {**REFS, "round-3-image-1": "new-output"}
     assert select_context_images(value, refs) == {"current", "second-current", "old-output", "mask", "new-output"}
@@ -74,7 +75,7 @@ def test_oversized_reference_numbers_do_not_break_request_construction(prompt):
 
 
 def test_rich_mention_label_is_not_treated_as_extra_history_instruction():
-    value = request("编辑 @第1轮图1\u2063\u2065之前的照片\u2064")
+    value = request("@第1轮图1\u2063\u2065之前的照片\u2064")
     assert select_context_images(value, REFS) == {"old-output"}
     value["round"]["prompt"] = "编辑 @第1轮图1\u2065unfinished"
     assert select_context_images(value, REFS) is None
