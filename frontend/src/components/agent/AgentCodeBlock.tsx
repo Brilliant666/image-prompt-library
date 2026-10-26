@@ -4,7 +4,7 @@ import { Check, Copy } from 'lucide-react';
 import { copyTextToClipboard } from '../../utils/clipboard';
 import './AgentCodeBlock.css';
 
-export function AgentCodeBlock({ children }: { children: ReactNode }) {
+export function AgentCodeBlock({ children, prompt = false, copyText }: { children: ReactNode; prompt?: boolean; copyText?: string }) {
   const content = useRef<HTMLPreElement>(null);
   const mounted = useRef(true);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -19,9 +19,9 @@ export function AgentCodeBlock({ children }: { children: ReactNode }) {
   }, []);
 
   async function copy() {
-    // Read only the displayed code, keeping whitespace and excluding the
-    // surrounding explanation, language label and copy control.
-    const text = content.current?.textContent;
+    // Prompt source preserves original whitespace, including an unfinished
+    // streamed fence. Code keeps its normal rendered-text copy behavior.
+    const text = copyText ?? content.current?.textContent;
     if (!text) return;
     let copied = false;
     try { copied = await copyTextToClipboard(text); } catch { /* Keep manual selection available. */ }
@@ -31,11 +31,13 @@ export function AgentCodeBlock({ children }: { children: ReactNode }) {
     timer.current = setTimeout(() => { timer.current = null; setStatus('idle'); }, 1800);
   }
 
-  return <div className="agent-code-block">
+  const label = prompt ? '复制提示词' : '复制文本';
+  return <div className={`agent-code-block${prompt ? ' agent-prompt-block' : ''}`}>
     <div className="agent-code-block-toolbar">
-      <button type="button" aria-label="复制文本" onClick={() => void copy()}>
+      {prompt && <strong className="agent-prompt-block-title">提示词 <span>· 纯文本</span></strong>}
+      <button type="button" aria-label={label} onClick={() => void copy()} disabled={prompt && copyText === ''}>
         {status === 'copied' ? <Check size={13} /> : <Copy size={13} />}
-        <span aria-live="polite">{status === 'copied' ? '已复制' : status === 'failed' ? '复制失败，请手动选择' : '复制文本'}</span>
+        <span aria-live="polite">{status === 'copied' ? '已复制' : status === 'failed' ? '复制失败，请手动选择' : label}</span>
       </button>
     </div>
     <pre ref={content}>{children}</pre>

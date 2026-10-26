@@ -169,6 +169,13 @@ def common_input_prefix(left, right):
     return count
 
 
+def unchanged_input_item_occurrences(left, right):
+    """Count exact preserved content, separately from cache-prefix order."""
+    old = Counter(hashlib.sha256(encoded(item).encode()).digest() for item in left)
+    new = Counter(hashlib.sha256(encoded(item).encode()).digest() for item in right)
+    return sum((old & new).values())
+
+
 def scope_probes(repo, request_id):
     """Measure real request construction for synthetic reference intents.
 
@@ -268,6 +275,7 @@ def scenario(root, checkpoints, repeats, with_images):
                 "same_instructions_as_first_call": following["instructions"] == body["instructions"],
                 "same_tools_as_first_call": following["tools"] == body["tools"],
                 "repeated_leading_input_items": common_input_prefix(body["input"], following["input"]),
+                "unchanged_input_item_occurrences": unchanged_input_item_occurrences(body["input"], following["input"]),
                 "skill_tool_output_bytes": len(encoded(skill).encode())})
         # Task changes can alter preloaded sections without changing configuration.
         with connect(repo.library) as conn:

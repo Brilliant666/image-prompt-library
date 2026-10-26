@@ -23,7 +23,9 @@ def test_real_context_and_snapshot_grow_without_claiming_provider_cache(small_ba
     for scenario in small_baseline["scenarios"]:
         first, third = scenario["rows"]
         assert [first["rounds"], third["rounds"]] == [1, 3]
-        assert [first["input_items"], third["input_items"]] == [1, 5]
+        # The first capture persists one bundled-guidance block. Later
+        # requests reuse it in addition to the unchanged five history items.
+        assert [first["input_items"], third["input_items"]] == [1, 6]
         for field in ("request_json_bytes", "snapshot_json_bytes", "stored_history_json_bytes_all_requests"):
             assert third[field] > first[field] > 0
         for row in (first, third):
@@ -34,8 +36,8 @@ def test_real_context_and_snapshot_grow_without_claiming_provider_cache(small_ba
                 assert cost["min_ms"] <= cost["median_ms"] <= cost["max_ms"]
             assert row["build_input_only"]["median_ms"] >= 0
         comparison, = scenario["prefix_comparisons"]
-        assert comparison["equal_leading_input_items"] == first["input_items"]
-        assert comparison["instructions_equal"] and comparison["tools_equal"]
+        assert comparison["equal_leading_input_items"] == 0
+        assert not comparison["instructions_equal"] and comparison["tools_equal"]
 
 
 def test_image_payload_counts_actual_repeated_bytes(small_baseline):
@@ -62,7 +64,10 @@ def test_tool_followups_preserve_history_and_measure_skill_repetition(small_base
         followups = scenario["tool_followups"]
         assert [row["simulated_image_jobs_used"] for row in followups] == [0, 1, 2]
         for row in followups:
-            assert row["repeated_leading_input_items"] == last["input_items"]
+            # Paired tool output replaces the overview slice in the leading
+            # guidance block. All original conversation items remain exact.
+            assert row["repeated_leading_input_items"] == 0
+            assert row["unchanged_input_item_occurrences"] == last["input_items"] - 1
             assert row["input_items"] == last["input_items"] + 2
             assert row["skill_tool_output_bytes"] > 0
             assert row["attached_image_bytes"] == last["attached_image_bytes"]

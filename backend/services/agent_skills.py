@@ -201,7 +201,7 @@ def _task_skill(prompt: str, has_images: bool) -> tuple[str, str] | None:
     ) and not matches(r"(?:再|然后|并).{0,12}(?:优化|改写|生成|润色)|\b(?:then|and)\b.{0,16}\b(?:refine|improve|rewrite|generate)\b"):
         return None
     # Explicit reverse-engineering needs an actual image, not just its mention.
-    if explicit_reverse or chained_reverse or ((reverse or (prompt_word and from_image)) and not explicit_craft and not derived_prompt):
+    if explicit_reverse or chained_reverse or (reverse and not explicit_craft and not derived_prompt):
         return ("image-prompt-reverse", "analysis") if has_images else None
 
     edit_image = matches(
@@ -216,6 +216,11 @@ def _task_skill(prompt: str, has_images: bool) -> tuple[str, str] | None:
     ))
     if edit_image:
         return "gpt-image", "editing"
+    # Asking for an edit prompt does not imply reconstructing the source image.
+    # Explicit reverse requests above still win; only the inferred image-to-
+    # prompt task yields to a concrete editing instruction.
+    if prompt_word and from_image and not explicit_craft and not derived_prompt:
+        return ("image-prompt-reverse", "analysis") if has_images else None
     if prompt_action or explicit_craft:
         section = "text" if matches(r"排版|文字海报|海报文字|字体|\btypography\b|\btext layout\b|\bexact text\b") else "composition"
         return "gpt-image", section
@@ -231,7 +236,45 @@ def _task_skill(prompt: str, has_images: bool) -> tuple[str, str] | None:
     return None
 
 
-def selected_skill_sections(prompt: str, has_images: bool = False, context_prompt: str | None = None) -> list[dict]:
+def _editing_task_skill(text, task, has_images, assistant_context):
+    """Use an explicit visual task for short edits, not as a blanket topic guess."""
+    from backend.services.agent_editing_task import task_boundary
+    if not isinstance(task, dict) or not task.get('target') or not has_images or task_boundary(text):
+        return None
+    if len(text) > 160 or re.search(
+        r'你好|您好|谢谢|什么模型|哪些技能|什么技能|为什么|为何|如何|怎么|有什么|是否|吗[？?]?$|'
+        r'^(?:请)?(?:只|仅)?(?:解释|描述|分析|比较|识别|提取|介绍)|\b(?:hello|hi|thanks|what|why|how|describe|explain|compare|analy[sz]e|ocr|transcribe)\b', text, re.I):
+        return None
+    confirm = re.fullmatch(
+        r'(?:请|就|那就)?(?:开始|继续|可以|好的?|是的|没错|确认|按这个来|重新试(?:一)?次|再试(?:一)?次|'
+        r'按照刚才的效果继续|按刚才的效果继续|继续优化|接着修改|接着改|再改一下)'
+        r'[吧了，。！!?\s]*|(?:please )?(?:continue|go ahead|yes|okay|ok|try again|keep going)[.!\s]*', text, re.I)
+    visual = re.search(r'袜|服装|衣服|衣领|裙|鞋|姿势|动作|背景|光线|灯光|色调|材质|构图|主体|人物|表情|发型|肤色|镜头|'
+                       r'\b(?:socks?|stockings?|clothes|outfit|pose|background|lighting|material|composition|subject|expression)\b', text, re.I)
+    directive = re.search(r'换|改|调整|保持|保留|继续|接着|\b(?:change|edit|modify|replace|keep|preserve|adjust)\b', text, re.I)
+    # Bare property answers are meaningful only when grounded in confirmed task
+    # requirements, or in an actual question about that editing task's details.
+    requirements = str(task.get('requirements', '')).splitlines()
+    if requirements and requirements[-1].strip().casefold() == text:
+        requirements.pop()  # Current text is not independent evidence of intent.
+    task_text = '\n'.join([*requirements, *task.get('constraints', [])])
+    facets = ('袜', '衣', '裙', '鞋', '姿势', '背景', '光线', '色调', '材质', '构图', '表情', '发型', '肤色')
+    shared_property = any(facet in text and facet in task_text for facet in facets)
+    asking_detail = isinstance(assistant_context, str) and re.search(
+        r'(?:什么|哪种|哪个|怎样|确认|需要|想要).{0,24}(?:款式|颜色|光线|背景|材质|姿势|要求)|'
+        r'\b(?:what|which).{0,32}\b(?:style|color|colour|lighting|background|material|pose)\b', assistant_context, re.I)
+    property_answer = len(text) <= 80 and not re.search(r'[？?]', text) and (
+        shared_property or asking_detail and (visual or re.search(r'白|黑|红|蓝|绿|紫|粉|灰|金|银|\b(?:white|black|red|blue|green|pink|purple|gray|grey)\b', text, re.I)))
+    prompt_revision = re.fullmatch(r'(?:请|帮我)?(?:优化|改写|润色|完善)(?:这个|当前|刚才的?)(?:提示词|prompt)[吧，。！!?\s]*', text, re.I)
+    if not (confirm or visual and directive or property_answer or prompt_revision or directive and re.search(r'白|黑|红|蓝|绿|紫|粉|灰', text)):
+        return None
+    if task.get('workflow') == 'image-prompt-reverse':
+        return 'image-prompt-reverse', 'analysis'
+    return 'gpt-image', 'editing'
+
+
+def selected_skill_sections(prompt: str, has_images: bool = False, context_prompt: str | None = None,
+                            *, editing_task=None, assistant_context=None) -> list[dict]:
     """Preload a small skill slice for a clear task without another model call.
 
     The optional context is consulted only for explicit short continuations.
@@ -271,6 +314,11 @@ def selected_skill_sections(prompt: str, has_images: bool = False, context_promp
     ):
         return []
     selected = _task_skill(text, has_images)
+    task_selected = _editing_task_skill(text, editing_task, has_images, assistant_context)
+    if selected is None:
+        selected = task_selected
+    elif selected == ('gpt-image', 'composition') and task_selected and re.search(r'这个|当前|刚才|\b(?:this|that|it)\b', text):
+        selected = task_selected
     model_rewrite = re.fullmatch(
         r"(?:请|帮我)?(?:改成|改为|写成).{0,12}(?:适合|用于)\s*gpt[- ]?image\s*[\d.]*\s*(?:的)?(?:写法|版本|格式)[，。！!?\s]*",
         text,
@@ -347,3 +395,28 @@ def read_agent_skill(skill: str, section: str = "overview") -> dict:
         "license": record["license"],
         "content": _BOUNDARY + "\n\n" + record["sections"][section],
     }
+
+
+def validated_skill_preloads(rounds):
+    """Only server-recorded exact pinned bodies count as reusable guidance.
+
+    User text, attribution-only legacy records and stale/edited receipts never
+    count. Callers must not invoke this when professional workflows are off.
+    """
+    seen, result = set(), []
+    for row in rounds:
+        records = row.get('skillPreloads') or []
+        if not isinstance(records, list):
+            continue
+        for value in records[:12]:
+            if not isinstance(value, dict):
+                continue
+            try:
+                expected = read_agent_skill(value.get('skill'), value.get('section'))
+            except ValueError:
+                continue
+            key = (expected['skill'], expected['section'], expected['revision'])
+            if value == expected and key not in seen:
+                result.append(expected)
+                seen.add(key)
+    return result

@@ -51,7 +51,7 @@ def test_ui_mention_label_is_not_a_skill_instruction(repo, monkeypatch):
     from backend.services import agent_execution
     new_request(repo, '你好\u2065图片反推收藏\u2064\u2063')
     prompts = []
-    monkeypatch.setattr(agent_execution, "selected_skill_sections", lambda prompt, *args: prompts.append(prompt) or [])
+    monkeypatch.setattr(agent_execution, "selected_skill_sections", lambda prompt, *args, **kwargs: prompts.append(prompt) or [])
     mock_transport(monkeypatch, response(), [])
     call_responses(repo, "task", 1, {})
     assert prompts == ['你好']

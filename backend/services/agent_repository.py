@@ -843,8 +843,9 @@ class AgentRepository:
             self._save_round(conn, round_data)
             self._touch(conn, request["conversation_id"])
 
-    def record_skill_read(self, request_id, result):
-        # Only bundled attribution is public; the skill body stays in tool history.
+    def record_skill_read(self, request_id, result, *, preloaded=False):
+        # Only bundled attribution is public; preloads keep an authenticated,
+        # finite application-guidance receipt separate from real tool history.
         fields = ("skill", "section", "title", "source", "revision", "license")
         value = {key: safe_model_label(result.get(key)) for key in fields}
         if not all(value.values()):
@@ -856,6 +857,13 @@ class AgentRepository:
             details = round_data.setdefault("responseDetails", {"version": 1, "steps": [], "skills": []})
             if value not in details["skills"]:
                 details["skills"].append(value)
+            if preloaded:
+                from backend.services.agent_skills import validated_skill_preloads
+                receipt = validated_skill_preloads([{'skillPreloads': [result]}])
+                if receipt:
+                    records = round_data.setdefault('skillPreloads', [])
+                    if receipt[0] not in records:
+                        records.append(receipt[0])
             details["usage"] = aggregate_response_usage(details["steps"])
             self._save_round(conn, round_data)
             self._touch(conn, request["conversation_id"])
@@ -894,6 +902,7 @@ class AgentRepository:
             own_request = historical_requests.get(r['requestId'])
             r['resultSummary'] = timing.result_summary(r, own_request, jobs, r['requestId'] in completed_text)
             r['execution'] = r.get('execution')
+            r.pop('skillPreloads', None)  # Public details expose attribution, not repeated guidance bodies.
             from backend.services.agent_diagnostics import classify_failure
             failures = [classify_failure((jobs[jid].get('metadata') or {}).get('error_diagnostics'))
                         for jid in r['outputTaskIds'] if jid in jobs and jobs[jid]['status'] == 'failed']

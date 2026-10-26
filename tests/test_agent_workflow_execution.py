@@ -211,7 +211,7 @@ def test_library_and_gallery_reference_pixels_and_original_prompt_survive_analys
         assert len(client.get('/api/generation-jobs').json()['jobs']) == 1
 
 
-def test_actual_tool_body_is_reused_across_steps_and_rounds_but_metadata_is_not(isolated, monkeypatch):
+def test_actual_tool_body_and_preload_receipt_are_reused_without_duplicate_guidance(isolated, monkeypatch):
     with application(isolated, monkeypatch) as (client, calls, replies):
         replies.extend([{'id': 'step-one', 'status': 'completed', 'output': [skill_call()]}, answer()])
         result, _ = submit(client, isolated, '优化提示词：陶瓷茶杯', rid='tools')
@@ -220,20 +220,33 @@ def test_actual_tool_body_is_reused_across_steps_and_rounds_but_metadata_is_not(
         assert text in calls[0][1]['instructions']
         assert text not in calls[1][1]['instructions']
         assert any(text == json.loads(item['output']).get('content') for item in calls[1][1]['input'] if item.get('type') == 'function_call_output')
-        assert read_agent_skill('gpt-image', 'overview')['content'] in calls[1][1]['instructions']
-        # Composition has an actual historical tool body; overview only has
-        # metadata from its earlier preload and must be sent again.
+        overview = read_agent_skill('gpt-image', 'overview')['content']
+        assert overview not in calls[1][1]['instructions']
+        # The composition remains a real paired tool result. The authenticated
+        # overview preload is application guidance, never a fabricated call.
+        guidance = [part.get('text', '') for item in calls[1][1]['input'] for part in item.get('content', [])]
+        assert sum(part.count(overview) for part in guidance) == 1
+        assert not any(text in part for part in guidance)
         second, _ = submit(client, isolated, '继续优化', rid='next')
         assert second['request']['state'] == 'completed' and text not in calls[-1][1]['instructions']
         tool_bodies = [json.loads(item['output']).get('content') for item in calls[-1][1]['input'] if item.get('type') == 'function_call_output']
         assert tool_bodies.count(text) == 1
-        assert read_agent_skill('gpt-image', 'overview')['content'] in calls[-1][1]['instructions']
+        assert overview not in calls[-1][1]['instructions']
+        guidance = [part.get('text', '') for item in calls[-1][1]['input'] for part in item.get('content', [])]
+        assert sum(part.count(overview) for part in guidance) == 1
         assert used_sections(second) == {('gpt-image', 'overview'), ('gpt-image', 'composition')}
 
 
 def test_preloaded_metadata_without_tool_body_is_reloaded_on_next_round(isolated, monkeypatch):
     with application(isolated, monkeypatch) as (client, calls, replies):
         first, _ = submit(client, isolated, '优化提示词：陶瓷杯', rid='first')
+        # Emulate the old schema-compatible record: attribution exists, but no
+        # authenticated body was ever persisted. It cannot prove model context.
+        with connect(isolated) as conn:
+            row = conn.execute('SELECT id,data FROM agent_rounds WHERE request_id=?', ('first',)).fetchone()
+            data = json.loads(row['data'])
+            assert data.pop('skillPreloads') and data['responseDetails']['skills']
+            conn.execute('UPDATE agent_rounds SET data=? WHERE id=?', (encoded(data), row['id']))
         second, _ = submit(client, isolated, '继续优化', rid='next')
         assert first['request']['state'] == second['request']['state'] == 'completed'
         assert len(calls) == 2

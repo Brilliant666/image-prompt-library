@@ -24,6 +24,7 @@ function instantiate(js, deps, globals = {}) {
 const markdownJs = await compile('../frontend/src/components/agent/AgentMarkdown.tsx');
 const codeBlockJs = await compile('../frontend/src/components/agent/AgentCodeBlock.tsx');
 const clipboardJs = await compile('../frontend/src/utils/clipboard.ts');
+const promptBlocks = instantiate(await compile('../frontend/src/utils/playground/agentPromptBlocks.ts'), {});
 const { AgentCodeBlock } = instantiate(codeBlockJs, {
   react: React, 'react/jsx-runtime': jsxRuntime,
   'lucide-react': { Copy: () => null, Check: () => null },
@@ -35,6 +36,7 @@ const { AgentMarkdown } = instantiate(markdownJs, {
   'remark-gfm': { __esModule: true, default: remarkGfm }, 'remark-math': { __esModule: true, default: remarkMath },
   'rehype-katex': { __esModule: true, default: rehypeKatex }, 'katex/dist/katex.min.css': {},
   './AgentCodeBlock': { AgentCodeBlock },
+  '../../utils/playground/agentPromptBlocks': promptBlocks,
 });
 const html = text => renderToStaticMarkup(React.createElement(AgentMarkdown, { text }));
 test('actual Agent markdown renders inline/display math and preserves code and ordinary Markdown', () => {
@@ -60,11 +62,61 @@ test('math macros cannot leak between messages, and excessive expansion is bound
 
 test('actual markdown offers a separate copy control for each fenced prompt while keeping prose and inline code separate', () => {
   const output = html('原始分析。\n\n```text\n  中文提示词\n\n第二段  \n```\n\n优化说明。\n\n```text\nEnglish prompt.\n```\n\n`inline`');
-  assert.equal((output.match(/aria-label="复制文本"/g) || []).length, 2);
+  assert.equal((output.match(/aria-label="复制提示词"/g) || []).length, 2);
   assert.match(output, /<pre><code class="language-text">  中文提示词\n\n第二段  \n<\/code><\/pre>/);
   assert.match(output, /<p>原始分析。<\/p>/);
   assert.match(output, /<p>优化说明。<\/p>/);
   assert.match(output, /<code>inline<\/code>/);
+});
+
+test('actual Markdown gives explicit prompt fences a discoverable plain-text block without converting normal answers or code', () => {
+  const output = html('普通分析。\n\n```prompt\nKeep pose.\n```\n\n```plaintext\n换成柔和侧光。\n```\n\n```js\nconst prompt = "Keep pose";\n```\n\n```\nprint("unchanged code")\n```\n\n$x^2$');
+  assert.equal((output.match(/class="agent-code-block agent-prompt-block"/g) || []).length, 2);
+  assert.equal((output.replace(/<[^>]*>/g, '').match(/提示词 · 纯文本/g) || []).length, 2);
+  assert.equal((output.match(/aria-label="复制提示词"/g) || []).length, 2);
+  assert.equal((output.match(/aria-label="复制文本"/g) || []).length, 2);
+  assert.match(output, /<p>普通分析。<\/p>/); assert.match(output, /class="language-js"/); assert.match(output, /class="katex"/);
+});
+
+test('unlabelled fences need an explicit adjacent prompt heading and never inherit a distant prompt topic', () => {
+  const output = html('### 优化后的提示词\n\n```\nA portrait with natural light.\n```\n\n下面是普通示例。\n\n```\nfunction example() {}\n```\n\n### Final prompt\n\n```python\nprint("this is code")\n```');
+  assert.equal((output.match(/class="agent-code-block agent-prompt-block"/g) || []).length, 1);
+  assert.equal((output.match(/aria-label="复制文本"/g) || []).length, 2);
+});
+
+test('actual Markdown and copy callbacks preserve source spaces, line endings and streamed text without added newlines', async () => {
+  const captured = [];
+  const { AgentMarkdown: CaptureMarkdown } = instantiate(markdownJs, {
+    'react/jsx-runtime': jsxRuntime, 'react-markdown': { __esModule: true, default: ReactMarkdown },
+    'remark-gfm': { __esModule: true, default: remarkGfm }, 'remark-math': { __esModule: true, default: remarkMath },
+    'rehype-katex': { __esModule: true, default: rehypeKatex }, 'katex/dist/katex.min.css': {},
+    '../../utils/playground/agentPromptBlocks': promptBlocks,
+    './AgentCodeBlock': { AgentCodeBlock: props => { captured.push(props); return React.createElement(AgentCodeBlock, props); } },
+  });
+  const cases = [
+    ['```prompt\r\n  Keep pose.\r\n\r\n第二段\t  \r\n```', '  Keep pose.\r\n\r\n第二段\t  \r\n'],
+    ['```plaintext\n  Streaming text without a terminal newline', '  Streaming text without a terminal newline'],
+    ['```text\nFirst\n\n\n```', 'First\n\n\n'],
+    ['```txt\n<literal> & "quotes"\n```', '<literal> & "quotes"\n'],
+    ['  ~~~prompt\n    Kept content indent\n  ~~~', '  Kept content indent\n'],
+    ['> ```text\r\n> Quoted prompt.\r\n> ```', 'Quoted prompt.\r\n'],
+  ];
+  const writes = [];
+  const jsx = (type, props) => ({ type, props });
+  const { AgentCodeBlock: CopyBlock } = instantiate(codeBlockJs, {
+    react: { useRef: value => ({ current: value }), useState: value => [value, () => {}], useEffect: () => {} },
+    'react/jsx-runtime': { jsx, jsxs: jsx }, 'lucide-react': { Copy: 'copy', Check: 'check' },
+    '../../utils/clipboard': { copyTextToClipboard: async value => { writes.push(value); return true; } }, './AgentCodeBlock.css': {},
+  }, { setTimeout: () => 1, clearTimeout() {} });
+  for (const [source, expected] of cases) {
+    renderToStaticMarkup(React.createElement(CaptureMarkdown, { text: source }));
+    const props = captured.at(-1); assert.equal(props.prompt, true);
+    const tree = CopyBlock(props);
+    nodes(tree).find(node => node.type === 'pre').props.ref.current = { textContent: 'Wrong renderer fallback\n' };
+    nodes(tree).find(node => node.type === 'button').props.onClick(); await Promise.resolve(); await Promise.resolve();
+    assert.equal(writes.at(-1), expected);
+  }
+  assert.deepEqual(writes, cases.map(([, expected]) => expected));
 });
 
 test('production code-block callback copies only exact displayed text and retains whitespace; late clipboard receipts do not update an unmounted block', async () => {

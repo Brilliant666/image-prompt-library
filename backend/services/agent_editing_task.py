@@ -10,6 +10,14 @@ _LIGHT = re.compile(r'(?:参考|沿用|保持).*(?:前面|之前|上[一张]|历
 _ROUND = re.compile(r'@(?:第)?(\d+)轮图(\d+)')
 _CURRENT = re.compile(r'@图(\d+)')
 _TAG = re.compile(r'<ref\b[^>]*\bid=["\'](round-\d+-(?:image|reference)-\d+)["\'][^>]*\s*/?>')
+_TOPIC_CHANGE = re.compile(r'^(?:请|我们|现在|接下来|好了|好)[，,\s]*(?:换个话题|换个问题|新任务|新的任务|另一个任务)|^(?:换个话题|换个问题|新任务|新的任务|另一个任务)|^(?:(?:please|now|let\'s)\s+)?(?:start\s+(?:a\s+)?)?(?:new task|new topic|change (?:the )?topic|another topic)\b', re.I)
+_BOUNDARY_NEGATION = re.compile(r'(?:不要|不用|不必|别|不是|并非|\b(?:do not|don\'t|dont|not|never)\b)[^，,。.!！？?；;\n]{0,24}$', re.I)
+
+
+def task_boundary(prompt):
+    text = prompt.strip()
+    return any(not _BOUNDARY_NEGATION.search(text[max(0, match.start() - 40):match.start()])
+               for pattern in (_END, _TOPIC_CHANGE) for match in pattern.finditer(text))
 
 
 def branch_key(round_id):
@@ -53,7 +61,7 @@ def infer_task(repo, previous, *, conversation_id, parent_id, prompt, inputs, hi
     A few explicit task boundaries help ordinary chat. They are not a classifier
     for every possible instruction: full history and all required pixels remain.
     """
-    if _END.search(prompt):
+    if task_boundary(prompt):
         previous = None
         if not inputs or not _EDIT.search(prompt):
             return None
