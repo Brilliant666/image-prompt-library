@@ -108,7 +108,7 @@ def classify_failure(raw=None, *, code=None):
     status, category = data.get('http_status'), data.get('category')
     uncertain = category in {'connect_timeout', 'read_timeout', 'connection_error', 'incomplete_stream', 'preview_storage'} or code in {'unknown', 'upstream_unknown', 'upstream_outcome_unknown', 'interrupted'}
     kind = 'unknown'
-    if codes & {'reference_missing', 'frozen_reference_invalid', 'reference_unavailable'}:
+    if codes & {'reference_missing', 'frozen_reference_invalid', 'reference_unavailable'} or category == 'reference_missing':
         kind = 'reference_missing'
     elif codes & {'moderation_blocked', 'content_policy_violation', 'safety_violation'}:
         kind = 'moderation'

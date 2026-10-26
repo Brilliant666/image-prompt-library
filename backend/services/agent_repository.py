@@ -23,6 +23,7 @@ from backend.services.generation_jobs import (
 from backend.services.image_store import _atomic_write_bytes
 from backend.services.openai_compatible import OpenAICompatibleConfig, OpenAICompatibleError, normalize_image_parameters
 from backend.services import agent_execution_timing as timing
+from backend.services import agent_editing_task as editing
 
 ACTIVE_STATES = {"queued", "running", "waiting_for_jobs", "stop_requested"}
 ROUND_MENTION = re.compile(r"@(?:第)?(\d+)轮图(\d+)")
@@ -179,7 +180,15 @@ class AgentRepository:
         conn.execute("UPDATE agent_conversations SET revision=revision+1,updated_at=? WHERE id=?", (milliseconds(), cid))
 
     def _rounds(self, conn, cid):
-        return [json.loads(r[0]) for r in conn.execute("SELECT data FROM agent_rounds WHERE conversation_id=? AND deleted=0 ORDER BY rowid", (cid,))]
+        rounds = [json.loads(r[0]) for r in conn.execute("SELECT data FROM agent_rounds WHERE conversation_id=? AND deleted=0 ORDER BY rowid", (cid,))]
+        by_id = {r['id']: r for r in rounds}
+        for value in rounds:
+            value['retryTaskIds'] = []
+        for row in conn.execute("SELECT id,metadata FROM generation_jobs WHERE json_extract(metadata,'$.agentRetry.conversationId')=? ORDER BY created_at,id", (cid,)):
+            link = json.loads(row['metadata'])['agentRetry']
+            if link.get('roundId') in by_id:
+                by_id[link['roundId']].setdefault('retryTaskIds', []).append(row['id'])
+        return rounds
 
     def _save_round(self, conn, value):
         conn.execute("UPDATE agent_rounds SET data=?,parent_round_id=? WHERE id=?",
@@ -233,6 +242,56 @@ class AgentRepository:
             self._touch(conn, cid)
         return self.snapshot(cid)
 
+    def patch_editing_task(self, cid, payload):
+        with connect(self.library) as conn:
+            conversation = self._conversation(conn, cid)
+            rounds = self._rounds(conn, cid)
+        if payload.branchRoundId and not any(r['id'] == payload.branchRoundId for r in rounds):
+            raise AgentError('not_found', '编辑任务分支不存在。', 404)
+        if conversation['revision'] != payload.expectedRevision:
+            raise AgentError('revision_conflict', '对话已改变，请重新加载。')
+        value = None
+        if payload.task is not None:
+            branch_history = self.path(rounds, payload.branchRoundId)
+            allowed_round_ids = {row['id'] for row in branch_history}
+            known_assets = self._legacy_frozen_assets(branch_history)
+            current_task = editing.current_task(conversation, rounds, payload.branchRoundId)
+            for image in ([current_task['target']] if current_task and current_task.get('target') else []) + (current_task.get('auxiliaries', []) if current_task else []):
+                known_assets[encoded(image['source'])] = image['assetId']
+            def selected(ref):
+                source_key = encoded(ref.model_dump(exclude_none=True))
+                known = known_assets.get(source_key)
+                aid = self._check_frozen_asset(self.asset(known), source_key) if known else self.resolve_ref(ref)
+                if ref.kind == 'upload':
+                    with connect(self.library) as conn:
+                        owners = conn.execute("""SELECT id FROM agent_rounds WHERE deleted=0 AND (
+                            EXISTS(SELECT 1 FROM json_each(data,'$.inputImageIds') WHERE value=?) OR
+                            EXISTS(SELECT 1 FROM json_each(data,'$.taskImageIds') WHERE value=?))""", (aid, aid)).fetchall()
+                    if owners and not any(owner['id'] in allowed_round_ids for owner in owners):
+                        raise AgentError('invalid_reference', '此上传图片不属于当前分支；请通过图库明确导入或重新添加。', 400)
+                return editing.asset_selection(self, aid)
+            value = {'version': 1, 'conversationId': cid, 'branchRoundId': payload.branchRoundId,
+                     'target': selected(payload.task.target) if payload.task.target else None,
+                     'auxiliaries': [{**selected(item.ref), 'role': item.role} for item in payload.task.auxiliaries],
+                     'requirements': payload.task.requirements, 'constraints': payload.task.constraints,
+                     'workflow': payload.task.workflow, 'needsTargetSelection': payload.task.target is None,
+                     'configIdentity': None}
+            images = editing.required_asset_ids(value)
+            if len(images) != len(value['auxiliaries']) + (1 if value['target'] else 0):
+                raise AgentError('invalid_reference', '编辑对象和辅助参考不能重复。', 400)
+        with connect(self.library) as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            current = self._conversation(conn, cid)
+            if current['revision'] != payload.expectedRevision:
+                raise AgentError('revision_conflict', '对话已改变，请重新加载。')
+            if conn.execute("SELECT 1 FROM agent_requests WHERE conversation_id=? AND state IN ('queued','running','waiting_for_jobs','stop_requested')", (cid,)).fetchone():
+                raise AgentError('request_active', '请等待本轮完成后再修改编辑任务。')
+            drafts = json.loads(current['editing_tasks'])
+            drafts[editing.branch_key(payload.branchRoundId)] = value
+            conn.execute('UPDATE agent_conversations SET editing_tasks=? WHERE id=?', (encoded(drafts), cid))
+            self._touch(conn, cid)
+        return self.snapshot(cid)
+
     def delete(self, cid, round_id=None):
         with connect(self.library) as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -266,6 +325,10 @@ class AgentRepository:
                     r["index"] = len(new_path)
                     self._save_round(conn, r)
                 conn.execute("UPDATE agent_conversations SET active_round_id=? WHERE id=? AND active_round_id=?", (remaining[-1]["id"] if remaining else None, cid, round_id))
+                draft_row = self._conversation(conn, cid)
+                drafts = json.loads(draft_row['editing_tasks'])
+                drafts.pop(editing.branch_key(round_id), None)
+                conn.execute('UPDATE agent_conversations SET editing_tasks=? WHERE id=?', (encoded(drafts), cid))
                 self._touch(conn, cid)
         return self.snapshot(cid)
 
@@ -417,7 +480,7 @@ class AgentRepository:
             # Persisted input IDs are also proven references, including Library
             # images whose originals have since been deleted. Uploads and masks
             # retain their separate ownership and never become source mappings.
-            input_ids = list({aid for item in history for aid in item["inputImageIds"]})
+            input_ids = list({aid for item in history for aid in editing.all_input_ids(item)})
             for asset in conn.execute("SELECT a.id,a.source FROM agent_assets a JOIN json_each(?) i ON i.value=a.id WHERE a.kind='reference' ORDER BY a.created_at,a.id",
                                       (encoded(input_ids),)):
                 source = json.loads(asset["source"])
@@ -437,8 +500,8 @@ class AgentRepository:
             if not ancestor:
                 continue
             for index, asset_id in enumerate(item.get("frozenOutputImages") or []):
-                jobs = ancestor["outputTaskIds"]
-                old_jobs = item.get("outputTaskIds", [])
+                jobs = editing.all_output_ids(ancestor)
+                old_jobs = editing.all_output_ids(item)
                 if asset_id and index < len(jobs) and index < len(old_jobs) and jobs[index] == old_jobs[index]:
                     candidates.setdefault(encoded({"kind": "job", "jobId": jobs[index]}), asset_id)
         return candidates
@@ -624,7 +687,7 @@ class AgentRepository:
                     raise AgentError("invalid_reference", "遮罩必须包含透明通道。", 400)
         for historical in history:
             historical["frozenOutputImages"] = []
-            for jid in historical["outputTaskIds"]:
+            for jid in editing.all_output_ids(historical):
                 try:
                     ref = {"kind": "job", "jobId": jid}
                     historical["frozenOutputImages"].append(resolve_frozen(ref))
@@ -636,13 +699,30 @@ class AgentRepository:
             index, slot = int(match[1]) - 1, int(match[2]) - 1
             if index < 0 or index >= len(history) or slot < 0 or slot >= len(history[index]["frozenOutputImages"]) or not history[index]["frozenOutputImages"][slot]:
                 raise AgentError("reference_missing", "引用的历史图片不在当前分支或已删除。", 400)
+        inherited_task = editing.current_task(conversation, rounds, body.parentRoundId)
+        if body.origin != 'send' and body.derivedFromRoundId:
+            inherited_task = editing.current_task(conversation, rounds, body.derivedFromRoundId)
+        task = editing.infer_task(self, inherited_task, conversation_id=cid, parent_id=body.parentRoundId,
+                                  prompt=body.prompt, inputs=inputs, history=history, config=frozen)
+        historical_assets = {aid for row in history for aid in [*editing.all_input_ids(row), *row.get('frozenOutputImages', [])] if aid}
+        task_inputs = [aid for aid in editing.required_asset_ids(task) if aid not in inputs and aid not in historical_assets]
+        for aid in task_inputs:
+            # Freeze the stable identity into this request. Missing originals
+            # never silently redirect to a different Gallery/Library picture.
+            asset = self.asset(aid)
+            resolve_generation_input_image_path(self.library, asset['path'])
+        if len(set(inputs) | set(editing.required_asset_ids(task))) > 4:
+            raise AgentError('invalid_reference', '当前编辑对象与参考图片合计最多 4 张；请调整当前任务。', 400)
         now, rid = milliseconds(), "round_" + uuid4().hex
+        if task:
+            task['branchRoundId'] = rid
         round_data = {"id": rid, "index": len(history) + 1, "parentRoundId": body.parentRoundId,
                       "userMessageId": "user_" + uuid4().hex, "assistantMessageId": "assistant_" + uuid4().hex,
                       "prompt": body.prompt, "inputImageIds": inputs, "maskTargetImageId": inputs[body.mask.targetRefIndex] if body.mask else None,
                       "maskImageId": mask_id, "outputTaskIds": [], "responseOutput": [], "status": "running", "error": None,
                       "createdAt": now, "finishedAt": None, "requestId": body.requestId, "derivedFromRoundId": body.derivedFromRoundId,
-                      "assistantContent": "", "execution": timing.empty_execution(timing.elapsed(preparation_started))}
+                      "assistantContent": "", "execution": timing.empty_execution(timing.elapsed(preparation_started)),
+                      "editingTask": task, "taskImageIds": task_inputs}
         with connect(self.library) as conn:
             conn.execute("BEGIN IMMEDIATE")
             replay = conn.execute("SELECT fingerprint FROM agent_requests WHERE id=?", (body.requestId,)).fetchone()
@@ -792,6 +872,7 @@ class AgentRepository:
                                    for row in conn.execute('SELECT id,state,upstream_outcome,body,error,frozen FROM agent_requests WHERE conversation_id=?', (cid,))}
             completed_text = {row[0] for row in conn.execute("SELECT DISTINCT s.request_id FROM agent_steps s JOIN agent_requests r ON r.id=s.request_id WHERE r.conversation_id=? AND s.state='completed'", (cid,))}
             frozen_configs = {rid: json.loads(row['frozen']) for rid, row in historical_requests.items()}
+            task = editing.current_task(conversation, rounds, conversation['active_round_id'])
             for round_data in rounds:
                 round_data["modelInfo"] = model_info(frozen_configs.get(round_data["requestId"], {}), round_data)
             if request is None and rounds:
@@ -799,9 +880,9 @@ class AgentRepository:
                 request = self.request(current["requestId"])
         jobs, assets, messages = {}, {}, []
         for r in rounds:
-            for aid in r["inputImageIds"] + ([r["maskImageId"]] if r["maskImageId"] else []):
+            for aid in editing.all_input_ids(r) + ([r["maskImageId"]] if r["maskImageId"] else []):
                 assets[aid] = self.image(aid)
-            for jid in r["outputTaskIds"]:
+            for jid in editing.all_output_ids(r):
                 try:
                     jobs[jid] = self.jobs.get_job(jid).model_dump()
                     preview = (jobs[jid].get("metadata") or {}).get("agent", {}).get("partialImageId")
@@ -851,10 +932,13 @@ class AgentRepository:
                             "upstreamMayContinue": bool(request["stop_requested"] and request["upstream_outcome"] == "unknown"), "error": request["error"]}
         from backend.routers.generation_jobs import _sanitize_generation_job_record
         from backend.schemas import GenerationJobRecord
+        for aid in editing.required_asset_ids(task):
+            assets[aid] = self.image(aid)
         return {"schemaVersion": 1, "revision": conversation["revision"],
                 "conversation": {"id": cid, "title": conversation["title"], "activeRoundId": conversation["active_round_id"],
                                  "createdAt": conversation["created_at"], "updatedAt": conversation["updated_at"], "rounds": rounds, "messages": messages},
-                "request": request_view, "jobs": [_sanitize_generation_job_record(GenerationJobRecord(**j)).model_dump() for j in jobs.values()], "images": list(assets.values())}
+                "request": request_view, "editingTask": task,
+                "jobs": [_sanitize_generation_job_record(GenerationJobRecord(**j)).model_dump() for j in jobs.values()], "images": list(assets.values())}
 
     def progress_token(self, request_id):
         """Read a small change marker without assembling images or full history."""

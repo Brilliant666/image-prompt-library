@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -44,6 +44,25 @@ class AgentRef(AgentModel):
     imageId: str | None = None
     jobId: str | None = None
     uploadId: str | None = None
+
+
+class AgentEditingAuxiliary(AgentModel):
+    ref: AgentRef
+    role: Literal['lighting', 'style', 'subject', 'composition', 'other'] = 'other'
+
+
+class AgentEditingTask(AgentModel):
+    target: AgentRef | None = None
+    auxiliaries: list[AgentEditingAuxiliary] = Field(default_factory=list, max_length=3)
+    requirements: str = Field(default='', max_length=4000)
+    constraints: list[Annotated[str, Field(max_length=500)]] = Field(default_factory=list, max_length=12)
+    workflow: Literal['auto', 'image-prompt-reverse', 'gpt-image'] = 'auto'
+
+
+class AgentEditingTaskPatch(AgentModel):
+    expectedRevision: int = Field(ge=0)
+    branchRoundId: str | None = None
+    task: AgentEditingTask | None
 
 
 class AgentMask(AgentModel):

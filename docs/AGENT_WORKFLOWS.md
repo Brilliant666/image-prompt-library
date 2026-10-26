@@ -24,6 +24,18 @@ Native uses the Responses image tool. Hybrid uses the chosen text Responses prof
 
 ## Correctness and recovery boundaries
 
+### Continue an image edit
+
+The current editing task records a stable target image, auxiliary references and their roles, the user's requirements and confirmed constraints. Open the task panel to inspect or correct these choices, or end the task without deleting the conversation. Each conversation branch keeps its own task. A single newly attached image with an editing request becomes the target; an earlier lighting reference remains auxiliary. Ambiguous multiple-image edits require an explicit target, and unavailable references cannot silently substitute another image. Task roles supplement the required visual history rather than removing it.
+
+When changing the image API profile, the image-model field adopts that profile's saved default. A full manual model ID remains possible. This does not change the text profile, another profile's settings or an already submitted request.
+
+### Retry a failed image
+
+**Retry with current image configuration** reuses the failed image job's actual execution prompt and frozen reference pixels, preserving its parameters unless explicitly changed in the confirmation panel. After confirmation it creates a new linked Gallery job through the existing Images queue, with no additional text-model planning request. The original failure remains in history. A repeated submission identity returns the same receipt; an uncertain response requires checking that receipt instead of sending again. Quota, moderation and rate-limit failures never automatically retry or change suppliers.
+
+Direct retry is available only for confirmed failed Hybrid Images jobs while the current mode is Hybrid. Native Responses and Current API do not silently convert protocols. Use **Edit prompt and regenerate** to restore the actual prompt and available references to the composer, review them and explicitly send through the selected mode. Missing originals block restoration rather than substituting another image.
+
 ### Results and progress
 
 Each round reports its own durable image jobs. A completed text-model tool call is not an image-generation success. All failed jobs show that no image was produced; mixed batches retain and identify their successful images. Details distinguish submitted jobs, successful images, failures and the authorized maximum. Saved Library images remain part of the successful count.

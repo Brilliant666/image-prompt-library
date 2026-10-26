@@ -5,6 +5,7 @@ stored originals, or the branch's reference allowlist. ``None`` means that the
 caller must preserve its existing all-images behavior.
 """
 import re
+from backend.services.agent_editing_task import required_asset_ids
 
 
 _ROUND_MENTION = re.compile(r"@(?:第)?(\d+)轮图(\d+)")
@@ -42,7 +43,7 @@ def _reference_scope(request, refs):
     if "\u2065" in re.sub(r"\u2065[^\u2064]*\u2064", "", prompt):
         return None
     prompt = re.sub(r"\u2065[^\u2064]*\u2064", "", prompt).replace("\u2063", "").replace("\u2064", "")
-    selected = set(inputs)
+    selected = set(inputs) | set(current.get('taskImageIds', []))
     explicit = False
     invalid = False
 
@@ -134,7 +135,7 @@ def select_context_images(request, refs):
 
     plain = re.sub(r"[\s，,。.!！?？；;：:]+", " ", prompt).strip()
     if explicit:
-        return selected if not plain else None
+        return selected | set(required_asset_ids(current.get('editingTask'))) if not plain else None
     # Chinese spaces are optional; English phrase spacing remains meaningful.
     if _PLAIN_TEXT.fullmatch(plain) or _PLAIN_TEXT.fullmatch(plain.replace(" ", "")):
         return selected

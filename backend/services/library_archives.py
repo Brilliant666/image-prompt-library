@@ -421,6 +421,8 @@ def _validate_schema_contract(conn: sqlite3.Connection, ledger: list[str]) -> No
         required_columns.setdefault("items", set()).add("deleted_at")
     if migration_count >= 18:
         required_columns["agent_frozen_sources"] = {"source_key", "asset_id"}
+    if migration_count >= 19:
+        required_columns.setdefault('agent_conversations', set()).add('editing_tasks')
     for table, expected in required_columns.items():
         actual = {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
         missing_columns = sorted(expected - actual)
