@@ -22,6 +22,7 @@ from backend.services.generation_jobs import (
 )
 from backend.services.image_store import _atomic_write_bytes
 from backend.services.openai_compatible import OpenAICompatibleConfig, OpenAICompatibleError, normalize_image_parameters
+from backend.services import agent_execution_timing as timing
 
 ACTIVE_STATES = {"queued", "running", "waiting_for_jobs", "stop_requested"}
 ROUND_MENTION = re.compile(r"@(?:第)?(\d+)轮图(\d+)")
@@ -41,8 +42,10 @@ def fingerprint(value):
 
 
 class AgentError(ValueError):
-    def __init__(self, code, message, status=409):
+    def __init__(self, code, message, status=409, *, diagnostics=None):
         self.code, self.message, self.status = code, message, status
+        from backend.services.agent_diagnostics import safe_diagnostics
+        self.diagnostics = safe_diagnostics(diagnostics)
         super().__init__(message)
 
 
@@ -541,6 +544,7 @@ class AgentRepository:
         return profile
 
     def create_round(self, cid, body: AgentRoundCreate):
+        preparation_started = timing.monotonic()
         serialized = body.model_dump(exclude_none=True)
         digest_body = {k: v for k, v in serialized.items() if k != "expectedRevision"}
         digest_body["conversationId"] = cid
@@ -638,7 +642,7 @@ class AgentRepository:
                       "prompt": body.prompt, "inputImageIds": inputs, "maskTargetImageId": inputs[body.mask.targetRefIndex] if body.mask else None,
                       "maskImageId": mask_id, "outputTaskIds": [], "responseOutput": [], "status": "running", "error": None,
                       "createdAt": now, "finishedAt": None, "requestId": body.requestId, "derivedFromRoundId": body.derivedFromRoundId,
-                      "assistantContent": ""}
+                      "assistantContent": "", "execution": timing.empty_execution(timing.elapsed(preparation_started))}
         with connect(self.library) as conn:
             conn.execute("BEGIN IMMEDIATE")
             replay = conn.execute("SELECT fingerprint FROM agent_requests WHERE id=?", (body.requestId,)).fetchone()
@@ -692,12 +696,35 @@ class AgentRepository:
             if state:
                 round_data["status"] = "running" if state in ACTIVE_STATES else "done" if state == "completed" else "error"
                 round_data["finishedAt"] = None if state in ACTIVE_STATES else milliseconds()
+                if round_data.get('execution') and state not in ACTIVE_STATES:
+                    round_data['execution']['phase'] = state if state in {'completed', 'stopped', 'unknown'} else 'failed'
+                    for measured in round_data['execution']['modelSteps']:
+                        if measured['state'] == 'running':
+                            measured['state'] = 'interrupted'
             if error:
                 round_data["error"] = error["message"]
             self._save_round(conn, round_data)
             conn.execute("UPDATE agent_requests SET state=?,error=?,upstream_outcome=?,updated_at=? WHERE id=?",
                          (state or row["state"], encoded(error) if error else row["error"], outcome or row["upstream_outcome"], milliseconds(), request_id))
             self._touch(conn, row["conversation_id"])
+
+    def record_execution(self, request_id, *, phase=None, step=None, state=None, add=False, **durations):
+        """Finite phase boundaries only; never called for each text delta."""
+        from backend.services.agent_diagnostics import record_measurement
+        return record_measurement(self._record_execution, request_id, phase=phase, step=step, state=state, add=add, **durations)
+
+    def _record_execution(self, request_id, *, phase=None, step=None, state=None, add=False, **durations):
+        with connect(self.library) as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            request = conn.execute('SELECT conversation_id,round_id,state FROM agent_requests WHERE id=?', (request_id,)).fetchone()
+            if not request:
+                raise AgentError('not_found', '请求不存在。', 404)
+            data = json.loads(conn.execute('SELECT data FROM agent_rounds WHERE id=?', (request['round_id'],)).fetchone()[0])
+            measured = data.setdefault('execution', timing.empty_execution())
+            timing.apply_measurement(measured, phase=phase if request['state'] in ACTIVE_STATES else None,
+                                     step=step, state=state, add=add, **durations)
+            self._save_round(conn, data)
+            self._touch(conn, request['conversation_id'])
 
     def record_response_details(self, request_id, step, payload=None, *, native_job_id=None, secrets=()):
         """Upsert one physical Responses call; duplicate SSE receipts cannot add usage."""
@@ -761,8 +788,10 @@ class AgentRepository:
             rounds = self._rounds(conn, cid)
             # Read historical identities from their own request, never today's
             # profile. Older requests do not claim a provider name was recorded.
-            frozen_configs = {row["id"]: json.loads(row["frozen"]) for row in conn.execute(
-                "SELECT id,frozen FROM agent_requests WHERE conversation_id=?", (cid,))}
+            historical_requests = {row['id']: {**dict(row), 'body': json.loads(row['body']), 'error': json.loads(row['error']) if row['error'] else None}
+                                   for row in conn.execute('SELECT id,state,upstream_outcome,body,error,frozen FROM agent_requests WHERE conversation_id=?', (cid,))}
+            completed_text = {row[0] for row in conn.execute("SELECT DISTINCT s.request_id FROM agent_steps s JOIN agent_requests r ON r.id=s.request_id WHERE r.conversation_id=? AND s.state='completed'", (cid,))}
+            frozen_configs = {rid: json.loads(row['frozen']) for rid, row in historical_requests.items()}
             for round_data in rounds:
                 round_data["modelInfo"] = model_info(frozen_configs.get(round_data["requestId"], {}), round_data)
             if request is None and rounds:
@@ -781,6 +810,15 @@ class AgentRepository:
                 except KeyError:
                     pass
                 assets["output_" + jid] = self.image("output_" + jid)
+            own_request = historical_requests.get(r['requestId'])
+            r['resultSummary'] = timing.result_summary(r, own_request, jobs, r['requestId'] in completed_text)
+            r['execution'] = r.get('execution')
+            from backend.services.agent_diagnostics import classify_failure
+            failures = [classify_failure((jobs[jid].get('metadata') or {}).get('error_diagnostics'))
+                        for jid in r['outputTaskIds'] if jid in jobs and jobs[jid]['status'] == 'failed']
+            own_error = own_request.get('error') if own_request else None
+            r['failure'] = next((failure for failure in failures if failure['kind'] != 'unknown'), None) or (
+                classify_failure(own_error.get('diagnostics'), code=own_error.get('code')) if own_error else failures[0] if failures else None)
             messages.extend([
                 {"id": r["userMessageId"], "role": "user", "content": r["prompt"], "roundId": r["id"], "createdAt": r["createdAt"],
                  "inputImageIds": r["inputImageIds"], "maskImageId": r["maskImageId"], "maskTargetImageId": r["maskTargetImageId"]},

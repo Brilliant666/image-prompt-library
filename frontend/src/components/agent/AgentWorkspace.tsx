@@ -13,7 +13,7 @@ import { api, mediaUrl } from '../../api/client';
 import { AgentApiError, agentApi, getAgentConfig, watchAgentRequest, type AgentConfigResponse, type AgentConversationSummary, type AgentImage, type AgentImageParams, type AgentRound, type AgentRoundCreate, type AgentSnapshot } from '../../api/agentClient';
 import type { GenerationJobRecord } from '../../types';
 import { getActiveAgentRounds, getAgentBranchLeafId, getAgentSiblingRounds } from '../../utils/playground/agentConversationState';
-import { getAgentAssistantBlocks, getAgentToolLabel, isAgentRequestActive } from '../../utils/playground/agentAssistantBlocks';
+import { agentPhaseLabels, getAgentAssistantBlocks, getAgentJobFailure, getAgentRoundStatus, getAgentRoundSummary, getAgentToolLabel, isAgentRequestActive } from '../../utils/playground/agentAssistantBlocks';
 import { insertMention, referenceKey, resolveAgentPromptImageReferences, type ReferenceChoice } from '../../utils/playground/agentImageReferences';
 import { AGENT_DRAFT_KEY, acknowledgeAgentDraft, clearPendingAgentSubmission, draftFromPendingAgentSubmission, getAgentResumeId, readAgentDrafts, readPendingAgentSubmissions, savePendingAgentSubmission, shouldSubmitAgentOnKey, type AgentDraft, type PendingAgentSubmission } from '../../utils/playground/agentSubmission';
 import { resolveAuto4k } from '../../utils/compatibleRecipe';
@@ -62,8 +62,8 @@ function ResultCard({ job, preview, onOpen, onSaved, onError, onReference, refer
   }
   return <article className="agent-result-card">
     {job.result_path ? <button className="agent-result-image" aria-label="查看生成结果" onClick={onOpen}><img src={mediaUrl(job.result_path)} alt="生成结果" loading="lazy" width={job.result_width || undefined} height={job.result_height || undefined} /></button> : preview?.status === 'available' && sameOriginImage(preview.url) ? <div className="agent-result-image"><img src={sameOriginImage(preview.url)} alt="生成中预览，非最终结果" width={preview.width || undefined} height={preview.height || undefined} /><p className="agent-help">生成中预览 · 非最终结果，尚不可收录</p></div> : <div className="agent-result-placeholder">{['queued', 'running'].includes(job.status) && <LoaderCircle size={22} className="spin" />}<span>{statusText[job.status] || job.status}</span></div>}
-    <div className="agent-result-meta"><span>{statusText[job.status] || job.status}</span><span>{job.result_width && job.result_height ? `${job.result_width} × ${job.result_height}` : '文件尺寸未知'}</span></div>
-    {job.error && <p className="agent-error">{job.error}</p>}
+    {job.result_path && <div className="agent-result-meta"><span>{statusText[job.status] || job.status}</span><span>{job.result_width && job.result_height ? `${job.result_width} × ${job.result_height}` : '文件尺寸未返回'}</span></div>}
+    {['failed', 'unknown'].includes(job.status) && <p className="agent-error"><strong>{getAgentJobFailure(job).label}</strong> · {getAgentJobFailure(job).action}</p>}
     <footer><button aria-label="查看或编辑生成结果" onClick={onOpen}>查看 / 编辑</button>{job.result_path && ['succeeded','accepted'].includes(job.status) && <><button aria-label="加入本轮参考图" disabled={referenceDisabled} onClick={onReference}><ImagePlus size={16} />加入参考图</button><a href={mediaUrl(job.result_path)} download title="下载原文件"><Download size={16} /></a><button aria-label={saved ? '已收录到 Library' : '保存到 Library'} disabled={saving || saved} onClick={() => void save()}>{saved ? <Check size={16} /> : <Plus size={16} />}{saved ? '已收录' : saving ? '保存中' : '保存到 Library'}</button></>}</footer>
   </article>;
 }
@@ -127,6 +127,10 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
   // start at zero. New requests bind their original send boundary below.
   const submissionBoundaries = useRef<Record<string, { conversationId: string; draft: number; authorization: { images: number; search: number } }>>(Object.fromEntries(pending.map(entry => [entry.payload.requestId, { conversationId: entry.conversationId, draft: 0, authorization: { images: 0, search: 0 } }])));
   const lastCompleted = useRef(new Set<string>());
+  // Browser-only observation. A refresh intentionally loses the start boundary;
+  // neither wall-clock timestamps nor old requests can manufacture this duration.
+  const submissionStarts = useRef(new Map<string, number>());
+  const [terminalObservations, setTerminalObservations] = useState<Record<string, number>>({});
   const settingsHandoff = useRef(false);
   activeIdRef.current = activeId;
   const draftsRef = useRef(drafts);
@@ -350,6 +354,13 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
     delete submissionBoundaries.current[entry.payload.requestId];
   }
   const applySnapshot = useCallback((value: AgentSnapshot) => {
+    const request = value.request;
+    const started = request ? submissionStarts.current.get(request.id) : undefined;
+    if (request && started !== undefined && !isAgentRequestActive(request.state)) {
+      submissionStarts.current.delete(request.id);
+      const elapsed = Math.max(0, performance.now() - started);
+      setTerminalObservations(old => ({ ...old, [request.id]: elapsed }));
+    }
     if (activeIdRef.current === value.conversation.id) setSnapshot(old => !old || old.conversation.id !== value.conversation.id || value.revision >= old.revision ? value : old);
     const row: AgentConversationSummary = { id: value.conversation.id, title: value.conversation.title, activeRoundId: value.conversation.activeRoundId, createdAt: value.conversation.createdAt, updatedAt: value.conversation.updatedAt, roundCount: value.conversation.rounds.length, runningRequestId: isAgentRequestActive(value.request?.state) ? value.request!.id : null, revision: value.revision };
     upsertConversation(row);
@@ -544,6 +555,7 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
       savePendingAgentSubmission(localStorage, entry);
       submissionBoundaries.current[payload.requestId] = { conversationId: entry.conversationId, draft: submittedRevision, authorization: submittedAuthorizationRevision };
       setPending(readPendingAgentSubmissions(localStorage));
+      submissionStarts.current.set(payload.requestId, performance.now());
       const result = await agentApi.submit(entry.conversationId, payload);
       clearPendingAgentSubmission(localStorage, payload.requestId); setPending(readPendingAgentSubmissions(localStorage)); applySnapshot(result); onJobsChanged?.();
       acknowledgeSubmission(entry);
@@ -554,7 +566,7 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
     } catch (reason) {
       // An explicit schema/config rejection is safe to edit. Network errors and
       // server errors retain the frozen request for read-only reconciliation.
-      if (entry && reason instanceof AgentApiError && [400, 404, 409, 422].includes(reason.status)) { clearPendingAgentSubmission(localStorage, entry.payload.requestId); setPending(readPendingAgentSubmissions(localStorage)); delete submissionBoundaries.current[entry.payload.requestId]; }
+      if (entry && reason instanceof AgentApiError && [400, 404, 409, 422].includes(reason.status)) { clearPendingAgentSubmission(localStorage, entry.payload.requestId); setPending(readPendingAgentSubmissions(localStorage)); delete submissionBoundaries.current[entry.payload.requestId]; submissionStarts.current.delete(entry.payload.requestId); }
       setError(`${errorText(reason)}${entry && !(reason instanceof AgentApiError) ? '。提交结果不确定；请检查原请求，不要重新发起。' : ''}`);
     } finally { sending.current = false; setBusy(false); }
   }
@@ -632,14 +644,14 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
           const siblings = getAgentSiblingRounds(current!.conversation, round);
           const branchIndex = siblings.findIndex(item => item.id === round.id);
           const blocks = getAgentAssistantBlocks(round, current!.jobs, assistant?.content || '');
+          const summary = getAgentRoundSummary(round, current!.jobs, current!.request);
           return <article className="agent-round" data-agent-round={round.id} key={round.id}>
             <div className="agent-user-message" aria-label={`你，第 ${roundIndex + 1} 轮`}>{round.inputImageIds.length > 0 && <div className="agent-reference-strip">{round.inputImageIds.map((id, i) => { const image = current!.images.find(image => image.id === id); const url = sameOriginImage(image?.thumbnailUrl || image?.url); return <div key={id} title={`参考图 ${i + 1}`}>{image?.status === 'available' && url ? <a href={sameOriginImage(image.url)} target="_blank" rel="noreferrer"><img src={url} alt={`参考图 ${i + 1}`} /></a> : <span>图片缺失</span>}<small>{i + 1}</small></div>; })}</div>}<p className="agent-original-text">{round.prompt}</p>
               <div className="agent-message-actions"><button title="复制原文" aria-label="复制原文" onClick={() => void copyTextToClipboard(round.prompt).then(ok => setNotice(ok ? '已复制原文' : '复制失败'))}><Copy size={15} /></button><button title="编辑重发" aria-label="编辑重发" disabled={inFlight || busy || Boolean(uncertain)} onClick={() => void prepareEdit(round, 'edit')}><Pencil size={15} /></button><button title="重新生成" aria-label="重新生成" disabled={inFlight || busy || Boolean(uncertain)} onClick={() => void prepareEdit(round, 'regenerate')}><RotateCcw size={15} /></button>{siblings.length > 1 && <span className="agent-branch-controls"><button aria-label="上一分支" disabled={branchIndex === 0 || busy} onClick={() => void selectBranch(siblings[branchIndex - 1].id)}><ChevronLeft size={15} /></button>{branchIndex + 1} / {siblings.length}<button aria-label="下一分支" disabled={branchIndex === siblings.length - 1 || busy} onClick={() => void selectBranch(siblings[branchIndex + 1].id)}><ChevronRight size={15} /></button></span>}</div>
             </div>
             <div className="agent-assistant-message" aria-label={`Agent，第 ${roundIndex + 1} 轮`}>
-              {blocks.map(block => block.type === 'text' ? <AgentMarkdown key={block.key} text={block.content} /> : block.type === 'image-task' ? <ResultCard onReference={() => addResultReference(block.task)} referenceDisabled={draftLocked || uploading || handoffBusy} key={block.key} job={block.task} preview={current!.images.find(image => image.id === (block.task.metadata?.agent as Record<string, unknown> | undefined)?.partialImageId)} onOpen={() => onOpenJob(block.task.id)} onSaved={() => { onLibraryChanged(); onJobsChanged?.(); void agentApi.conversation(current!.conversation.id).then(applySnapshot).catch(() => {}); }} onError={setError} /> : block.type === 'deleted-image-task' ? <p key={block.key} className="agent-missing-image">原图片任务已不可用，保留引用位置。</p> : <div key={block.key} className="agent-tool-status"><span>{getAgentToolLabel(block.name)}</span><small>{statusText[current?.request?.toolCalls.find(call => call.callId === block.callId)?.state || block.state || ''] || (block.state === 'in_progress' ? '进行中' : '工具调用')}</small></div>)}
-              {!blocks.length && round.status === 'running' && <p className="agent-help">等待模型响应…</p>}
-              {round.error && <p className="agent-error">{round.error}</p>}
+              {blocks.map(block => block.type === 'text' ? <AgentMarkdown key={block.key} text={block.content} /> : block.type === 'image-task' ? <ResultCard onReference={() => addResultReference(block.task)} referenceDisabled={draftLocked || uploading || handoffBusy} key={block.key} job={block.task} preview={current!.images.find(image => image.id === (block.task.metadata?.agent as Record<string, unknown> | undefined)?.partialImageId)} onOpen={() => onOpenJob(block.task.id)} onSaved={() => { onLibraryChanged(); onJobsChanged?.(); void agentApi.conversation(current!.conversation.id).then(applySnapshot).catch(() => {}); }} onError={setError} /> : block.type === 'deleted-image-task' ? <p key={block.key} className="agent-missing-image">原图片任务已不可用，保留引用位置。</p> : <div key={block.key} className="agent-tool-status"><span>{getAgentToolLabel(block.name)}</span><small>{agentPhaseLabels[block.state || ''] || statusText[block.state || ''] || (block.state === 'in_progress' ? '进行中' : '工具调用')}</small></div>)}
+              {(summary.imageJobsCreated > 0 || summary.outcomeUnknown || round.error || round.status === 'running' || ['stopped', 'stop_requested', 'failed', 'interrupted'].includes(summary.requestState)) && <p className="agent-round-outcome" role="status">{getAgentRoundStatus(round, summary)}</p>}
               <div className="agent-answer-actions">
                 {assistant?.content && <button className="agent-text-button" aria-label="复制回答" title="复制回答" onClick={() => void copyTextToClipboard(assistant.content).then(ok => setNotice(ok ? '已复制回答' : '复制失败'))}><Copy size={15} /></button>}
                 <button className="agent-text-button" aria-label={`查看第 ${roundIndex + 1} 轮详情`} aria-haspopup="dialog" aria-expanded={panel === 'details' && detailRoundId === round.id} onClick={event => openPanel('details', event.currentTarget, round.id)}><Info size={15} /><span>详情</span></button>
@@ -647,7 +659,7 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
             </div>
           </article>;
         })}
-        {current?.request && requestNeedsAttention ? <div className="agent-request-attention" role="alert"><strong>{statusText[current.request.state] || current.request.state}</strong>{current.request.error && <p>{current.request.error.message}</p>}{current.request.recoveryReason && <p>{current.request.recoveryReason}</p>}{current.request.upstreamMayContinue && <p>已发送的上游请求可能仍在执行或计费；停止只阻止后续新调用。</p>}{current.request.canResume && <button aria-label="继续已确认安全的步骤" disabled={busy} onClick={async () => { setBusy(true); try { applySnapshot(await agentApi.resume(current.request!.id, getAgentResumeId(localStorage, [current.request!.id, current.request!.usage.responseStepsStarted, current.request!.usage.imageJobsCreated].join(':'), () => crypto.randomUUID()))); } catch (reason) { setError(errorText(reason)); } finally { setBusy(false); } }}>继续已确认安全的步骤</button>}</div> : inFlight && <p className="agent-live-progress" role="status"><LoaderCircle size={14} className="spin" />{statusText[current!.request!.state] || current!.request!.state}</p>}
+        {current?.request && requestNeedsAttention && (current.request.upstreamMayContinue || current.request.canResume) && <div className="agent-request-attention" role="alert">{current.request.upstreamMayContinue && <p>已发送的上游请求可能仍在执行或计费；请先检查原请求，不会自动重复提交。</p>}{current.request.canResume && <button aria-label="继续已确认安全的步骤" disabled={busy} onClick={async () => { setBusy(true); try { applySnapshot(await agentApi.resume(current.request!.id, getAgentResumeId(localStorage, [current.request!.id, current.request!.usage.responseStepsStarted, current.request!.usage.imageJobsCreated].join(':'), () => crypto.randomUUID()))); } catch (reason) { setError(errorText(reason)); } finally { setBusy(false); } }}>继续已确认安全的步骤</button>}</div>}
       </div>
       </div>
       <div className="agent-scroll-anchor">
@@ -692,7 +704,7 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
 
           <p className="agent-help">{imageMode ? '生图模式已开启，本会话后续发送持续允许生图；可在输入框关闭。网络搜索仍仅授权本轮。' : '本轮授权发送后自动关闭；连续创作可在输入框开启生图模式。'}只有发送后才调用接口，可能产生费用。</p>
         </div>}
-        {panel === 'details' && detailRound && <AgentResponseDetails details={detailRound.responseDetails} modelInfo={detailRound.modelInfo} request={detailRequest} />}
+        {panel === 'details' && detailRound && <AgentResponseDetails details={detailRound.responseDetails} modelInfo={detailRound.modelInfo} request={detailRequest} round={detailRound} jobs={current?.jobs || []} terminalObservationMs={terminalObservations[detailRound.requestId]} />}
       </div>
     </div>, document.body)}
     {active && sizeOpen && <SizeDialog recipe={{...draft.params,model:imageModel,background:draft.params.background || 'auto',output_compression:draft.params.output_compression ?? undefined,moderation:draft.params.moderation === 'low' || draft.params.moderation === 'auto' ? draft.params.moderation : undefined,size_mode:draft.sizeMode}} prompt={draft.text} referenceSize={measuredReferenceSize} referenceStatus={sizeReferenceStatus} onClose={() => setSizeOpen(false)} onApply={selection => updateDraft({params:{...draft.params,size:selection.size},sizeMode:selection.size_mode})} />}

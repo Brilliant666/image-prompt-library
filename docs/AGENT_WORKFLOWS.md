@@ -24,6 +24,16 @@ Native uses the Responses image tool. Hybrid uses the chosen text Responses prof
 
 ## Correctness and recovery boundaries
 
+### Results and progress
+
+Each round reports its own durable image jobs. A completed text-model tool call is not an image-generation success. All failed jobs show that no image was produced; mixed batches retain and identify their successful images. Details distinguish submitted jobs, successful images, failures and the authorized maximum. Saved Library images remain part of the successful count.
+
+Progress distinguishes local preparation, waiting for the text model, receiving output, waiting for image tasks, generating and saving results. Safe diagnostic categories identify quota, model/interface compatibility, moderation, rate limits, service failures, uncertain connections and unavailable references. Unknown provider errors are not classified by guessing from prose. No category automatically retries a paid request or switches providers. Persisted diagnostics omit upstream error prose, addresses and arbitrary JSON; request identities are hashed and endpoint names contain only a recognized API route.
+
+Advanced details contain measured monotonic durations. Headers and first-event milestones start at the same HTTP request and must not be added together. Tool execution includes image queue/call time. Direct Native Responses can combine text and image execution, so its separately observed image-tool interval is not a separate pure-provider latency measurement. Missing historical or post-restart measurements show as unrecorded. Browser send-to-terminal observation includes backend work and transport, and is only available in the page that observed it. Optional timing-storage failures emit a safe warning and cannot overturn a paid-request receipt or trigger another request.
+
+Missing usage values remain unknown; an explicitly reported zero stays zero. These measurements do not estimate actual tokens, money, provider capacity or cache eligibility.
+
 - Ambiguous image instructions retain images from the current conversation branch. A new attachment does not make earlier images irrelevant. Exact reference-only requests can narrow historical pixels; missing or deleted explicit references fail rather than silently substitute an image.
 - Native results require a valid completed Responses receipt and a complete image. Failed or incomplete responses containing images are not successful tasks. Previously confirmed sibling tasks remain saved.
 - A verified terminal SSE receipt is not undone by connection teardown. A disconnect without a valid terminal remains uncertain and does not automatically replay a paid POST.

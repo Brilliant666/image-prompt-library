@@ -9,10 +9,15 @@ import { renderToStaticMarkup } from 'react-dom/server';
 const source = await readFile(new URL('../frontend/src/components/agent/AgentResponseDetails.tsx', import.meta.url), 'utf8');
 const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
 const mod = { exports: {} };
+const resultSource = await readFile(new URL('../frontend/src/utils/playground/agentAssistantBlocks.ts', import.meta.url), 'utf8');
+const resultJs = ts.transpileModule(resultSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+const resultModule = { exports: {} };
+new Function('require', 'module', 'exports', resultJs)(name => { throw new Error(name); }, resultModule, resultModule.exports);
 const dependencies = {
   'react/jsx-runtime': jsxRuntime,
   './AgentResponseDetails.css': {},
   './AgentMarkdown': { AgentMarkdown: ({ text }) => React.createElement('div', null, text) },
+  '../../utils/playground/agentAssistantBlocks': resultModule.exports,
 };
 new Function('require', 'module', 'exports', js)(name => {
   assert.ok(name in dependencies, name); return dependencies[name];
@@ -46,7 +51,8 @@ test('only reported input and output appear by default and a reported zero is pr
   data.usage = { ...data.usage, outputTokens: null, totalTokens: null, complete: false };
   const partial = render(data);
   assert.match(partial, /部分调用/);
-  assert.doesNotMatch(partial, /输出 token|<dd>0<\/dd>|高级信息/);
+  assert.doesNotMatch(partial, /输出 token|<dd>0<\/dd>/);
+  assert.match(partial, /缓存输入 token<\/dt><dd>未知（接口未提供）/);
 });
 
 test('returned model and call budgets stay in collapsed advanced information', () => {
@@ -60,7 +66,30 @@ test('returned model and call budgets stay in collapsed advanced information', (
   assert.doesNotMatch(primary, /returned-model|模型步骤|生成图片|已完成|状态/);
   assert.match(html, /返回模型<\/dt><dd>returned-model/);
   assert.match(html, /模型步骤<\/dt><dd>2 \/ 5/);
-  assert.match(html, /生成图片<\/dt><dd>1 \/ 2/);
+  assert.match(html, /已提交<\/dt><dd>1/);
+  assert.match(html, /成功<\/dt><dd>未记录/);
+  assert.match(html, /本轮上限<\/dt><dd>2/);
+});
+
+test('round details count actual jobs, preserve reported cache zero, and show only measured stage durations', () => {
+  const data = details(); data.usage = { ...data.usage, inputTokens: 40, cachedInputTokens: 0 };
+  const round = {
+    id: 'old', requestId: 'old-request', status: 'error', outputTaskIds: ['ok', 'fail'],
+    execution: { version: 1, phase: 'failed', timings: { preparationMs: 20, modelResponseMs: 900, toolsMs: 300, resultProcessingMs: null }, modelSteps: [{ step: 1, state: 'completed', preparationMs: 20, headersMs: 100, firstEventMs: 250, responseMs: 900 }] },
+  };
+  const jobs = [
+    { id: 'ok', status: 'accepted' },
+    { id: 'fail', status: 'failed', error: '{"secret":"NEVER_RENDER"}', metadata: { failure: { kind: 'quota', message: 'NEVER_RENDER' }, execution: { timings: { queueMs: 50, providerMs: 200, resultWriteMs: null } } } },
+    { id: 'unrelated', status: 'succeeded' },
+  ];
+  const html = render(data, { round, jobs });
+  assert.match(html, /已提交<\/dt><dd>2/); assert.match(html, /成功<\/dt><dd>1/); assert.match(html, /失败<\/dt><dd>1/);
+  assert.match(html, /缓存输入 token<\/dt><dd>0/); assert.match(html, /推理 token<\/dt><dd>未知（接口未提供）/);
+  assert.match(html, /请求至响应头<\/dt><dd>0.100 秒/); assert.match(html, /请求至首个有效事件<\/dt><dd>0.250 秒/);
+  assert.match(html, /结果处理<\/dt><dd>未记录/); assert.match(html, /图片接口<\/dt><dd>0.200 秒/);
+  assert.match(html, /余额不足 · quota/); assert.doesNotMatch(html, /NEVER_RENDER|secret/);
+  const legacy = render(undefined, { round: { ...round, execution: null }, jobs });
+  assert.match(legacy, /本地准备<\/dt><dd>未记录/); assert.doesNotMatch(legacy, /0.000 秒/);
 });
 
 test('details show reported tokens, attributed skills and public summary without rendering hidden output', () => {
