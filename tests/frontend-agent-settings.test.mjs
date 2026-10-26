@@ -147,15 +147,18 @@ function imageOptions(t, overrides = {}) {
   return { ...h, changes, copies, resets, sizes, config, fields: () => h.find(select), models: () => h.find(model) };
 }
 
-test('image options keeps text routing independent while selecting an image provider and preserving manual models and other parameters', async t => {
+test('image profile changes use its own default while text routing and parameters stay unchanged; manual overrides remain available', async t => {
   const h = imageOptions(t); await h.flush();
   assert.ok(h.text().includes('Profile a · text-model'));
   assert.ok(h.text().includes('b-image · 供应商默认模型'));
   assert.equal(h.models()[0].profile.id, 'b'); assert.equal(h.models()[0].imageRecommendations, true);
   h.models()[0].onChange('historical-image-model'); await h.flush();
   h.fields().find(field => field.label === '生图供应商').onChange('a'); await h.flush();
-  assert.deepEqual(h.changes.at(-1), { imageConfig: { profileId: 'a', model: 'historical-image-model' } });
-  assert.equal(h.models()[0].value, 'historical-image-model');
+  assert.deepEqual(h.changes.at(-1), { imageConfig: { profileId: 'a', model: 'a-image' } });
+  assert.equal(h.models()[0].value, 'a-image');
+  h.models()[0].onChange('my-manual-model'); await h.flush();
+  assert.deepEqual(h.changes.at(-1), { imageConfig: { profileId: 'a', model: 'my-manual-model' } });
+  assert.match(h.text(), /手动覆盖模型/);
   h.fields().find(field => field.label === '图片质量').onChange('max'); await h.flush();
   assert.deepEqual(h.changes.at(-1), { params: { size: '1024x1024', quality: 'max', background: 'auto', output_format: 'webp', output_compression: 87, moderation: 'low' } });
   assert.equal(h.find('select').length, 0, 'all visible choices use project controls');

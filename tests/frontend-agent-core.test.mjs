@@ -104,12 +104,14 @@ const assistantBlocks = instantiate(await compile('../frontend/src/utils/playgro
 const imageReferences = instantiate(await compile('../frontend/src/utils/playground/agentImageReferences.ts'), {});
 const compatibleRecipe = instantiate(await compile('../frontend/src/utils/compatibleRecipe.ts'), {});
 const galleryBridge = instantiate(await compile('../frontend/src/utils/agentGalleryBridge.ts'), {});
+const imageRetry = instantiate(await compile('../frontend/src/utils/playground/agentImageRetry.ts'), {});
+const recipeInputs = instantiate(await compile('../frontend/src/utils/recipeInputs.ts'), {});
 function nodes(node) { return !node || typeof node !== 'object' ? [] : [node, ...[node.props?.children].flat(Infinity).flatMap(nodes)]; }
 function deferred() { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; }
 function harness(t, options = {}) {
   const slots = [], effects = [], timers = new Map(), calls = [], listeners = new Map(), scrollFrames = new Map(), scrollObservers = [];
   const submissions = [], creations = [], requestReads = [], watchers = [], profileChanges = [], panelFocusCalls = [], settingsOpens = [];
-  const jobReads = [], jobReplies = [], conversationReads = [], conversationUpdates = [], imageDecodes = [];
+  const jobReads = [], jobReplies = [], conversationReads = [], conversationUpdates = [], imageDecodes = [], taskUpdates = [], uploads = [], referenceReads = [];
   const root = { inert: false };
   const storage = new Map([['ipl.agent.active-conversation', options.activeId === null ? null : 'current']]);
   if (options.inputPreferences) storage.set('ipl.agent.input-preferences.v1', JSON.stringify(options.inputPreferences));
@@ -125,6 +127,7 @@ function harness(t, options = {}) {
   const jsx = (type, props) => ({ type, props });
   const globalMocks = {
     performance: { now: () => options.now?.() ?? 100 },
+    fetch: (url, init) => { referenceReads.push([url, init]); return options.fetch?.(url, init) ?? Promise.resolve(new Response(new Blob(['synthetic-image'], { type: 'image/png' }))); },
     setTimeout: cb => { timers.set(++timerId, cb); return timerId; }, clearTimeout: id => timers.delete(id),
     window: { innerWidth: 1280, innerHeight: 900, addEventListener: (name, cb) => { if (!listeners.has(name)) listeners.set(name, new Set()); listeners.get(name).add(cb); }, removeEventListener: (name, cb) => listeners.get(name)?.delete(cb), dispatchEvent: event => { listeners.get(event.type)?.forEach(cb => cb(event)); return true; } },
     localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) },
@@ -139,6 +142,8 @@ function harness(t, options = {}) {
   const snapshot = { conversation: { id: 'current', title: 'Open conversation', rounds: [], messages: [] }, revision: 1, request: null, jobs: [], images: [], ...options.snapshot };
   const snapshots = new Map([['current', snapshot], ...Object.entries(options.snapshots || {})]);
   const agentApi = {
+    upload: async file => { uploads.push(file); return options.upload?.(file) ?? { uploadId: `restored-${uploads.length}`, image: { status: 'available', url: `http://isolated.test/restored-${uploads.length}.png` } }; },
+    updateEditingTask: async (id, body) => { taskUpdates.push({ id, body }); return options.updateEditingTask?.(id, body) ?? { ...snapshot, revision: snapshot.revision + 1, editingTask: body.task }; },
     conversations(cursor, signal, query) { const reply = deferred(); calls.push({ cursor, signal, query, ...reply }); return reply.promise; },
     conversation: async id => { conversationReads.push(id); return options.conversation?.(id) ?? snapshots.get(id) ?? { ...snapshot, conversation: { ...snapshot.conversation, id } }; },
     updateConversation: async (id, body) => { conversationUpdates.push({ id, body }); const current = snapshots.get(id) || snapshot; const value = { ...current, revision: current.revision + 1, conversation: { ...current.conversation, id, activeRoundId: body.activeRoundId } }; snapshots.set(id, value); return options.updateConversation?.(id, body) ?? value; },
@@ -167,6 +172,11 @@ function harness(t, options = {}) {
     },
     '../../utils/compatibleRecipe': compatibleRecipe,
     '../../utils/agentGalleryBridge': galleryBridge,
+    '../../utils/playground/agentImageRetry': imageRetry,
+    '../../utils/recipeInputs': recipeInputs,
+    './AgentImageRetryDialog': { __esModule: true, default: 'retry-dialog' },
+    './AgentEditingTaskDialog': { __esModule: true, default: 'editing-task-dialog' },
+    './AgentFailedImageEditDialog': { __esModule: true, default: 'failed-image-edit-dialog' },
     './AgentImageOptions': { __esModule: true, default: 'image-options' }, '../gallery/SizeDialog': { __esModule: true, default: 'size-dialog' },
     '../../utils/localPreferences': { readLocalPreferences: () => ({ persistInputOnRestart: true }) },
     '../../utils/agentInputPreferences': inputPreferences,
@@ -191,7 +201,7 @@ function harness(t, options = {}) {
   const close = async () => { find('button', p => p['aria-label'] === '关闭 Agent 面板')[0].onClick(); await flush(); };
   const unmount = () => { if (unmounted) return; unmounted = true; slots.forEach(slot => slot?.cleanup?.()); };
   render(); t.after(unmount);
-  return { calls, find, open, close, root, profileChanges, panelFocusCalls, settingsOpens, flush, unmount, submissions, creations, requestReads, watchers, snapshot, storage, AgentApiError, inputPreferences, jobReads, conversationReads, conversationUpdates, imageDecodes, scrollObservers, window: globalMocks.window,
+  return { calls, find, open, close, root, profileChanges, panelFocusCalls, settingsOpens, flush, unmount, submissions, creations, requestReads, watchers, snapshot, storage, AgentApiError, inputPreferences, jobReads, conversationReads, conversationUpdates, imageDecodes, taskUpdates, uploads, referenceReads, scrollObservers, window: globalMocks.window,
     updateProps(next) { props = { ...props, ...next }; render(); }, queueJobRead() { const reply = deferred(); jobReplies.push(reply); return reply; },
     resultCard() { const card = nodes(tree).find(node => typeof node.type === 'function' && node.type.name === 'ResultCard'); assert.ok(card, 'actual result card should be rendered'); const savedCursor = cursor; cursor = slots.length; const content = card.type(card.props); cursor = savedCursor; return nodes(content); },
     setConfig(value) { config = { ...config, ...value }; }, dispatch(name) { globalMocks.window.dispatchEvent({ type: name }); }, show() { active = true; render(); }, get late() { return late; }, get pendingTimers() { return timers.size; }, get configReads() { return configReads; }, hide() { active = false; render(); } };
@@ -834,10 +844,90 @@ test('historical image tool uses its own failed job rather than completed model 
   data.jobs = [{ id: 'old-failed', status: 'failed', result_path: null, error: 'legacy upstream error', metadata: { agent: { agentToolCallId: 'same-call' } } }];
   const h = harness(t, { snapshot: data }); await h.flush();
   const caption = JSON.stringify(h.find('div', p => p.className === 'agent-tool-status'));
-  assert.match(caption, /本次未生成图片|图片全部失败/);
+  assert.match(caption, /生成图片/);
+  assert.equal(h.find('small', p => p.children === '本次未生成图片').length, 0, 'one image tool does not repeat the round outcome');
+  assert.match(JSON.stringify(h.find('p', p => p.className === 'agent-round-outcome')), /本次未生成图片/);
   assert.doesNotMatch(caption, /已完成/);
   assert.equal(h.find('textarea')[0].value, 'Keep my draft');
   assert.equal(h.submissions.length, 0);
+});
+
+test('actual workspace edits and ends the branch task without replacing prompt, attachments or image configuration', async t => {
+  const data = displaySnapshot('completed');
+  const h = harness(t, { snapshot: data, updateEditingTask: async (_, body) => ({ ...data, revision: 2, jobs: [], images: [], editingTask: body.task ? { ...body.task, target: { assetId: 'frozen-id', source: body.task.target } } : null }) }); await h.flush();
+  const before = savedDraft(h);
+  await h.open('查看和修改当前编辑任务');
+  const dialog = h.find('editing-task-dialog')[0];
+  assert.deepEqual(dialog.choices[0].reference, before.refs[0].reference);
+  const task = { target: before.refs[0].reference, auxiliaries: [], requirements: 'Only socks', constraints: ['Keep pose'], workflow: 'gpt-image' };
+  await dialog.onSave(task); await h.flush();
+  assert.deepEqual(h.taskUpdates, [{ id: 'current', body: { expectedRevision: 1, branchRoundId: 'r1', task } }]);
+  assert.deepEqual(savedDraft(h), before); assert.equal(h.submissions.length, 0);
+  await h.open('查看和修改当前编辑任务'); await h.find('editing-task-dialog')[0].onSave(null); await h.flush();
+  assert.equal(h.taskUpdates.at(-1).body.task, null); assert.deepEqual(savedDraft(h), before);
+});
+
+test('failed image actions preserve the draft and retry results stay separate from the original failure', async t => {
+  const data = displaySnapshot('failed'); data.revision = 1; data.jobs = [{ id: 'failed', status: 'failed', prompt_text: 'execution prompt', parameters: {}, metadata: {} }]; data.conversation.rounds[0].outputTaskIds = ['failed'];
+  const updated = structuredClone(data); updated.revision = 2; updated.images = []; updated.conversation.rounds[0].retryTaskIds = ['retry-result']; updated.jobs.push({ id: 'retry-result', status: 'succeeded', result_path: '/retry.png' });
+  let reads = 0;
+  const h = harness(t, { snapshot: data, conversation: async () => ++reads === 1 ? { ...data, images: [] } : updated }); await h.flush();
+  const before = savedDraft(h);
+  h.resultCard().find(node => node.props?.['aria-label'] === '使用当前生图配置重试').props.onClick(); await h.flush();
+  const dialog = h.find('retry-dialog')[0]; assert.equal(dialog.job.prompt_text, 'execution prompt');
+  assert.equal(h.submissions.length, 0); assert.deepEqual(savedDraft(h), before);
+  dialog.onReceipt({ retryId: 'retry', sourceJobId: 'failed', job: updated.jobs[1] }); await h.flush();
+  assert.equal(h.conversationReads.length, 2, `read calls ${JSON.stringify(h.conversationReads)}`);
+  assert.ok(h.find('section', p => p['aria-label'] === '本轮图片的重试结果').length);
+  assert.match(JSON.stringify(h.find('p', p => p.className === 'agent-round-outcome')), /本次未生成图片/);
+  assert.deepEqual(savedDraft(h), before); assert.equal(h.submissions.length, 0);
+});
+
+test('accepted task updates survive a closed editor without clearing newer draft edits, but cannot update an unmounted workspace', async t => {
+  for (const unmount of [false, true]) {
+    const data = displaySnapshot('completed'), pending = deferred();
+    const h = harness(t, { snapshot: data, updateEditingTask: () => pending.promise }); await h.flush();
+    await h.open('查看和修改当前编辑任务');
+    const dialog = h.find('editing-task-dialog')[0];
+    const task = { target: reference('u1').reference, auxiliaries: [], requirements: 'Keep lighting', constraints: [], workflow: 'auto' };
+    const saving = dialog.onSave(task);
+    dialog.onClose(); await h.flush();
+    h.find('textarea')[0].onChange({ target: { value: 'New draft after close', selectionStart: 21 } }); await h.flush();
+    const before = savedDraft(h);
+    if (unmount) h.unmount();
+    pending.resolve({ ...data, revision: 2, images: [], jobs: [], editingTask: { ...task, target: { assetId: 'frozen', source: task.target } } }); await saving; await h.flush();
+    assert.deepEqual(savedDraft(h), before); assert.equal(h.late, 0); assert.equal(h.submissions.length, 0);
+    if (!unmount) { await h.open('查看和修改当前编辑任务'); assert.equal(h.find('editing-task-dialog')[0].task.requirements, 'Keep lighting'); }
+  }
+});
+
+function editableFailure() {
+  const data = displaySnapshot('failed'); data.jobs = [{ id: 'failed', provider: 'openai_compatible', status: 'failed', prompt_text: '  Actual execution prompt\n\nSecond paragraph.  ', mode: 'image_edit', parameters: { size: '1536x1024', quality: 'high', output_format: 'png', input_images: [{ name: 'frozen 1', result_path: 'http://isolated.test/frozen-1.png' }, { name: 'frozen 2', result_path: 'http://isolated.test/frozen-2.png' }] }, metadata: {} }]; data.conversation.rounds[0].outputTaskIds = ['failed']; return data;
+}
+test('actual failed image edit restores the execution prompt and both frozen originals atomically with no model submission', async t => {
+  const data = editableFailure(), h = harness(t, { snapshot: data }); await h.flush();
+  const before = savedDraft(h);
+  h.resultCard().find(node => node.props?.['aria-label'] === '修改提示词后重新生成').props.onClick(); await h.flush();
+  const dialog = h.find('failed-image-edit-dialog')[0]; assert.equal(dialog.job.prompt_text, data.jobs[0].prompt_text); assert.deepEqual(savedDraft(h), before);
+  await dialog.onApply('  Changed light\n\nKeep pose.  '); await h.flush();
+  assert.equal(savedDraft(h).text, '  Changed light\n\nKeep pose.  '); assert.equal(savedDraft(h).refs.length, 2);
+  assert.deepEqual(savedDraft(h).refs.map(choice => choice.reference.uploadId), ['restored-1','restored-2']);
+  assert.deepEqual(h.referenceReads.map(([url]) => url), ['http://isolated.test/frozen-1.png','http://isolated.test/frozen-2.png']);
+  assert.equal(h.uploads.length, 2); assert.equal(await h.uploads[0].text(), 'synthetic-image'); assert.equal(savedDraft(h).params.size, '1536x1024'); assert.equal(h.submissions.length, 0);
+});
+
+test('missing frozen reference never falls back to another image and late restoration cannot replace a newer draft', async t => {
+  const missing = harness(t, { snapshot: editableFailure(), fetch: async () => new Response('', { status: 404 }) }); await missing.flush();
+  const before = savedDraft(missing);
+  missing.resultCard().find(node => node.props?.['aria-label'] === '修改提示词后重新生成').props.onClick(); await missing.flush();
+  await assert.rejects(missing.find('failed-image-edit-dialog')[0].onApply('new'), /冻结参考图无法读取/); await missing.flush();
+  assert.deepEqual(savedDraft(missing), before); assert.equal(missing.submissions.length, 0); assert.equal(missing.uploads.length, 0);
+  const deferredRead = deferred(), late = harness(t, { snapshot: editableFailure(), fetch: () => deferredRead.promise }); await late.flush();
+  late.resultCard().find(node => node.props?.['aria-label'] === '修改提示词后重新生成').props.onClick(); await late.flush();
+  const pending = late.find('failed-image-edit-dialog')[0].onApply('old replacement'); await late.flush();
+  late.find('textarea')[0].onChange({ target: { value: 'Newer draft', selectionStart: 11 } }); await late.flush();
+  deferredRead.resolve(new Response(new Blob(['synthetic-image'], { type: 'image/png' }))); await pending; await late.flush();
+  assert.equal(savedDraft(late).text, 'Newer draft'); assert.equal(savedDraft(late).refs[0].reference.uploadId, 'u1'); assert.equal(late.uploads.length, 0); assert.equal(late.submissions.length, 0);
 });
 
 test('actual result cards classify safe image failures once without exposing old raw upstream JSON', async t => {
@@ -863,12 +953,12 @@ test('actual workspace reports mixed results and unknown receipts without losing
   data.jobs = [{ id: 'ok', status: 'accepted', result_path: '/ok.png', metadata: { agent: { agentToolCallId: 'batch' } } }, { id: 'fail', status: 'failed', metadata: { agent: { agentToolCallId: 'batch' } } }];
   const h = harness(t, { snapshot: data }); await h.flush();
   assert.match(JSON.stringify(h.find('p', p => p.className === 'agent-round-outcome')), /图片部分成功，已保留 1 张结果/);
-  assert.match(JSON.stringify(h.find('div', p => p.className === 'agent-tool-status')), /图片部分成功/);
+  assert.equal(h.find('small', p => p.children === '图片部分成功').length, 0);
   h.unmount();
   data.jobs.pop();
   const unknown = harness(t, { snapshot: data }); await unknown.flush();
   assert.match(JSON.stringify(unknown.find('p', p => p.className === 'agent-round-outcome')), /结果未知/);
-  assert.match(JSON.stringify(unknown.find('div', p => p.className === 'agent-tool-status')), /结果未知/);
+  assert.equal(unknown.find('small', p => p.children === '结果未知').length, 0);
   assert.equal(unknown.find('textarea')[0].value, 'Keep my draft'); assert.equal(unknown.submissions.length, 0);
   unknown.unmount();
   data.jobs.push({ id: 'fail', status: 'unknown', metadata: { agent: { agentToolCallId: 'batch' } } });
@@ -889,6 +979,18 @@ test('production progress snapshots expose measured phases without fabricating a
     assert.match(caption, new RegExp(label)); assert.doesNotMatch(caption, /%|正在响应/);
     assert.deepEqual(savedDraft(h), before);
   }
+  assert.equal(h.submissions.length, 0);
+});
+
+test('different image tools retain individual outcomes while one round reports the combined partial result', async t => {
+  const data = displaySnapshot('completed'), round = data.conversation.rounds[0];
+  round.outputTaskIds = ['success', 'failure'];
+  round.responseOutput = ['first', 'second'].map(call_id => ({ type: 'function_call', name: 'generate_image', call_id, status: 'completed' }));
+  data.jobs = [{ id: 'success', status: 'succeeded', result_path: '/success.png', metadata: { agent: { agentToolCallId: 'first' } } }, { id: 'failure', status: 'failed', metadata: { agent: { agentToolCallId: 'second' } } }];
+  const h = harness(t, { snapshot: data }); await h.flush();
+  assert.equal(h.find('small', p => p.children === '图片全部成功').length, 1);
+  assert.equal(h.find('small', p => p.children === '本次未生成图片').length, 1);
+  assert.match(JSON.stringify(h.find('p', p => p.className === 'agent-round-outcome')), /图片部分成功，已保留 1 张结果/);
   assert.equal(h.submissions.length, 0);
 });
 
@@ -1003,6 +1105,23 @@ test('reference success notices expire without closing errors or changing text a
   assert.match(JSON.stringify(h.find('p', p => p.role === 'alert')), /Keep this error visible/);
 });
 
+test('historical task images use frozen reference aliases after original attachments and never impersonate those attachments', async t => {
+  const data = displaySnapshot('completed');
+  data.conversation.rounds[0].inputImageIds = ['original'];
+  data.conversation.rounds[0].taskImageIds = ['task-image', 'missing-task'];
+  data.images = [{ id: 'original', source: { kind: 'upload', uploadId: 'original' }, status: 'available', url: '/original.png' }, { id: 'task-image', source: { kind: 'library', imageId: 'mutable-source' }, status: 'available', url: '/frozen-task.png' }, { id: 'missing-task', source: { kind: 'upload', uploadId: 'gone' }, status: 'missing', url: '' }];
+  const h = harness(t, { snapshot: data, draft: { text: 'Keep lighting @', params } }); await h.flush();
+  const before = savedDraft(h);
+  assert.equal(h.find('img', p => p.alt === '参考图 1').length, 1);
+  assert.equal(h.find('img', p => p.alt === '参考图 2').length, 0);
+  await h.open('添加图片或引用'); h.find('button', p => p['aria-label'] === '引用已有图片')[0].onClick(); await h.flush();
+  assert.equal(h.find('button', p => p['aria-label'] === '引用第 1 轮编辑任务参考 2')[0].disabled, true);
+  h.find('button', p => p['aria-label'] === '引用第 1 轮编辑任务参考 1')[0].onClick(); await h.flush();
+  assert.equal(savedDraft(h).text, 'Keep lighting <ref id="round-1-reference-2" /> ');
+  assert.deepEqual(savedDraft(h).refs, before.refs, 'historical frozen pixels must not be replaced by a fresh mutable Library lookup');
+  assert.deepEqual(savedDraft(h).params, params); assert.equal(h.submissions.length, 0);
+});
+
 test('actual workspace explicitly copies Gallery image settings, keeps drafts independent and freezes the per-request selection', async t => {
   const gallery = { provider: 'openai_compatible', profileId: 'gallery', model: 'gpt-image-gallery', params: { ...params, quality: 'medium' } };
   const h = harness(t, { draft: { params }, props: { galleryImageSettings: gallery } }); await h.flush(); await configureImages(h);
@@ -1111,6 +1230,18 @@ test('Gallery Agent-source handoff selects the precise recorded branch and prese
   assert.equal(h.find('textarea')[0].value, 'Unsaved target text');
   assert.deepEqual(allDrafts(h).current, before);
   assert.deepEqual(allDrafts(h).target, { ...targetDraft, refs: [...targetDraft.refs, { reference: { kind: 'job', jobId: job.id }, label: '画廊结果', url: job.result_path }] });
+  assert.equal(h.submissions.length, 0); assert.equal(h.creations.length, 0);
+});
+
+test('Gallery retry results return to their recorded Agent branch without replacing the original failed task', async t => {
+  const job = completedJob('retried-image', { agentRetry: { conversationId: 'target', roundId: 'target-first', sourceJobId: 'failed-original' } });
+  const target = { revision: 4, request: null, jobs: [job], images: [], conversation: { id: 'target', title: 'Target', activeRoundId: 'target-first', rounds: [{ id: 'target-first', index: 1, parentRoundId: null, outputTaskIds: ['failed-original'], retryTaskIds: [job.id], inputImageIds: [], prompt: 'old', status: 'done' }], messages: [] } };
+  const h = harness(t, { jobs: { [job.id]: job }, snapshots: { target } }); await h.flush(); const before = savedDraft(h);
+  h.updateProps({ galleryCommand: { id: 20, job, intent: 'reference' } }); await h.flush();
+  assert.equal(h.storage.get('ipl.agent.active-conversation'), 'target');
+  assert.deepEqual(allDrafts(h).current, before);
+  assert.deepEqual(allDrafts(h).target.refs.map(row => row.reference), [{ kind: 'job', jobId: job.id }]);
+  assert.deepEqual(target.conversation.rounds[0].outputTaskIds, ['failed-original']);
   assert.equal(h.submissions.length, 0); assert.equal(h.creations.length, 0);
 });
 

@@ -72,7 +72,7 @@ export interface AgentExecution {
 }
 export interface AgentRound {
   id: string; index: number; parentRoundId: string | null; userMessageId: string; assistantMessageId?: string;
-  prompt: string; inputImageIds: string[]; maskTargetImageId: string | null; maskImageId: string | null;
+  prompt: string; inputImageIds: string[]; taskImageIds?: string[]; maskTargetImageId: string | null; maskImageId: string | null;
   outputTaskIds: string[]; responseId?: string; responseOutput?: AgentOutputItem[];
   status: 'running' | 'done' | 'error'; error: string | null; createdAt: number; finishedAt: number | null;
   requestId: string; derivedFromRoundId?: string | null;
@@ -81,7 +81,30 @@ export interface AgentRound {
   resultSummary?: AgentResultSummary;
   execution?: AgentExecution | null;
   failure?: { kind: string; message: string; outcomeUnknown: boolean } | null;
+  retryTaskIds?: string[];
+  editingTask?: AgentEditingTask | null;
 }
+export type AgentReferenceRole = 'lighting' | 'style' | 'subject' | 'composition' | 'other';
+export interface AgentEditingTaskInput {
+  target: AgentReference | null;
+  auxiliaries: Array<{ ref: AgentReference; role: AgentReferenceRole }>;
+  requirements: string; constraints: string[];
+  workflow: 'auto' | 'image-prompt-reverse' | 'gpt-image';
+}
+export interface AgentEditingTask {
+  version: 1; conversationId: string; branchRoundId: string | null;
+  target: { assetId: string; source: AgentReference } | null;
+  auxiliaries: Array<{ assetId: string; source: AgentReference; role: AgentReferenceRole }>;
+  requirements: string; constraints: string[]; workflow: AgentEditingTaskInput['workflow'];
+  needsTargetSelection: boolean;
+  configIdentity: { mode: AgentConfig['apiConfigMode']; textProfileId: string | null; textModel: string; imageProfileId: string | null; imageModel: string };
+}
+export interface AgentImageRetryInput {
+  retryId: string; conversationId: string; configRevision: number;
+  imageConfig: { profileId: string; model: string };
+  params?: Partial<AgentImageParams>; confirmed: true;
+}
+export interface AgentImageRetryReceipt { retryId: string; sourceJobId: string; job: GenerationJobRecord }
 export interface AgentMessage {
   id: string; role: 'user' | 'assistant'; content: string; roundId: string;
   inputImageIds?: string[]; outputTaskIds?: string[]; createdAt: number;
@@ -126,20 +149,21 @@ export interface AgentRequest {
 export interface AgentSnapshot {
   schemaVersion: 1; revision: number; conversation: AgentConversation; request: AgentRequest | null;
   jobs: GenerationJobRecord[]; images: AgentImage[];
+  editingTask?: AgentEditingTask | null;
 }
 
 export class AgentApiError extends Error {
   constructor(public status: number, public code: string, message: string) { super(message); this.name = 'AgentApiError'; }
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function request<T>(path: string, init: RequestInit = {}, prefix = '/api/agent'): Promise<T> {
   const timeout = new AbortController();
   const timer = setTimeout(() => timeout.abort(), 30_000);
   const signal = init.signal ? AbortSignal.any([init.signal, timeout.signal]) : timeout.signal;
   try {
     // No automatic retry, including after a timeout. Mutating submissions retain
     // their original request ID in the workspace's uncertain-submission journal.
-    const response = await fetch(`/api/agent${path}`, {
+    const response = await fetch(`${prefix}${path}`, {
       ...init, signal, credentials: 'same-origin',
       headers: init.body instanceof FormData ? init.headers : { 'Content-Type': 'application/json', ...init.headers },
     });
@@ -200,6 +224,9 @@ export function watchAgentRequest(id: string, onSnapshot: (value: AgentSnapshot)
 }
 
 export const agentApi = {
+  updateEditingTask: (id: string, payload: { expectedRevision: number; branchRoundId: string | null; task: AgentEditingTaskInput | null }) => request<AgentSnapshot>(`/conversations/${encodeURIComponent(id)}/editing-task`, { method: 'PATCH', body: JSON.stringify(payload) }),
+  retryImage: (jobId: string, payload: AgentImageRetryInput) => request<AgentImageRetryReceipt>(`/${encodeURIComponent(jobId)}/retry-current`, { method: 'POST', body: JSON.stringify(payload) }, '/api/generation-jobs'),
+  imageRetryReceipt: (retryId: string, conversationId: string) => request<AgentImageRetryReceipt>(`/retry-submissions/${encodeURIComponent(retryId)}?conversation_id=${encodeURIComponent(conversationId)}`, {}, '/api/generation-jobs'),
   conversations: (cursor?: string, signal?: AbortSignal, query?: string) => request<{ conversations: AgentConversationSummary[]; nextCursor: string | null }>(`/conversations?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}${query?.trim() ? `&q=${encodeURIComponent(query.trim())}` : ''}`, { signal }),
   createConversation: (id: string, title?: string) => request<AgentSnapshot>('/conversations', { method: 'POST', body: JSON.stringify({ id, title }) }),
   conversation: (id: string, signal?: AbortSignal) => request<AgentSnapshot>(`/conversations/${encodeURIComponent(id)}`, { signal }),

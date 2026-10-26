@@ -1047,7 +1047,7 @@ class GenerationJobRepository:
         for row in rows:
             self.clear_stream_preview(row["id"])
 
-    def mark_running(self, job_id: str) -> GenerationJobRecord:
+    def mark_running(self, job_id: str, *, queued_only: bool = False) -> GenerationJobRecord:
         timestamp = now()
         with connect(self.library_path) as conn:
             conn.execute('BEGIN IMMEDIATE')
@@ -1057,21 +1057,23 @@ class GenerationJobRepository:
             metadata = _from_json(row['metadata'], {})
             execution = metadata.setdefault('execution', {'version': 1, 'phase': 'queued',
                 'timings': {key: None for key in ('queueMs', 'preparationMs', 'providerMs', 'resultWriteMs')}})
-            if row['status'] in {'queued', 'failed'}:
+            allowed = {'queued'} if queued_only else {'queued', 'failed'}
+            if row['status'] in allowed:
                 execution['timings']['queueMs'] = _queue_duration(self.library_path, job_id)
                 execution['phase'] = 'preparing'
             cursor = conn.execute(
                 """
                 UPDATE generation_jobs
                 SET status='running', error=NULL, started_at=COALESCE(started_at, ?), updated_at=?, metadata=?
-                WHERE id=? AND status IN ('queued', 'failed')
+                WHERE id=? AND (status='queued' OR (?=0 AND status='failed'))
                 """,
-                (timestamp, timestamp, _to_json(metadata), job_id),
+                (timestamp, timestamp, _to_json(metadata), job_id, int(queued_only)),
             )
             conn.commit()
         if cursor.rowcount != 1:
             current = self.get_job(job_id)
-            raise GenerationJobConflict(f"Generation job must be queued or failed before run; current status is {current.status}")
+            expected = 'queued' if queued_only else 'queued or failed'
+            raise GenerationJobConflict(f"Generation job must be {expected} before run; current status is {current.status}")
         return self.get_job(job_id)
 
     def mark_failed(self, job_id: str, error: str, retry_after_seconds: int | None = None, *, diagnostics: dict | None = None) -> GenerationJobRecord:
@@ -2426,6 +2428,8 @@ class GenerationJobRepository:
                 if not isinstance(original_metadata, dict):
                     original_metadata = {}
                 original_metadata = sanitize_generation_parameters(original_metadata, redact_image_data=True)
+                if original_metadata.get("latestRetryJobId") or original_metadata.get("agentRetry"):
+                    raise GenerationJobConflict("请在 Agent 中核对已有重试并确认当前生图配置，不能从旧入口重复提交。")
                 if original_metadata.get("retried_by_generation_job_id"):
                     raise GenerationJobConflict("Failed generation job has already been retried")
                 original_metadata["retried_by_generation_job_id"] = retry_id

@@ -18,7 +18,7 @@ export interface AgentGalleryCommand {
 }
 
 export function agentJobSource(job: Pick<GenerationJobRecord, 'metadata'>): { conversationId: string; roundId?: string } | undefined {
-  const value = job.metadata?.agent;
+  const value = job.metadata?.agentRetry || job.metadata?.agent;
   if (!value || typeof value !== 'object' || Array.isArray(value)) return;
   const source = value as Record<string, unknown>;
   if (typeof source.conversationId !== 'string' || !source.conversationId) return;

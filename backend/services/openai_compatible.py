@@ -737,7 +737,9 @@ class OpenAICompatibleProvider:
             return job
         if job.status != "queued":
             raise GenerationJobConflict("Generation job must be queued; failed paid jobs require explicit resubmission")
-        repo.mark_running(job_id)
+        # The earlier read is not a claim: another dispatcher may have already
+        # called this paid request and persisted its failure in the meantime.
+        repo.mark_running(job_id, queued_only=True)
         preparation_started = time.monotonic()
         try:
             repo.record_execution(job_id, 'preparing')

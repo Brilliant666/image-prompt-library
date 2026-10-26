@@ -50,11 +50,12 @@ export default function AgentImageOptions({ config, activeProfileId, selection, 
     <div className="agent-image-text-source"><span>{en ? 'Text model' : '文字模型'}</span><strong>{textProfile?.display_name || unavailable} · {config.config.textModel || (en ? 'Not set' : '未设置')}</strong></div>
     <div className="agent-image-provider">
       <span className="agent-image-field-label">{en ? 'Image provider' : '生图供应商'}</span>
-      {hybrid ? <ToolbarSelect label={en ? 'Image provider' : '生图供应商'} value={imageProfileId || ''} options={profileOptions} disabled={disabled} onChange={profileId => changeImage({ profileId })} />
+      {hybrid ? <ToolbarSelect label={en ? 'Image provider' : '生图供应商'} value={imageProfileId || ''} options={profileOptions} disabled={disabled} onChange={profileId => changeImage({ profileId, model: config.profiles.find(profile => profile.id === profileId)?.model || '' })} />
         : <strong>{imageProfile?.display_name || unavailable}<small>{en ? 'Responses image tool' : 'Responses 生图工具'}</small></strong>}
     </div>
     <AgentModelPicker label={en ? 'Image model' : '生图模型'} value={imageModel} profile={imageProfile} active={!disabled} en={en} disabled={disabled} imageRecommendations={hybrid} onChange={model => changeImage({ model })} />
-    <p className="agent-image-model-summary">{en ? 'Will use: ' : '将使用：'}<strong>{effectiveModel}</strong>{!imageModel.trim() && hybrid && (en ? ' · profile default' : ' · 供应商默认模型')}</p>
+    <p className="agent-image-model-summary">{en ? 'Will use: ' : '将使用：'}<strong>{effectiveModel}</strong>{hybrid && (imageModel.trim() && imageModel.trim() !== imageProfile?.model ? en ? ' · manual override' : ' · 手动覆盖模型' : en ? ' · profile default' : ' · 供应商默认模型')}</p>
+    {hybrid && imageModel.trim() && imageModel.trim() !== imageProfile?.model && <p className="agent-image-hint">{en ? 'Profile default: ' : '供应商默认模型：'}{imageProfile?.model || (en ? 'Not set' : '未设置')}{imageProfile?.model_catalog?.fetched_at && !imageProfile.model_catalog.models.some(model => model.id === imageModel.trim()) && (en ? ' · Manual model is not in the cached catalog; compatibility is unverified.' : ' · 手填模型不在缓存清单中，兼容性未验证。')}</p>}
     {!hybrid && <p className="agent-image-hint">{en ? 'This mode uses the text provider’s Responses image tool. Gallery Images API settings cannot be copied into it.' : '此模式通过文字接口的 Responses 生图工具生成，不能直接套用画廊的 Images API 配置。'}</p>}
     <div className="agent-image-config-actions">
       <button type="button" className="secondary" disabled={disabled || !hybrid || !galleryAvailable} title={hybrid ? galleryUnavailable : undefined} onClick={() => { if (!disabled && hybrid && galleryAvailable) onUseGallery(); }}>{en ? 'Use Gallery image settings' : '使用画廊当前生图设置'}</button>

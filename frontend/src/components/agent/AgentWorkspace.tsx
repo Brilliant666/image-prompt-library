@@ -10,7 +10,7 @@ import { AgentMarkdown } from './AgentMarkdown';
 import { useAgentConversations } from './useAgentConversations';
 import { useAgentScroll } from './useAgentScroll';
 import { api, mediaUrl } from '../../api/client';
-import { AgentApiError, agentApi, getAgentConfig, watchAgentRequest, type AgentConfigResponse, type AgentConversationSummary, type AgentImage, type AgentImageParams, type AgentRound, type AgentRoundCreate, type AgentSnapshot } from '../../api/agentClient';
+import { AgentApiError, agentApi, getAgentConfig, watchAgentRequest, type AgentConfigResponse, type AgentConversationSummary, type AgentEditingTaskInput, type AgentImage, type AgentImageParams, type AgentImageRetryReceipt, type AgentRound, type AgentRoundCreate, type AgentSnapshot } from '../../api/agentClient';
 import type { GenerationJobRecord } from '../../types';
 import { getActiveAgentRounds, getAgentBranchLeafId, getAgentSiblingRounds } from '../../utils/playground/agentConversationState';
 import { agentPhaseLabels, getAgentAssistantBlocks, getAgentJobFailure, getAgentRoundStatus, getAgentRoundSummary, getAgentToolLabel, isAgentRequestActive } from '../../utils/playground/agentAssistantBlocks';
@@ -26,6 +26,11 @@ import AgentImageOptions from './AgentImageOptions';
 import SizeDialog from '../gallery/SizeDialog';
 import './AgentWorkspace.css';
 import { AgentResponseDetails } from './AgentResponseDetails';
+import AgentImageRetryDialog from './AgentImageRetryDialog';
+import AgentEditingTaskDialog from './AgentEditingTaskDialog';
+import AgentFailedImageEditDialog from './AgentFailedImageEditDialog';
+import { imageJobParams } from '../../utils/playground/agentImageRetry';
+import { recipeInputs } from '../../utils/recipeInputs';
 
 export interface AgentWorkspaceProps {
   active: boolean;
@@ -41,6 +46,7 @@ export interface AgentWorkspaceProps {
 }
 type Draft = AgentDraft;
 type AgentPanel = 'model' | 'add' | 'options' | 'mentions' | 'details';
+type AgentAction = { kind: 'retry' | 'edit' | 'task'; job?: GenerationJobRecord; conversationId: string; branchRoundId: string | null; revision: number };
 const emptyDraft = (): Draft => ({ text: '', refs: [], params: { size: 'auto', quality: 'auto', background: 'auto', output_format: 'png' }, editId: null, origin: 'send' });
 const statusText: Record<string, string> = { queued: '等待执行', running: '正在响应', waiting_for_jobs: '等待图片任务', stop_requested: '正在停止后续调用', completed: '已完成', stopped: '已停止后续调用', failed: '执行失败', interrupted: '执行已中断', unknown: '上游结果未知', succeeded: '已生成', accepted: '已收录', discarded: '已清理', cancelled: '已取消', pending: '等待执行' };
 const ACTIVE_KEY = 'ipl.agent.active-conversation';
@@ -49,7 +55,7 @@ function safeStorageSet(key: string, value: string) { try { localStorage.setItem
 function errorText(reason: unknown) { return reason instanceof Error ? reason.message : '请求未完成'; }
 function sameOriginImage(url?: string | null) { if (!url) return ''; try { const value = new URL(url, location.origin); return value.origin === location.origin ? value.href : ''; } catch { return ''; } }
 
-function ResultCard({ job, preview, onOpen, onSaved, onError, onReference, referenceDisabled }: { job: GenerationJobRecord; preview?: AgentImage; onOpen: () => void; onSaved: () => void; onError: (value: string) => void; onReference: () => void; referenceDisabled: boolean }) {
+function ResultCard({ job, preview, onOpen, onSaved, onError, onReference, referenceDisabled, onRetry, onEdit }: { job: GenerationJobRecord; preview?: AgentImage; onOpen: () => void; onSaved: () => void; onError: (value: string) => void; onReference: () => void; referenceDisabled: boolean; onRetry?: () => void; onEdit?: () => void }) {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(Boolean(job.accepted_image_id));
   useEffect(() => setSaved(Boolean(job.accepted_image_id)), [job.accepted_image_id]);
@@ -64,6 +70,7 @@ function ResultCard({ job, preview, onOpen, onSaved, onError, onReference, refer
     {job.result_path ? <button className="agent-result-image" aria-label="查看生成结果" onClick={onOpen}><img src={mediaUrl(job.result_path)} alt="生成结果" loading="lazy" width={job.result_width || undefined} height={job.result_height || undefined} /></button> : preview?.status === 'available' && sameOriginImage(preview.url) ? <div className="agent-result-image"><img src={sameOriginImage(preview.url)} alt="生成中预览，非最终结果" width={preview.width || undefined} height={preview.height || undefined} /><p className="agent-help">生成中预览 · 非最终结果，尚不可收录</p></div> : <div className="agent-result-placeholder">{['queued', 'running'].includes(job.status) && <LoaderCircle size={22} className="spin" />}<span>{statusText[job.status] || job.status}</span></div>}
     {job.result_path && <div className="agent-result-meta"><span>{statusText[job.status] || job.status}</span><span>{job.result_width && job.result_height ? `${job.result_width} × ${job.result_height}` : '文件尺寸未返回'}</span></div>}
     {['failed', 'unknown'].includes(job.status) && <p className="agent-error"><strong>{getAgentJobFailure(job).label}</strong> · {getAgentJobFailure(job).action}</p>}
+    {job.status === 'failed' && <footer><button type="button" aria-label="使用当前生图配置重试" disabled={referenceDisabled} onClick={onRetry}>使用当前生图配置重试</button><button type="button" aria-label="修改提示词后重新生成" disabled={referenceDisabled} onClick={onEdit}>修改提示词后重新生成</button></footer>}
     <footer><button aria-label="查看或编辑生成结果" onClick={onOpen}>查看 / 编辑</button>{job.result_path && ['succeeded','accepted'].includes(job.status) && <><button aria-label="加入本轮参考图" disabled={referenceDisabled} onClick={onReference}><ImagePlus size={16} />加入参考图</button><a href={mediaUrl(job.result_path)} download title="下载原文件"><Download size={16} /></a><button aria-label={saved ? '已收录到 Library' : '保存到 Library'} disabled={saving || saved} onClick={() => void save()}>{saved ? <Check size={16} /> : <Plus size={16} />}{saved ? '已收录' : saving ? '保存中' : '保存到 Library'}</button></>}</footer>
   </article>;
 }
@@ -88,6 +95,12 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
   const [uploading, setUploading] = useState(false);
   const [handoffBusy, setHandoffBusy] = useState(false);
   const [sizeOpen, setSizeOpen] = useState(false);
+  const [action, setAction] = useState<AgentAction | null>(null);
+  const actionRef = useRef(action); actionRef.current = action;
+  const snapshotRef = useRef(snapshot); snapshotRef.current = snapshot;
+  const actionMounted = useRef(true);
+  useEffect(() => { actionMounted.current = true; return () => { actionMounted.current = false; actionRef.current = null; }; }, []);
+  const closeAction = useCallback(() => { actionRef.current = null; setAction(null); }, []);
   const [referenceGeometry, setReferenceGeometry] = useState<{url:string;size?:{width:number;height:number};status:'loading'|'ready'|'error'}>();
   const [focusRoundId, setFocusRoundId] = useState<string>();
   const consumedHandoff = useRef<number | undefined>(undefined);
@@ -140,6 +153,14 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
   const imagesAllowed = imageMode || allowImages;
   const draft = drafts[draftKey] || emptyDraft();
   const current = snapshot?.conversation.id === activeId ? snapshot : null;
+  const taskChoices = useMemo(() => {
+    const choices = new Map<string, ReferenceChoice>();
+    for (const image of current?.images || []) choices.set(referenceKey(image.source), { reference: image.source, label: `会话图片 ${choices.size + 1}`, url: sameOriginImage(image.thumbnailUrl || image.url), missing: image.status !== 'available' });
+    const task = current?.editingTask;
+    for (const entry of [task?.target, ...(task?.auxiliaries || [])]) if (entry && !choices.has(referenceKey(entry.source))) choices.set(referenceKey(entry.source), { reference: entry.source, label: '已保存的任务图片', url: '' });
+    for (const choice of draft.refs) choices.set(referenceKey(choice.reference), choice);
+    return [...choices.values()];
+  }, [current, draft.refs]);
   const scrollToLatest = useAgentScroll({ containerRef: scroll, contentRef: scrollContent, active, conversationId: activeId, ready: Boolean(current) && !conversationLoading && !conversationLoadError, revision: current?.revision, focusRoundId, onFocusResolved: () => setFocusRoundId(undefined) });
   const conversationUnavailable = Boolean(activeId && !current);
   const rounds = useMemo(() => current ? getActiveAgentRounds(current.conversation) : [], [current]);
@@ -188,6 +209,7 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
   useEffect(() => {
     setPanel(null); setInlineMentions(false); setSizeOpen(false);
   }, [active, activeId]);
+  useEffect(() => { closeAction(); }, [active, activeId, current?.conversation.activeRoundId, closeAction]);
   useEffect(() => {
     if (!active || !panel) return;
     const root = document.getElementById('root'), wasInert = root?.inert;
@@ -246,7 +268,7 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
         }
         if (disposed) return;
         if (target) {
-          const owner = target.conversation.rounds.find(round => round.outputTaskIds.includes(job.id) && (!source.roundId || round.id === source.roundId));
+          const owner = target.conversation.rounds.find(round => [...round.outputTaskIds, ...(round.retryTaskIds || [])].includes(job.id) && (!source.roundId || round.id === source.roundId));
           if (!owner) throw new Error('图片与来源轮次不匹配，未改变当前草稿。');
           roundId = owner.id;
           if (isAgentRequestActive(target.request?.state)) throw new Error('来源会话正在执行，请完成或停止后再带入图片。');
@@ -365,6 +387,57 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
     const row: AgentConversationSummary = { id: value.conversation.id, title: value.conversation.title, activeRoundId: value.conversation.activeRoundId, createdAt: value.conversation.createdAt, updatedAt: value.conversation.updatedAt, roundCount: value.conversation.rounds.length, runningRequestId: isAgentRequestActive(value.request?.state) ? value.request!.id : null, revision: value.revision };
     upsertConversation(row);
   }, [upsertConversation]);
+  function openAction(kind: AgentAction['kind'], job?: GenerationJobRecord) {
+    if (!current || draftLocked || inFlight || handoffBusy || uploading) return;
+    closePanel(); setInlineMentions(false);
+    const next = { kind, job, conversationId: current.conversation.id, branchRoundId: current.conversation.activeRoundId, revision: current.revision };
+    actionRef.current = next; setAction(next);
+  }
+  async function saveEditingTask(task: AgentEditingTaskInput | null) {
+    const target = actionRef.current;
+    if (!target || target.kind !== 'task') return;
+    const value = await agentApi.updateEditingTask(target.conversationId, { expectedRevision: target.revision, branchRoundId: target.branchRoundId, task });
+    if (!actionMounted.current || activeIdRef.current !== target.conversationId || snapshotRef.current?.conversation.activeRoundId !== target.branchRoundId) return;
+    // Closing the editor cancels local UI work, not an accepted task update.
+    applySnapshot(value);
+    if (actionRef.current === target) { closeAction(); setNotice(task ? '当前分支的编辑任务已保存。' : '当前编辑任务已结束，历史图片和草稿保留。'); }
+  }
+  async function retryAccepted(receipt: AgentImageRetryReceipt) {
+    onJobsChanged?.();
+    const target = actionRef.current;
+    if (!target || target.kind !== 'retry' || target.job?.id !== receipt.sourceJobId) return;
+    try {
+      const value = await agentApi.conversation(target.conversationId);
+      if (actionRef.current === target && activeIdRef.current === target.conversationId) applySnapshot(value);
+    } catch { if (actionRef.current === target) setNotice('重试任务已创建，可以在画廊查看；会话状态稍后刷新。'); }
+  }
+  async function applyFailedImagePrompt(prompt: string) {
+    const target = actionRef.current;
+    if (!target?.job || target.kind !== 'edit') return;
+    const key = target.conversationId, draftRevision = draftRevisions.current[key] || 0;
+    const stillCurrent = () => actionRef.current === target && activeIdRef.current === key && snapshotRef.current?.conversation.activeRoundId === target.branchRoundId && (draftRevisions.current[key] || 0) === draftRevision;
+    const job = await api.generationJob(target.job.id);
+    if (!stillCurrent()) return;
+    const inputs = recipeInputs(job, mediaUrl);
+    if (inputs.length > inputLimit) throw new Error(`原任务有 ${inputs.length} 张参考图，超出当前 ${inputLimit} 张上限；未删减图片或改变草稿。`);
+    const refs: ReferenceChoice[] = [];
+    for (const [index, input] of inputs.entries()) {
+      const url = sameOriginImage(input.previewUrl);
+      if (input.missing || !url) throw new Error('原始冻结参考图缺失，不能换用其他图片；草稿保持不变。');
+      const response = await fetch(url, { credentials: 'same-origin' });
+      if (!response.ok) throw new Error('原始冻结参考图无法读取；草稿保持不变。');
+      const blob = await response.blob();
+      if (!blob.type.startsWith('image/') || !blob.size || blob.size > 30 * 1024 * 1024) throw new Error('冻结参考图格式或大小无效；草稿保持不变。');
+      if (!stillCurrent()) return;
+      const uploaded = await agentApi.upload(new File([blob], `reference-${index + 1}`, { type: blob.type }));
+      if (!stillCurrent()) return;
+      refs.push({ reference: { kind: 'upload', uploadId: uploaded.uploadId }, label: `原始参考图 ${index + 1}`, url: sameOriginImage(uploaded.image.thumbnailUrl || uploaded.image.url), missing: uploaded.image.status !== 'available' });
+    }
+    if (!stillCurrent()) return;
+    if (refs.some(ref => ref.missing)) throw new Error('冻结参考图未恢复完整；草稿保持不变。');
+    updateDraft({ text: prompt, refs, params: imageJobParams(job), sizeMode: undefined, editId: null, origin: 'send' });
+    closeAction(); setAllowImages(false); setNotice('已填入实际执行提示词和冻结参考图；检查当前配置后再发送。'); textarea.current?.focus();
+  }
   useEffect(() => {
     if (!active) return;
     let disposed = false;
@@ -431,6 +504,20 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
       }
     }, reason => setError(`状态读取失败：${errorText(reason)}。不会重新提交模型请求。`), config?.capabilities.progressTransport === 'sse');
   }, [active, current?.request?.id, inFlight, config?.capabilities.progressTransport, applySnapshot, onJobsChanged]);
+  const retryProgress = current?.jobs.filter(job => (job.metadata?.agentRetry || current.conversation.rounds.some(round => round.retryTaskIds?.includes(job.id))) && ['queued', 'running'].includes(job.status)).map(job => job.id).join(',') || '';
+  useEffect(() => {
+    if (!active || !current || !retryProgress || inFlight) return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const conversationId = current.conversation.id;
+    const poll = async () => {
+      try { const value = await agentApi.conversation(conversationId); if (!disposed) { applySnapshot(value); onJobsChanged?.(); } }
+      catch { /* A missed read never retries the image POST. */ }
+      if (!disposed) timer = setTimeout(poll, 1500);
+    };
+    timer = setTimeout(poll, 1500);
+    return () => { disposed = true; clearTimeout(timer); };
+  }, [active, current?.conversation.id, retryProgress, inFlight, applySnapshot, onJobsChanged]);
   useEffect(() => {
     setScrollbarActive(false);
     return () => {
@@ -599,7 +686,20 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
           <span><strong>{label}</strong><small>{available ? round.prompt : statusText[job?.status || ''] || '图片已不可用'}</small></span>
         </button>;
       }))}
-      {!draft.refs.length && !priorRounds.some(round => round.outputTaskIds.length) && <span>先添加图片，或等待生成结果。</span>}
+      {priorRounds.flatMap((round, r) => (round.taskImageIds || []).map((imageId, i) => {
+        const image = current?.images.find(value => value.id === imageId);
+        const url = sameOriginImage(image?.thumbnailUrl || image?.url);
+        const available = image?.status === 'available' && Boolean(url);
+        const label = `第 ${r + 1} 轮 · 编辑任务参考 ${i + 1}`;
+        // Task images are appended after original attachments in the server's
+        // frozen alias table; never turn them into retroactive user uploads.
+        const alias = `round-${round.index}-reference-${round.inputImageIds.length + i + 1}`;
+        return <button className="agent-mention-choice" key={`${round.id}:task:${imageId}`} aria-label={`引用第 ${r + 1} 轮编辑任务参考 ${i + 1}`} disabled={disabled || !available} onClick={() => mention(`<ref id="${alias}" />`)}>
+          {available ? <img src={url} alt={label} loading="lazy" /> : <span className="agent-mention-placeholder">无图片</span>}
+          <span><strong>{label}</strong><small>{available ? '沿用已保存的任务图片' : '图片已不可用'}</small></span>
+        </button>;
+      }))}
+      {!draft.refs.length && !priorRounds.some(round => round.outputTaskIds.length || round.taskImageIds?.length) && <span>先添加图片，或等待生成结果。</span>}
     </>;
   }
   async function stop() {
@@ -609,6 +709,7 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
     catch (reason) { setError(errorText(reason)); } finally { setBusy(false); }
   }
 
+  const renderResult = (job: GenerationJobRecord) => <ResultCard key={job.id} job={job} onReference={() => addResultReference(job)} referenceDisabled={draftLocked || uploading || handoffBusy || inFlight} preview={current?.images.find(image => image.id === (job.metadata?.agent as Record<string, unknown> | undefined)?.partialImageId)} onOpen={() => onOpenJob(job.id)} onSaved={() => { onLibraryChanged(); onJobsChanged?.(); if (current) void agentApi.conversation(current.conversation.id).then(applySnapshot).catch(() => {}); }} onError={setError} onRetry={() => openAction('retry', job)} onEdit={() => openAction('edit', job)} />;
   return <section className={`agent-workspace ${collapsed ? 'sidebar-collapsed' : ''}`} aria-label="Agent 创作工作区" hidden={!active}>
     <aside className="agent-conversations">
       <div className="agent-sidebar-head"><strong>创作会话</strong><button onClick={() => setCollapsed(true)} title="收起会话列表" aria-label="收起会话列表"><PanelLeftClose size={18} /></button></div>
@@ -645,13 +746,26 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
           const branchIndex = siblings.findIndex(item => item.id === round.id);
           const blocks = getAgentAssistantBlocks(round, current!.jobs, assistant?.content || '');
           const summary = getAgentRoundSummary(round, current!.jobs, current!.request);
+          const outcome = getAgentRoundStatus(round, summary);
+          const showOutcome = summary.imageJobsCreated > 0 || summary.outcomeUnknown || Boolean(round.error) || round.status === 'running' || ['stopped', 'stop_requested', 'failed', 'interrupted'].includes(summary.requestState);
+          const imageTools = blocks.filter(block => block.type === 'tool' && ['generate_image', 'generate_image_batch', 'image_generation'].includes(block.name));
           return <article className="agent-round" data-agent-round={round.id} key={round.id}>
             <div className="agent-user-message" aria-label={`你，第 ${roundIndex + 1} 轮`}>{round.inputImageIds.length > 0 && <div className="agent-reference-strip">{round.inputImageIds.map((id, i) => { const image = current!.images.find(image => image.id === id); const url = sameOriginImage(image?.thumbnailUrl || image?.url); return <div key={id} title={`参考图 ${i + 1}`}>{image?.status === 'available' && url ? <a href={sameOriginImage(image.url)} target="_blank" rel="noreferrer"><img src={url} alt={`参考图 ${i + 1}`} /></a> : <span>图片缺失</span>}<small>{i + 1}</small></div>; })}</div>}<p className="agent-original-text">{round.prompt}</p>
               <div className="agent-message-actions"><button title="复制原文" aria-label="复制原文" onClick={() => void copyTextToClipboard(round.prompt).then(ok => setNotice(ok ? '已复制原文' : '复制失败'))}><Copy size={15} /></button><button title="编辑重发" aria-label="编辑重发" disabled={inFlight || busy || Boolean(uncertain)} onClick={() => void prepareEdit(round, 'edit')}><Pencil size={15} /></button><button title="重新生成" aria-label="重新生成" disabled={inFlight || busy || Boolean(uncertain)} onClick={() => void prepareEdit(round, 'regenerate')}><RotateCcw size={15} /></button>{siblings.length > 1 && <span className="agent-branch-controls"><button aria-label="上一分支" disabled={branchIndex === 0 || busy} onClick={() => void selectBranch(siblings[branchIndex - 1].id)}><ChevronLeft size={15} /></button>{branchIndex + 1} / {siblings.length}<button aria-label="下一分支" disabled={branchIndex === siblings.length - 1 || busy} onClick={() => void selectBranch(siblings[branchIndex + 1].id)}><ChevronRight size={15} /></button></span>}</div>
             </div>
             <div className="agent-assistant-message" aria-label={`Agent，第 ${roundIndex + 1} 轮`}>
-              {blocks.map(block => block.type === 'text' ? <AgentMarkdown key={block.key} text={block.content} /> : block.type === 'image-task' ? <ResultCard onReference={() => addResultReference(block.task)} referenceDisabled={draftLocked || uploading || handoffBusy} key={block.key} job={block.task} preview={current!.images.find(image => image.id === (block.task.metadata?.agent as Record<string, unknown> | undefined)?.partialImageId)} onOpen={() => onOpenJob(block.task.id)} onSaved={() => { onLibraryChanged(); onJobsChanged?.(); void agentApi.conversation(current!.conversation.id).then(applySnapshot).catch(() => {}); }} onError={setError} /> : block.type === 'deleted-image-task' ? <p key={block.key} className="agent-missing-image">原图片任务已不可用，保留引用位置。</p> : <div key={block.key} className="agent-tool-status"><span>{getAgentToolLabel(block.name)}</span><small>{agentPhaseLabels[block.state || ''] || statusText[block.state || ''] || (block.state === 'in_progress' ? '进行中' : '工具调用')}</small></div>)}
-              {(summary.imageJobsCreated > 0 || summary.outcomeUnknown || round.error || round.status === 'running' || ['stopped', 'stop_requested', 'failed', 'interrupted'].includes(summary.requestState)) && <p className="agent-round-outcome" role="status">{getAgentRoundStatus(round, summary)}</p>}
+              {blocks.map(block => {
+                if (block.type === 'text') return <AgentMarkdown key={block.key} text={block.content} />;
+                if (block.type === 'image-task') return renderResult(block.task);
+                if (block.type === 'deleted-image-task') return <p key={block.key} className="agent-missing-image">原图片任务已不可用，保留引用位置。</p>;
+                const label = agentPhaseLabels[block.state || ''] || statusText[block.state || ''] || (block.state === 'in_progress' ? '进行中' : '工具调用');
+                // One aggregate already expresses this tool's complete outcome.
+                // Multiple tools keep their own states, which can legitimately differ.
+                const repeated = showOutcome && imageTools.length === 1 && imageTools[0] === block && (outcome === label || outcome.startsWith(`${label}，`));
+                return <div key={block.key} className="agent-tool-status"><span>{getAgentToolLabel(block.name)}</span>{!repeated && <small>{label}</small>}</div>;
+              })}
+              {showOutcome && <p className="agent-round-outcome" role="status">{outcome}</p>}
+              {Boolean(round.retryTaskIds?.length) && <section className="agent-retry-results" aria-label="本轮图片的重试结果"><h4>单独重试的结果 · 原失败记录保留</h4>{round.retryTaskIds!.map(id => { const job = current!.jobs.find(row => row.id === id); return job ? renderResult(job) : <p key={id} className="agent-missing-image">重试任务记录不可用。</p>; })}</section>}
               <div className="agent-answer-actions">
                 {assistant?.content && <button className="agent-text-button" aria-label="复制回答" title="复制回答" onClick={() => void copyTextToClipboard(assistant.content).then(ok => setNotice(ok ? '已复制回答' : '复制失败'))}><Copy size={15} /></button>}
                 <button className="agent-text-button" aria-label={`查看第 ${roundIndex + 1} 轮详情`} aria-haspopup="dialog" aria-expanded={panel === 'details' && detailRoundId === round.id} onClick={event => openPanel('details', event.currentTarget, round.id)}><Info size={15} /><span>详情</span></button>
@@ -672,6 +786,7 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
         {uncertain && <div className="agent-uncertain"><strong>上次提交结果尚未确认</strong><p>冻结的内容与请求 ID 已保留，重载不会自动重新收费提交。</p><button aria-label="检查原请求状态" disabled={busy} onClick={() => void reconcile(uncertain)}>检查原请求状态</button><button aria-label="用同一请求恢复" disabled={busy} onClick={() => void reconcile(uncertain, true)}>用同一请求恢复</button></div>}
         {config && !config.ready && <p className="agent-help">{config.issues.map(issue => issue.message).join('；')} <button className="agent-text-button" aria-label="打开 Agent 设置" onClick={onOpenSettings}>打开设置</button></p>}
         {draft.editId && <div className="agent-edit-notice">{draft.origin === 'regenerate' ? '重新生成' : '编辑重发'}会建立新分支，原记录保留。<button aria-label="取消分支编辑" disabled={draftLocked} onClick={() => updateDraft({ editId: null, origin: 'send' })}>取消分支编辑</button></div>}
+        {current && <div className="agent-task-entry"><span>{current.editingTask?.needsTargetSelection ? '请选择本次编辑对象' : current.editingTask?.target ? '当前分支有编辑任务' : '明确编辑对象与修改要求'}</span><button type="button" aria-label="查看和修改当前编辑任务" aria-haspopup="dialog" disabled={draftLocked || inFlight || uploading || handoffBusy} onClick={() => openAction('task')}>当前编辑任务</button></div>}
         <div className="agent-composer" onDragOver={event => { if (event.dataTransfer.types.includes('Files')) event.preventDefault(); }} onDrop={event => { if (!event.dataTransfer.files.length) return; event.preventDefault(); void addFiles(Array.from(event.dataTransfer.files)); }}>
           {draft.refs.length > 0 && <div className="agent-reference-strip">{draft.refs.map((choice, index) => <div key={referenceKey(choice.reference)} className={choice.missing ? 'missing' : ''}>{choice.url ? <img src={sameOriginImage(choice.url)} alt={choice.label} /> : <span>{choice.missing ? '图片缺失' : '已选择图片'}</span>}<button title="插入图片引用" aria-label={`插入图片 ${index + 1} 引用`} disabled={draftLocked} onClick={() => mention(`@图${index + 1}`)}>{index + 1}</button><button className="agent-remove-ref" title="移除参考图" aria-label={`移除参考图 ${index + 1}`} disabled={draftLocked} onClick={() => updateDraft({ refs: draft.refs.filter((_, i) => i !== index) })}><X size={12} /></button></div>)}</div>}
           <textarea ref={textarea} aria-label="Agent 消息" placeholder="输入想法、提示词或修改要求；输入 @ 引用图片" value={draft.text} disabled={draftLocked} aria-busy={busy} readOnly={draft.origin === 'regenerate'} rows={1} onChange={event => { updateDraft({ text: event.target.value }); setInlineMentions(event.target.value.slice(0, event.target.selectionStart).endsWith('@')); }} onKeyDown={event => { if (event.key === 'Escape' && inlineMentions && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) { event.preventDefault(); event.stopPropagation(); setInlineMentions(false); return; } if (shouldSubmitAgentOnKey({ ...event, isComposing: event.nativeEvent.isComposing, keyCode: event.nativeEvent.keyCode }, readAgentInputPreferences().enterSubmit)) { event.preventDefault(); void submit(); } }} onPaste={event => { const files = Array.from(event.clipboardData.files).filter(file => file.type.startsWith('image/')); if (files.length) { event.preventDefault(); void addFiles(files); } }} />
@@ -707,6 +822,9 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
         {panel === 'details' && detailRound && <AgentResponseDetails details={detailRound.responseDetails} modelInfo={detailRound.modelInfo} request={detailRequest} round={detailRound} jobs={current?.jobs || []} terminalObservationMs={terminalObservations[detailRound.requestId]} />}
       </div>
     </div>, document.body)}
+    {active && action?.kind === 'retry' && action.job && config && <AgentImageRetryDialog key={`${action.conversationId}:${action.job.id}`} job={action.job} conversationId={action.conversationId} config={config} selection={draft.imageConfig} onClose={closeAction} onReceipt={value => { void retryAccepted(value); }} onEdit={() => openAction('edit', action.job)} />}
+    {active && action?.kind === 'edit' && action.job && <AgentFailedImageEditDialog key={`${action.conversationId}:${action.job.id}`} job={action.job} onApply={applyFailedImagePrompt} onClose={closeAction} />}
+    {active && action?.kind === 'task' && <AgentEditingTaskDialog key={`${action.conversationId}:${action.branchRoundId}`} task={current?.editingTask} choices={taskChoices} onSave={saveEditingTask} onClose={closeAction} />}
     {active && sizeOpen && <SizeDialog recipe={{...draft.params,model:imageModel,background:draft.params.background || 'auto',output_compression:draft.params.output_compression ?? undefined,moderation:draft.params.moderation === 'low' || draft.params.moderation === 'auto' ? draft.params.moderation : undefined,size_mode:draft.sizeMode}} prompt={draft.text} referenceSize={measuredReferenceSize} referenceStatus={sizeReferenceStatus} onClose={() => setSizeOpen(false)} onApply={selection => updateDraft({params:{...draft.params,size:selection.size},sizeMode:selection.size_mode})} />}
     {picker && <AgentReferencePicker remaining={Math.max(0, inputLimit - draft.refs.length)} onClose={() => setPicker(false)} onSelect={choices => updateDraft({ refs: [...draft.refs, ...choices.filter(choice => !draft.refs.some(existing => referenceKey(existing.reference) === referenceKey(choice.reference)))] })} />}
   </section>;
