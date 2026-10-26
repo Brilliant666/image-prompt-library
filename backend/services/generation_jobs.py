@@ -1367,20 +1367,64 @@ class GenerationJobRepository:
                 prepared.append((data, name, source_image_id, generation_provider, generation_model))
         return prepared
 
+    def _linked_agent_retry(self, job: GenerationJobRecord, specs: list, prepared: list[PreparedReferenceImage]) -> bool:
+        """A retry keeps its real root receipt; it is never a new Agent tool call."""
+        link = job.metadata.get('agentRetry')
+        fields = ('retryId', 'rootSourceJobId', 'sourceJobId', 'sourceRequestId', 'roundId', 'conversationId')
+        if not isinstance(link, dict) or not all(isinstance(link.get(key), str) and link[key] for key in fields):
+            return False
+        if job.id != 'gen_retry_' + hashlib.sha256(link['retryId'].encode('utf-8')).hexdigest():
+            return False
+        with connect(self.library_path) as conn:
+            root = conn.execute('''SELECT g.*, r.data AS agent_round_data
+                FROM generation_jobs g JOIN agent_tool_jobs t ON t.job_id=g.id
+                JOIN agent_requests a ON a.id=t.request_id
+                JOIN agent_rounds r ON r.id=a.round_id AND r.conversation_id=a.conversation_id
+                WHERE g.id=? AND a.id=? AND a.round_id=? AND a.conversation_id=?''',
+                (link['rootSourceJobId'], link['sourceRequestId'], link['roundId'], link['conversationId'])).fetchone()
+            parent = conn.execute('SELECT metadata FROM generation_jobs WHERE id=?', (link['sourceJobId'],)).fetchone()
+            if root is None or parent is None or root['id'] not in json.loads(root['agent_round_data']).get('outputTaskIds', []):
+                return False
+            parent_metadata = json.loads(parent['metadata'])
+            if parent_metadata.get('latestRetryJobId') != job.id:
+                return False
+            if link['sourceJobId'] != root['id']:
+                ancestor = parent_metadata.get('agentRetry')
+                if not isinstance(ancestor, dict) or any(ancestor.get(key) != link[key] for key in (
+                        'rootSourceJobId', 'sourceRequestId', 'roundId', 'conversationId')):
+                    return False
+            original = self._record_from_row(root)
+            original_specs = self._input_image_specs(original)
+            if len(specs) != len(original_specs):
+                return False
+            expected = {entry.get('copied_path'): entry.get('sha256') for entry in
+                        original.metadata.get('reference_image_copies', []) if isinstance(entry, dict)}
+            # A source result may already have been cleaned; its immutable
+            # frozen identity still authenticates the retry's retained bytes.
+            for before, after, image in zip(original_specs, specs, prepared):
+                path = before.get('result_path')
+                asset = conn.execute('SELECT sha256 FROM agent_assets WHERE path=?', (path,)).fetchone()
+                digest = asset['sha256'] if asset else expected.get(path)
+                if before.get('name') != after.get('name') or not digest or hashlib.sha256(image[0]).hexdigest() != digest:
+                    return False
+        return True
+
     def _library_agent_prompt(
         self, job: GenerationJobRecord, text: str, prepared: list[PreparedReferenceImage],
     ) -> tuple[str, dict]:
         """Resolve only linked Agent markers; keep the original recipe untouched."""
         agent = job.metadata.get("agent")
         specs = self._input_image_specs(job)
-        if not isinstance(agent, dict) or not agent.get("requestId") or len(specs) != len(prepared):
+        if len(specs) != len(prepared):
             return text, {}
-        with connect(self.library_path) as conn:
-            linked = conn.execute(
-                "SELECT 1 FROM agent_tool_jobs WHERE job_id=? AND request_id=?",
-                (job.id, agent["requestId"]),
-            ).fetchone()
-        if linked is None:
+        linked = False
+        if isinstance(agent, dict) and agent.get('requestId'):
+            with connect(self.library_path) as conn:
+                linked = conn.execute(
+                    "SELECT 1 FROM agent_tool_jobs WHERE job_id=? AND request_id=?",
+                    (job.id, agent["requestId"]),
+                ).fetchone() is not None
+        if not linked and not self._linked_agent_retry(job, specs, prepared):
             return text, {}
         labels: dict[str, str] = {}
         image_labels: dict[str, str] = {}

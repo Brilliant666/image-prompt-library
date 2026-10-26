@@ -1,4 +1,5 @@
 import base64
+import hashlib
 from concurrent.futures import ThreadPoolExecutor
 import json
 
@@ -19,7 +20,7 @@ from test_agent_workspaces import configure, image_bytes, isolated, payload
 
 
 @pytest.fixture
-def source(isolated, monkeypatch):
+def source(isolated, monkeypatch, request):
     # Endpoint tests explicitly drive the existing queue dispatcher; no thread
     # or real network can race an assertion or submit an unexpected request.
     monkeypatch.setattr('backend.routers.agent_image_retry.enqueue_generation_jobs', lambda *a, **k: None)
@@ -33,9 +34,15 @@ def source(isolated, monkeypatch):
     image = repo.store_asset(image_bytes('blue'), None)
     body = payload(snapshot, config, prompt='User question differs from execution prompt')
     body['refs'] = [{'kind': 'upload', 'uploadId': image['id']}]
+    refs = {'round-1-reference-1': image['id']}
+    execution_prompt = '  EXACT execution\n<ref id="round-1-reference-1" />  '
+    if getattr(request, 'param', None) == 'two-images':
+        second = repo.store_asset(image_bytes('red'), None)
+        body['refs'].append({'kind': 'upload', 'uploadId': second['id']})
+        refs['round-1-reference-2'] = second['id']
+        execution_prompt = '  Blend <ref id="round-1-reference-2" />\nwith <ref id="round-1-reference-1" />, retain <ref id="round-1-reference-2" />.  '
     submitted, _ = repo.create_round('conv', AgentRoundCreate(**body))
-    job = create_image_job(repo, 'req_1', 1, 'synthetic-call', 'single', '  EXACT execution\n<ref id="round-1-reference-1" />  ',
-                           {'round-1-reference-1': image['id']})
+    job = create_image_job(repo, 'req_1', 1, 'synthetic-call', 'single', execution_prompt, refs)
     repo.jobs.mark_failed(job.id, 'Synthetic quota', diagnostics={'http_status': 402, 'error': {'code': 'insufficient_quota'}})
     repo.update('req_1', state='failed', outcome='known', error={'code': 'image_job_failed', 'message': 'Synthetic quota'})
     retry = {'retryId': 'retry-1', 'conversationId': 'conv', 'configRevision': config['revision'],
@@ -320,6 +327,8 @@ def test_retry_result_visible_after_reload_and_library_reference_reusable(source
         'title': 'Synthetic retry result', 'auto_title': False})
     assert saved.status_code == 200, saved.text
     item = saved.json()['item']
+    assert item['prompts'][0]['text'] == '  EXACT execution\n【参考图1】  '
+    assert item['prompts'][0]['provenance']['agent_reference_prompt']['raw_text'] == original.prompt_text
     result_image = next(row for row in item['images'] if row['id'] == saved.json()['job']['accepted_image_id'])
     asset_id = AgentRepository(repo.library).resolve_ref({'kind': 'library', 'imageId': result_image['id']})
     assert repo.data_url(asset_id).endswith(base64.b64encode(image_bytes('green')).decode())
@@ -332,3 +341,70 @@ def test_retry_cannot_cross_conversations(source):
     response = post(source, {**source[3], 'conversationId': 'other'})
     assert response.status_code == 404
     assert not source[4]
+
+
+@pytest.mark.parametrize('source', ['two-images'], indirect=True)
+@pytest.mark.parametrize('retry_again', [False, True])
+def test_retry_library_humanization_preserves_order_recipe_and_real_root_link(source, retry_again):
+    client, repo, original, body, calls = source
+    before = repo.request('req_1')
+    created = post(source).json()['job']
+    if retry_again:
+        repo.jobs.mark_failed(created['id'], 'Synthetic quota', diagnostics={'http_status': 402})
+        response = client.post(f"/api/generation-jobs/{created['id']}/retry-current", json={**body, 'retryId': 'second'})
+        assert response.status_code == 202, response.text
+        created = response.json()['job']
+    _run_provider_job(repo.library, created['id'], 'openai_compatible')
+    saved = client.post(f"/api/generation-jobs/{created['id']}/accept-as-new-item", json={'auto_title': False})
+    assert saved.status_code == 200, saved.text
+    item = saved.json()['item']
+    prompt = item['prompts'][0]
+    assert prompt['text'] == '  Blend 【参考图1】\nwith 【参考图2】, retain 【参考图1】.  '
+    assert prompt['provenance']['agent_reference_prompt'] == {
+        'raw_text': original.prompt_text,
+        'references': [
+            {'id': 'round-1-reference-2', 'label': '参考图1', 'input_index': 1, 'sha256': hashlib.sha256(image_bytes('red')).hexdigest()},
+            {'id': 'round-1-reference-1', 'label': '参考图2', 'input_index': 2, 'sha256': hashlib.sha256(image_bytes('blue')).hexdigest()},
+        ],
+    }
+    assert [(repo.library / image['original_path']).read_bytes() for image in item['images']
+            if image['role'] == 'reference_image'] == [image_bytes('red'), image_bytes('blue')]
+    assert repo.jobs.get_job(created['id']).prompt_text == original.prompt_text
+    assert repo.jobs.get_job(created['id']).parameters == created['parameters']
+    assert repo.request('req_1')['body'] == before['body'] and repo.request('req_1')['history'] == before['history']
+    with connect(repo.library) as conn:
+        assert conn.execute('SELECT COUNT(*) FROM agent_tool_jobs WHERE job_id=?', (created['id'],)).fetchone()[0] == 0
+        assert conn.execute('SELECT COUNT(*) FROM agent_tool_jobs WHERE job_id=?', (original.id,)).fetchone()[0] == 1
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize('corruption', [
+    'retryId', 'rootSourceJobId', 'sourceRequestId', 'roundId', 'conversationId', 'sourceJobId',
+    'registration', 'tool-link', 'reference-name', 'reference-bytes',
+])
+def test_retry_forged_lineage_or_reference_mapping_does_not_rewrite_prompt(source, corruption):
+    client, repo, original, _, calls = source
+    created = post(source).json()['job']
+    metadata, parameters = created['metadata'], created['parameters']
+    with connect(repo.library) as conn:
+        if corruption == 'registration':
+            conn.execute('UPDATE generation_jobs SET metadata=? WHERE id=?', (json.dumps(original.metadata), original.id))
+        elif corruption == 'tool-link':
+            conn.execute('DELETE FROM agent_tool_jobs WHERE job_id=?', (original.id,))
+        elif corruption == 'reference-name':
+            parameters['input_images'][0]['name'] = 'round-99-reference-1'
+        elif corruption == 'reference-bytes':
+            changed = repo.store_asset(image_bytes('red'), None)
+            parameters['input_images'][0]['result_path'] = repo.asset(changed['id'])['path']
+        else:
+            metadata['agentRetry'][corruption] = 'unrelated'
+        conn.execute('UPDATE generation_jobs SET metadata=?,parameters=? WHERE id=?',
+                     (json.dumps(metadata), json.dumps(parameters), created['id']))
+    repo.jobs.stage_result(created['id'], image_bytes('green'), 'synthetic.png')
+    accepted = client.post(f"/api/generation-jobs/{created['id']}/accept-as-new-item", json={'auto_title': False})
+    assert accepted.status_code == 200, accepted.text
+    prompt = accepted.json()['item']['prompts'][0]
+    assert prompt['text'] == original.prompt_text
+    assert 'agent_reference_prompt' not in prompt['provenance']
+    assert repo.jobs.get_job(created['id']).prompt_text == original.prompt_text
+    assert not calls
