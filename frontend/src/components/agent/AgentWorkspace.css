@@ -107,4 +107,5 @@
 .agent-mention-choice small{font-size:11px;color:var(--ag-muted);line-height:1.45;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
 .agent-chat-panel .agent-mention-menu{display:grid;gap:4px}
 .agent-workspace .agent-notice{padding:6px 10px;font-size:12px;line-height:1.5;margin:0 0 6px;border:0;background:transparent;color:var(--ag-muted)}
+.agent-round-outcome{margin:10px 0;color:var(--ag-muted);font-size:12px;line-height:1.6;overflow-wrap:anywhere}
 @media(max-width:480px){.agent-inline-mentions{grid-template-columns:1fr}.agent-composer-toolbar{gap:4px}.agent-workspace .agent-composer-toolbar .agent-options-trigger,.agent-workspace .agent-composer-toolbar .agent-image-mode{padding:6px;font-size:11px}.agent-reference-count{display:none}}

@@ -57,6 +57,19 @@ export interface AgentResponseDetails {
   usage: AgentTokenUsage & { reportedSteps: number; totalSteps: number; complete: boolean };
   skills: Array<{ skill: string; section: string; title: string; source: string; revision: string; license: string }>;
 }
+export interface AgentResultSummary {
+  requestState: AgentRequest['state']; textCompleted: boolean;
+  imageJobsCreated: number; imageJobsQueued: number; imageJobsRunning: number;
+  imageJobsSucceeded: number; imageJobsFailed: number; imageJobsCancelled: number;
+  imageJobsAccepted: number; imageJobsDiscarded: number; imageJobsMissing: number;
+  outcomeUnknown: boolean; maxImageJobs: number | null; outcome: string;
+}
+export interface AgentExecution {
+  version: 1;
+  phase: 'preparing' | 'waiting_model' | 'receiving_model' | 'waiting_jobs' | 'generating_images' | 'processing_results' | 'completed' | 'failed' | 'stopped' | 'unknown';
+  timings: { preparationMs: number | null; modelHeadersMs: number | null; modelFirstEventMs: number | null; modelResponseMs: number | null; toolsMs: number | null; resultProcessingMs: number | null };
+  modelSteps: Array<{ step: number; state: string; preparationMs: number | null; headersMs: number | null; firstEventMs: number | null; responseMs: number | null }>;
+}
 export interface AgentRound {
   id: string; index: number; parentRoundId: string | null; userMessageId: string; assistantMessageId?: string;
   prompt: string; inputImageIds: string[]; maskTargetImageId: string | null; maskImageId: string | null;
@@ -65,6 +78,9 @@ export interface AgentRound {
   requestId: string; derivedFromRoundId?: string | null;
   modelInfo?: AgentModelInfo;
   responseDetails?: AgentResponseDetails;
+  resultSummary?: AgentResultSummary;
+  execution?: AgentExecution | null;
+  failure?: { kind: string; message: string; outcomeUnknown: boolean } | null;
 }
 export interface AgentMessage {
   id: string; role: 'user' | 'assistant'; content: string; roundId: string;

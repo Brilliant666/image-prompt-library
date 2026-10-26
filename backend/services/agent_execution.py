@@ -23,6 +23,8 @@ from backend.services.agent_repository import (
 )
 from backend.services.agent_skills import read_agent_skill, selected_skill_sections, skill_catalog_instructions, skill_tool
 from backend.services.agent_context import select_context_images, validate_context_references
+from backend.services import agent_execution_timing as timing
+from backend.services.agent_diagnostics import safe_diagnostics
 
 _executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="agent-turn")
 _lock = RLock()
@@ -30,6 +32,37 @@ _futures = {}
 _clients = {}
 _closing = set()
 MAX_RESPONSE_BYTES = 80 * 1024 * 1024
+
+
+def safe_http_failure(response):
+    """Inspect a bounded error body, persist only recognized diagnostic fields."""
+    chunks, size = [], 0
+    try:
+        for chunk in response.iter_bytes():
+            size += len(chunk)
+            if size > 65536:
+                break
+            chunks.append(chunk)
+    except httpx.TransportError:
+        # Failure status was already received. A broken error body must not
+        # turn this known rejection into an uncertain paid submission.
+        pass
+    try:
+        body = json.loads(b''.join(chunks))
+    except (ValueError, UnicodeError):
+        body = {}
+    return safe_diagnostics({'http_status': response.status_code,
+                             'error': body.get('error') if isinstance(body, dict) else None})
+
+
+def exception_diagnostics(exc):
+    if isinstance(exc, AgentError):
+        return exc.diagnostics or safe_diagnostics({'category': 'incomplete_stream' if exc.code == 'upstream_outcome_unknown' else
+                                                   'reference_missing' if exc.code in {'reference_missing', 'frozen_reference_invalid'} else 'unknown'})
+    category = ('read_timeout' if isinstance(exc, httpx.ReadTimeout) else
+                'connect_timeout' if isinstance(exc, httpx.ConnectTimeout) else
+                'connection_error' if isinstance(exc, httpx.TransportError) else 'unknown')
+    return safe_diagnostics({'category': category})
 
 
 @contextmanager
@@ -48,7 +81,7 @@ def validate_response_payload(payload, *, require_completed=False):
         raise AgentError("upstream_error", "Responses 返回格式无效。")
     status = payload.get("status")
     if payload.get("error") or status not in ({"completed"} if require_completed else {None, "completed"}):
-        raise AgentError("upstream_error", "Responses 未成功完成；已保留已有结果，不会自动重试。")
+        raise AgentError("upstream_error", "Responses 未成功完成；不会自动重试。", diagnostics={'error': payload.get('error')})
     return payload
 
 
@@ -78,7 +111,8 @@ def read_native_response(response, check_running):
         check_running()
         kind = event.get("type")
         if kind in {"error", "response.failed", "response.incomplete"}:
-            raise AgentError("upstream_error", "原生图片响应未成功完成；不会自动重试。")
+            source = event.get('response') if isinstance(event.get('response'), dict) else event
+            raise AgentError("upstream_error", "原生图片响应未成功完成；不会自动重试。", diagnostics={'error': source.get('error')})
         if kind == "response.output_item.done":
             item = event.get("item")
             if isinstance(item, dict) and item.get("id"):
@@ -424,11 +458,18 @@ def native_image(repo, request_id, step, item, refs, secrets=()):
     if isinstance(result, dict):
         result = next((result[k] for k in ("b64_json", "base64", "image", "data") if isinstance(result.get(k), str)), None)
     if item.get("status") in {"failed", "incomplete", "cancelled"}:
-        return repo.jobs.mark_failed(job.id, "原生图像工具未能生成图片。")
+        repo.jobs.record_execution(job.id, phase='failed')
+        return repo.jobs.mark_failed(job.id, "原生图像工具未能生成图片。", diagnostics={'error': item.get('error')})
     if item.get("status") != "completed":
-        return repo.jobs.mark_running(job.id) if job.status == "queued" else job
+        if job.status == 'queued':
+            repo.record_execution(request_id, phase='generating_images')
+            repo.jobs.mark_running(job.id)
+            repo.jobs.record_execution(job.id, phase='generating')
+            return repo.jobs.get_job(job.id)
+        return job
     if not isinstance(result, str) or not result:
-        return repo.jobs.mark_failed(job.id, "原生图像工具已完成但未返回图片。")
+        repo.jobs.record_execution(job.id, phase='failed')
+        return repo.jobs.mark_failed(job.id, "原生图像工具已完成但未返回图片。", diagnostics={'category': 'missing_image'})
     try:
         data = base64.b64decode(result.split(",", 1)[-1] if result.startswith("data:") else result, validate=True)
     except ValueError:
@@ -440,14 +481,23 @@ def native_image(repo, request_id, step, item, refs, secrets=()):
             extension = {"PNG": "png", "JPEG": "jpg", "WEBP": "webp"}.get(image.format, "png")
     except Exception:
         raise AgentError("upstream_error", "原生图像结果无法解码。") from None
-    return repo.jobs.stage_result(job.id, data, "native." + extension,
+    result_started = timing.monotonic()
+    result_job = repo.jobs.stage_result(job.id, data, "native." + extension,
                                  {"provider": "agent_native", "requested": {**native_image_parameters(request["body"]["params"]), **({"model": request["frozen"]["imageModel"]} if request["frozen"]["imageModel"] else {})},
                                   "response": {k: item[k] for k in ("size", "quality", "output_format", "output_compression", "revised_prompt") if k in item}})
+    repo.jobs.record_execution(job.id, phase='completed', resultWriteMs=timing.elapsed(result_started))
+    return result_job
 
 
 def call_responses(repo, request_id, step, refs, *, body_override=None, native_call_id=None):
     request = check_active(repo, request_id)
     profile = repo.verified_profile(request)
+    try:
+        measured = timing.ModelTiming(repo, request_id, step)
+    except Exception:
+        # No HTTP submission has begun; instrumentation failure is local.
+        repo.update(request_id, outcome='known')
+        raise
     config = request["frozen"]
     secret = profile["api_key"]
     try:
@@ -457,6 +507,7 @@ def call_responses(repo, request_id, step, refs, *, body_override=None, native_c
         if exc.code in {"reference_missing", "frozen_reference_invalid"}:
             # This preflight runs before HTTP, so failure is safely known.
             repo.update(request_id, outcome="known")
+        measured.finish()
         raise
     body = body_override or {
         "model": config["textModel"], "input": input_items, "stream": config["stream"],
@@ -510,6 +561,7 @@ def call_responses(repo, request_id, step, refs, *, body_override=None, native_c
     current_output, completed = [], None
     stream_item_ids = {}
     pending_native_images = {}
+    native_started = {}
     provisional_message_ids = set()
     seen_delta_events, completed_message_ids = set(), set()
     byte_count = 0
@@ -543,9 +595,17 @@ def call_responses(repo, request_id, step, refs, *, body_override=None, native_c
             repo.update(request_id, outcome="known")
             raise
         check_active(repo, request_id)
+        # Persist finality before optional diagnostics. A later timing write
+        # cannot erase this valid terminal receipt or make it replayable.
+        repo.update(request_id, outcome='known')
+        measured.finish(completed=True)
+        result_started = timing.monotonic()
         for item in output if "output" in payload else pending_native_images.values():
             if isinstance(item, dict) and item.get("type") == "image_generation_call":
-                native_image(repo, request_id, step, item, refs, [secret])
+                duration = timing.elapsed(native_started[item['id']]) if item.get('id') in native_started else None
+                job = native_image(repo, request_id, step, item, refs, [secret])
+                if duration is not None and job:
+                    repo.jobs.record_execution(job.id, providerMs=duration)
         if output:
             clean = safe_output(output, [secret])
             for i, item in enumerate(clean):
@@ -555,6 +615,7 @@ def call_responses(repo, request_id, step, refs, *, body_override=None, native_c
             current_output = clean
             combined = merge_output(base_output, current_output)
             repo.update(request_id, output=combined, text=output_text(combined))
+        repo.record_execution(request_id, add=True, resultProcessingMs=timing.elapsed(result_started))
         return payload
 
     def record_model(payload):
@@ -572,12 +633,18 @@ def call_responses(repo, request_id, step, refs, *, body_override=None, native_c
         repo.record_response_details(request_id, step)
         for skill in selected_skills:
             repo.record_skill_read(request_id, skill)
+        try:
+            measured.start_http()
+        except Exception:
+            repo.update(request_id, outcome='known')
+            raise
         with response_stream(client, "POST", profile["base_url"].rstrip("/") + "/responses", is_complete=lambda: completed is not None,
                            headers={"Authorization": "Bearer " + secret, "Content-Type": "application/json"}, json=body) as response:
+            measured.headers()
             if not response.is_success:
                 # Never interpolate arbitrary upstream bodies/headers into errors.
                 repo.update(request_id, outcome="known")
-                raise AgentError("upstream_error", f"Responses 返回 HTTP {response.status_code}；请求不会自动重试。")
+                raise AgentError("upstream_error", f"Responses 返回 HTTP {response.status_code}；请求不会自动重试。", diagnostics=safe_http_failure(response))
             if "text/event-stream" not in response.headers.get("content-type", ""):
                 chunks = []
                 for chunk in response.iter_bytes():
@@ -586,7 +653,10 @@ def call_responses(repo, request_id, step, refs, *, body_override=None, native_c
                     if byte_count > MAX_RESPONSE_BYTES:
                         raise AgentError("upstream_error", "Responses 数据过大。")
                     chunks.append(chunk)
-                completed = handle_payload(json.loads(b"".join(chunks)))
+                payload = json.loads(b"".join(chunks))
+                if isinstance(payload, dict):
+                    measured.event(receiving=True)
+                completed = handle_payload(payload)
             else:
                 data_lines, sse_event_id = [], None
                 def consume():
@@ -600,13 +670,16 @@ def call_responses(repo, request_id, step, refs, *, body_override=None, native_c
                         return
                     event = json.loads(data)
                     kind = event.get("type")
+                    if isinstance(kind, str) and kind.startswith('response.'):
+                        measured.event(receiving=kind.startswith(('response.output_', 'response.image_generation_call.')))
                     check_active(repo, request_id)
                     if kind != "response.completed":
                         record_model(event.get("response"))
                     if kind in {"error", "response.failed", "response.incomplete"}:
                         repo.record_response_details(request_id, step, event.get("response"), secrets=[secret])
                         repo.update(request_id, outcome="known")
-                        raise AgentError("upstream_error", "Responses 流未成功完成；不会自动重试。")
+                        source = event.get('response') if isinstance(event.get('response'), dict) else event
+                        raise AgentError("upstream_error", "Responses 流未成功完成；不会自动重试。", diagnostics={'error': source.get('error')})
                     if kind == "response.output_text.delta":
                         delta = str(event.get("delta", ""))
                         slot = event.get("output_index", 0)
@@ -651,6 +724,8 @@ def call_responses(repo, request_id, step, refs, *, body_override=None, native_c
                         item = event.get("item")
                         if isinstance(item, dict):
                             if item.get("type") == "image_generation_call":
+                                if item.get('id') and kind == 'response.output_item.added':
+                                    native_started.setdefault(item['id'], timing.monotonic())
                                 if item.get("id") and (kind == "response.output_item.done" or item["id"] not in pending_native_images):
                                     pending_native_images[item["id"]] = item
                                 # Item completion is not response completion.
@@ -685,6 +760,7 @@ def call_responses(repo, request_id, step, refs, *, body_override=None, native_c
                         # Partial bytes are not persisted in the conversation JSON.
                         tool_id = event.get("item_id")
                         if tool_id:
+                            native_started.setdefault(tool_id, timing.monotonic())
                             job = native_image(repo, request_id, step, {"id": tool_id, "type": "image_generation_call", "status": "in_progress"}, refs, [secret])
                             raw = event.get("partial_image_b64")
                             if isinstance(raw, str) and raw:
@@ -726,11 +802,14 @@ def call_responses(repo, request_id, step, refs, *, body_override=None, native_c
         repo.record_response_details(request_id, step, {**completed, "output": final}, secrets=[secret])
         return final, redact(completed.get("id"), [secret])
     finally:
-        with suppress(httpx.TransportError):
-            client.close()
-        with _lock:
-            if _clients.get(key) is client:
-                _clients.pop(key, None)
+        try:
+            measured.finish(completed=completed is not None)
+        finally:
+            with suppress(httpx.TransportError):
+                client.close()
+            with _lock:
+                if _clients.get(key) is client:
+                    _clients.pop(key, None)
 
 
 def parse_images(call):
@@ -757,6 +836,14 @@ def parse_images(call):
 
 
 def execute_calls(repo, request_id, step, output, refs):
+    started = timing.monotonic()
+    try:
+        return _execute_calls(repo, request_id, step, output, refs)
+    finally:
+        repo.record_execution(request_id, phase='processing_results', add=True, toolsMs=timing.elapsed(started))
+
+
+def _execute_calls(repo, request_id, step, output, refs):
     from backend.services.generation_queue import enqueue_generation_jobs
     function_outputs = []
     for call in output:
@@ -806,6 +893,7 @@ def execute_calls(repo, request_id, step, output, refs):
             if len(images) - already > remaining:
                 raise AgentError("budget_exhausted", "本批图片超过本轮剩余额度。")
             jobs = []
+            repo.record_execution(request_id, phase='waiting_jobs')
             for image in images:
                 job = create_image_job(repo, request_id, step, call_id, image["id"] if name == "generate_image_batch" else "single", image["prompt"], refs, native=native)
                 jobs.append((image, job))
@@ -818,9 +906,13 @@ def execute_calls(repo, request_id, step, output, refs):
             else:
                 enqueue_generation_jobs(repo.library, provider="openai_compatible")
             repo.update(request_id, state="waiting_for_jobs")
+            generating = False
             while True:
                 check_active(repo, request_id)
                 current = [repo.jobs.get_job(job.id) for _, job in jobs]
+                if not generating and any(job.status == 'running' for job in current):
+                    generating = True
+                    repo.record_execution(request_id, phase='generating_images')
                 if all(job.status not in {"queued", "running"} for job in current):
                     break
                 time.sleep(0.05)
@@ -835,7 +927,7 @@ def execute_calls(repo, request_id, step, output, refs):
         request = repo.request(request_id)
         repo.update(request_id, output=merge_output(request["round"]["responseOutput"], [item]), state="running", outcome="known")
         if name in {"generate_image", "generate_image_batch"} and any(result["status"] == "error" for result in results):
-            raise AgentError("image_job_failed", "部分图片未完成；已保留结果，需要明确发起新请求。")
+            raise AgentError("image_job_failed", timing.image_failure_message(current))
     return function_outputs
 
 
@@ -887,13 +979,16 @@ def run_request(library, request_id):
                     execute_calls(repo, request_id, pending["step"], output, refs_for_request(repo, request))
                     request = check_active(repo, request_id)
                 if not calls or generation_finishes_request(repo, request, calls):
-                    if any(repo.jobs.get_job(jid).status not in {"succeeded", "accepted"} for jid in request["round"]["outputTaskIds"]):
-                        raise AgentError("image_job_failed", "部分原生图片未完成；已保留结果，需要明确发起新请求。")
+                    current_jobs = [repo.jobs.get_job(jid) for jid in request['round']['outputTaskIds']]
+                    if any(job.status not in {"succeeded", "accepted"} for job in current_jobs):
+                        raise AgentError("image_job_failed", timing.image_failure_message(current_jobs))
                     repo.update(request_id, state="completed", outcome="known")
                     return
             if request["usage"]["responseStepsStarted"] >= request["body"]["authorization"]["maxToolRounds"]:
-                raise AgentError("budget_exhausted", "本轮工具调用轮数已用尽，已保留生成结果。")
+                raise AgentError("budget_exhausted", "本轮工具调用轮数已用尽；请查看本轮结果，需要继续时明确发起新请求。")
+            preparation_started = timing.monotonic()
             refs = refs_for_request(repo, request)
+            repo.record_execution(request_id, phase='preparing', add=True, preparationMs=timing.elapsed(preparation_started))
             step = request["usage"]["responseStepsStarted"] + 1
             with connect(repo.library) as conn:
                 conn.execute("BEGIN IMMEDIATE")
@@ -918,22 +1013,31 @@ def run_request(library, request_id):
                     _provider_slots.release()
             with connect(repo.library) as conn:
                 conn.execute("UPDATE agent_steps SET state='completed',output=?,response_id=? WHERE request_id=? AND step=?", (encoded(output), response_id, request_id, step))
+            result_started = timing.monotonic()
             request = repo.request(request_id)
             combined = merge_output(request["round"]["responseOutput"], output)
             repo.update(request_id, output=combined, text=output_text(combined), response_id=response_id, outcome="known")
+            repo.record_execution(request_id, add=True, resultProcessingMs=timing.elapsed(result_started))
     except Exception as exc:
         request = repo.request(request_id)
+        failed_native = []
         for jid in request["round"]["outputTaskIds"]:
             job = repo.jobs.get_job(jid)
             if job.provider == "agent_native" and job.status in {"queued", "running"}:
-                repo.jobs.mark_failed(jid, "原生图片请求未完成；不会自动重试。")
+                repo.jobs.mark_failed(jid, "原生图片请求未完成；不会自动重试。", diagnostics=exception_diagnostics(exc))
+                failed_native.append(jid)
         if request["stop_requested"]:
             repo.update(request_id, state="stopped", error={"code": "stopped", "message": "已停止生成。"})
         else:
             code = exc.code if isinstance(exc, AgentError) else "upstream_outcome_unknown" if request["upstream_outcome"] == "unknown" else "upstream_error"
             message = exc.message if isinstance(exc, AgentError) else "Agent 请求未完成；原请求不会自动重试。"
             state = "interrupted" if code == "interrupted" and request["upstream_outcome"] != "unknown" else "unknown" if request["upstream_outcome"] == "unknown" else "failed"
-            repo.update(request_id, state=state, error={"code": code, "message": message})
+            repo.update(request_id, state=state, error={"code": code, "message": message, 'diagnostics': exception_diagnostics(exc)})
+        # Optional diagnostics are last. Even another instrumentation error
+        # must leave the request and its claimed jobs in durable terminal states.
+        from backend.services.agent_diagnostics import classify_failure
+        for jid in failed_native:
+            repo.jobs.record_execution(jid, phase='unknown' if classify_failure(exception_diagnostics(exc))['outcomeUnknown'] else 'failed')
     finally:
         with _lock:
             _futures.pop(key_for(library, request_id), None)
@@ -983,11 +1087,13 @@ def run_compatible_agent_job(library, job_id):
 class NativeAgentImageProvider:
     """One native batch image occupies one existing generation queue slot."""
     def run_job(self, library, job_id):
+        preparation_started = timing.monotonic()
         repo = AgentRepository(library)
         job = repo.jobs.get_job(job_id)
         link = (job.metadata or {}).get("agent", {})
         request_id = link.get("requestId")
         client, key, claimed = None, (*key_for(library, request_id), job_id, uuid4().hex), False
+        provider_started, provider_ms = None, None
         try:
             request = check_active(repo, request_id)
             profile = repo.verified_profile(request)
@@ -1013,12 +1119,17 @@ class NativeAgentImageProvider:
             with _lock:
                 _clients[key] = client
             payload = None
+            repo.jobs.record_execution(job_id, phase='generating', preparationMs=timing.elapsed(preparation_started))
+            provider_started = timing.monotonic()
             # No image is staged until a successful final response is validated.
             with response_stream(client, "POST", profile["base_url"].rstrip("/") + "/responses", is_complete=lambda: payload is not None,
                                  headers={"Authorization": "Bearer " + profile["api_key"]}, json=body) as response:
                 if not response.is_success:
-                    raise AgentError("upstream_error", f"原生图片接口返回 HTTP {response.status_code}。")
+                    raise AgentError("upstream_error", f"原生图片接口返回 HTTP {response.status_code}。", diagnostics=safe_http_failure(response))
                 payload = read_native_response(response, lambda: check_active(repo, request_id))
+                provider_ms = timing.elapsed(provider_started)
+            repo.jobs.record_execution(job_id, phase='processing_results', providerMs=provider_ms)
+            result_started = timing.monotonic()
             repo.record_response_details(request_id, link.get("step", 1), payload, native_job_id=job_id, secrets=[profile["api_key"]])
             images = [item for item in payload.get("output", []) if isinstance(item, dict) and item.get("type") == "image_generation_call"]
             if len(images) != 1 or images[0].get("status") != "completed" or not images[0].get("result"):
@@ -1038,11 +1149,18 @@ class NativeAgentImageProvider:
             except (ValueError, OSError):
                 raise AgentError("upstream_error", "原生图片结果无法解码。") from None
             check_active(repo, request_id)
-            return repo.jobs.stage_result(job_id, data, "native." + extension,
+            repo.jobs.stage_result(job_id, data, "native." + extension,
                                          {"provider": "agent_native_batch", "requested": {k: v for k, v in image_tool.items() if k not in {"type", "action"}}, "response": {"response_id": redact(payload.get("id"), [profile["api_key"]])}})
+            repo.jobs.record_execution(job_id, phase='completed', resultWriteMs=timing.elapsed(result_started))
+            return repo.jobs.get_job(job_id)
         except Exception as exc:
             if claimed and repo.jobs.get_job(job_id).status == "running":
-                repo.jobs.mark_failed(job_id, exc.message if isinstance(exc, AgentError) else "原生图片请求未完成；不会自动重试。")
+                from backend.services.agent_diagnostics import classify_failure
+                diagnostics = exception_diagnostics(exc)
+                measurements = {'providerMs': provider_ms if provider_ms is not None else timing.elapsed(provider_started)} if provider_started is not None else {
+                    'preparationMs': timing.elapsed(preparation_started)}
+                repo.jobs.mark_failed(job_id, exc.message if isinstance(exc, AgentError) else "原生图片请求未完成；不会自动重试。", diagnostics=diagnostics)
+                repo.jobs.record_execution(job_id, phase='unknown' if classify_failure(diagnostics)['outcomeUnknown'] else 'failed', **measurements)
             elif not claimed:
                 fail_unstarted_agent_job(repo, job_id, exc.message if isinstance(exc, AgentError) else "原生图片请求未完成；不会自动重试。")
             raise
@@ -1076,7 +1194,12 @@ def recover_agent_requests(library):
     repo = AgentRepository(library)
     with _lock:
         _closing.discard(str(repo.library.resolve()))
-    repo.jobs.mark_running_provider_jobs_failed("agent_native", "原生图片请求被后端重启中断；未自动重发。")
+    interrupted_images = repo.jobs.mark_running_provider_jobs_failed("agent_native", "原生图片请求被后端重启中断；未自动重发。")
+    for job in interrupted_images:
+        # No live monotonic origin survives a restart. Preserve measured fields
+        # without deriving a duration from timestamps or implying safe replay.
+        repo.jobs.record_execution(job.id, phase='unknown')
+        repo.jobs.mark_failed(job.id, "原生图片请求被后端重启中断；未自动重发。", diagnostics={'category': 'incomplete_stream'})
     with connect(repo.library) as conn:
         rows = conn.execute("SELECT id,state,upstream_outcome FROM agent_requests WHERE state IN ('queued','running','waiting_for_jobs','stop_requested')").fetchall()
     for row in rows:

@@ -8,6 +8,8 @@ import logging
 import math
 import re
 import sqlite3
+import time
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from contextlib import nullcontext, suppress
@@ -33,6 +35,7 @@ from backend.schemas import (
 )
 from backend.services.credential_safety import contains_embedded_credential, sanitize_structured_credentials
 from backend.services.image_store import MAX_IMAGE_PIXELS, _atomic_write_bytes, store_image
+from backend.services.agent_diagnostics import classify_failure, safe_diagnostics, duration_ms, record_measurement
 
 
 class GenerationJobConflict(ValueError):
@@ -64,6 +67,25 @@ _ACCEPT_ARTIFACTS_METADATA_KEY = "_generation_accept_artifacts"
 # Persist UTC wall-clock age so a lease remains recoverable after restart.
 ACCEPT_CLAIM_LEASE_AFTER = timedelta(minutes=10)
 _DISCARD_REPAIR_LOCK = RLock()
+_QUEUE_CLOCK_LOCK = RLock()
+# In-process origins only. Restarted/evicted jobs have an unknown queue duration;
+# wall-clock timestamps must not be substituted for a monotonic measurement.
+_QUEUE_CLOCKS: OrderedDict[tuple[str, str], float] = OrderedDict()
+
+
+def _remember_queue_start(library_path: Path, job_id: str) -> None:
+    with _QUEUE_CLOCK_LOCK:
+        _QUEUE_CLOCKS[(str(library_path.resolve()), job_id)] = time.monotonic()
+        while len(_QUEUE_CLOCKS) > 4096:
+            _QUEUE_CLOCKS.popitem(last=False)
+
+
+def _queue_duration(library_path: Path, job_id: str) -> float | None:
+    with _QUEUE_CLOCK_LOCK:
+        start = _QUEUE_CLOCKS.pop((str(library_path.resolve()), job_id), None)
+    return duration_ms((time.monotonic() - start) * 1000) if start is not None else None
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -435,7 +457,9 @@ class GenerationJobRepository:
             if connection is None:
                 conn.commit()
             else:
+                _remember_queue_start(self.library_path, job_id)
                 return self._record_from_row(conn.execute("SELECT * FROM generation_jobs WHERE id=?", (job_id,)).fetchone())
+        _remember_queue_start(self.library_path, job_id)
         return self.get_job(job_id)
 
     def _prepare_library_reference_inputs(self, job_id: str, parameters: dict) -> tuple[dict, list[str]]:
@@ -1026,13 +1050,23 @@ class GenerationJobRepository:
     def mark_running(self, job_id: str) -> GenerationJobRecord:
         timestamp = now()
         with connect(self.library_path) as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            row = conn.execute('SELECT metadata,status FROM generation_jobs WHERE id=?', (job_id,)).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            metadata = _from_json(row['metadata'], {})
+            execution = metadata.setdefault('execution', {'version': 1, 'phase': 'queued',
+                'timings': {key: None for key in ('queueMs', 'preparationMs', 'providerMs', 'resultWriteMs')}})
+            if row['status'] in {'queued', 'failed'}:
+                execution['timings']['queueMs'] = _queue_duration(self.library_path, job_id)
+                execution['phase'] = 'preparing'
             cursor = conn.execute(
                 """
                 UPDATE generation_jobs
-                SET status='running', error=NULL, started_at=COALESCE(started_at, ?), updated_at=?
+                SET status='running', error=NULL, started_at=COALESCE(started_at, ?), updated_at=?, metadata=?
                 WHERE id=? AND status IN ('queued', 'failed')
                 """,
-                (timestamp, timestamp, job_id),
+                (timestamp, timestamp, _to_json(metadata), job_id),
             )
             conn.commit()
         if cursor.rowcount != 1:
@@ -1056,7 +1090,9 @@ class GenerationJobRepository:
             metadata = sanitize_generation_parameters(metadata, redact_image_data=True)
             metadata["error_kind"] = _classify_error(str(error or ""))
             if diagnostics is not None:
-                metadata["error_diagnostics"] = sanitize_generation_parameters(diagnostics, redact_image_data=True)
+                metadata["error_diagnostics"] = safe_diagnostics(diagnostics)
+                metadata["failure"] = classify_failure(diagnostics)
+                redacted_error = metadata["failure"]["message"]
             if retry_after_seconds is not None:
                 metadata["retry_after_seconds"] = max(0, min(300, int(retry_after_seconds)))
             cursor = conn.execute(
@@ -1073,6 +1109,27 @@ class GenerationJobRepository:
             raise GenerationJobConflict(f"Generation job cannot be marked failed from status {current.status}")
         self.clear_stream_preview(job_id)
         return self.get_job(job_id)
+
+    def record_execution(self, job_id: str, phase: str | None = None, **durations) -> bool:
+        return record_measurement(self._record_execution, job_id, phase, **durations)
+
+    def _record_execution(self, job_id: str, phase: str | None = None, **durations) -> None:
+        """Persist bounded monotonic measurements, never wall-clock estimates."""
+        with connect(self.library_path) as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            row = conn.execute('SELECT metadata FROM generation_jobs WHERE id=?', (job_id,)).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            metadata = _from_json(row['metadata'], {})
+            execution = metadata.setdefault('execution', {'version': 1, 'phase': 'queued',
+                'timings': {key: None for key in ('queueMs', 'preparationMs', 'providerMs', 'resultWriteMs')}})
+            if phase in {'queued', 'preparing', 'generating', 'processing_results', 'completed', 'failed', 'unknown'}:
+                execution['phase'] = phase
+            for key, value in durations.items():
+                if key in {'queueMs', 'preparationMs', 'providerMs', 'resultWriteMs'}:
+                    execution['timings'][key] = duration_ms(value)
+            conn.execute('UPDATE generation_jobs SET metadata=?,updated_at=? WHERE id=?', (_to_json(metadata), now(), job_id))
+            conn.commit()
 
     def mark_running_provider_jobs_failed(self, provider: str, error: str) -> list[GenerationJobRecord]:
         with connect(self.library_path) as conn:
@@ -2420,6 +2477,12 @@ class GenerationJobRepository:
             raise
 
     def discard_and_retry_job(self, job_id: str) -> GenerationJobRetryResult:
+        # A concurrent caller must not mistake an in-progress discard repair for
+        # a previous interrupted operation and report a second successful claim.
+        with _DISCARD_REPAIR_LOCK:
+            return self._discard_and_retry_job(job_id)
+
+    def _discard_and_retry_job(self, job_id: str) -> GenerationJobRetryResult:
         if self.get_job(job_id).provider in {"agent_native", "agent_native_batch"}:
             raise GenerationJobConflict("请在 Agent 对话中重新生成此原生图片，并确认本轮授权。")
         pending = self._resume_pending_discard_repair(job_id)
@@ -2783,4 +2846,11 @@ class GenerationJobRepository:
         meta = _from_json(data.get("metadata"), {})
         data["parameters"] = params if isinstance(params, dict) else {}
         data["metadata"] = meta if isinstance(meta, dict) else {}
+        # Old records are projected safely, without mutating their stored history.
+        if isinstance(data['metadata'].get('error_diagnostics'), dict):
+            failure = classify_failure(data['metadata']['error_diagnostics'])
+            data['metadata']['failure'] = failure
+            data['metadata']['error_diagnostics'] = safe_diagnostics(data['metadata']['error_diagnostics'])
+            if data.get('error'):
+                data['error'] = failure['message']
         return GenerationJobRecord(**data)

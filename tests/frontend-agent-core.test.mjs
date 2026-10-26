@@ -124,6 +124,7 @@ function harness(t, options = {}) {
   };
   const jsx = (type, props) => ({ type, props });
   const globalMocks = {
+    performance: { now: () => options.now?.() ?? 100 },
     setTimeout: cb => { timers.set(++timerId, cb); return timerId; }, clearTimeout: id => timers.delete(id),
     window: { innerWidth: 1280, innerHeight: 900, addEventListener: (name, cb) => { if (!listeners.has(name)) listeners.set(name, new Set()); listeners.get(name).add(cb); }, removeEventListener: (name, cb) => listeners.get(name)?.delete(cb), dispatchEvent: event => { listeners.get(event.type)?.forEach(cb => cb(event)); return true; } },
     localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) },
@@ -822,11 +823,98 @@ test('actual streamed tool output uses readable captions and renders later struc
   assert.equal(h.find('textarea')[0].value, 'Keep my draft');
 });
 
+test('historical image tool uses its own failed job rather than completed model arguments or another request', async t => {
+  const data = displaySnapshot('completed');
+  const old = data.conversation.rounds[0];
+  old.status = 'error'; old.outputTaskIds = ['old-failed'];
+  old.responseOutput = [{ type: 'function_call', call_id: 'same-call', name: 'generate_image', status: 'completed' }];
+  const latest = { ...old, id: 'latest', index: 2, parentRoundId: old.id, requestId: 'request-latest', status: 'done', outputTaskIds: [], responseOutput: [] };
+  data.conversation.rounds.push(latest); data.conversation.activeRoundId = latest.id;
+  data.request = { ...data.request, id: latest.requestId, roundId: latest.id, toolCalls: [{ callId: 'same-call', state: 'completed' }] };
+  data.jobs = [{ id: 'old-failed', status: 'failed', result_path: null, error: 'legacy upstream error', metadata: { agent: { agentToolCallId: 'same-call' } } }];
+  const h = harness(t, { snapshot: data }); await h.flush();
+  const caption = JSON.stringify(h.find('div', p => p.className === 'agent-tool-status'));
+  assert.match(caption, /本次未生成图片|图片全部失败/);
+  assert.doesNotMatch(caption, /已完成/);
+  assert.equal(h.find('textarea')[0].value, 'Keep my draft');
+  assert.equal(h.submissions.length, 0);
+});
+
+test('actual result cards classify safe image failures once without exposing old raw upstream JSON', async t => {
+  for (const [kind, label] of [['quota', '余额不足'], ['model_unsupported', '模型或接口不支持'], ['moderation', '供应商审核拒绝'], ['authentication', '认证或权限问题'], ['unknown', '图片请求未完成']]) {
+    const data = displaySnapshot('failed');
+    data.request.error = { code: 'image_job_failed', message: 'RAW_SECRET_JSON' };
+    data.request.recoveryReason = 'RAW_SECRET_JSON';
+    const round = data.conversation.rounds[0]; round.outputTaskIds = ['fail']; round.error = 'RAW_SECRET_JSON';
+    round.responseOutput = [{ type: 'function_call', call_id: 'image', name: 'generate_image_batch', status: 'completed' }];
+    data.jobs = [{ id: 'fail', status: 'failed', error: '{"secret":"RAW_SECRET_JSON"}', metadata: { agent: { agentToolCallId: 'image' }, failure: { kind, message: 'RAW_SECRET_JSON' } } }];
+    const h = harness(t, { snapshot: data }); await h.flush();
+    const card = JSON.stringify(h.resultCard());
+    assert.match(card, new RegExp(label)); assert.doesNotMatch(card, /RAW_SECRET_JSON|文件尺寸未知/);
+    assert.equal(h.find('div', p => p.className === 'agent-request-attention').length, 0);
+    assert.match(JSON.stringify(h.find('p', p => p.className === 'agent-round-outcome')), /本次未生成图片/);
+    assert.equal(h.submissions.length, 0); h.unmount();
+  }
+});
+
+test('actual workspace reports mixed results and unknown receipts without losing drafts or treating missing files as success', async t => {
+  const data = displaySnapshot('failed'); const round = data.conversation.rounds[0];
+  round.outputTaskIds = ['ok', 'fail']; round.responseOutput = [{ type: 'function_call', call_id: 'batch', name: 'generate_image_batch', status: 'completed' }];
+  data.jobs = [{ id: 'ok', status: 'accepted', result_path: '/ok.png', metadata: { agent: { agentToolCallId: 'batch' } } }, { id: 'fail', status: 'failed', metadata: { agent: { agentToolCallId: 'batch' } } }];
+  const h = harness(t, { snapshot: data }); await h.flush();
+  assert.match(JSON.stringify(h.find('p', p => p.className === 'agent-round-outcome')), /图片部分成功，已保留 1 张结果/);
+  assert.match(JSON.stringify(h.find('div', p => p.className === 'agent-tool-status')), /图片部分成功/);
+  h.unmount();
+  data.jobs.pop();
+  const unknown = harness(t, { snapshot: data }); await unknown.flush();
+  assert.match(JSON.stringify(unknown.find('p', p => p.className === 'agent-round-outcome')), /结果未知/);
+  assert.match(JSON.stringify(unknown.find('div', p => p.className === 'agent-tool-status')), /结果未知/);
+  assert.equal(unknown.find('textarea')[0].value, 'Keep my draft'); assert.equal(unknown.submissions.length, 0);
+  unknown.unmount();
+  data.jobs.push({ id: 'fail', status: 'unknown', metadata: { agent: { agentToolCallId: 'batch' } } });
+  const uncertainJob = harness(t, { snapshot: data }); await uncertainJob.flush();
+  assert.match(JSON.stringify(uncertainJob.find('p', p => p.className === 'agent-round-outcome')), /结果未知/);
+  assert.equal(uncertainJob.submissions.length, 0);
+});
+
+test('production progress snapshots expose measured phases without fabricating a percentage or changing the draft', async t => {
+  const data = { ...displaySnapshot('running'), jobs: [], images: [] }; const round = data.conversation.rounds[0]; round.status = 'running';
+  const h = harness(t, { snapshot: data }); await h.flush();
+  const before = savedDraft(h);
+  for (const [phase, label] of [['preparing', '准备参考图'], ['waiting_model', '等待文字模型'], ['receiving_model', '接收回答'], ['waiting_jobs', '等待图片任务'], ['generating_images', '正在生成图片'], ['processing_results', '保存图片结果']]) {
+    const next = structuredClone(data); next.revision = 5 + ['preparing', 'waiting_model', 'receiving_model', 'waiting_jobs', 'generating_images', 'processing_results'].indexOf(phase);
+    next.conversation.rounds[0].execution = { version: 1, phase, timings: {}, modelSteps: [] };
+    h.watchers[0].next(next); await h.flush();
+    const caption = JSON.stringify(h.find('p', p => p.className === 'agent-round-outcome'));
+    assert.match(caption, new RegExp(label)); assert.doesNotMatch(caption, /%|正在响应/);
+    assert.deepEqual(savedDraft(h), before);
+  }
+  assert.equal(h.submissions.length, 0);
+});
+
+test('browser terminal observation uses the original send boundary and repeated snapshots cannot extend it; refresh is unknown', async t => {
+  let now = 100;
+  const h = harness(t, { now: () => now }); await h.flush();
+  h.find('button', p => p['aria-label'] === '发送 Agent 消息')[0].onClick(); await h.flush();
+  const data = { ...displaySnapshot('running'), jobs: [], images: [] }; data.revision = 2;
+  data.request.id = h.submissions[0].payload.requestId;
+  data.conversation.rounds[0].requestId = data.request.id; data.conversation.rounds[0].status = 'running';
+  now = 200; h.submissions[0].resolve(data); await h.flush();
+  const terminal = structuredClone(data); terminal.revision = 3; terminal.request.state = 'completed'; terminal.conversation.rounds[0].status = 'done';
+  now = 1300; h.watchers[0].next(terminal); await h.flush();
+  await h.open('查看第 1 轮详情');
+  assert.equal(h.find('response-details')[0].terminalObservationMs, 1200);
+  now = 2400; h.watchers[0].next({ ...terminal, revision: 4 }); await h.flush();
+  assert.equal(h.find('response-details')[0].terminalObservationMs, 1200);
+  const refreshed = harness(t, { snapshot: terminal }); await refreshed.flush(); await refreshed.open('查看第 1 轮详情');
+  assert.equal(refreshed.find('response-details')[0].terminalObservationMs, undefined);
+});
+
 test('failed and uncertain results retain visible recovery actions outside the details menu', async t => {
   for (const state of ['failed', 'unknown', 'interrupted']) {
     const h = harness(t, { snapshot: displaySnapshot(state, { error: { message: 'Mock failure' }, recoveryReason: 'Check original request', upstreamMayContinue: true, canResume: true }) }); await h.flush();
     const alert = h.find('div', p => p.className === 'agent-request-attention' && p.role === 'alert')[0];
-    assert.ok(alert); assert.match(JSON.stringify(alert), /Mock failure/); assert.match(JSON.stringify(alert), /Check original request/); assert.match(JSON.stringify(alert), /计费/);
+    assert.ok(alert); assert.doesNotMatch(JSON.stringify(alert), /Mock failure|Check original request/); assert.match(JSON.stringify(alert), /计费/);
     assert.equal(h.find('button', p => p['aria-label'] === '继续已确认安全的步骤')[0].disabled, false);
     assert.equal(h.find('div', p => p.role === 'dialog').length, 0);
     assert.equal(h.find('textarea')[0].value, 'Keep my draft'); h.unmount();
