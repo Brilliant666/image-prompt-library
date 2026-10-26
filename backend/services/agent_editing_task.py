@@ -152,6 +152,44 @@ def required_asset_ids(task):
                              (task.get('auxiliaries', []) if task else [])))
 
 
+def select_references(repo, request, arguments, refs):
+    """Bind a model's conversational selection to this frozen branch only."""
+    from backend.services.agent_repository import AgentError, encoded
+
+    if (not isinstance(arguments, dict) or set(arguments) != {'targetRef', 'auxiliaries'}
+            or not isinstance(arguments['auxiliaries'], list) or len(arguments['auxiliaries']) > 3):
+        raise AgentError('invalid_reference', '图片选择参数无效；请选择当前分支提供的图片。', 400)
+    target_ref, auxiliaries = arguments['targetRef'], arguments['auxiliaries']
+    if target_ref is None:
+        if auxiliaries:
+            raise AgentError('invalid_reference', '辅助参考需要明确的编辑对象。', 400)
+        return None
+
+    def selected(ref):
+        if not isinstance(ref, str) or not refs.get(ref):
+            raise AgentError('reference_missing', '所选图片不在本轮冻结引用中；不会用其他图片替代。', 400)
+        image = asset_selection(repo, refs[ref])
+        repo._check_frozen_asset(repo.asset(image['assetId']), encoded(image['source']))
+        return image
+
+    target = selected(target_ref)
+    chosen = []
+    for item in auxiliaries:
+        if (not isinstance(item, dict) or set(item) != {'ref', 'role'} or not isinstance(item['role'], str)
+                or item['role'] not in {'lighting', 'style', 'subject', 'composition', 'other'}):
+            raise AgentError('invalid_reference', '辅助参考角色无效。', 400)
+        chosen.append({**selected(item['ref']), 'role': item['role']})
+    identities = [target['assetId'], *(image['assetId'] for image in chosen)]
+    if len(set(identities)) != len(identities):
+        raise AgentError('invalid_reference', '编辑对象和辅助参考不能重复。', 400)
+    previous = request['round'].get('editingTask') or {}
+    return {**copy.deepcopy(previous), 'version': 1, 'conversationId': request['conversation_id'],
+            'branchRoundId': request['round_id'], 'target': target, 'auxiliaries': chosen,
+            'requirements': previous.get('requirements', request['round']['prompt']),
+            'constraints': previous.get('constraints', []), 'workflow': previous.get('workflow', 'auto'),
+            'needsTargetSelection': False, 'candidates': []}
+
+
 def context_data(task, refs):
     if not task:
         return None

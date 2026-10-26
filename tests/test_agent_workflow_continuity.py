@@ -44,7 +44,7 @@ def test_library_edit_prompt_prefers_editing_unless_reverse_is_explicit(isolated
         assert len(calls) == 1 and calls[0][0] == '/v1/responses' and result['jobs'] == []
         sent = calls[0][1]
         assert pixels(sent)[0].endswith(base64.b64encode(image_bytes('blue')).decode())
-        assert all(tool.get('name') == 'read_agent_skill' for tool in sent['tools'])
+        assert all(tool.get('name') in {'read_agent_skill', 'select_image_references'} for tool in sent['tools'])
         for name, section in EDITING | {('image-prompt-reverse', 'overview'), ('image-prompt-reverse', 'analysis')}:
             assert guidance_count(sent, name, section) == int((name, section) in expected)
         assert client.get('/api/items/' + created['id']).json() == before
@@ -162,7 +162,7 @@ def test_disabled_workflows_neither_read_nor_inject_preload_then_reenable(isolat
             guard.setattr(agent_skills, 'read_agent_skill', forbidden)
             off, _ = submit(client, isolated, '继续优化', rid='off')
         assert off['request']['state'] == 'completed' and used_sections(off) == set()
-        assert calls[-1][1]['tools'] == [] and off['jobs'] == []
+        assert [tool.get('name') for tool in calls[-1][1]['tools']] == ['select_image_references'] and off['jobs'] == []
         assert all(guidance_count(calls[-1][1], name, section) == 0 for name, section in EDITING)
         config = client.get('/api/agent/config').json()
         client.put('/api/agent/config', json={'expectedRevision': config['revision'],

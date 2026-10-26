@@ -1,11 +1,14 @@
 import base64
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
+from io import BytesIO
 import json
+from threading import Event
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image
 
 from backend.agent_schemas import AgentRoundCreate
 from backend.db import connect
@@ -19,6 +22,13 @@ from backend.services.openai_compatible import OpenAICompatibleConfig, OpenAICom
 from test_agent_workspaces import configure, image_bytes, isolated, payload
 
 
+def mask_bytes():
+    with Image.open(BytesIO(image_bytes('white'))) as original:
+        buffer = BytesIO()
+        original.convert('RGBA').save(buffer, format='PNG')
+        return buffer.getvalue()
+
+
 @pytest.fixture
 def source(isolated, monkeypatch, request):
     # Endpoint tests explicitly drive the existing queue dispatcher; no thread
@@ -26,7 +36,8 @@ def source(isolated, monkeypatch, request):
     monkeypatch.setattr('backend.routers.agent_image_retry.enqueue_generation_jobs', lambda *a, **k: None)
     monkeypatch.setattr('backend.routers.generation_jobs.enqueue_metadata_jobs', lambda *a, **k: None)
     client = TestClient(create_app(isolated))
-    config = configure(client, isolated, 'http://127.0.0.1:1/v1')
+    native = getattr(request, 'param', None) in {'native', 'native_batch', 'native_mask'}
+    config = configure(client, isolated, 'http://127.0.0.1:1/v1', 'native' if native else 'hybrid')
     store = OpenAICompatibleConfig(library_path=isolated)
     store.save({'base_url': 'http://127.0.0.1:2/v1', 'api_key': 'qa-key-b', 'model': 'gpt-image-b', 'display_name': 'Synthetic B'}, profile_id='mock-b')
     repo = AgentRepository(isolated)
@@ -36,17 +47,33 @@ def source(isolated, monkeypatch, request):
     body['refs'] = [{'kind': 'upload', 'uploadId': image['id']}]
     refs = {'round-1-reference-1': image['id']}
     execution_prompt = '  EXACT execution\n<ref id="round-1-reference-1" />  '
+    if getattr(request, 'param', None) == 'native_mask':
+        mask = repo.store_asset(mask_bytes(), None)
+        body['mask'] = {'targetRefIndex': 0, 'uploadId': mask['id']}
     if getattr(request, 'param', None) == 'two-images':
         second = repo.store_asset(image_bytes('red'), None)
         body['refs'].append({'kind': 'upload', 'uploadId': second['id']})
         refs['round-1-reference-2'] = second['id']
         execution_prompt = '  Blend <ref id="round-1-reference-2" />\nwith <ref id="round-1-reference-1" />, retain <ref id="round-1-reference-2" />.  '
     submitted, _ = repo.create_round('conv', AgentRoundCreate(**body))
-    job = create_image_job(repo, 'req_1', 1, 'synthetic-call', 'single', execution_prompt, refs)
+    job = create_image_job(repo, 'req_1', 1, 'synthetic-call', 'single', execution_prompt, refs, native=native)
+    if native:
+        metadata = {**job.metadata, 'response': {'revised_prompt': execution_prompt}, 'agent': {**job.metadata['agent'],
+            'nativeReferenceSnapshot': {'version': 1, 'complete': True, 'count': len(job.parameters['input_images']),
+                'references': [{'ref': spec['name'], 'assetId': refs[spec['name']], 'path': spec['result_path'],
+                                'sha256': repo.asset(refs[spec['name']])['sha256']} for spec in job.parameters['input_images']]}}}
+        with connect(isolated) as conn:
+            conn.execute('UPDATE generation_jobs SET metadata=? WHERE id=?', (json.dumps(metadata), job.id))
+        job = repo.jobs.get_job(job.id)
+    if getattr(request, 'param', None) == 'native_batch':
+        with connect(isolated) as conn:
+            conn.execute("UPDATE generation_jobs SET provider='agent_native_batch' WHERE id=?", (job.id,))
+        job = repo.jobs.get_job(job.id)
     repo.jobs.mark_failed(job.id, 'Synthetic quota', diagnostics={'http_status': 402, 'error': {'code': 'insufficient_quota'}})
     repo.update('req_1', state='failed', outcome='known', error={'code': 'image_job_failed', 'message': 'Synthetic quota'})
     retry = {'retryId': 'retry-1', 'conversationId': 'conv', 'configRevision': config['revision'],
-             'imageConfig': {'profileId': 'mock-b', 'model': 'gpt-image-b'}, 'confirmed': True}
+             'imageConfig': {'profileId': None if native else 'mock-b', 'model': 'gpt-image-b'},
+             'params': {'size': '1024x1024', 'quality': 'auto', 'output_format': 'png'}, 'confirmed': True}
     calls = []
     def mock(request):
         calls.append((str(request.url), request.read()))
@@ -64,7 +91,8 @@ def source(isolated, monkeypatch, request):
 
 def post(source, body=None):
     client, _, job, retry, _ = source
-    return client.post(f'/api/generation-jobs/{job.id}/retry-current', json=body or retry)
+    value = body or retry
+    return client.post(f'/api/generation-jobs/{job.id}/retry-current', json={**value, 'params': {**retry['params'], **value.get('params', {})}})
 
 
 def test_retry_real_queue_is_image_only_preserves_prompt_pixels_and_lineage(source):
@@ -407,4 +435,328 @@ def test_retry_forged_lineage_or_reference_mapping_does_not_rewrite_prompt(sourc
     assert prompt['text'] == original.prompt_text
     assert 'agent_reference_prompt' not in prompt['provenance']
     assert repo.jobs.get_job(created['id']).prompt_text == original.prompt_text
+    assert not calls
+
+
+@pytest.mark.parametrize('accepted', [False, True])
+def test_retry_successful_image_keeps_original_result_and_uses_current_controls(source, accepted):
+    client, repo, original, body, calls = source
+    repo.jobs.mark_running(original.id)
+    repo.jobs.stage_result(original.id, image_bytes('yellow'), 'old.png')
+    if accepted:
+        saved = client.post(f'/api/generation-jobs/{original.id}/accept-as-new-item', json={'auto_title': False})
+        assert saved.status_code == 200, saved.text
+    before = repo.jobs.get_job(original.id)
+    response = post(source, {**body, 'params': {'size': '1536x1024', 'quality': 'high', 'output_format': 'webp'}})
+    assert response.status_code == 202, response.text
+    created = response.json()['job']
+    assert created['parameters']['size'] == '1536x1024'
+    assert created['parameters']['quality'] == 'high'
+    assert created['parameters']['output_format'] == 'webp'
+    assert created['prompt_text'] == before.prompt_text
+    assert _run_provider_job(repo.library, created['id'], created['provider']).status == 'succeeded'
+    after = repo.jobs.get_job(original.id)
+    for key in ('status', 'result_path', 'result_sha256', 'accepted_image_id', 'prompt_text', 'parameters'):
+        assert getattr(after, key) == getattr(before, key)
+    assert (repo.library / before.result_path).read_bytes() == image_bytes('yellow')
+    assert len(calls) == 1
+
+
+def test_retry_current_controls_never_inherit_old_optional_or_ratio_settings(source):
+    _, repo, job, body, _ = source
+    with connect(repo.library) as conn:
+        parameters = {**job.parameters, 'moderation': 'low', 'background': 'transparent', 'output_compression': 12,
+                      'requested_aspect_ratio': '16:9', 'aspect_ratio_prompt_injection': True}
+        metadata = {**repo.jobs.get_job(job.id).metadata, 'requested': {'size': '2048x1024', 'quality': 'high', 'moderation': 'low'}}
+        conn.execute('UPDATE generation_jobs SET parameters=?,metadata=? WHERE id=?', (json.dumps(parameters), json.dumps(metadata), job.id))
+    response = post(source)
+    assert response.status_code == 202, response.text
+    params = response.json()['job']['parameters']
+    assert params['size'] == body['params']['size']
+    assert params['quality'] == 'auto' and params['background'] == 'auto'
+    assert not {'moderation', 'output_compression', 'requested_aspect_ratio', 'aspect_ratio_prompt_injection'} & params.keys()
+
+
+def test_retry_requires_current_parameter_snapshot(source):
+    client, _, job, body, calls = source
+    for params in (None, {}, {'size': '1024x1024'}):
+        request = {k: v for k, v in body.items() if k != 'params'}
+        if params is not None:
+            request['params'] = params
+        assert client.post(f'/api/generation-jobs/{job.id}/retry-current', json=request).status_code == 422
+    assert not calls
+
+
+@pytest.mark.parametrize('status', ['queued', 'running', 'cancelled', 'discarded'])
+def test_retry_requires_known_terminal_source(source, status):
+    _, repo, job, _, calls = source
+    with connect(repo.library) as conn:
+        conn.execute('UPDATE generation_jobs SET status=? WHERE id=?', (status, job.id))
+    response = post(source)
+    assert response.status_code == 409 and response.json()['detail']['code'] == 'retry_not_terminal'
+    assert not calls
+
+
+def test_retry_success_result_missing_never_submits(source):
+    _, repo, job, _, calls = source
+    repo.jobs.mark_running(job.id)
+    result = repo.jobs.stage_result(job.id, image_bytes('yellow'), 'old.png')
+    (repo.library / result.result_path).unlink()
+    response = post(source)
+    assert response.status_code == 400 and response.json()['detail']['code'] == 'reference_missing'
+    assert not calls
+
+
+def test_retry_completed_descendant_allows_next_attempt_but_queued_descendant_blocks(source):
+    _, repo, original, body, calls = source
+    first = post(source).json()['job']
+    _run_provider_job(repo.library, first['id'], first['provider'])
+    second = post(source, {**body, 'retryId': 'retry-2'})
+    assert second.status_code == 202, second.text
+    assert repo.jobs.get_job(original.id).metadata['latestRetryJobId'] == second.json()['job']['id']
+    blocked = post(source, {**body, 'retryId': 'retry-3'})
+    assert blocked.status_code == 409 and blocked.json()['detail']['code'] == 'retry_pending'
+    assert len(calls) == 1
+
+
+def mock_native_client(monkeypatch, handler):
+    original = httpx.Client
+    monkeypatch.setattr('backend.services.agent_image_retry.httpx.Client', lambda **kwargs: original(
+        **{**kwargs, 'transport': httpx.MockTransport(handler)}))
+
+
+@pytest.mark.parametrize('source', ['native', 'native_batch', 'native_mask'], indirect=True)
+@pytest.mark.parametrize('successful_source', [False, True])
+def test_retry_native_single_forced_tool_preserves_prompt_references_and_current_config(source, monkeypatch, successful_source):
+    client, repo, original, body, image_calls = source
+    if successful_source:
+        repo.jobs.mark_running(original.id)
+        repo.jobs.stage_result(original.id, image_bytes('yellow'), 'before.png')
+    document = client.get('/api/agent/config').json()
+    saved = client.put('/api/agent/config', json={'expectedRevision': document['revision'],
+        'config': {**document['config'], 'textProfileId': 'mock-b', 'textModel': 'current-responses-model'}}).json()
+    body = {**body, 'configRevision': saved['revision'], 'params': {'size': '1536x1024', 'quality': 'high', 'output_format': 'webp'}}
+    native_calls = []
+    def handler(request):
+        native_calls.append((str(request.url), json.loads(request.content)))
+        return httpx.Response(200, json={'id': 'native-retry-result', 'status': 'completed', 'output': [
+            {'id': 'image-retry-result', 'type': 'image_generation_call', 'status': 'completed',
+             'revised_prompt': 'Unrequested provider rewrite', 'result': base64.b64encode(image_bytes('green')).decode()}]})
+    mock_native_client(monkeypatch, handler)
+    response = post(source, body)
+    assert response.status_code == 202, response.text
+    created = response.json()['job']
+    assert created['provider'] == 'agent_native_batch'
+    result = _run_provider_job(repo.library, created['id'], created['provider'])
+    assert result.status == 'succeeded'
+    assert len(native_calls) == 1 and native_calls[0][0] == 'http://127.0.0.1:2/v1/responses'
+    wire = native_calls[0][1]
+    assert wire['model'] == 'current-responses-model'
+    assert wire['tool_choice'] == {'type': 'image_generation'} and wire['max_tool_calls'] == 1
+    assert len(wire['tools']) == 1 and wire['tools'][0]['model'] == 'gpt-image-b'
+    assert wire['tools'][0]['size'] == '1536x1024' and wire['tools'][0]['quality'] == 'high'
+    assert wire['input'][0]['content'][0]['text'] == original.prompt_text
+    assert base64.b64decode(wire['input'][0]['content'][1]['image_url'].split(',')[1]) == image_bytes('blue')
+    if repo.request('req_1')['round']['maskImageId']:
+        assert base64.b64decode(wire['tools'][0]['input_image_mask']['image_url'].split(',')[1]) == mask_bytes()
+    assert result.prompt_text == original.prompt_text
+    assert result.metadata['response']['revised_prompt'] == 'Unrequested provider rewrite'
+    assert repo.jobs.get_job(original.id).status == ('succeeded' if successful_source else 'failed')
+    snapshot = client.get('/api/agent/conversations/conv').json()
+    assert created['id'] in snapshot['conversation']['rounds'][0]['retryTaskIds']
+    with connect(repo.library) as conn:
+        assert conn.execute('SELECT COUNT(*) FROM agent_tool_jobs WHERE job_id=?', (created['id'],)).fetchone()[0] == 0
+    assert not image_calls
+
+
+@pytest.mark.parametrize('source', ['native'], indirect=True)
+def test_retry_native_unknown_receipt_or_dispatch_never_reposts(source, monkeypatch):
+    client, repo, _, body, image_calls = source
+    calls = []
+    def handler(request):
+        calls.append(request)
+        raise httpx.ReadTimeout('synthetic response missing', request=request)
+    mock_native_client(monkeypatch, handler)
+    created = post(source).json()['job']
+    with pytest.raises(httpx.ReadTimeout):
+        _run_provider_job(repo.library, created['id'], created['provider'])
+    assert _run_provider_job(repo.library, created['id'], created['provider']).status == 'failed'
+    receipt = client.get('/api/generation-jobs/retry-submissions/retry-1', params={'conversation_id': 'conv'})
+    assert receipt.status_code == 200 and receipt.json()['job']['metadata']['failure']['outcomeUnknown'] is True
+    assert post(source).status_code == 200
+    fresh = post(source, {**body, 'retryId': 'next-click'})
+    assert fresh.status_code == 409 and fresh.json()['detail']['code'] == 'retry_outcome_unknown'
+    assert len(calls) == 1 and not image_calls
+
+
+@pytest.mark.parametrize('source', ['native'], indirect=True)
+def test_retry_native_accepts_completed_sse_without_second_request(source, monkeypatch):
+    _, repo, _, _, _ = source
+    calls = []
+    def handler(request):
+        calls.append(request)
+        payload = {'id': 'final', 'status': 'completed', 'output': [{'id': 'image', 'type': 'image_generation_call',
+            'status': 'completed', 'result': base64.b64encode(image_bytes('green')).decode()}]}
+        stream = 'data: ' + json.dumps({'type': 'response.completed', 'response': payload}) + '\n\ndata: [DONE]\n\n'
+        return httpx.Response(200, text=stream, headers={'content-type': 'text/event-stream'})
+    mock_native_client(monkeypatch, handler)
+    created = post(source).json()['job']
+    assert _run_provider_job(repo.library, created['id'], created['provider']).status == 'succeeded'
+    assert _run_provider_job(repo.library, created['id'], created['provider']).status == 'succeeded'
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize('source', ['native_mask'], indirect=True)
+def test_retry_native_changed_mask_after_enqueue_never_posts(source, monkeypatch):
+    _, repo, _, _, _ = source
+    calls = []
+    mock_native_client(monkeypatch, lambda request: calls.append(request))
+    created = post(source).json()['job']
+    mask_path = created['metadata']['agentRetry']['maskReference']['path']
+    (repo.library / mask_path).write_bytes(image_bytes('black'))
+    with pytest.raises(AgentError, match='冻结蒙版'):
+        _run_provider_job(repo.library, created['id'], created['provider'])
+    assert repo.jobs.get_job(created['id']).status == 'failed'
+    assert not calls
+
+
+@pytest.mark.parametrize('source', ['native'], indirect=True)
+def test_retry_native_concurrent_dispatch_posts_once(source, monkeypatch):
+    _, repo, _, _, _ = source
+    entered, release, calls = Event(), Event(), []
+    def handler(request):
+        calls.append(request)
+        entered.set()
+        assert release.wait(5)
+        return httpx.Response(200, json={'status': 'completed', 'output': [{'id': 'image', 'type': 'image_generation_call',
+            'status': 'completed', 'result': base64.b64encode(image_bytes('green')).decode()}]})
+    mock_native_client(monkeypatch, handler)
+    created = post(source).json()['job']
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(_run_provider_job, repo.library, created['id'], created['provider'])
+        try:
+            assert entered.wait(5)
+            duplicate = pool.submit(_run_provider_job, repo.library, created['id'], created['provider'])
+            assert duplicate.result(timeout=5).status == 'running'
+        finally:
+            release.set()
+        assert first.result(timeout=5).status == 'succeeded'
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize('source', ['native'], indirect=True)
+def test_retry_native_known_rejection_can_create_new_identity(source, monkeypatch):
+    _, repo, _, body, _ = source
+    calls = []
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(402, json={'error': {'code': 'insufficient_quota'}})
+    mock_native_client(monkeypatch, handler)
+    created = post(source).json()['job']
+    with pytest.raises(AgentError, match='HTTP 402'):
+        _run_provider_job(repo.library, created['id'], created['provider'])
+    failed = repo.jobs.get_job(created['id'])
+    assert failed.metadata['failure']['kind'] == 'quota'
+    assert failed.metadata['failure']['outcomeUnknown'] is False
+    assert post(source, {**body, 'retryId': 'next-click'}).status_code == 202
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize('source', ['native'], indirect=True)
+def test_retry_native_default_image_model_is_not_replaced_with_text_profile_model(source, monkeypatch):
+    _, repo, _, body, _ = source
+    calls = []
+    def handler(request):
+        calls.append(json.loads(request.content))
+        return httpx.Response(200, json={'status': 'completed', 'output': [{'id': 'image', 'type': 'image_generation_call',
+            'status': 'completed', 'result': base64.b64encode(image_bytes('green')).decode()}]})
+    mock_native_client(monkeypatch, handler)
+    response = post(source, {**body, 'imageConfig': {'profileId': None, 'model': ''}})
+    assert response.status_code == 202, response.text
+    created = response.json()['job']
+    assert created['model'] is None
+    assert _run_provider_job(repo.library, created['id'], created['provider']).status == 'succeeded'
+    assert 'model' not in calls[0]['tools'][0]
+    assert calls[0]['model'] == 'mock-text'
+
+
+@pytest.mark.parametrize('source', ['native'], indirect=True)
+@pytest.mark.parametrize('snapshot', [None, {'version': 1, 'complete': False, 'count': 1},
+    {'version': 1, 'complete': True, 'count': 0}, {'version': 1, 'complete': True, 'count': 5}])
+def test_retry_native_unproven_or_incomplete_original_recipe_never_submits(source, snapshot):
+    _, repo, job, _, calls = source
+    current = repo.jobs.get_job(job.id)
+    metadata = {**current.metadata, 'agent': {**current.metadata['agent'], 'nativeReferenceSnapshot': snapshot}}
+    with connect(repo.library) as conn:
+        conn.execute('UPDATE generation_jobs SET metadata=? WHERE id=?', (json.dumps(metadata), job.id))
+    response = post(source)
+    assert response.status_code == 400 and response.json()['detail']['code'] == 'reference_missing'
+    with connect(repo.library) as conn:
+        assert conn.execute("SELECT count(*) FROM generation_jobs WHERE id LIKE 'gen_retry_%'").fetchone()[0] == 0
+    assert not calls
+
+
+@pytest.mark.parametrize('source', ['native'], indirect=True)
+@pytest.mark.parametrize('terminal_status', ['failed', 'incomplete', 'cancelled', None])
+def test_retry_native_terminal_failure_requires_final_receipt_evidence(source, terminal_status):
+    _, repo, job, _, calls = source
+    repo.jobs.mark_failed(job.id, 'Synthetic tool status', diagnostics={'error': {'code': 'image_generation_user_error'}})
+    current = repo.jobs.get_job(job.id)
+    metadata = {**current.metadata, 'agent': {**current.metadata['agent'], 'nativeTerminalStatus': terminal_status}}
+    with connect(repo.library) as conn:
+        conn.execute('UPDATE generation_jobs SET metadata=? WHERE id=?', (json.dumps(metadata), job.id))
+    response = post(source)
+    assert response.status_code == (202 if terminal_status == 'failed' else 409), response.text
+    if terminal_status != 'failed':
+        assert response.json()['detail']['code'] == 'retry_outcome_unknown'
+    assert not calls
+
+
+@pytest.mark.parametrize('source', ['native'], indirect=True)
+@pytest.mark.parametrize('parent_status,tool_status', [('completed', 'failed'), ('completed', 'incomplete'), ('failed', 'failed')])
+def test_retry_native_runner_records_only_confirmed_tool_failure(source, monkeypatch, parent_status, tool_status):
+    _, repo, _, body, _ = source
+    calls = []
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, json={'status': parent_status, 'output': [
+            {'id': 'image', 'type': 'image_generation_call', 'status': tool_status, 'error': {'code': 'image_generation_user_error'}}]})
+    mock_native_client(monkeypatch, handler)
+    created = post(source).json()['job']
+    with pytest.raises(AgentError):
+        _run_provider_job(repo.library, created['id'], created['provider'])
+    stored = repo.jobs.get_job(created['id'])
+    confirmed = parent_status == 'completed' and tool_status == 'failed'
+    assert (stored.metadata['agentRetry'].get('nativeTerminalStatus') == 'failed') is confirmed
+    response = post(source, {**body, 'retryId': 'next-click'})
+    assert response.status_code == (202 if confirmed else 409), response.text
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize('source', ['native'], indirect=True)
+def test_retry_native_frozen_snapshot_digest_outranks_mutated_asset_record(source):
+    _, repo, job, _, calls = source
+    spec = job.parameters['input_images'][0]
+    changed = image_bytes('red')
+    (repo.library / spec['result_path']).write_bytes(changed)
+    with connect(repo.library) as conn:
+        conn.execute('UPDATE agent_assets SET sha256=? WHERE path=?', (hashlib.sha256(changed).hexdigest(), spec['result_path']))
+    response = post(source)
+    assert response.status_code == 400 and response.json()['detail']['code'] == 'reference_missing'
+    assert not calls
+
+
+@pytest.mark.parametrize('source', ['native'], indirect=True)
+@pytest.mark.parametrize('revised', [None, '', '   ', {'text': 'invalid'}])
+def test_retry_native_direct_without_actual_prompt_evidence_never_replays_user_turn(source, revised):
+    _, repo, job, _, calls = source
+    current = repo.jobs.get_job(job.id)
+    metadata = {**current.metadata, 'response': {'revised_prompt': revised}}
+    with connect(repo.library) as conn:
+        conn.execute('UPDATE generation_jobs SET metadata=? WHERE id=?', (json.dumps(metadata), job.id))
+    response = post(source)
+    assert response.status_code == 400 and response.json()['detail']['code'] == 'prompt_unavailable'
+    assert repo.jobs.get_job(job.id).prompt_text == job.prompt_text
+    with connect(repo.library) as conn:
+        assert conn.execute("SELECT count(*) FROM generation_jobs WHERE id LIKE 'gen_retry_%'").fetchone()[0] == 0
     assert not calls

@@ -32,7 +32,7 @@ export function readAgentDrafts(storage: Pick<Storage, 'getItem'>, enabled: bool
   } catch { return {}; }
 }
 
-export interface PendingAgentSubmission { conversationId: string; payload: AgentRoundCreate }
+export interface PendingAgentSubmission { conversationId: string; payload: AgentRoundCreate; preserveDraft?: boolean }
 const JOURNAL = 'ipl.agent.pending-submissions.v1';
 
 // A safety journal is independent from the optional draft preference. A reload

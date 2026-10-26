@@ -556,12 +556,16 @@ class AgentRepository:
         if not text["api_key"] or not text["base_url"]:
             raise AgentError("configuration_incomplete", "文本 API 配置不完整。", 400)
         auth = body.authorization
+        if auth.allowImageGeneration and body.imageCount > config['maxImageJobs']:
+            raise AgentError('authorization_denied', f'本轮希望生成 {body.imageCount} 张图片，超过当前设置的图片上限 {config["maxImageJobs"]} 张。', 400)
         if auth.maxToolRounds > config["maxToolRounds"] or auth.maxImageJobs > config["maxImageJobs"]:
             raise AgentError("authorization_denied", "请求额度超过当前设置。", 400)
         if auth.allowWebSearch and not config["webSearch"]:
             raise AgentError("authorization_denied", "当前设置未启用网络搜索。", 400)
         if (not auth.allowImageGeneration and auth.maxImageJobs != 0) or (auth.allowImageGeneration and auth.maxImageJobs < 1):
             raise AgentError("authorization_denied", "生图授权与图片额度不一致。", 400)
+        if auth.allowImageGeneration and body.imageCount > auth.maxImageJobs:
+            raise AgentError('authorization_denied', f'本轮希望生成 {body.imageCount} 张图片，超过本轮可生成的 {auth.maxImageJobs} 张。', 400)
         selection = body.imageConfig
         if selection is not None:
             if config["apiConfigMode"] != "hybrid" and selection.profileId is not None:
@@ -610,6 +614,10 @@ class AgentRepository:
         preparation_started = timing.monotonic()
         serialized = body.model_dump(exclude_none=True)
         digest_body = {k: v for k, v in serialized.items() if k != "expectedRevision"}
+        if body.imageCount == 1:
+            # The compatible default must preserve receipts created before the
+            # explicit count field existed; omitted and explicit one are equal.
+            digest_body.pop('imageCount', None)
         digest_body["conversationId"] = cid
         digest = fingerprint(digest_body)
         with connect(self.library) as conn:
@@ -722,7 +730,7 @@ class AgentRepository:
                       "maskImageId": mask_id, "outputTaskIds": [], "responseOutput": [], "status": "running", "error": None,
                       "createdAt": now, "finishedAt": None, "requestId": body.requestId, "derivedFromRoundId": body.derivedFromRoundId,
                       "assistantContent": "", "execution": timing.empty_execution(timing.elapsed(preparation_started)),
-                      "editingTask": task, "taskImageIds": task_inputs}
+                      "editingTask": task, "taskImageIds": task_inputs, "imageCount": body.imageCount}
         with connect(self.library) as conn:
             conn.execute("BEGIN IMMEDIATE")
             replay = conn.execute("SELECT fingerprint FROM agent_requests WHERE id=?", (body.requestId,)).fetchone()
@@ -753,6 +761,21 @@ class AgentRepository:
             value["round"] = json.loads(conn.execute("SELECT data FROM agent_rounds WHERE id=?", (row["round_id"],)).fetchone()[0])
             value["steps"] = [dict(r) for r in conn.execute("SELECT * FROM agent_steps WHERE request_id=? ORDER BY step", (request_id,))]
         return value
+
+    def select_request_references(self, request_id, arguments, refs):
+        request = self.request(request_id)
+        task = editing.select_references(self, request, arguments, refs)
+        with connect(self.library) as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            stored = conn.execute('SELECT * FROM agent_requests WHERE id=?', (request_id,)).fetchone()
+            if stored['stop_requested'] or stored['state'] not in ACTIVE_STATES:
+                raise AgentError('stopped', '本轮已结束，不能继续修改图片选择。')
+            current = json.loads(conn.execute('SELECT data FROM agent_rounds WHERE id=? AND deleted=0',
+                                             (stored['round_id'],)).fetchone()[0])
+            current['editingTask'] = task
+            self._save_round(conn, current)
+            self._touch(conn, stored['conversation_id'])
+        return editing.context_data(task, refs)
 
     def update(self, request_id, *, state=None, output=None, text=None, response_id=None, error=None, outcome=None, returned_model=None):
         with connect(self.library) as conn:
@@ -934,7 +957,8 @@ class AgentRepository:
             request_view = {"id": request["id"], "conversationId": request["conversation_id"], "roundId": request["round_id"],
                             "state": request["state"], "frozenConfig": {k: v for k, v in request["frozen"].items() if not k.startswith("_")},
                             "modelInfo": model_info(request["frozen"], request["round"]),
-                            "params": request["body"]["params"], "authorization": request["body"]["authorization"], "usage": request["usage"], "toolCalls": list(calls.values()),
+                            "params": request["body"]["params"], "imageCount": request["body"].get('imageCount', 1),
+                            "authorization": request["body"]["authorization"], "usage": request["usage"], "toolCalls": list(calls.values()),
                             "canResume": request["state"] == "interrupted" and request["upstream_outcome"] != "unknown" and not request["stop_requested"],
                             "recoveryReason": request["error"]["message"] if request["error"] else None,
                             "upstreamOutcome": request["upstream_outcome"], "stopRequested": bool(request["stop_requested"]),

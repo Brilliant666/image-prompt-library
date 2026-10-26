@@ -108,7 +108,7 @@ def test_text_and_visual_workflows_cross_real_api_and_worker(isolated, monkeypat
         assert used_sections(result) == expected
         assert len(calls) == 1 and calls[0][0] == '/v1/responses'
         sent = calls[0][1]
-        assert all(tool.get('name') == 'read_agent_skill' for tool in sent['tools'])
+        assert all(tool.get('name') in {'read_agent_skill', 'select_image_references'} for tool in sent['tools'])
         for skill, section in expected:
             assert read_agent_skill(skill, section)['content'] in sent['instructions']
         assert bool(pixels(sent)) == with_image

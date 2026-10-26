@@ -6,7 +6,7 @@ import type { GenerationJobRecord } from '../../types';
 import type { Translator } from '../../utils/i18n';
 import type { LocalPreferences } from '../../utils/localPreferences';
 import { galleryMatches } from '../../utils/galleryRecipe';
-import { agentJobSource, type GalleryImageSettings } from '../../utils/agentGalleryBridge';
+import { agentJobSource, type GalleryImageSettings, type GalleryImageSettingsCommand } from '../../utils/agentGalleryBridge';
 import { readGalleryFilter, saveGalleryFilter, galleryFilterStatuses, readGalleryHistory, saveGalleryHistory, clearGalleryHistory } from '../../utils/galleryHistory';
 import InputBar, { type GalleryCommand } from './InputBar';
 import TaskGrid from './TaskGrid';
@@ -18,8 +18,8 @@ import { mapGenerationRetryJob } from '../../utils/generationSiblings';
 import ToolbarSelect from '../ToolbarSelect';
 import './GalleryWorkspace.css';
 
-interface Props {active:boolean;queueOpen:boolean;onQueueOpenChange:(open:boolean)=>void;t:Translator;preferences:LocalPreferences;libraryScope?:string;command?:GalleryCommand;focusJobId?:string;refreshKey:number;configurationRevision:number;promptVariablesEnabled?:boolean;promptLanguage?:string;preferredProvider?:string;onOpenAgent?:(id:string)=>void;onImageSettingsChange?:(settings:GalleryImageSettings)=>void;onSendToAgent?:(job:GenerationJobRecord,intent:'reference'|'conversation')=>void;onOpenSettings:()=>void;onAccepted:(id:string,autoTitle?:boolean)=>void;onQueueChanged:()=>void;onCloseDetail?:()=>void}
-export default function GalleryWorkspace({active,queueOpen,onQueueOpenChange,t,preferences,libraryScope,command,focusJobId,refreshKey,configurationRevision,promptVariablesEnabled,promptLanguage,preferredProvider,onOpenAgent,onImageSettingsChange,onSendToAgent,onOpenSettings,onAccepted,onQueueChanged,onCloseDetail}:Props) {
+interface Props {active:boolean;queueOpen:boolean;onQueueOpenChange:(open:boolean)=>void;t:Translator;preferences:LocalPreferences;libraryScope?:string;command?:GalleryCommand;imageSettingsCommand?:GalleryImageSettingsCommand;focusJobId?:string;refreshKey:number;configurationRevision:number;promptVariablesEnabled?:boolean;promptLanguage?:string;preferredProvider?:string;onOpenAgent?:(id:string)=>void;onImageSettingsChange?:(settings:GalleryImageSettings)=>void;onSendToAgent?:(job:GenerationJobRecord,intent:'reference'|'conversation')=>void;onOpenSettings:()=>void;onAccepted:(id:string,autoTitle?:boolean)=>void;onQueueChanged:()=>void;onCloseDetail?:()=>void}
+export default function GalleryWorkspace({active,queueOpen,onQueueOpenChange,t,preferences,libraryScope,command,imageSettingsCommand,focusJobId,refreshKey,configurationRevision,promptVariablesEnabled,promptLanguage,preferredProvider,onOpenAgent,onImageSettingsChange,onSendToAgent,onOpenSettings,onAccepted,onQueueChanged,onCloseDetail}:Props) {
   const [jobs,setJobs]=useState<GenerationJobRecord[]>([]),[total,setTotal]=useState(0),[loading,setLoading]=useState(true),[error,setError]=useState(''),[loadError,setLoadError]=useState(''),[message,setMessage]=useState('');
   const [query,setQuery]=useState(''),[status,setStatus]=useState(readGalleryFilter),[selected,setSelected]=useState<Set<string>>(new Set()),[detail,setDetail]=useState<GenerationJobRecord>(),[lightbox,setLightbox]=useState<string>(),[localCommand,setLocalCommand]=useState<GalleryCommand>(),[busy,setBusy]=useState(false);
   const [refreshing,setRefreshing]=useState(false),[fromCache,setFromCache]=useState(false);
@@ -115,7 +115,7 @@ export default function GalleryWorkspace({active,queueOpen,onQueueOpenChange,t,p
     {!batch&&jobs.length<total&&<button className="pg-load-more" disabled={refreshing} onClick={()=>{pageLimit.current+=48;void refresh();}}>已加载 {jobs.length} / {total} · 加载更多</button>}
     </div>
     {(error||loadError||message)&&<div className={`pg-gallery-feedback ${error||loadError?'is-error':''}`} role={error||loadError?'alert':'status'}><span>{error||(loadError?`${fromCache?'当前显示上次列表，历史更新失败：':''}${loadError}`:message)}</span><button aria-label="关闭画廊提示" onClick={()=>{setError('');setLoadError('');setMessage('');}}><X size={15}/></button></div>}
-    <InputBar active={active} command={localCommand} preferences={preferences} t={t} onCreated={(created?:GenerationJobRecord[])=>{
+    <InputBar active={active} command={localCommand} imageSettingsCommand={imageSettingsCommand} preferences={preferences} t={t} onCreated={(created?:GenerationJobRecord[])=>{
       invalidateHistory();
       if(created?.length){
         const ids=new Set(created.map(job=>job.id));

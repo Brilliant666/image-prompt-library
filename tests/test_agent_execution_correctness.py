@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from backend.db import connect
+from backend.agent_schemas import AgentRef
 from backend.services import agent_execution as execution
 from backend.services.agent_repository import AgentError
 from test_agent_image_selection import repo, body, set_mode
@@ -85,6 +86,109 @@ def new_child(repo, item='one'):
 def job_count(repo):
     with connect(repo.library) as conn:
         return conn.execute('SELECT count(*) FROM generation_jobs').fetchone()[0]
+
+
+def test_native_stream_preserves_final_revised_prompt_after_early_job_creation(repo, monkeypatch):
+    value = start(repo, native=True)
+    revised = 'Actual provider prompt\n  Exact spacing.'
+    image = {**image_result(), 'revised_prompt': revised}
+    transport(monkeypatch, events=[
+        {'type': 'response.output_item.added', 'item': {**image, 'status': 'in_progress', 'result': None, 'revised_prompt': None}},
+        {'type': 'response.output_item.done', 'item': image}, terminal([image])])
+    execution.run_request(repo.library, 'request')
+    current = repo.request('request')
+    assert current['state'] == 'completed' and current['round']['prompt'] == value.prompt
+    assert len(current['round']['outputTaskIds']) == 1
+    job = repo.jobs.get_job(current['round']['outputTaskIds'][0])
+    assert job.status == 'succeeded' and job.prompt_text == revised
+
+
+@pytest.mark.parametrize('narrow', [False, True])
+def test_native_recipe_records_actual_historical_pixels_without_new_upload(repo, monkeypatch, narrow):
+    set_mode(repo, 'native')
+    assets = [repo.store_asset(image_bytes(color=color), None)['id'] for color in ('red', 'blue')]
+    first = body(repo, 'first', images=False).model_copy(update={'prompt': '图片里有什么？',
+        'refs': [AgentRef(kind='upload', uploadId=aid) for aid in assets]})
+    repo.create_round('conversation', first)
+    parent = repo.request('first')['round_id']
+    repo.update('first', state='completed', outcome='known')
+    value = body(repo, 'next').model_copy(update={'parentRoundId': parent,
+        'prompt': '<ref id="round-1-reference-2" />' if narrow else '蓝色陶瓷茶杯，柔光，桌面。'})
+    repo.create_round('conversation', value)
+    calls = transport(monkeypatch, payload={'id': 'native', 'status': 'completed', 'output': [image_result()]})
+    execution.run_request(repo.library, 'next')
+    current = repo.request('next')
+    job = repo.jobs.get_job(current['round']['outputTaskIds'][0])
+    expected = assets[1:] if narrow else assets
+    assert job.status == 'succeeded' and job.mode == 'image_edit'
+    assert [image['result_path'] for image in job.parameters['input_images']] == [repo.asset(aid)['path'] for aid in expected]
+    snapshot = job.metadata['agent']['nativeReferenceSnapshot']
+    assert snapshot['complete'] and snapshot['count'] == len(expected)
+    assert [entry['assetId'] for entry in snapshot['references']] == expected
+    pixels = [part for item in calls[0]['input'] for part in item.get('content', []) if part.get('type') == 'input_image']
+    assert len(pixels) == len(expected)
+
+
+def test_native_more_than_four_context_images_preserves_complete_record_and_result(repo, monkeypatch):
+    set_mode(repo, 'native')
+    parent, assets = None, []
+    for index, colors in enumerate((('red', 'blue', 'green'), ('yellow', 'purple', 'orange'))):
+        current_assets = [repo.store_asset(image_bytes(color=color), None)['id'] for color in colors]
+        assets.extend(current_assets)
+        request_id = f'history-{index}'
+        value = body(repo, request_id, images=False).model_copy(update={'prompt': '描述这些图片', 'parentRoundId': parent,
+            'refs': [AgentRef(kind='upload', uploadId=aid) for aid in current_assets]})
+        repo.create_round('conversation', value)
+        parent = repo.request(request_id)['round_id']
+        repo.update(request_id, state='completed', outcome='known')
+    repo.create_round('conversation', body(repo, 'next').model_copy(update={'parentRoundId': parent}))
+    calls = transport(monkeypatch, payload={'id': 'native', 'status': 'completed', 'output': [image_result()]})
+    execution.run_request(repo.library, 'next')
+    current = repo.request('next')
+    job = repo.jobs.get_job(current['round']['outputTaskIds'][0])
+    snapshot = job.metadata['agent']['nativeReferenceSnapshot']
+    assert current['state'] == 'completed' and job.status == 'succeeded' and job.mode == 'image_edit'
+    assert snapshot['complete'] is False and snapshot['count'] == 6 and snapshot['reason'] == 'input_limit_exceeded'
+    assert [entry['assetId'] for entry in snapshot['references']] == assets
+    assert job.parameters['input_images'] == []  # No truncated or substitutable retry recipe.
+    assert len([part for item in calls[0]['input'] for part in item.get('content', []) if part.get('type') == 'input_image']) == 6
+
+
+@pytest.mark.parametrize('status', ['failed', 'incomplete', 'cancelled'])
+def test_native_explicit_tool_failure_has_terminal_evidence_only_for_failed(repo, monkeypatch, status):
+    start(repo, native=True)
+    failed = {**image_result(status), 'result': None, 'error': {'code': 'image_generation_user_error'}}
+    transport(monkeypatch, payload={'id': 'native', 'status': 'completed', 'output': [failed]})
+    execution.run_request(repo.library, 'request')
+    current = repo.request('request')
+    job = repo.jobs.get_job(current['round']['outputTaskIds'][0])
+    assert job.status == 'failed'
+    assert job.metadata['agent'].get('nativeTerminalStatus') == ('failed' if status == 'failed' else None)
+
+
+def test_native_stream_failed_terminal_keeps_reliable_image_prompt_for_retry(repo, monkeypatch):
+    start(repo, native=True)
+    revised = 'Final attempted image prompt\n  Exact spacing.'
+    failed = {**image_result('failed'), 'result': None, 'revised_prompt': revised,
+              'error': {'code': 'image_generation_user_error'}}
+    transport(monkeypatch, events=[{'type': 'response.output_item.added', 'item': {
+        **failed, 'status': 'in_progress', 'revised_prompt': None}}, terminal([failed])])
+    execution.run_request(repo.library, 'request')
+    current = repo.request('request')
+    job = repo.jobs.get_job(current['round']['outputTaskIds'][0])
+    assert job.status == 'failed' and job.prompt_text == revised
+    assert job.metadata['response']['revised_prompt'] == revised
+    assert job.metadata['agent']['nativeTerminalStatus'] == 'failed'
+
+
+def test_native_batch_preserves_submitted_prompt_and_records_provider_revision(repo, monkeypatch):
+    start(repo, native=True)
+    job = new_child(repo)
+    transport(monkeypatch, payload={'id': 'native', 'status': 'completed', 'output': [
+        {**image_result(), 'revised_prompt': 'Final provider recipe\n  Exact spacing.'}]})
+    result = execution.NativeAgentImageProvider().run_job(repo.library, job.id)
+    assert result.status == 'succeeded' and result.prompt_text == job.prompt_text
+    assert result.metadata['response']['revised_prompt'] == 'Final provider recipe\n  Exact spacing.'
 
 
 @pytest.mark.parametrize('status', ['failed', 'incomplete'])

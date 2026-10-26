@@ -162,7 +162,7 @@ function nodes(node) { return !node || typeof node !== 'object' ? [] : [node, ..
 function deferred() { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; }
 function harness(t, options = {}) {
   const slots = [], effects = [], timers = new Map(), calls = [], listeners = new Map(), scrollFrames = new Map(), scrollObservers = [];
-  const submissions = [], creations = [], requestReads = [], watchers = [], profileChanges = [], panelFocusCalls = [], settingsOpens = [];
+  const submissions = [], creations = [], requestReads = [], watchers = [], profileChanges = [], panelFocusCalls = [], settingsOpens = [], sharedChanges = [];
   const jobReads = [], jobReplies = [], conversationReads = [], conversationUpdates = [], imageDecodes = [], taskUpdates = [], uploads = [], referenceReads = [];
   const root = { inert: false };
   const storage = new Map([['ipl.agent.active-conversation', options.activeId === null ? null : 'current']]);
@@ -227,6 +227,7 @@ function harness(t, options = {}) {
     '../../utils/playground/agentImageRetry': imageRetry,
     '../../utils/recipeInputs': recipeInputs,
     './AgentImageRetryDialog': { __esModule: true, default: 'retry-dialog' },
+    './AgentImageRetryButton': { __esModule: true, default: 'retry-button' },
     './AgentEditingTaskDialog': { __esModule: true, default: 'editing-task-dialog' },
     './AgentFailedImageEditDialog': { __esModule: true, default: 'failed-image-edit-dialog' },
     './AgentImageOptions': { __esModule: true, default: 'image-options' }, '../gallery/SizeDialog': { __esModule: true, default: 'size-dialog' },
@@ -238,7 +239,7 @@ function harness(t, options = {}) {
   let active = true;
   let props = { ...options.props };
   const render = () => {
-    dirty = false; cursor = 0; tree = Component({ active, onOpenSettings() { settingsOpens.push({ rootInert: root.inert, portalPresent: nodes(tree).some(node => node.props?.id === 'agent-chat-panel') }); }, onProfileChange: value => profileChanges.push(value), ...props });
+    dirty = false; cursor = 0; tree = Component({ active, onOpenSettings() { settingsOpens.push({ rootInert: root.inert, portalPresent: nodes(tree).some(node => node.props?.id === 'agent-chat-panel') }); }, onProfileChange: value => profileChanges.push(value), onGalleryImageSettingsChange(value) { sharedChanges.push(structuredClone(value)); props = { ...props, galleryImageSettings: structuredClone(value) }; dirty = true; }, ...props });
     if (options.scrollNodes) {
       const region = nodes(tree).find(node => node.props?.['aria-label'] === '对话消息');
       const content = nodes(tree).find(node => node.props?.className === 'agent-content-column' && node.props.ref);
@@ -253,7 +254,7 @@ function harness(t, options = {}) {
   const close = async () => { find('button', p => p['aria-label'] === '关闭 Agent 面板')[0].onClick(); await flush(); };
   const unmount = () => { if (unmounted) return; unmounted = true; slots.forEach(slot => slot?.cleanup?.()); };
   render(); t.after(unmount);
-  return { calls, find, open, close, root, profileChanges, panelFocusCalls, settingsOpens, flush, unmount, submissions, creations, requestReads, watchers, snapshot, storage, AgentApiError, inputPreferences, jobReads, conversationReads, conversationUpdates, imageDecodes, taskUpdates, uploads, referenceReads, scrollObservers, window: globalMocks.window,
+  return { calls, find, open, close, root, profileChanges, panelFocusCalls, settingsOpens, sharedChanges, flush, unmount, submissions, creations, requestReads, watchers, snapshot, storage, AgentApiError, inputPreferences, jobReads, conversationReads, conversationUpdates, imageDecodes, taskUpdates, uploads, referenceReads, scrollObservers, window: globalMocks.window,
     updateProps(next) { props = { ...props, ...next }; render(); }, queueJobRead() { const reply = deferred(); jobReplies.push(reply); return reply; },
     resultCard() { const card = nodes(tree).find(node => typeof node.type === 'function' && node.type.name === 'ResultCard'); assert.ok(card, 'actual result card should be rendered'); const savedCursor = cursor; cursor = slots.length; const content = card.type(card.props); cursor = savedCursor; return nodes(content); },
     setConfig(value) { config = { ...config, ...value }; }, dispatch(name) { globalMocks.window.dispatchEvent({ type: name }); }, show() { active = true; render(); }, get late() { return late; }, get pendingTimers() { return timers.size; }, get configReads() { return configReads; }, hide() { active = false; render(); } };
@@ -323,8 +324,8 @@ test('actual workspace searches remote history with pagination while preserving 
   assert.equal(h.find('img')[0].src, 'http://isolated.test/img.png');
   assert.equal(h.configReads, 1);
   assert.equal(h.find('button', p => p['aria-label'] === '发送 Agent 消息')[0].disabled, false);
-  await h.open('本轮选项');
-  assert.equal(h.find('input', p => p['aria-label'] === '本轮允许生成图片')[0].disabled, true);
+  await h.open('生图设置');
+  assert.equal(h.find('button', p => p['aria-label'] === '持续生图模式')[0].disabled, true);
   await h.close();
   // Loading a selected conversation uses the same applySnapshot callback as
   // background polling: neither may collapse the server-filtered result window.
@@ -354,21 +355,25 @@ test('conversation API URL encodes query and cursor and makes one read-only requ
 });
 
 
-test('reactivating the actual workspace revokes an invalid image permission without losing text or references', async t => {
+test('unavailable image configuration blocks image-mode sends while preserving its draft and permitting text after mode is off', async t => {
   const h = harness(t); h.setConfig({ imageReady: true, imageIssues: [] }); await h.flush();
   h.hide(); h.show(); await h.flush();
-  await h.open('本轮选项');
-  h.find('input', p => p['aria-label'] === '本轮允许生成图片')[0].onChange({ target: { checked: true } }); await h.flush();
-  assert.equal(h.find('input', p => p['aria-label'] === '本轮允许生成图片')[0].checked, true);
+  const mode = () => h.find('button', p => p['aria-label'] === '持续生图模式')[0];
+  mode().onClick(); await h.flush(); assert.equal(mode()['aria-pressed'], true);
   h.hide(); h.setConfig({ imageReady: false, imageIssues: [{ message: 'Removed image profile' }] }); h.show(); await h.flush();
-  await h.open('本轮选项');
-  assert.equal(h.find('input', p => p['aria-label'] === '本轮允许生成图片')[0].checked, false);
-  assert.equal(h.find('button', p => p['aria-label'] === '发送 Agent 消息')[0].disabled, false);
-  assert.equal(h.find('textarea')[0].value, 'Keep my draft');
+  h.find('button', p => p['aria-label'] === '发送 Agent 消息')[0].onClick(); await h.flush();
+  assert.equal(h.submissions.length, 0); assert.equal(h.find('textarea')[0].value, 'Keep my draft');
   assert.equal(h.find('img')[0].src, 'http://isolated.test/img.png');
+  assert.match(JSON.stringify(h.find('p', p => p.role === 'alert')), /完善生图设置/);
+  assert.equal(mode().disabled, false, 'the user can turn off an unavailable image mode');
+  mode().onClick(); await h.flush();
+  h.find('button', p => p['aria-label'] === '发送 Agent 消息')[0].onClick(); await h.flush();
+  assert.equal(h.submissions.length, 1); assert.equal(h.submissions[0].payload.authorization.allowImageGeneration, false);
+  h.submissions[0].resolve(h.snapshot); await h.flush();
 });
 
 const params = { size: '1536x1024', quality: 'max', background: 'transparent', output_format: 'webp', output_compression: 0 };
+const neutralParams = { size: 'auto', quality: 'auto', background: 'auto', output_format: 'png' };
 const savedDraft = h => JSON.parse(h.storage.get('ipl.agent.drafts.v1')).current;
 test('professional workflow config events preserve the current workspace draft, references and image configuration without creating or submitting a conversation', async t => {
   const selection = { profileId: 'image', model: 'manual-image-model' };
@@ -438,6 +443,7 @@ test('actual settings save receipt after close refreshes workspace revision whil
   assert.equal(h.find('textarea')[0].value, before.text); assert.equal(h.find('img')[0].src, before.refs[0].url);
   assert.deepEqual(savedDraft(h).params, params); assert.deepEqual(savedDraft(h).imageConfig, selection);
   assert.equal(h.submissions.length, 0); assert.equal(h.creations.length, 0);
+  h.find('button', props => props['aria-label'] === '持续生图模式')[0].onClick(); await h.flush();
   h.find('button', props => props['aria-label'] === '发送 Agent 消息')[0].onClick(); await h.flush();
   assert.equal(h.submissions.length, 1); assert.equal(h.creations.length, 0);
   assert.equal(h.submissions[0].payload.configRevision, 6);
@@ -478,9 +484,10 @@ test('Agent defaults are independent of Gallery and the actual composer sends on
 
 test('accepted Agent submission clears text and references while retaining every image parameter', async t => {
   const h = harness(t, { draft: { text: '  exact prompt\n\n', params } }); await h.flush();
+  await configureImages(h); h.find('button', p => p['aria-label'] === '持续生图模式')[0].onClick(); await h.flush();
   h.find('button', p => p['aria-label'] === '发送 Agent 消息')[0].onClick(); await h.flush();
   assert.equal(h.find('textarea')[0].disabled, true);
-  await h.open('本轮选项');
+  await h.open('生图设置');
   assert.equal(h.find('image-options')[0].disabled, true);
   await h.close();
   assert.equal(h.find('button', p => p.title === '移除参考图')[0].disabled, true);
@@ -574,100 +581,95 @@ test('late conversation details cannot select a different conversation or update
   }
 });
 
-test('confirming an uncertain request consumes both one-request permissions before the next message', async t => {
+test('confirming an uncertain request preserves image mode but consumes search permission before the next message', async t => {
   const h = harness(t); await h.flush();
   h.setConfig({ imageReady: true, imageIssues: [], config: { apiConfigMode: 'hybrid', maxToolRounds: 5, maxImageJobs: 2, webSearch: true }, capabilities: { maxInputImages: 4, webSearch: true } });
-  h.hide(); h.show(); await h.flush(); await h.open('本轮选项');
-  h.find('input', p => p['aria-label'] === '本轮允许生成图片')[0].onChange({ target: { checked: true } });
-  h.find('input', p => p['aria-label'] === '本轮允许网络搜索')[0].onChange({ target: { checked: true } });
-  await h.flush(); await h.close();
+  h.hide(); h.show(); await h.flush();
+  h.find('button', p => p['aria-label'] === '持续生图模式')[0].onClick(); await h.flush();
+  await h.open('生图设置');
+  h.find('input', p => p['aria-label'] === '本轮允许网络搜索')[0].onChange({ target: { checked: true } }); await h.flush(); await h.close();
   h.find('button', p => p['aria-label'] === '发送 Agent 消息')[0].onClick(); await h.flush();
   assert.equal(h.submissions[0].payload.authorization.allowImageGeneration, true);
   assert.equal(h.submissions[0].payload.authorization.allowWebSearch, true);
   h.submissions[0].reject(Error('response lost')); await h.flush();
   h.find('button', p => p['aria-label'] === '检查原请求状态')[0].onClick(); await h.flush();
   h.requestReads[0].resolve(h.snapshot); await h.flush();
-  assert.equal(h.find('button', p => p['aria-label'] === '取消本轮图片授权').length, 0);
+  assert.equal(h.find('button', p => p['aria-label'] === '持续生图模式')[0]['aria-pressed'], true);
   assert.equal(h.find('button', p => p['aria-label'] === '取消本轮搜索授权').length, 0);
-  h.find('textarea')[0].onChange({ target: { value: 'Just a text question', selectionStart: 20 } }); await h.flush();
+  h.find('textarea')[0].onChange({ target: { value: 'Next image instruction', selectionStart: 22 } }); await h.flush();
   h.find('button', p => p['aria-label'] === '发送 Agent 消息')[0].onClick(); await h.flush();
   assert.equal(h.creations.length, 0); assert.equal(h.submissions.length, 2);
-  assert.equal(h.submissions[1].payload.authorization.allowImageGeneration, false);
+  assert.equal(h.submissions[1].payload.authorization.allowImageGeneration, true);
   assert.equal(h.submissions[1].payload.authorization.allowWebSearch, false);
-  assert.equal(h.submissions[1].payload.authorization.maxImageJobs, 0);
+  assert.equal(h.submissions[1].payload.authorization.maxImageJobs, 2);
   h.submissions[1].resolve(h.snapshot); await h.flush();
 });
 
-test('a late receipt does not revoke a newer explicit permission or clear its draft and reference', async t => {
+test('a late receipt preserves image mode and a newer explicit search permission, draft and reference', async t => {
   for (const recover of [false, true]) {
     const h = harness(t); await h.flush();
     h.setConfig({ imageReady: true, imageIssues: [], config: { apiConfigMode: 'hybrid', maxToolRounds: 5, maxImageJobs: 2, webSearch: true }, capabilities: { maxInputImages: 4, webSearch: true } });
-    h.hide(); h.show(); await h.flush(); await h.open('本轮选项');
-    const imagePermission = h.find('input', p => p['aria-label'] === '本轮允许生成图片')[0].onChange;
+    h.hide(); h.show(); await h.flush();
+    h.find('button', p => p['aria-label'] === '持续生图模式')[0].onClick(); await h.flush();
+    await h.open('生图设置');
     const searchPermission = h.find('input', p => p['aria-label'] === '本轮允许网络搜索')[0].onChange;
-    imagePermission({ target: { checked: true } }); searchPermission({ target: { checked: true } }); await h.flush(); await h.close();
+    searchPermission({ target: { checked: true } }); await h.flush(); await h.close();
     const edit = h.find('textarea')[0].onChange;
     h.find('button', p => p['aria-label'] === '发送 Agent 消息')[0].onClick(); await h.flush();
     if (recover) {
       h.submissions[0].reject(Error('response lost')); await h.flush();
       h.find('button', p => p['aria-label'] === '检查原请求状态')[0].onClick(); await h.flush();
     }
-    // A callback already queued before the disabled state rendered still owns
-    // the next draft; a receipt must only consume the submitted choice.
+    // Callbacks queued before disabling still belong to the next draft/choice.
     edit({ target: { value: 'Newer draft', selectionStart: 11 } });
-    imagePermission({ target: { checked: false } }); searchPermission({ target: { checked: false } });
-    imagePermission({ target: { checked: true } }); searchPermission({ target: { checked: true } }); await h.flush();
+    searchPermission({ target: { checked: false } }); searchPermission({ target: { checked: true } }); await h.flush();
     (recover ? h.requestReads[0] : h.submissions[0]).resolve(h.snapshot); await h.flush();
     assert.equal(h.find('textarea')[0].value, 'Newer draft');
     assert.deepEqual(h.find('img').map(p => p.src), ['http://isolated.test/img.png']);
-    assert.equal(h.find('button', p => p['aria-label'] === '取消本轮图片授权').length, 1);
+    assert.equal(h.find('button', p => p['aria-label'] === '持续生图模式')[0]['aria-pressed'], true);
     assert.equal(h.find('button', p => p['aria-label'] === '取消本轮搜索授权').length, 1);
     h.unmount();
   }
 });
 
-test('renewing only image permission while receipt reconciliation is pending still consumes the earlier search permission', async t => {
+test('a queued image-mode change during receipt reconciliation does not renew search permission', async t => {
   const h = harness(t); await h.flush();
   h.setConfig({ imageReady: true, imageIssues: [], config: { apiConfigMode: 'hybrid', maxToolRounds: 5, maxImageJobs: 2, webSearch: true }, capabilities: { maxInputImages: 4, webSearch: true } });
-  h.hide(); h.show(); await h.flush(); await h.open('本轮选项');
-  const imagePermission = h.find('input', p => p['aria-label'] === '本轮允许生成图片')[0].onChange;
-  imagePermission({ target: { checked: true } });
+  h.hide(); h.show(); await h.flush();
+  const mode = () => h.find('button', p => p['aria-label'] === '持续生图模式')[0];
+  mode().onClick(); await h.flush(); const turnOff = mode().onClick;
+  await h.open('生图设置');
   h.find('input', p => p['aria-label'] === '本轮允许网络搜索')[0].onChange({ target: { checked: true } }); await h.flush(); await h.close();
   h.find('button', p => p['aria-label'] === '发送 Agent 消息')[0].onClick(); await h.flush();
   h.submissions[0].reject(Error('response lost')); await h.flush();
   h.find('button', p => p['aria-label'] === '检查原请求状态')[0].onClick(); await h.flush();
-  imagePermission({ target: { checked: false } }); imagePermission({ target: { checked: true } }); await h.flush();
+  turnOff(); await h.flush();
   h.requestReads[0].resolve(h.snapshot); await h.flush();
-  assert.equal(h.find('button', p => p['aria-label'] === '取消本轮图片授权').length, 1);
+  assert.equal(mode()['aria-pressed'], false);
   assert.equal(h.find('button', p => p['aria-label'] === '取消本轮搜索授权').length, 0);
 });
 
-test('uncertain reconciliation uses the original send boundary for edits and permissions queued before checking', async t => {
-  for (const renewed of ['images', 'both']) {
+test('uncertain reconciliation uses the original send boundary for newer drafts and single-request search choices', async t => {
+  for (const renewSearch of [false, true]) {
     const h = harness(t); await h.flush();
     h.setConfig({ imageReady: true, imageIssues: [], config: { apiConfigMode: 'hybrid', maxToolRounds: 5, maxImageJobs: 2, webSearch: true }, capabilities: { maxInputImages: 4, webSearch: true } });
-    h.hide(); h.show(); await h.flush(); await h.open('本轮选项');
-    const imagePermission = h.find('input', p => p['aria-label'] === '本轮允许生成图片')[0].onChange;
+    h.hide(); h.show(); await h.flush();
+    h.find('button', p => p['aria-label'] === '持续生图模式')[0].onClick(); await h.flush();
+    await h.open('生图设置');
     const searchPermission = h.find('input', p => p['aria-label'] === '本轮允许网络搜索')[0].onChange;
-    imagePermission({ target: { checked: true } }); searchPermission({ target: { checked: true } }); await h.flush(); await h.close();
+    searchPermission({ target: { checked: true } }); await h.flush(); await h.close();
     const edit = h.find('textarea')[0].onChange;
     h.find('button', p => p['aria-label'] === '发送 Agent 消息')[0].onClick();
-    // These callbacks were queued before the pending/disabled render. Their
-    // revisions belong to the next draft, before the user checks the receipt.
     edit({ target: { value: 'Newer draft before confirmation', selectionStart: 31 } });
-    imagePermission({ target: { checked: false } }); imagePermission({ target: { checked: true } });
-    if (renewed === 'both') { searchPermission({ target: { checked: false } }); searchPermission({ target: { checked: true } }); }
-    await h.flush();
-    h.submissions[0].reject(Error('response lost')); await h.flush();
-    assert.equal(h.find('textarea')[0].value, 'Newer draft before confirmation');
+    if (renewSearch) { searchPermission({ target: { checked: false } }); searchPermission({ target: { checked: true } }); }
+    await h.flush(); h.submissions[0].reject(Error('response lost')); await h.flush();
     h.find('button', p => p['aria-label'] === '检查原请求状态')[0].onClick(); await h.flush();
     h.requestReads[0].resolve(h.snapshot); await h.flush();
     assert.equal(h.find('textarea')[0].value, 'Newer draft before confirmation');
     assert.deepEqual(h.find('img').map(p => p.src), ['http://isolated.test/img.png']);
-    assert.equal(h.find('button', p => p['aria-label'] === '取消本轮图片授权').length, 1);
-    assert.equal(h.find('button', p => p['aria-label'] === '取消本轮搜索授权').length, renewed === 'both' ? 1 : 0);
-    assert.equal(h.submissions.length, 1); assert.equal(h.requestReads.length, 1);
-    h.unmount();
+    assert.equal(h.find('button', p => p['aria-label'] === '持续生图模式')[0]['aria-pressed'], true);
+    assert.equal(h.find('button', p => p['aria-label'] === '取消本轮搜索授权').length, renewSearch ? 1 : 0);
+    assert.equal(h.submissions.length, 1); assert.equal(h.requestReads.length, 1); h.unmount();
   }
 });
 
@@ -730,37 +732,27 @@ test('actual progress callback updates streamed text and historical model inform
   assert.equal(h.watchers[0].stopped, true); assert.equal(h.submissions.length, 1);
 });
 
-test('actual options open, close and cancel preserve draft and parameters without implicitly authorizing any calls', async t => {
-  const h = harness(t, { draft: { params } }); await h.flush();
-  h.setConfig({ imageReady: true, imageIssues: [], config: { apiConfigMode: 'hybrid', textModel: 'text-model', maxToolRounds: 5, maxImageJobs: 2, webSearch: true }, capabilities: { maxInputImages: 4, webSearch: true } });
-  h.hide(); h.show(); await h.flush();
-  const before = savedDraft(h);
-  await h.open('本轮选项');
-  assert.equal(h.root.inert, true);
-  for (const input of h.find('input', p => p.type === 'checkbox')) assert.equal(input.checked, false);
-  h.find('input', p => p['aria-label'] === '本轮允许生成图片')[0].onChange({ target: { checked: true } });
-  h.find('input', p => p['aria-label'] === '本轮允许网络搜索')[0].onChange({ target: { checked: true } }); await h.flush();
-  h.find('input', p => p['aria-label'] === '本轮图片上限')[0].onChange({ target: { value: '2' } }); await h.flush();
-  const escape = { key: 'Escape', preventDefault() {}, stopPropagation() {} };
-  h.find('div', p => p.role === 'dialog')[0].onKeyDown(escape); await h.flush();
-  assert.equal(h.root.inert, false);
-  assert.equal(h.find('div', p => p.role === 'dialog').length, 0);
-  assert.equal(h.find('button', p => p['aria-label'] === '取消本轮图片授权').length, 1);
+test('image settings open and close without sending, expose actual quantity, and retain draft and search choice', async t => {
+  const h = harness(t, { draft: { params } }); await h.flush(); await configureImages(h);
+  h.setConfig({ config: { apiConfigMode: 'hybrid', textProfileId: 'text', imageProfileId: 'image', textModel: 'reasoning-model', maxToolRounds: 5, maxImageJobs: 4, webSearch: true }, capabilities: { maxInputImages: 4, webSearch: true } });
+  h.hide(); h.show(); await h.flush(); const before = savedDraft(h);
+  const mode = () => h.find('button', p => p['aria-label'] === '持续生图模式')[0];
+  await h.open('生图设置'); assert.equal(h.root.inert, true);
+  for (const label of ['本轮允许生成图片', '本轮图片上限', '本轮模型步骤']) assert.equal(h.find('input', p => p['aria-label'] === label).length, 0);
+  h.find('input', p => p['aria-label'] === '本轮允许网络搜索')[0].onChange({ target: { checked: true } });
+  h.find('image-options')[0].onChange({ count: 3 }); await h.flush();
+  h.find('div', p => p.role === 'dialog')[0].onKeyDown({ key: 'Escape', preventDefault() {}, stopPropagation() {} }); await h.flush();
+  assert.equal(h.root.inert, false); assert.equal(mode()['aria-pressed'], false);
   assert.equal(h.find('button', p => p['aria-label'] === '取消本轮搜索授权').length, 1);
-  await h.open('本轮选项');
-  assert.equal(h.find('input', p => p['aria-label'] === '本轮允许生成图片')[0].checked, true);
-  assert.equal(h.find('input', p => p['aria-label'] === '本轮图片上限')[0].value, 2);
-  const backdrop = h.find('div', p => p.className === 'agent-popover-layer')[0];
-  const target = {}; backdrop.onMouseDown({ target, currentTarget: target }); await h.flush();
-  h.find('button', p => p['aria-label'] === '取消本轮图片授权')[0].onClick(); await h.flush();
-  assert.deepEqual(savedDraft(h), before);
-  await h.open('本轮选项');
-  assert.equal(h.find('input', p => p['aria-label'] === '本轮允许生成图片')[0].checked, false);
+  mode().onClick(); await h.flush(); await h.open('生图设置');
+  assert.equal(h.find('image-options')[0].count, 3);
+  const backdrop = h.find('div', p => p.className === 'agent-popover-layer')[0], target = {};
+  backdrop.onMouseDown({ target, currentTarget: target }); await h.flush();
+  mode().onClick(); await h.flush(); await h.open('生图设置');
+  assert.equal(mode()['aria-pressed'], false);
   assert.equal(h.find('input', p => p['aria-label'] === '本轮允许网络搜索')[0].checked, true);
-  await h.close();
+  await h.close(); assert.deepEqual(savedDraft(h), before);
   assert.equal(h.submissions.length, 0); assert.equal(h.creations.length, 0); assert.equal(h.requestReads.length, 0);
-  assert.equal(h.find('textarea')[0].value, before.text);
-  assert.deepEqual(h.find('img').map(p => p.src), ['http://isolated.test/img.png']);
 });
 
 test('typing @ keeps the actual composer editable without opening a modal or stealing its focus', async t => {
@@ -806,7 +798,7 @@ test('changing the active conversation closes stale panels and inline reference 
 test('settings handoff waits for the Agent portal to unmount and release inert before opening the settings drawer', async t => {
   const h = harness(t, { draft: { params } }); await h.flush();
   const before = savedDraft(h);
-  for (const [panel, action] of [['当前模型与供应商', '修改 Agent 模型配置'], ['本轮选项', '检查图片配置']]) {
+  for (const [panel, action] of [['当前模型与供应商', '修改 Agent 模型配置'], ['生图设置', '检查图片配置']]) {
     const count = h.settingsOpens.length;
     await h.open(panel); assert.equal(h.root.inert, true);
     h.find('button', p => p['aria-label'] === action)[0].onClick();
@@ -824,7 +816,7 @@ test('model panel preserves off-mode profile selection and every rendered action
   h.setConfig({ config: { apiConfigMode: 'off', textModel: 'manual-model', maxToolRounds: 5, maxImageJobs: 2 }, profiles: [{ id: 'a', display_name: 'Provider A' }, { id: 'b', display_name: 'Provider B' }] });
   h.hide(); h.show(); await h.flush();
   const before = savedDraft(h);
-  for (const label of ['当前模型与供应商', '添加图片或引用', '本轮选项']) {
+  for (const label of ['当前模型与供应商', '添加图片或引用', '生图设置']) {
     await h.open(label);
     for (const button of h.find('button')) assert.ok(button['aria-label']?.trim(), `action without a name: ${JSON.stringify(button)}`);
     await h.close();
@@ -832,9 +824,9 @@ test('model panel preserves off-mode profile selection and every rendered action
   await h.open('当前模型与供应商');
   h.find('select', p => p['aria-label'] === '本轮 API 配置')[0].onChange({ target: { value: 'b' } }); await h.flush();
   assert.match(JSON.stringify(h.find('div', p => p.className === 'agent-model-panel-content')), /Provider B/);
-  await h.close(); await h.open('本轮选项');
+  await h.close(); await h.open('生图设置');
   assert.equal(h.find('select', p => p['aria-label'] === '本轮 API 配置')[0].value, 'b');
-  assert.equal(h.find('input', p => p['aria-label'] === '本轮允许生成图片')[0].checked, false);
+  assert.equal(h.find('button', p => p['aria-label'] === '持续生图模式')[0]['aria-pressed'], false);
   assert.deepEqual(savedDraft(h), before); assert.equal(h.profileChanges.at(-1), 'b'); assert.equal(h.submissions.length, 0);
 });
 
@@ -904,82 +896,131 @@ test('historical image tool uses its own failed job rather than completed model 
   assert.equal(h.submissions.length, 0);
 });
 
-test('actual workspace edits and ends the branch task without replacing prompt, attachments or image configuration', async t => {
+test('conversation editing state has no separate task editor or redundant failure controls', async t => {
   const data = displaySnapshot('completed');
-  const h = harness(t, { snapshot: data, updateEditingTask: async (_, body) => ({ ...data, revision: 2, jobs: [], images: [], editingTask: body.task ? { ...body.task, target: { assetId: 'frozen-id', source: body.task.target } } : null }) }); await h.flush();
-  const before = savedDraft(h);
-  await h.open('查看和修改当前编辑任务');
-  const dialog = h.find('editing-task-dialog')[0];
-  assert.deepEqual(dialog.choices[0].reference, before.refs[0].reference);
-  const task = { target: before.refs[0].reference, auxiliaries: [], requirements: 'Only socks', constraints: ['Keep pose'], workflow: 'gpt-image' };
-  await dialog.onSave(task); await h.flush();
-  assert.deepEqual(h.taskUpdates, [{ id: 'current', body: { expectedRevision: 1, branchRoundId: 'r1', task } }]);
-  assert.deepEqual(savedDraft(h), before); assert.equal(h.submissions.length, 0);
-  await h.open('查看和修改当前编辑任务'); await h.find('editing-task-dialog')[0].onSave(null); await h.flush();
-  assert.equal(h.taskUpdates.at(-1).body.task, null); assert.deepEqual(savedDraft(h), before);
+  data.editingTask = { target: { source: { kind: 'upload', uploadId: 'old-task' } }, requirements: 'Keep pose', constraints: ['Keep lighting'], auxiliaries: [] };
+  const h = harness(t, { snapshot: data }); await h.flush(); const before = savedDraft(h);
+  assert.equal(h.find('button', p => /当前编辑任务|使用当前生图配置重试|修改提示词后重新生成/.test(p['aria-label'] || '')).length, 0);
+  assert.equal(h.find('editing-task-dialog').length, 0);
+  await h.open('生图设置'); await h.close();
+  assert.deepEqual(savedDraft(h), before); assert.deepEqual(h.taskUpdates, []); assert.equal(h.submissions.length, 0);
 });
 
-test('failed image actions preserve the draft and retry results stay separate from the original failure', async t => {
-  const data = displaySnapshot('failed'); data.revision = 1; data.jobs = [{ id: 'failed', status: 'failed', prompt_text: 'execution prompt', parameters: {}, metadata: {} }]; data.conversation.rounds[0].outputTaskIds = ['failed'];
-  const updated = structuredClone(data); updated.revision = 2; updated.images = []; updated.conversation.rounds[0].retryTaskIds = ['retry-result']; updated.jobs.push({ id: 'retry-result', status: 'succeeded', result_path: '/retry.png' });
+test('failed images receive current shared settings and retain distinct retry results without replacing the draft', async t => {
+  const data = displaySnapshot('failed'); data.revision = 1;
+  data.jobs = [{ id: 'failed', provider: 'openai_compatible', status: 'failed', prompt_text: 'execution prompt', parameters: { size: '1024x1024', quality: 'low' }, metadata: {} }];
+  data.conversation.rounds[0].outputTaskIds = ['failed'];
+  const updated = structuredClone(data); updated.revision = 2; updated.images = [];
+  updated.conversation.rounds[0].retryTaskIds = ['retry-result']; updated.jobs.push({ id: 'retry-result', status: 'succeeded', result_path: '/retry.png' });
+  const shared = { provider: 'openai_compatible', profileId: 'gallery', model: 'shared-current', params: { ...params, quality: 'medium' }, sizeMode: 'auto4k', count: 5 };
   let reads = 0;
-  const h = harness(t, { snapshot: data, conversation: async () => ++reads === 1 ? { ...data, images: [] } : updated }); await h.flush();
-  const before = savedDraft(h);
-  h.resultCard().find(node => node.props?.['aria-label'] === '使用当前生图配置重试').props.onClick(); await h.flush();
-  const dialog = h.find('retry-dialog')[0]; assert.equal(dialog.job.prompt_text, 'execution prompt');
-  assert.equal(h.submissions.length, 0); assert.deepEqual(savedDraft(h), before);
-  dialog.onReceipt({ retryId: 'retry', sourceJobId: 'failed', job: updated.jobs[1] }); await h.flush();
-  assert.equal(h.conversationReads.length, 2, `read calls ${JSON.stringify(h.conversationReads)}`);
-  assert.ok(h.find('section', p => p['aria-label'] === '本轮图片的重试结果').length);
+  const h = harness(t, { snapshot: data, props: { galleryImageSettings: shared }, conversation: async () => ++reads === 1 ? { ...data, images: [] } : updated }); await h.flush(); await configureImages(h);
+  const before = savedDraft(h), card = h.resultCard();
+  assert.equal(card.filter(node => node.type === 'button' && /使用当前生图配置重试|修改提示词后重新生成/.test(node.props['aria-label'] || '')).length, 0);
+  assert.equal(card.filter(node => node.type === 'button' && node.props['aria-label'] === '复制生图提示词').length, 1);
+  const retry = card.find(node => node.type === 'retry-button').props;
+  assert.equal(retry.job.prompt_text, 'execution prompt'); assert.deepEqual(retry.params, shared.params);
+  assert.deepEqual(retry.selection, { profileId: 'gallery', model: 'shared-current' }); assert.equal(retry.sizeMode, 'auto4k');
+  assert.deepEqual(savedDraft(h), before); assert.equal(h.submissions.length, 0);
+  retry.onReceipt({ retryId: 'retry', sourceJobId: 'failed', job: updated.jobs[1] }); await h.flush();
+  assert.equal(h.conversationReads.length, 2);
+  assert.equal(h.find('section', p => p['aria-label'] === '本轮图片的重试结果').length, 1);
   assert.match(JSON.stringify(h.find('p', p => p.className === 'agent-round-outcome')), /本次未生成图片/);
   assert.deepEqual(savedDraft(h), before); assert.equal(h.submissions.length, 0);
 });
 
-test('accepted task updates survive a closed editor without clearing newer draft edits, but cannot update an unmounted workspace', async t => {
-  for (const unmount of [false, true]) {
-    const data = displaySnapshot('completed'), pending = deferred();
-    const h = harness(t, { snapshot: data, updateEditingTask: () => pending.promise }); await h.flush();
-    await h.open('查看和修改当前编辑任务');
-    const dialog = h.find('editing-task-dialog')[0];
-    const task = { target: reference('u1').reference, auxiliaries: [], requirements: 'Keep lighting', constraints: [], workflow: 'auto' };
-    const saving = dialog.onSave(task);
-    dialog.onClose(); await h.flush();
-    h.find('textarea')[0].onChange({ target: { value: 'New draft after close', selectionStart: 21 } }); await h.flush();
-    const before = savedDraft(h);
-    if (unmount) h.unmount();
-    pending.resolve({ ...data, revision: 2, images: [], jobs: [], editingTask: { ...task, target: { assetId: 'frozen', source: task.target } } }); await saving; await h.flush();
-    assert.deepEqual(savedDraft(h), before); assert.equal(h.late, 0); assert.equal(h.submissions.length, 0);
-    if (!unmount) { await h.open('查看和修改当前编辑任务'); assert.equal(h.find('editing-task-dialog')[0].task.requirements, 'Keep lighting'); }
+test('reply retry immediately resubmits the original message and references while preserving the current draft', async t => {
+  const data = displaySnapshot('completed'); data.conversation.rounds[0].inputImageIds = ['original-image'];
+  const original = { id: 'original-image', status: 'available', source: { kind: 'upload', uploadId: 'original-upload' }, url: 'http://isolated.test/original.png' };
+  const h = harness(t, { snapshot: data, draft: { text: '  Unsent next edit\n', params }, inputPreferences: { clearInputAfterSubmit: true } }); await h.flush();
+  const before = structuredClone(savedDraft(h));
+  const retry = h.find('button', p => p['aria-label'] === '重试回答')[0].onClick;
+  retry(); retry(); await h.flush();
+  assert.equal(h.requestReads.length, 1); assert.equal(h.submissions.length, 0);
+  h.requestReads[0].resolve({ ...h.snapshot, images: [original] }); await h.flush();
+  assert.equal(h.submissions.length, 1, 'no extra send click is needed');
+  const sent = h.submissions[0].payload;
+  assert.equal(sent.origin, 'regenerate'); assert.equal(sent.derivedFromRoundId, 'r1'); assert.equal(sent.parentRoundId, null);
+  assert.equal(sent.prompt, data.conversation.rounds[0].prompt);
+  assert.deepEqual(sent.refs, [original.source]); assert.notDeepEqual(sent.refs, before.refs.map(item => item.reference));
+  assert.deepEqual(sent.params, neutralParams); assert.equal(sent.imageConfig, undefined);
+  assert.deepEqual(sent.authorization, { scope: 'this_request', allowImageGeneration: false, allowWebSearch: false, maxImageJobs: 0, maxToolRounds: 5 });
+  assert.equal(JSON.parse(h.storage.get('ipl.agent.pending-submissions.v1'))[0].preserveDraft, true);
+  assert.deepEqual(savedDraft(h), before);
+  h.submissions[0].resolve({ ...h.snapshot, revision: 2 }); await h.flush();
+  assert.deepEqual(savedDraft(h), before, 'successful retry cannot clear an unrelated composer');
+  assert.equal(h.find('textarea')[0].value, before.text); assert.deepEqual(h.find('img').map(p => p.src), before.refs.map(item => item.url));
+  assert.deepEqual(JSON.parse(h.storage.get('ipl.agent.pending-submissions.v1')), []);
+});
+
+test('an unknown reply retry and reload retain the unsent draft and only reconcile the original request', async t => {
+  const shared = { provider: 'openai_compatible', profileId: 'gallery', model: 'current-shared-model', params: { ...params, quality: 'low' }, count: 3 };
+  const h = harness(t, { snapshot: displaySnapshot('completed'), draft: { text: 'Different unsent draft', params }, props: { galleryImageSettings: shared } }); await h.flush(); await configureImages(h);
+  const before = structuredClone(savedDraft(h));
+  h.find('button', p => p['aria-label'] === '重试回答')[0].onClick(); await h.flush();
+  h.requestReads[0].resolve(h.snapshot); await h.flush();
+  h.submissions[0].reject(Error('retry response lost')); await h.flush();
+  const journal = JSON.parse(h.storage.get('ipl.agent.pending-submissions.v1'));
+  assert.equal(journal.length, 1); assert.equal(journal[0].preserveDraft, true); assert.deepEqual(savedDraft(h), before);
+  await h.open('生图设置');
+  assert.deepEqual(h.find('image-options')[0].params, shared.params, 'an unrelated retry cannot replace visible shared settings with old draft values');
+  assert.deepEqual(h.find('image-options')[0].selection, { profileId: shared.profileId, model: shared.model });
+  const newerShared = { ...shared, model: 'newer-shared-model', params: { ...params, quality: 'medium' }, count: 5 };
+  h.updateProps({ galleryImageSettings: newerShared }); await h.flush();
+  assert.deepEqual(h.find('image-options')[0].params, newerShared.params);
+  assert.equal(h.find('image-options')[0].selection.model, newerShared.model); assert.equal(h.find('image-options')[0].count, 5);
+  assert.deepEqual(JSON.parse(h.storage.get('ipl.agent.pending-submissions.v1')), journal, 'shared edits do not mutate the pending text retry');
+  assert.deepEqual(savedDraft(h), before); await h.close();
+  h.unmount();
+  const refreshed = harness(t, { snapshot: displaySnapshot('completed'), pending: journal, draft: before, props: { galleryImageSettings: newerShared } }); await refreshed.flush(); await configureImages(refreshed);
+  assert.deepEqual(savedDraft(refreshed), before);
+  assert.equal(refreshed.submissions.length, 0); assert.equal(refreshed.requestReads.length, 0);
+  await refreshed.open('生图设置');
+  assert.deepEqual(refreshed.find('image-options')[0].params, newerShared.params);
+  assert.equal(refreshed.find('image-options')[0].selection.model, newerShared.model); await refreshed.close();
+  refreshed.find('button', p => p['aria-label'] === '检查原请求状态')[0].onClick(); await refreshed.flush();
+  assert.equal(refreshed.requestReads[0].id, journal[0].payload.requestId);
+  refreshed.requestReads[0].resolve(refreshed.snapshot); await refreshed.flush();
+  assert.deepEqual(savedDraft(refreshed), before); assert.equal(refreshed.submissions.length, 0);
+  assert.deepEqual(JSON.parse(refreshed.storage.get('ipl.agent.pending-submissions.v1')), []);
+  await refreshed.open('生图设置');
+  assert.deepEqual(refreshed.find('image-options')[0].params, newerShared.params);
+  assert.equal(refreshed.find('image-options')[0].selection.model, newerShared.model); await refreshed.close();
+});
+
+test('reply retry refuses unavailable original references and a late read cannot send into another conversation', async t => {
+  for (const unavailable of [undefined, { id: 'original', status: 'missing', source: { kind: 'upload', uploadId: 'lost' } }]) {
+    const data = displaySnapshot('completed'); data.conversation.rounds[0].inputImageIds = ['original'];
+    const h = harness(t, { snapshot: data }); await h.flush(); const before = savedDraft(h);
+    h.find('button', p => p['aria-label'] === '重试回答')[0].onClick(); await h.flush();
+    h.requestReads[0].resolve({ ...h.snapshot, images: unavailable ? [unavailable] : [] }); await h.flush();
+    assert.equal(h.submissions.length, 0); assert.deepEqual(savedDraft(h), before);
+    assert.match(JSON.stringify(h.find('p', p => p.role === 'alert')), /原参考图片不可用/);
   }
+  const h = harness(t, { snapshot: displaySnapshot('completed') }); await h.flush();
+  h.calls[0].resolve(result(['next'])); await h.flush();
+  const switchConversation = h.find('button', p => p.className === 'agent-conversation-link')[0].onClick;
+  h.find('button', p => p['aria-label'] === '重试回答')[0].onClick(); await h.flush();
+  switchConversation(); await h.flush();
+  h.requestReads[0].resolve(h.snapshot); await h.flush();
+  assert.equal(h.submissions.length, 0); assert.equal(h.storage.get('ipl.agent.active-conversation'), 'next');
+  assert.equal(allDrafts(h).current.text, 'Keep my draft');
 });
 
-function editableFailure() {
-  const data = displaySnapshot('failed'); data.jobs = [{ id: 'failed', provider: 'openai_compatible', status: 'failed', prompt_text: '  Actual execution prompt\n\nSecond paragraph.  ', mode: 'image_edit', parameters: { size: '1536x1024', quality: 'high', output_format: 'png', input_images: [{ name: 'frozen 1', result_path: 'http://isolated.test/frozen-1.png' }, { name: 'frozen 2', result_path: 'http://isolated.test/frozen-2.png' }] }, metadata: {} }]; data.conversation.rounds[0].outputTaskIds = ['failed']; return data;
-}
-test('actual failed image edit restores the execution prompt and both frozen originals atomically with no model submission', async t => {
-  const data = editableFailure(), h = harness(t, { snapshot: data }); await h.flush();
-  const before = savedDraft(h);
-  h.resultCard().find(node => node.props?.['aria-label'] === '修改提示词后重新生成').props.onClick(); await h.flush();
-  const dialog = h.find('failed-image-edit-dialog')[0]; assert.equal(dialog.job.prompt_text, data.jobs[0].prompt_text); assert.deepEqual(savedDraft(h), before);
-  await dialog.onApply('  Changed light\n\nKeep pose.  '); await h.flush();
-  assert.equal(savedDraft(h).text, '  Changed light\n\nKeep pose.  '); assert.equal(savedDraft(h).refs.length, 2);
-  assert.deepEqual(savedDraft(h).refs.map(choice => choice.reference.uploadId), ['restored-1','restored-2']);
-  assert.deepEqual(h.referenceReads.map(([url]) => url), ['http://isolated.test/frozen-1.png','http://isolated.test/frozen-2.png']);
-  assert.equal(h.uploads.length, 2); assert.equal(await h.uploads[0].text(), 'synthetic-image'); assert.equal(savedDraft(h).params.size, '1536x1024'); assert.equal(h.submissions.length, 0);
-});
-
-test('missing frozen reference never falls back to another image and late restoration cannot replace a newer draft', async t => {
-  const missing = harness(t, { snapshot: editableFailure(), fetch: async () => new Response('', { status: 404 }) }); await missing.flush();
-  const before = savedDraft(missing);
-  missing.resultCard().find(node => node.props?.['aria-label'] === '修改提示词后重新生成').props.onClick(); await missing.flush();
-  await assert.rejects(missing.find('failed-image-edit-dialog')[0].onApply('new'), /冻结参考图无法读取/); await missing.flush();
-  assert.deepEqual(savedDraft(missing), before); assert.equal(missing.submissions.length, 0); assert.equal(missing.uploads.length, 0);
-  const deferredRead = deferred(), late = harness(t, { snapshot: editableFailure(), fetch: () => deferredRead.promise }); await late.flush();
-  late.resultCard().find(node => node.props?.['aria-label'] === '修改提示词后重新生成').props.onClick(); await late.flush();
-  const pending = late.find('failed-image-edit-dialog')[0].onApply('old replacement'); await late.flush();
-  late.find('textarea')[0].onChange({ target: { value: 'Newer draft', selectionStart: 11 } }); await late.flush();
-  deferredRead.resolve(new Response(new Blob(['synthetic-image'], { type: 'image/png' }))); await pending; await late.flush();
-  assert.equal(savedDraft(late).text, 'Newer draft'); assert.equal(savedDraft(late).refs[0].reference.uploadId, 'u1'); assert.equal(late.uploads.length, 0); assert.equal(late.submissions.length, 0);
+test('reply retry stays independent of changing shared image settings and never grants image or search calls', async t => {
+  const first = { provider: 'openai_compatible', profileId: 'gallery', model: 'first', params: { ...params, quality: 'low' }, count: 3 };
+  const h = harness(t, { snapshot: displaySnapshot('completed'), props: { galleryImageSettings: first } }); await h.flush(); await configureImages(h);
+  const before = structuredClone(savedDraft(h));
+  h.find('button', p => p['aria-label'] === '持续生图模式')[0].onClick(); await h.flush();
+  h.find('button', p => p['aria-label'] === '重试回答')[0].onClick(); await h.flush();
+  h.updateProps({ galleryImageSettings: { ...first, model: 'later', params: { ...params, quality: 'high' }, count: 10 } }); await h.flush();
+  h.requestReads[0].resolve(h.snapshot); await h.flush();
+  assert.deepEqual(h.submissions[0].payload.params, neutralParams); assert.equal(h.submissions[0].payload.imageConfig, undefined);
+  assert.equal(h.submissions[0].payload.authorization.allowImageGeneration, false);
+  assert.equal(h.submissions[0].payload.authorization.allowWebSearch, false);
+  assert.deepEqual(savedDraft(h), before);
+  h.submissions[0].resolve(h.snapshot); await h.flush();
+  assert.deepEqual(savedDraft(h), before); assert.equal(h.find('button', p => p['aria-label'] === '持续生图模式')[0]['aria-pressed'], true);
 });
 
 test('actual result cards classify safe image failures once without exposing old raw upstream JSON', async t => {
@@ -991,7 +1032,8 @@ test('actual result cards classify safe image failures once without exposing old
     round.responseOutput = [{ type: 'function_call', call_id: 'image', name: 'generate_image_batch', status: 'completed' }];
     data.jobs = [{ id: 'fail', status: 'failed', error: '{"secret":"RAW_SECRET_JSON"}', metadata: { agent: { agentToolCallId: 'image' }, failure: { kind, message: 'RAW_SECRET_JSON' } } }];
     const h = harness(t, { snapshot: data }); await h.flush();
-    const card = JSON.stringify(h.resultCard());
+    const visibleText = node => typeof node === 'string' ? node : Array.isArray(node) ? node.map(visibleText).join('') : node && typeof node === 'object' ? visibleText(node.props?.children) : '';
+    const card = visibleText(h.resultCard()[0]);
     assert.match(card, new RegExp(label)); assert.doesNotMatch(card, /RAW_SECRET_JSON|文件尺寸未知/);
     assert.equal(h.find('div', p => p.className === 'agent-request-attention').length, 0);
     assert.match(JSON.stringify(h.find('p', p => p.className === 'agent-round-outcome')), /本次未生成图片/);
@@ -1092,11 +1134,9 @@ test('explicit image mode survives accepted and reconciled sends, while search s
   const send = async text => { h.find('textarea')[0].onChange({ target: { value: text, selectionStart: text.length } }); await h.flush(); h.find('button', p => p['aria-label'] === '发送 Agent 消息')[0].onClick(); await h.flush(); };
   assert.equal(mode()['aria-pressed'], false);
   mode().onClick(); await h.flush(); assert.equal(mode()['aria-pressed'], true); assert.equal(h.submissions.length, 0);
-  await h.open('本轮选项');
-  const permission = h.find('input', p => p['aria-label'] === '本轮允许生成图片')[0];
-  assert.equal(permission.checked, true, 'persistent permission is visibly effective in this request');
-  assert.equal(permission.disabled, true, 'persistent permission is controlled by its composer switch');
-  assert.ok(h.find('label').some(label => JSON.stringify(label.children).includes('生图模式已授权')));
+  await h.open('生图设置');
+  assert.equal(mode()['aria-pressed'], true, 'the composer switch shows the persistent image permission');
+  assert.equal(h.find('input', p => p['aria-label'] === '本轮允许生成图片').length, 0, 'there is no duplicate per-turn image permission');
   h.find('input', p => p['aria-label'] === '本轮允许网络搜索')[0].onChange({ target: { checked: true } }); await h.flush(); await h.close();
   await send('Image one'); assert.equal(h.submissions[0].payload.authorization.allowImageGeneration, true);
   h.submissions[0].resolve(h.snapshot); await h.flush(); assert.equal(mode()['aria-pressed'], true);
@@ -1105,9 +1145,9 @@ test('explicit image mode survives accepted and reconciled sends, while search s
   h.find('button', p => p['aria-label'] === '检查原请求状态')[0].onClick(); await h.flush(); h.requestReads[0].resolve(h.snapshot); await h.flush();
   assert.equal(mode()['aria-pressed'], true); assert.equal(h.submissions.length, 2);
   mode().onClick(); await h.flush();
-  await h.open('本轮选项');
-  assert.equal(h.find('input', p => p['aria-label'] === '本轮允许生成图片')[0].checked, false);
-  assert.equal(h.find('input', p => p['aria-label'] === '本轮允许生成图片')[0].disabled, false);
+  await h.open('生图设置');
+  assert.equal(mode()['aria-pressed'], false);
+  assert.equal(mode().disabled, false);
   await h.close(); await send('Text only');
   assert.equal(h.submissions[2].payload.authorization.allowImageGeneration, false); assert.equal(h.submissions[2].payload.authorization.maxImageJobs, 0);
   assert.equal(h.submissions[2].payload.authorization.allowWebSearch, false);
@@ -1174,48 +1214,92 @@ test('historical task images use frozen reference aliases after original attachm
   assert.deepEqual(savedDraft(h).params, params); assert.equal(h.submissions.length, 0);
 });
 
-test('actual workspace explicitly copies Gallery image settings, keeps drafts independent and freezes the per-request selection', async t => {
-  const gallery = { provider: 'openai_compatible', profileId: 'gallery', model: 'gpt-image-gallery', params: { ...params, quality: 'medium' } };
+test('shared image settings follow Gallery automatically, synchronize Agent changes, and freeze sent values without rewriting drafts', async t => {
+  const gallery = { provider: 'openai_compatible', profileId: 'gallery', model: 'gpt-image-gallery', params: { ...params, quality: 'medium' }, count: 3 };
   const h = harness(t, { draft: { params }, props: { galleryImageSettings: gallery } }); await h.flush(); await configureImages(h);
   const before = structuredClone(savedDraft(h));
-  await h.open('本轮选项');
-  assert.deepEqual(savedDraft(h), before, 'opening options must not copy Gallery settings');
-  h.find('image-options')[0].onUseGallery(); await h.flush();
-  assert.equal(savedDraft(h).text, before.text); assert.deepEqual(savedDraft(h).refs, before.refs);
-  assert.deepEqual(savedDraft(h).params, gallery.params);
-  assert.deepEqual(savedDraft(h).imageConfig, { profileId: 'gallery', model: 'gpt-image-gallery' });
-  assert.equal(h.find('input', p => p['aria-label'] === '本轮允许生成图片')[0].checked, false);
-  assert.equal(h.submissions.length, 0);
-  h.updateProps({ galleryImageSettings: { ...gallery, model: 'changed-in-gallery', params: { ...params, quality: 'low' } } }); await h.flush();
-  assert.deepEqual(savedDraft(h).params, gallery.params); assert.equal(savedDraft(h).imageConfig.model, gallery.model);
-  h.find('image-options')[0].onResetSelection(); await h.flush();
-  assert.equal(savedDraft(h).imageConfig, undefined); assert.deepEqual(savedDraft(h).params, gallery.params);
-  h.find('image-options')[0].onChange({ imageConfig: { profileId: 'image', model: 'manual-image' } }); await h.flush();
-  h.find('input', p => p['aria-label'] === '本轮允许生成图片')[0].onChange({ target: { checked: true } }); await h.flush();
-  await h.close();
+  await h.open('生图设置');
+  let options = h.find('image-options')[0];
+  assert.equal(options.shared, true); assert.equal(options.count, 3); assert.deepEqual(options.params, gallery.params);
+  assert.deepEqual(options.selection, { profileId: 'gallery', model: gallery.model }); assert.deepEqual(savedDraft(h), before);
+  assert.equal(h.sharedChanges.length, 0, 'opening or observing settings is not an edit');
+  const changedGallery = { ...gallery, model: 'changed-in-gallery', params: { ...params, quality: 'low' }, count: 1 };
+  h.updateProps({ galleryImageSettings: changedGallery }); await h.flush();
+  options = h.find('image-options')[0]; assert.deepEqual(options.params, changedGallery.params);
+  assert.equal(options.selection.model, changedGallery.model); assert.equal(options.count, 1); assert.deepEqual(savedDraft(h), before);
+  options.onChange({ imageConfig: { profileId: 'image', model: 'manual-image' }, params: { ...params, quality: 'high' }, count: 3 }); await h.flush();
+  const shared = h.sharedChanges.at(-1);
+  assert.equal(shared.profileId, 'image'); assert.equal(shared.model, 'manual-image'); assert.equal(shared.count, 3);
+  assert.equal(shared.params.quality, 'high'); assert.deepEqual(savedDraft(h), before);
+  assert.equal(shared.prompt, undefined); assert.equal(shared.refs, undefined);
+  await h.close(); h.find('button', p => p['aria-label'] === '持续生图模式')[0].onClick(); await h.flush();
   h.find('button', p => p['aria-label'] === '发送 Agent 消息')[0].onClick(); await h.flush();
-  assert.deepEqual(h.submissions[0].payload.imageConfig, { profileId: 'image', model: 'manual-image' });
-  assert.deepEqual(h.submissions[0].payload.refs, before.refs.map(choice => choice.reference));
-  assert.equal(h.submissions[0].payload.prompt, before.text); assert.equal(h.submissions[0].payload.authorization.allowImageGeneration, true);
-  assert.deepEqual(JSON.parse(h.storage.get('ipl.agent.pending-submissions.v1'))[0].payload.imageConfig, h.submissions[0].payload.imageConfig);
+  const frozen = structuredClone(h.submissions[0].payload);
+  assert.deepEqual(frozen.imageConfig, { profileId: 'image', model: 'manual-image' }); assert.deepEqual(frozen.params, shared.params);
+  assert.equal(frozen.imageCount, 3); assert.equal(frozen.authorization.maxImageJobs, 4, 'requested count is separate from the protection ceiling');
+  assert.deepEqual(frozen.refs, before.refs.map(choice => choice.reference)); assert.equal(frozen.prompt, before.text);
+  h.updateProps({ galleryImageSettings: { ...gallery, model: 'future-gallery', params: { ...params, size: '1024x1024' }, count: 5 } }); await h.flush();
+  assert.deepEqual(h.submissions[0].payload, frozen);
+  assert.deepEqual(JSON.parse(h.storage.get('ipl.agent.pending-submissions.v1'))[0].payload, JSON.parse(JSON.stringify(frozen)));
   h.submissions[0].resolve(h.snapshot); await h.flush();
-  assert.deepEqual(savedDraft(h).imageConfig, { profileId: 'image', model: 'manual-image' });
-  assert.deepEqual(savedDraft(h).params, gallery.params); assert.equal(savedDraft(h).text, '');
+  assert.deepEqual(savedDraft(h).params, before.params); assert.equal(savedDraft(h).text, '');
+  await h.open('生图设置'); assert.equal(h.find('image-options')[0].selection.model, 'future-gallery');
+  assert.equal(h.find('image-options')[0].count, 5); await h.close();
 });
 
-test('actual workspace rejects incompatible Gallery settings and changing image options never writes the saved text model', async t => {
+test('incompatible Gallery settings disable image mode and can be repaired without changing saved text-model configuration', async t => {
   const h = harness(t, { props: { galleryImageSettings: { provider: 'chatgpt', profileId: '', model: 'oauth-model', params } } }); await h.flush(); await configureImages(h);
-  const before = savedDraft(h); await h.open('本轮选项');
-  h.find('image-options')[0].onUseGallery(); await h.flush(); assert.deepEqual(savedDraft(h), before);
+  const before = structuredClone(savedDraft(h)); await h.open('生图设置');
+  assert.match(h.find('image-options')[0].sharedUnavailable, /供应商不支持/);
+  assert.equal(h.find('button', p => p['aria-label'] === '持续生图模式')[0].disabled, true);
   h.find('image-options')[0].onChange({ imageConfig: { profileId: 'image', model: 'my-image-model' } }); await h.flush();
+  assert.equal(h.sharedChanges.at(-1).provider, 'openai_compatible'); assert.equal(h.sharedChanges.at(-1).model, 'my-image-model');
   assert.equal(h.find('image-options')[0].config.config.textModel, 'reasoning-model');
   assert.equal(h.find('image-options')[0].config.config.imageModel, 'gpt-image-configured');
-  assert.equal(h.submissions.length, 0);
+  assert.equal(h.find('button', p => p['aria-label'] === '持续生图模式')[0].disabled, false);
+  assert.deepEqual(savedDraft(h), before); assert.equal(h.submissions.length, 0);
+});
+
+test('text discussion remains available with unresolved auto4k references and unavailable shared image configuration', async t => {
+  const shared = { provider: 'openai_compatible', profileId: 'gone', model: '', params: { ...params, quality: 'unsupported', size: 'invalid' }, sizeMode: 'auto4k', count: 10, unavailable: 'Image configuration unavailable' };
+  const h = harness(t, { draft: { text: 'Discuss this reference without generating', params }, props: { galleryImageSettings: shared } }); await h.flush(); await configureImages(h);
+  const before = structuredClone(savedDraft(h));
+  assert.ok(h.imageDecodes.length, 'reference measurement is still unresolved');
+  assert.equal(h.find('button', p => p['aria-label'] === '持续生图模式')[0].disabled, true);
+  h.find('button', p => p['aria-label'] === '发送 Agent 消息')[0].onClick(); await h.flush();
+  assert.equal(h.submissions.length, 1);
+  assert.equal(h.submissions[0].payload.prompt, before.text);
+  assert.deepEqual(h.submissions[0].payload.refs, before.refs.map(item => item.reference));
+  assert.deepEqual(h.submissions[0].payload.params, neutralParams);
+  assert.equal(h.submissions[0].payload.imageConfig, undefined);
+  assert.equal(h.submissions[0].payload.authorization.allowImageGeneration, false);
+  assert.equal(h.submissions[0].payload.authorization.maxImageJobs, 0);
+  h.submissions[0].resolve(h.snapshot); await h.flush();
+  assert.deepEqual(savedDraft(h).params, before.params);
+});
+
+test('shared actual image count cannot silently truncate at the configured protection ceiling', async t => {
+  const shared = { provider: 'openai_compatible', profileId: 'gallery', model: 'gallery-model', params, count: 5 };
+  const h = harness(t, { props: { galleryImageSettings: shared } }); await h.flush(); await configureImages(h);
+  const before = structuredClone(savedDraft(h));
+  h.find('button', p => p['aria-label'] === '持续生图模式')[0].onClick(); await h.flush();
+  h.find('button', p => p['aria-label'] === '发送 Agent 消息')[0].onClick(); await h.flush();
+  assert.equal(h.submissions.length, 0); assert.deepEqual(savedDraft(h), before);
+  assert.match(JSON.stringify(h.find('p', p => p.role === 'alert')), /5.*4.*上限/);
+  assert.equal(h.storage.has('ipl.agent.pending-submissions.v1'), false);
+  await h.open('生图设置'); assert.equal(h.find('image-options')[0].count, 5);
+  h.find('image-options')[0].onChange({ count: 3 }); await h.flush(); await h.close();
+  h.find('button', p => p['aria-label'] === '发送 Agent 消息')[0].onClick(); await h.flush();
+  assert.equal(h.submissions.length, 1); assert.equal(h.submissions[0].payload.imageCount, 3);
+  assert.equal(h.submissions[0].payload.authorization.maxImageJobs, 4);
+  assert.equal(h.sharedChanges.at(-1).count, 3);
+  h.submissions[0].resolve(h.snapshot); await h.flush();
 });
 
 test('actual workspace size-dialog handoff releases the options modal and resolves auto size from the first image before submission', async t => {
   const h = harness(t, { draft: { params, sizeMode: 'auto4k' } }); await h.flush(); await configureImages(h);
-  await h.open('本轮选项'); assert.equal(h.root.inert, true);
+  h.find('button', p => p['aria-label'] === '持续生图模式')[0].onClick(); await h.flush();
+  await h.open('生图设置'); assert.equal(h.root.inert, true);
   h.find('image-options')[0].onChooseSize(); await h.flush();
   assert.equal(h.find('image-options').length, 0); assert.equal(h.root.inert, false);
   const dialog = h.find('size-dialog')[0]; assert.ok(dialog); assert.equal(dialog.referenceStatus, 'loading');
@@ -1407,21 +1491,24 @@ test('Gallery handoff cannot change a target conversation branch or frozen draft
   }
 });
 
-test('changing Agent mode from hybrid to native blocks an old image-profile override until explicitly restoring the defaults', async t => {
+test('native image mode rejects an old Images profile until selecting a native tool model without a profile override', async t => {
   const selection = { profileId: 'image', model: 'gpt-image-hybrid-draft' };
   const h = harness(t, { draft: { params, imageConfig: selection } }); await h.flush(); await configureImages(h);
   const before = structuredClone(savedDraft(h));
   h.setConfig({ config: { apiConfigMode: 'native', textProfileId: 'text', textModel: 'native-text-model', imageModel: 'native-tool-model', maxToolRounds: 5, maxImageJobs: 4 }, profiles: [imageProfile('text'), imageProfile('image')], imageReady: true, imageIssues: [] });
   h.hide(); h.show(); await h.flush();
+  h.find('button', p => p['aria-label'] === '持续生图模式')[0].onClick(); await h.flush();
   h.find('button', p => p['aria-label'] === '发送 Agent 消息')[0].onClick(); await h.flush();
-  assert.equal(h.submissions.length, 0, 'an Images API override must never be posted as a native Responses tool selection');
+  assert.equal(h.submissions.length, 0, 'an Images API profile cannot be sent as a native tool selection');
   assert.equal(h.creations.length, 0); assert.deepEqual(savedDraft(h), before);
-  assert.match(JSON.stringify(h.find('p', p => p.role === 'alert')), /恢复.*默认/);
-  assert.equal(h.storage.has('ipl.agent.pending-submissions.v1'), false, 'the local compatibility error does not create an uncertain request');
-  await h.open('本轮选项'); h.find('image-options')[0].onResetSelection(); await h.flush(); await h.close();
+  assert.match(JSON.stringify(h.find('p', p => p.role === 'alert')), /重新选择生图模型/);
+  assert.equal(h.storage.has('ipl.agent.pending-submissions.v1'), false);
+  await h.open('生图设置'); h.find('image-options')[0].onChange({ imageConfig: { model: 'native-new-model' } }); await h.flush(); await h.close();
   assert.equal(savedDraft(h).text, before.text); assert.deepEqual(savedDraft(h).refs, before.refs); assert.deepEqual(savedDraft(h).params, params);
+  assert.equal(h.sharedChanges.length, 0, 'native choices cannot update Gallery Images routing');
   h.find('button', p => p['aria-label'] === '发送 Agent 消息')[0].onClick(); await h.flush();
-  assert.equal(h.submissions.length, 1); assert.equal(h.submissions[0].payload.imageConfig, undefined);
+  assert.equal(h.submissions.length, 1); assert.deepEqual(h.submissions[0].payload.imageConfig, { model: 'native-new-model' });
+  assert.equal(h.submissions[0].payload.authorization.allowImageGeneration, true);
   h.submissions[0].resolve(h.snapshot); await h.flush();
 });
 

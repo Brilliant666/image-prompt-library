@@ -36,15 +36,21 @@ Native uses the Responses image tool. Hybrid uses the chosen text Responses prof
 
 ### Continue an image edit
 
-The current editing task records a stable target image, auxiliary references and their roles, the user's requirements and confirmed constraints. Open the task panel to inspect or correct these choices, or end the task without deleting the conversation. Each conversation branch keeps its own task. A single newly attached image with an editing request becomes the target; an earlier lighting reference remains auxiliary. Ambiguous multiple-image edits require an explicit target, and unavailable references cannot silently substitute another image. Task roles supplement the required visual history rather than removing it.
+The current editing task records a stable target image, auxiliary references and their roles, the user's requirements and confirmed constraints. Describe changes or end the task in the conversation; no separate task form is required. The model can select the target and auxiliary roles from this branch's verified image references, or ask a clarification when the target is ambiguous. Each branch keeps its own task, and unavailable references cannot silently substitute another image. Task roles supplement the required visual history rather than removing it.
+
+The composer keeps one **Image mode** switch, initially off. Turning it on permits the model to interpret a full visual prompt or a natural generation request; it does not force generation for a request to analyze or refine text. **Image settings** in Hybrid share the Gallery's provider, model, dimensions, quality, format and image count. Changes work in both directions, while each workspace retains its own draft and attachments. Automatic dimensions are resolved from the prompt and references of the request being sent. Previously submitted requests retain their frozen settings. Native and Current API continue to use their Responses image tool and do not silently inherit an incompatible Gallery protocol.
+
+The configured maximum jobs and model steps remain backend safeguards, without duplicate per-turn controls. Image count is a requested default, separate from the safety maximum; a choice above that maximum is rejected explicitly. These limits are request-count controls, not monetary budgets.
 
 When changing the image API profile, the image-model field adopts that profile's saved default. A full manual model ID remains possible. This does not change the text profile, another profile's settings or an already submitted request.
 
-### Retry a failed image
+### Retry an answer or image
 
-**Retry with current image configuration** reuses the failed image job's actual execution prompt and frozen reference pixels, preserving its parameters unless explicitly changed in the confirmation panel. After confirmation it creates a new linked Gallery job through the existing Images queue, with no additional text-model planning request. The original failure remains in history. A repeated submission identity returns the same receipt; an uncertain response requires checking that receipt instead of sending again. Quota, moderation and rate-limit failures never automatically retry or change suppliers.
+The compact **Retry** button on an image reuses its actual execution prompt and original frozen references with the current image settings. It creates a new linked Gallery job without an additional text-model planning request, and retains the original result or confirmed failure. The composer draft and attachments are unaffected. Change the prompt by describing the desired change in the conversation. A repeated submission identity returns the same receipt; an uncertain response requires checking that receipt instead of sending again. Quota, moderation and rate-limit failures never automatically retry or change suppliers.
 
-Direct retry is available only for confirmed failed Hybrid Images jobs while the current mode is Hybrid. Native Responses and Current API do not silently convert protocols. Use **Edit prompt and regenerate** to restore the actual prompt and available references to the composer, review them and explicitly send through the selected mode. Missing originals block restoration rather than substituting another image.
+Successful, saved and confirmed failed results can be retried when their source is complete. Hybrid remains on the Images queue; Native remains on Responses. Native direct results require a reliable execution prompt and a complete record of the pixels actually sent, including necessary history images. Old results without this evidence, excessive reference counts, missing originals, protocol changes and unknown outcomes block direct retry rather than substituting another request.
+
+On a text answer, **Retry** immediately requests another answer in a sibling branch using the original user message and input references. It does not enable image generation or search, and does not replace an unsent draft. This preservation also applies when the submission receipt is lost and the page is reloaded.
 
 ### Results and progress
 

@@ -448,7 +448,10 @@ def test_mask_targets_first_image_and_rejects_missing_alpha_before_post(isolated
         sent = requests[0][1]
         input_images = [part["image_url"] for item in sent["input"] for part in item.get("content", []) if part.get("type") == "input_image"]
         assert base64.b64decode(input_images[0].split(",", 1)[1]) == image_bytes("blue")
-        assert sent["tools"][0]["input_image_mask"]["image_url"].startswith("data:image/png;base64,")
+        image_tools = [tool for tool in sent['tools'] if tool['type'] == 'image_generation']
+        assert len(image_tools) == 1
+        assert image_tools[0]["input_image_mask"]["image_url"].startswith("data:image/png;base64,")
+        assert sent['max_tool_calls'] == body['authorization']['maxImageJobs']
         assert not any(tool.get("name") == "generate_image_batch" for tool in sent["tools"])
 
 
