@@ -362,7 +362,12 @@ def test_conversation_selection_resolves_second_image_and_auxiliary_before_real_
         assert [entry['result_path'] for entry in job['parameters']['input_images']] == (
             [target_path, auxiliary_path] if mode == 'hybrid' else [auxiliary_path, target_path])
         model_calls = [sent for path, sent in calls if path == '/v1/responses']
-        assert not any(tool.get('name') == 'generate_image' or tool['type'] == 'image_generation' for tool in model_calls[1]['tools'])
+        # Local generation functions can validate an inline selection before
+        # dispatch; the upstream native tool still needs a resolved target.
+        assert not any(tool['type'] == 'image_generation' for tool in model_calls[1]['tools'])
+        local_tool = next(tool for tool in model_calls[1]['tools']
+                          if tool.get('name') == ('generate_image' if mode == 'hybrid' else 'generate_image_batch'))
+        assert 'referenceSelection' in local_tool['parameters']['required']
         assert any(tool.get('name') == 'generate_image' or tool['type'] == 'image_generation' for tool in model_calls[2]['tools'])
         receipt = next(item for item in model_calls[2]['input'] if item.get('type') == 'function_call_output' and item['call_id'] == 'selection')
         assert json.loads(receipt['output'])['editingTask']['targetRef'] == 'round-1-reference-2'
