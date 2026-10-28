@@ -11,6 +11,7 @@ const referenceUtility = evaluate(await compile('../frontend/src/utils/playgroun
 const recipeUtility = evaluate(await compile('../frontend/src/utils/recipeInputs.ts'), {});
 const compatibleUtility = evaluate(await compile('../frontend/src/utils/compatibleRecipe.ts'), {});
 const clientCode = await compile('../frontend/src/api/agentClient.ts');
+const progress = evaluate(await compile('../frontend/src/api/agentProgress.ts'), {});
 const nodes = node => !node || typeof node !== 'object' ? [] : [node, ...[node.props?.children].flat(Infinity).flatMap(nodes)];
 const text = node => typeof node === 'string' ? node : Array.isArray(node) ? node.map(text).join('') : node && typeof node === 'object' ? text(node.props?.children) : '';
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
@@ -127,7 +128,7 @@ test('failed prompt editing starts with the exact execution prompt, preserves wh
 
 test('production API uses retry-current, receipt GET and branch PATCH without automatic paid retries', async () => {
   const calls = [];
-  const client = evaluate(clientCode, {}, { fetch: async (url, init) => { calls.push([url, init]); if (url.endsWith('/retry-current')) throw new TypeError('unknown outcome'); return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } }); } });
+  const client = evaluate(clientCode, { './agentProgress': progress }, { fetch: async (url, init) => { calls.push([url, init]); if (url.endsWith('/retry-current')) throw new TypeError('unknown outcome'); return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } }); } });
   await assert.rejects(client.agentApi.retryImage('job/1', { retryId: 'retry', confirmed: true }));
   await client.agentApi.imageRetryReceipt('retry/1', 'conversation/1');
   await client.agentApi.updateEditingTask('conversation/1', { expectedRevision: 4, branchRoundId: 'branch', task: null });

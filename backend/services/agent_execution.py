@@ -10,7 +10,7 @@ import json
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager, suppress
+from contextlib import suppress
 from threading import RLock
 from uuid import uuid4
 
@@ -22,6 +22,10 @@ from backend.services.agent_repository import (
     ACTIVE_STATES, AgentError, AgentRepository, REF_TAG, ROUND_MENTION, encoded, milliseconds, safe_model_label,
 )
 from backend.services.agent_skills import default_skill_sections, read_agent_skill, skill_catalog_instructions, skill_tool, validated_skill_preloads
+from backend.services.agent_responses import (
+    MAX_RESPONSE_BYTES, ResponseOutput, response_stream, validate_response_payload, read_native_response,
+    redact, safe_output, merge_output, output_text,
+)
 from backend.services.agent_protocol import function_tool, native_image_parameters, tools_for, response_body
 from backend.services.agent_context_pipeline import (
     build_input, refs_for_request, history_items, skill_context_items, validated_skill_tool_outputs, prepare_context,
@@ -37,7 +41,6 @@ _lock = RLock()
 _futures = {}
 _clients = {}
 _closing = set()
-MAX_RESPONSE_BYTES = 80 * 1024 * 1024
 
 
 def safe_http_failure(response):
@@ -73,79 +76,6 @@ def exception_diagnostics(exc):
     return safe_diagnostics({'category': category})
 
 
-@contextmanager
-def response_stream(client, *args, is_complete, **kwargs):
-    """A validated terminal receipt outranks subsequent transport teardown."""
-    try:
-        with client.stream(*args, **kwargs) as response:
-            yield response
-    except httpx.TransportError:
-        if not is_complete():
-            raise
-
-
-def validate_response_payload(payload, *, require_completed=False):
-    if not isinstance(payload, dict) or not isinstance(payload.get("output", []), list):
-        raise AgentError("upstream_error", "Responses 返回格式无效。")
-    status = payload.get("status")
-    if payload.get("error") or status not in ({"completed"} if require_completed else {None, "completed"}):
-        raise AgentError("upstream_error", "Responses 未成功完成；不会自动重试。", diagnostics={'error': payload.get('error')})
-    return payload
-
-
-def read_native_response(response, check_running):
-    """Read one bounded response without retrying or accepting partial images."""
-    size = 0
-    if "text/event-stream" not in response.headers.get("content-type", ""):
-        chunks = []
-        for chunk in response.iter_bytes():
-            check_running()
-            size += len(chunk)
-            if size > MAX_RESPONSE_BYTES:
-                raise AgentError("upstream_error", "原生图片数据过大。")
-            chunks.append(chunk)
-        return validate_response_payload(json.loads(b"".join(chunks)), require_completed=True)
-
-    data_lines, output = [], {}
-
-    def consume():
-        if not data_lines:
-            return None
-        data = "\n".join(data_lines)
-        data_lines.clear()
-        if data == "[DONE]":
-            return None
-        event = json.loads(data)
-        check_running()
-        kind = event.get("type")
-        if kind in {"error", "response.failed", "response.incomplete"}:
-            source = event.get('response') if isinstance(event.get('response'), dict) else event
-            raise AgentError("upstream_error", "原生图片响应未成功完成；不会自动重试。", diagnostics={'error': source.get('error')})
-        if kind == "response.output_item.done":
-            item = event.get("item")
-            if isinstance(item, dict) and item.get("id"):
-                output[item["id"]] = item
-        if kind == "response.completed":
-            payload = validate_response_payload(event.get("response"), require_completed=True)
-            return payload if "output" in payload else {**payload, "output": list(output.values())}
-        return None
-
-    for line in response.iter_lines():
-        size += len(line.encode("utf-8"))
-        if size > MAX_RESPONSE_BYTES:
-            raise AgentError("upstream_error", "原生图片数据过大。")
-        if not line:
-            payload = consume()
-            if payload is not None:
-                return payload
-        elif line.startswith("data:"):
-            data_lines.append(line[5:].lstrip(" "))
-    payload = consume()
-    if payload is None:
-        raise AgentError("upstream_outcome_unknown", "原生图片流已断开，未收到最终结果；不会自动重试。")
-    return payload
-
-
 def key_for(library, request_id):
     from pathlib import Path
     return (str(Path(library).resolve()), request_id)
@@ -160,72 +90,6 @@ def check_active(repo, request_id):
     if str(repo.library.resolve()) in _closing:
         raise AgentError("interrupted", "后端已停止，本轮未自动重发。")
     return request
-
-
-def redact(value, secrets=()):
-    if isinstance(value, str):
-        for secret in secrets:
-            if secret:
-                value = value.replace(secret, "[redacted]")
-        return value
-    if isinstance(value, list):
-        return [redact(item, secrets) for item in value]
-    if isinstance(value, dict):
-        return {redact(key, secrets): redact(item, secrets) for key, item in value.items()
-                if str(key).lower() not in {"api_key", "apikey", "authorization", "headers"}}
-    return value
-
-
-def safe_output(items, secrets=()):
-    result = []
-    for raw in items if isinstance(items, list) else []:
-        if not isinstance(raw, dict) or not isinstance(raw.get("type"), str):
-            continue
-        item = redact(dict(raw), secrets)
-        if item["type"] == "image_generation_call":
-            item.pop("result", None)
-        if item["type"] == "function_call" and isinstance(item.get("arguments"), str):
-            with suppress(ValueError, TypeError):
-                # Tool arguments are JSON nested inside a string. Decode first
-                # so escaped credential echoes cannot bypass exact redaction.
-                item["arguments"] = encoded(redact(json.loads(item["arguments"]), secrets))
-        result.append(item)
-    return result
-
-
-def merge_output(previous, updates):
-    result = list(previous)
-    for value in updates:
-        identity = value.get("id") or value.get("call_id")
-        index = next((i for i, old in enumerate(result) if identity and old.get("type") == value.get("type") and (old.get("id") or old.get("call_id")) == identity), None)
-        if index is None:
-            result.append(value)
-        else:
-            result[index] = value
-    return result
-
-
-def output_text(items):
-    parts = []
-    for item in items:
-        if item.get("type") != "message":
-            continue
-        for part in item.get("content", []):
-            if not isinstance(part, dict):
-                continue
-            text = part.get("text") or part.get("refusal") or ""
-            if not isinstance(text, str):
-                continue
-            # Keep the upstream citation alongside the corresponding text block.
-            links = []
-            for annotation in part.get("annotations", []):
-                if isinstance(annotation, dict) and annotation.get("type") == "url_citation":
-                    url = annotation.get("url", "")
-                    if isinstance(url, str) and url.startswith(("https://", "http://")):
-                        title = str(annotation.get("title") or url).replace("[", "\\[").replace("]", "\\]")
-                        links.append(f"[{title}]({url.replace(')', '%29')})")
-            parts.append(text + ("\n\n" + " · ".join(dict.fromkeys(links)) if links else ""))
-    return "\n\n".join(parts)
 
 
 def context_image_url(repo, asset_id):
@@ -418,32 +282,17 @@ def call_responses(repo, request_id, step, refs, *, body_override=None, native_c
         raise
     body, foundations, prior_preloads = response_body(
         request, input_items, mask, secret, reused_skills=reused_skills, body_override=body_override)
-    base_output = request["round"]["responseOutput"]
-    current_output, completed = [], None
-    stream_item_ids = {}
+    output_state = ResponseOutput(request_id, step, request["round"]["responseOutput"], [secret])
+    completed = None
     pending_native_images = {}
     native_started = {}
-    provisional_message_ids = set()
-    seen_delta_events, completed_message_ids = set(), set()
     byte_count = 0
 
     def publish(items):
-        nonlocal current_output
-        clean = safe_output(items, [secret])
-        for i, item in enumerate(clean):
-            if not item.get("id") and not item.get("call_id") and i < len(current_output) and current_output[i].get("type") == item.get("type"):
-                if current_output[i].get("id"):
-                    item["id"] = current_output[i]["id"]
-                current_output[i] = item
-            else:
-                if not item.get("id") and not item.get("call_id"):
-                    item["id"] = f"agent-output-{request_id}-{step}-{i}"
-                current_output = merge_output(current_output, [item])
-        combined = merge_output(base_output, current_output)
+        combined = output_state.publish(items)
         repo.update(request_id, output=combined, text=output_text(combined))
 
     def handle_payload(payload):
-        nonlocal current_output
         if not isinstance(payload, dict):
             raise AgentError("upstream_error", "Responses 返回格式无效。")
         record_model(payload)
@@ -468,13 +317,7 @@ def call_responses(repo, request_id, step, refs, *, body_override=None, native_c
                 if duration is not None and job:
                     repo.jobs.record_execution(job.id, providerMs=duration)
         if output:
-            clean = safe_output(output, [secret])
-            for i, item in enumerate(clean):
-                if not item.get("id") and not item.get("call_id"):
-                    candidate = current_output[i] if i < len(current_output) and current_output[i].get("type") == item.get("type") else None
-                    item["id"] = candidate.get("id") if candidate and candidate.get("id") else f"agent-output-{request_id}-{step}-{i}"
-            current_output = clean
-            combined = merge_output(base_output, current_output)
+            combined = output_state.complete(output)
             repo.update(request_id, output=combined, text=output_text(combined))
         repo.record_execution(request_id, add=True, resultProcessingMs=timing.elapsed(result_started))
         return payload
@@ -552,45 +395,9 @@ def call_responses(repo, request_id, step, refs, *, body_override=None, native_c
                         source = event.get('response') if isinstance(event.get('response'), dict) else event
                         raise AgentError("upstream_error", "Responses 流未成功完成；不会自动重试。", diagnostics={'error': source.get('error')})
                     if kind == "response.output_text.delta":
-                        delta = str(event.get("delta", ""))
-                        slot = event.get("output_index", 0)
-                        index = event.get("content_index", 0)
-                        if not isinstance(slot, int) or isinstance(slot, bool) or not 0 <= slot < 4096:
-                            raise AgentError("upstream_error", "Responses 输出索引无效。")
-                        if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < 256:
-                            raise AgentError("upstream_error", "Responses 文本片段索引无效。")
-                        sequence = event.get("sequence_number")
-                        label = event_id or event.get("event_id")
-                        event_key = ("sequence", sequence, slot, index) if isinstance(sequence, int) and not isinstance(sequence, bool) and sequence >= 0 else (
-                            ("event", label, slot, index) if isinstance(label, str) and label else None)
-                        # Content is not an identity: two legitimate events may
-                        # contain the same words. Slots survive late message IDs.
-                        duplicate = event_key is not None and event_key in seen_delta_events
-                        if event_key is not None:
-                            seen_delta_events.add(event_key)
-                        previous_id = stream_item_ids.get(slot)
-                        identity = redact(event.get("item_id"), [secret]) or stream_item_ids.get(slot)
-                        if identity and previous_id in provisional_message_ids and identity != previous_id:
-                            current_output[:] = [{**o, "id": identity} if o.get("id") == previous_id else o for o in current_output]
-                            provisional_message_ids.discard(previous_id)
-                            stream_item_ids[slot] = identity
-                        if duplicate:
-                            # A retransmission can still establish a late ID.
-                            publish([])
-                            return
-                        if identity in completed_message_ids:
-                            return
-                        message = next((o for o in reversed(current_output) if o.get("type") == "message" and o.get("id") == identity), None)
-                        message = dict(message) if message else {"id": identity or f"agent-output-{request_id}-{step}-text-{slot}", "type": "message", "role": "assistant"}
-                        if not identity:
-                            provisional_message_ids.add(message["id"])
-                        stream_item_ids[slot] = message["id"]
-                        content = [dict(p) for p in message.get("content", [])]
-                        while len(content) <= index:
-                            content.append({"type": "output_text", "text": ""})
-                        content[index] = {**content[index], "type": "output_text", "text": content[index].get("text", "") + delta}
-                        message["content"] = content
-                        publish([message])
+                        combined = output_state.delta(event, event_id)
+                        if combined is not None:
+                            repo.update(request_id, output=combined, text=output_text(combined))
                     if kind in {"response.output_item.added", "response.output_item.done"}:
                         item = event.get("item")
                         if isinstance(item, dict):
@@ -603,30 +410,8 @@ def call_responses(repo, request_id, step, refs, *, body_override=None, native_c
                                 # Keep a running job until the final receipt is
                                 # validated, even if bytes arrived in this item.
                                 native_image(repo, request_id, step, {**item, "status": "in_progress", "result": None}, refs, [secret], native_context=native_context)
-                            item = safe_output([item], [secret])[0]
-                            slot = event.get("output_index", 0)
-                            provisional = stream_item_ids.get(slot)
-                            if item.get("type") == "message" and kind == "response.output_item.added":
-                                prior_ids = {item.get("id")}
-                                if provisional in provisional_message_ids:
-                                    prior_ids.add(provisional)
-                                prior = next((o for o in current_output if o.get("id") in prior_ids and o.get("type") == "message"), {})
-                                if prior.get("content"):
-                                    item = {**item, "content": prior["content"]}
-                            if item.get("type") == "message" and item.get("id") and provisional in provisional_message_ids and provisional != item["id"]:
-                                # Some gateways omit IDs from deltas but supply
-                                # them on done. Replace the provisional node in
-                                # place, including when completion omits output.
-                                if kind == "response.output_item.added" and not item.get("content"):
-                                    prior = next((o for o in current_output if o.get("id") == provisional), {})
-                                    item = {**item, "content": prior.get("content", [])}
-                                current_output[:] = [item if o.get("id") == provisional and o.get("type") == "message" else o for o in current_output]
-                                provisional_message_ids.discard(provisional)
-                            if item.get("id"):
-                                stream_item_ids[slot] = item["id"]
-                                if kind == "response.output_item.done" and item.get("type") == "message":
-                                    completed_message_ids.add(item["id"])
-                            publish([item])
+                            combined = output_state.item(event)
+                            repo.update(request_id, output=combined, text=output_text(combined))
                     if kind == "response.image_generation_call.partial_image":
                         # Partial bytes are not persisted in the conversation JSON.
                         tool_id = event.get("item_id")
@@ -667,7 +452,7 @@ def call_responses(repo, request_id, step, refs, *, body_override=None, native_c
                     consume()
         if completed is None:
             raise AgentError("upstream_outcome_unknown", "Responses 流已断开，未收到最终结果；不会自动重试。")
-        final = current_output
+        final = output_state.current_output
         # Completion may omit output; current_output retains the streamed items.
         # Some gateways send public summaries in output-item events only.
         repo.record_response_details(request_id, step, {**completed, "output": final}, secrets=[secret])

@@ -8,6 +8,7 @@ from starlette.concurrency import run_in_threadpool
 from backend.agent_schemas import AgentConfigSave, AgentConversationCreate, AgentConversationPatch, AgentEditingTaskPatch, AgentResume, AgentRoundCreate
 from backend.services.agent_execution import schedule_request, stop_request
 from backend.services.agent_repository import ACTIVE_STATES, AgentError, AgentRepository, encoded
+from backend.services.agent_progress import ProgressLimit, ProgressSession
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 PROGRESS_INTERVAL = 0.15
@@ -77,17 +78,38 @@ def get_request(request_id: str, request: Request):
     return repo(request).snapshot(request_id=request_id)
 
 
-async def progress_events(request, repository, request_id, token, snapshot):
-    """Observe durable progress only. Disconnecting never cancels or retries work."""
+async def progress_events(request, repository, request_id, token, snapshot, structure=None):
+    """Observe durable progress only; retain one bounded current-round view."""
+    if structure is None:
+        structure = await run_in_threadpool(repository.progress_structure, request_id)
+    session = ProgressSession(snapshot)
+    initial = session.initial(snapshot)
+    terminal = snapshot['request']['state'] not in ACTIVE_STATES
+    snapshot = None
+    if await request.is_disconnected():
+        return
+    if terminal:
+        # Snapshot assembly spans several reads. A safe resume can otherwise
+        # pair an old terminal request with the new conversation revision and
+        # make the client stop observing before it receives any correction.
+        try:
+            if (await run_in_threadpool(repository.progress_token, request_id) != token
+                    or await run_in_threadpool(repository.progress_structure, request_id) != structure):
+                yield 'event: resync\ndata: {"reason":"structure_changed"}\n\n'
+                return
+        except AgentError:
+            yield 'event: fallback\ndata: {"reason":"unavailable"}\n\n'
+            return
+    yield 'event: snapshot\nid: ' + session.identity['epoch'] + ':0\ndata: ' + encoded(initial) + '\n\n'
+    initial = None
+    if terminal:
+        return
+    if session.view is None:
+        yield 'event: fallback\ndata: {"reason":"view_limit"}\n\n'
+        return
     last_sent = time.monotonic()
     while not await request.is_disconnected():
-        if snapshot is not None:
-            yield "event: snapshot\ndata: " + encoded(snapshot) + "\n\n"
-            last_sent = time.monotonic()
-            if snapshot["request"]["state"] not in ACTIVE_STATES:
-                return
-            snapshot = None
-        elif time.monotonic() - last_sent >= PROGRESS_HEARTBEAT:
+        if time.monotonic() - last_sent >= PROGRESS_HEARTBEAT:
             yield "event: heartbeat\ndata: {}\n\n"
             last_sent = time.monotonic()
         await asyncio.sleep(PROGRESS_INTERVAL)
@@ -95,14 +117,39 @@ async def progress_events(request, repository, request_id, token, snapshot):
             return
         try:
             current = await run_in_threadpool(repository.progress_token, request_id)
+            current_structure = await run_in_threadpool(repository.progress_structure, request_id)
+            if current_structure != structure:
+                yield 'event: resync\ndata: {"reason":"structure_changed"}\n\n'
+                return
             if current != token:
-                # Capture the marker before the snapshot so an update during
-                # assembly is observed again rather than accidentally skipped.
+                # Capture before assembly, never stamp an older view with a
+                # newer marker. Concurrent writes are picked up next iteration.
                 token = current
-                snapshot = await run_in_threadpool(repository.snapshot, request_id=request_id)
+                view = await run_in_threadpool(repository.progress_view, request_id)
+                # A branch/history change while projecting must be a resync,
+                # not a patch that silently updates only part of the history.
+                if await run_in_threadpool(repository.progress_structure, request_id) != structure:
+                    yield 'event: resync\ndata: {"reason":"structure_changed"}\n\n'
+                    return
+                if (view['request']['state'] not in ACTIVE_STATES
+                        and await run_in_threadpool(repository.progress_token, request_id) != token):
+                    # Do not publish a stale terminal view when a concurrent
+                    # resume committed while the projection was being built.
+                    continue
+                patch = session.patch(view)
+                if patch:
+                    yield 'event: patch\nid: ' + session.identity['epoch'] + ':' + str(session.sequence) + '\ndata: ' + encoded(patch) + '\n\n'
+                    last_sent = time.monotonic()
+                if view['request']['state'] not in ACTIVE_STATES:
+                    return
+        except ProgressLimit as exc:
+            yield 'event: fallback\ndata: ' + encoded({'reason': str(exc)}) + '\n\n'
+            return
         except AgentError:
-            # A removed conversation is no longer observable. The browser can
-            # reconcile its selection through the ordinary GET fallback.
+            yield 'event: fallback\ndata: {"reason":"unavailable"}\n\n'
+            return
+        except ValueError:
+            yield 'event: resync\ndata: {"reason":"structure_changed"}\n\n'
             return
 
 
@@ -110,8 +157,11 @@ async def progress_events(request, repository, request_id, token, snapshot):
 async def get_request_events(request_id: str, request: Request):
     repository = await run_in_threadpool(repo, request)
     token = await run_in_threadpool(repository.progress_token, request_id)
+    structure = await run_in_threadpool(repository.progress_structure, request_id)
     snapshot = await run_in_threadpool(repository.snapshot, request_id=request_id)
-    return StreamingResponse(progress_events(request, repository, request_id, token, snapshot),
+    # Every GET begins a new epoch/snapshot, including an expired Last-Event-ID.
+    # Reconnecting restores observation and never schedules provider work.
+    return StreamingResponse(progress_events(request, repository, request_id, token, snapshot, structure),
                              media_type="text/event-stream",
                              headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 

@@ -328,7 +328,9 @@ test('professional workflow switch uses the actual client to persist only the ch
     }
     return { ok: true, json: async () => structuredClone(stored) };
   };
-  new Function('module', 'exports', 'fetch', clientCode)(module, module.exports, fetchLocal);
+  const progressCode = ts.transpileModule(await readFile(new URL('../frontend/src/api/agentProgress.ts', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+  const progress = { exports: {} }; new Function('module', 'exports', progressCode)(progress, progress.exports);
+  new Function('require', 'module', 'exports', 'fetch', clientCode)(name => { assert.equal(name, './agentProgress'); return progress.exports; }, module, module.exports, fetchLocal);
   const open = () => harness(t, settingsCode, { './AgentModelPicker': marker, '../../api/agentClient': module.exports }, { uiLanguage: 'zh_hans', active: true });
   let h = open(); await h.flush();
   const switchFor = current => current.all().find(node => node.type === 'label' && text(node).includes('启用图片提示词专业工作流')).props.children.find(node => node.type === 'input').props;

@@ -149,6 +149,8 @@ test('production code-block callback copies only exact displayed text and retain
 const listJs = await compile('../frontend/src/components/agent/useAgentConversations.ts');
 const scrollJs = await compile('../frontend/src/components/agent/useAgentScroll.ts');
 const workspaceJs = await compile('../frontend/src/components/agent/AgentWorkspace.tsx');
+const runStateJs = await compile('../frontend/src/components/agent/useAgentRunState.ts');
+const progress = instantiate(await compile('../frontend/src/api/agentProgress.ts'), {});
 const submissionJs = await compile('../frontend/src/utils/playground/agentSubmission.ts');
 const inputPreferencesJs = await compile('../frontend/src/utils/agentInputPreferences.ts');
 const conversationState = instantiate(await compile('../frontend/src/utils/playground/agentConversationState.ts'), {});
@@ -163,6 +165,7 @@ function nodes(node) { return !node || typeof node !== 'object' ? [] : [node, ..
 function deferred() { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; }
 function harness(t, options = {}) {
   const slots = [], effects = [], timers = new Map(), calls = [], listeners = new Map(), scrollFrames = new Map(), scrollObservers = [];
+  const stops = [], resumes = [], jobsChanged = [];
   const submissions = [], creations = [], requestReads = [], watchers = [], profileChanges = [], panelFocusCalls = [], settingsOpens = [], sharedChanges = [];
   const jobReads = [], jobReplies = [], conversationReads = [], conversationUpdates = [], imageDecodes = [], taskUpdates = [], uploads = [], referenceReads = [];
   const root = { inert: false };
@@ -196,28 +199,31 @@ function harness(t, options = {}) {
   const snapshot = { conversation: { id: 'current', title: 'Open conversation', rounds: [], messages: [] }, revision: 1, request: null, jobs: [], images: [], ...options.snapshot };
   const snapshots = new Map([['current', snapshot], ...Object.entries(options.snapshots || {})]);
   const agentApi = {
+    stop(id) { const reply = deferred(); stops.push({ id, ...reply }); return reply.promise; },
+    resume(id, resumeId) { const reply = deferred(); resumes.push({ id, resumeId, ...reply }); return reply.promise; },
     deleteConversation: async id => options.deleteConversation?.(id),
     upload: async file => { uploads.push(file); return options.upload?.(file) ?? { uploadId: `restored-${uploads.length}`, image: { status: 'available', url: `http://isolated.test/restored-${uploads.length}.png` } }; },
     updateEditingTask: async (id, body) => { taskUpdates.push({ id, body }); return options.updateEditingTask?.(id, body) ?? { ...snapshot, revision: snapshot.revision + 1, editingTask: body.task }; },
     conversations(cursor, signal, query) { const reply = deferred(); calls.push({ cursor, signal, query, ...reply }); return reply.promise; },
     conversation: async id => { conversationReads.push(id); return options.conversation?.(id) ?? snapshots.get(id) ?? { ...snapshot, conversation: { ...snapshot.conversation, id } }; },
     updateConversation: async (id, body) => { conversationUpdates.push({ id, body }); const current = snapshots.get(id) || snapshot; const value = { ...current, revision: current.revision + 1, conversation: { ...current.conversation, id, activeRoundId: body.activeRoundId } }; snapshots.set(id, value); return options.updateConversation?.(id, body) ?? value; },
-    submit(conversationId, payload) { const reply = deferred(); submissions.push({ conversationId, payload, ...reply }); return reply.promise; },
+    submit(conversationId, payload) { const reply = deferred(); submissions.push({ conversationId, payload, ...reply, resolve: value => reply.resolve({ ...value, request: value.request ? { conversationId, roundId: value.conversation.activeRoundId || 'accepted-round', ...value.request } : { id: payload.requestId, conversationId, roundId: value.conversation.activeRoundId || 'accepted-round', state: 'completed' } }) }); return reply.promise; },
     createConversation() { const reply = deferred(); creations.push(reply); return reply.promise; },
-    request(id) { const reply = deferred(); requestReads.push({ id, ...reply }); return reply.promise; },
+    request(id) { const reply = deferred(); requestReads.push({ id, ...reply, resolve: value => reply.resolve({ ...value, request: value.request ? { conversationId: value.conversation.id, roundId: value.conversation.activeRoundId || 'accepted-round', ...value.request } : { id, conversationId: value.conversation.id, roundId: value.conversation.activeRoundId || 'accepted-round', state: 'completed' } }) }); return reply.promise; },
   };
-  class AgentApiError extends Error { constructor(status, message) { super(message); this.status = status; } }
+  class AgentApiError extends Error { constructor(status, message, code) { super(message); this.status = status; this.code = code; } }
   const client = { AgentApiError, agentApi, getAgentConfig: async () => { configReads++; return options.getAgentConfig ? options.getAgentConfig() : config; }, watchAgentRequest(id, next, error, useSse) { const watcher = { id, next, error, useSse, stopped: false }; watchers.push(watcher); return () => { watcher.stopped = true; }; } };
   const submission = instantiate(submissionJs, {}, globalMocks);
   const inputPreferences = instantiate(inputPreferencesJs, {}, globalMocks);
   const list = instantiate(listJs, { react: hooks, '../../api/agentClient': client }, globalMocks);
   const scroll = instantiate(scrollJs, { react: hooks }, globalMocks);
+  const runState = instantiate(runStateJs, { react: hooks, '../../api/agentClient': client, '../../utils/playground/agentAssistantBlocks': assistantBlocks, '../../utils/playground/agentSubmission': submission, '../../utils/localPreferences': { readLocalPreferences: () => ({ persistInputOnRestart: true }) } }, globalMocks);
   const deps = {
     react: hooks, 'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'fragment' }, 'lucide-react': new Proxy({}, { get: (_, key) => key }),
     'react-dom': { createPortal: node => node },
     '../../hooks/useModalFocus': { useModalFocus: close => ({ containerRef: { current: { querySelector: selector => { assert.equal(selector, '[data-agent-panel-close]'); return { focus: options => panelFocusCalls.push(options) }; } } }, handleModalKeyDown: event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(); } } }) },
     '../../api/client': { api: { generationJob(id) { jobReads.push(id); return jobReplies.length ? jobReplies.shift().promise : Promise.resolve(options.jobs?.[id] || snapshot.jobs.find(job => job.id === id)); } }, mediaUrl: p => p }, '../../api/agentClient': client,
-    './AgentResponseDetails': { AgentResponseDetails: 'response-details' }, './useAgentConversations': list, './useAgentScroll': scroll, './AgentMarkdown': { AgentMarkdown: 'markdown' }, './AgentWorkspace.css': {},
+    './AgentResponseDetails': { AgentResponseDetails: 'response-details' }, './useAgentConversations': list, './useAgentScroll': scroll, './useAgentRunState': runState, './AgentMarkdown': { AgentMarkdown: 'markdown' }, './AgentWorkspace.css': {},
     '../../utils/playground/agentConversationState': conversationState,
     '../../utils/playground/agentAssistantBlocks': assistantBlocks,
     '../../utils/playground/agentImageReferences': imageReferences,
@@ -242,7 +248,7 @@ function harness(t, options = {}) {
   let active = true;
   let props = { ...options.props };
   const render = () => {
-    dirty = false; cursor = 0; tree = Component({ active, onOpenSettings() { settingsOpens.push({ rootInert: root.inert, portalPresent: nodes(tree).some(node => node.props?.id === 'agent-chat-panel') }); }, onProfileChange: value => profileChanges.push(value), onGalleryImageSettingsChange(value) { sharedChanges.push(structuredClone(value)); props = { ...props, galleryImageSettings: structuredClone(value) }; dirty = true; }, ...props });
+    dirty = false; cursor = 0; tree = Component({ active, onJobsChanged: () => jobsChanged.push(true), onOpenSettings() { settingsOpens.push({ rootInert: root.inert, portalPresent: nodes(tree).some(node => node.props?.id === 'agent-chat-panel') }); }, onProfileChange: value => profileChanges.push(value), onGalleryImageSettingsChange(value) { sharedChanges.push(structuredClone(value)); props = { ...props, galleryImageSettings: structuredClone(value) }; dirty = true; }, ...props });
     if (options.scrollNodes) {
       const region = nodes(tree).find(node => node.props?.['aria-label'] === '对话消息');
       const content = nodes(tree).find(node => node.props?.className === 'agent-content-column' && node.props.ref);
@@ -257,7 +263,7 @@ function harness(t, options = {}) {
   const close = async () => { find('button', p => p['aria-label'] === '关闭 Agent 面板')[0].onClick(); await flush(); };
   const unmount = () => { if (unmounted) return; unmounted = true; slots.forEach(slot => slot?.cleanup?.()); };
   render(); t.after(unmount);
-  return { calls, find, open, close, root, profileChanges, panelFocusCalls, settingsOpens, sharedChanges, flush, unmount, submissions, creations, requestReads, watchers, snapshot, storage, AgentApiError, inputPreferences, jobReads, conversationReads, conversationUpdates, imageDecodes, taskUpdates, uploads, referenceReads, scrollObservers, window: globalMocks.window,
+  return { stops, resumes, jobsChanged, calls, find, open, close, root, profileChanges, panelFocusCalls, settingsOpens, sharedChanges, flush, unmount, submissions, creations, requestReads, watchers, snapshot, storage, AgentApiError, inputPreferences, jobReads, conversationReads, conversationUpdates, imageDecodes, taskUpdates, uploads, referenceReads, scrollObservers, window: globalMocks.window,
     updateProps(next) { props = { ...props, ...next }; render(); }, queueJobRead() { const reply = deferred(); jobReplies.push(reply); return reply; },
     resultCard() { const card = nodes(tree).find(node => typeof node.type === 'function' && node.type.name === 'ResultCard'); assert.ok(card, 'actual result card should be rendered'); const savedCursor = cursor; cursor = slots.length; const content = card.type(card.props); cursor = savedCursor; return nodes(content); },
     setConfig(value) { config = { ...config, ...value }; }, dispatch(name) { globalMocks.window.dispatchEvent({ type: name }); }, show() { active = true; render(); }, get late() { return late; }, get pendingTimers() { return timers.size; }, get configReads() { return configReads; }, hide() { active = false; render(); } };
@@ -305,7 +311,7 @@ test('actual message scroll activity expires and is cleared on conversation chan
   assert.equal(h.pendingTimers, 0); assert.equal(visible(), false);
   messages().onScroll(); await h.flush(false); assert.equal(h.pendingTimers, 0);
   h.show(); await h.flush(); messages().onScroll(); await h.flush(false);
-  h.find('button', p => p.className === 'agent-conversation-link')[0].onClick(); await h.flush(false);
+  h.find('button', p => p['aria-label'] === '打开会话 Title next')[0].onClick(); await h.flush(false);
   assert.equal(visible(), false); assert.equal(h.pendingTimers, 0);
   assert.equal(JSON.parse(h.storage.get('ipl.agent.drafts.v1')).current.text, 'Keep my draft');
   messages().onScroll(); await h.flush(false); h.unmount(); await h.flush();
@@ -351,7 +357,7 @@ test('actual workspace ignores stale search/page responses after query change, h
 });
 test('conversation API URL encodes query and cursor and makes one read-only request', async () => {
   const js = await compile('../frontend/src/api/agentClient.ts'); const requests = [];
-  const { agentApi } = instantiate(js, {}, { fetch: async (url, init) => { requests.push({ url, init }); return { ok: true, json: async () => result([]) }; } });
+  const { agentApi } = instantiate(js, { './agentProgress': progress }, { fetch: async (url, init) => { requests.push({ url, init }); return { ok: true, json: async () => result([]) }; } });
   await agentApi.conversations('100', undefined, '  A%_ &词  ');
   assert.equal(requests.length, 1); assert.equal(requests[0].url, '/api/agent/conversations?limit=100&cursor=100&q=A%25_%20%26%E8%AF%8D');
   assert.equal(requests[0].init.method, undefined);
@@ -404,7 +410,7 @@ test('actual settings save receipt after close refreshes workspace revision whil
   const calls = [], receipt = deferred(), marker = () => null;
   const config = { apiConfigMode: 'hybrid', textProfileId: 'text', textModel: 'text-model', imageProfileId: 'image', imageModel: 'gpt-image-default', maxToolRounds: 5, maxImageJobs: 2, webSearch: false, stream: true, professionalPromptWorkflows: true };
   let stored = { revision: 5, config, imageReady: true, imageIssues: [], ready: true, issues: [], profiles: ['text', 'image'].map(id => ({ id, display_name: id, model: `gpt-image-${id}`, configured: true })), capabilities: { modes: ['off', 'native', 'hybrid'], maxToolRounds: 50, maxImageJobs: 20, maxInputImages: 4 } };
-  const api = instantiate(await compile('../frontend/src/api/agentClient.ts'), {}, { fetch: async (url, init) => {
+  const api = instantiate(await compile('../frontend/src/api/agentClient.ts'), { './agentProgress': progress }, { fetch: async (url, init) => {
     assert.equal(url, '/api/agent/config', 'only saved configuration may be fetched; no provider calls');
     calls.push(init.method || 'GET');
     if (init.method === 'PUT') {
@@ -835,7 +841,7 @@ test('model panel preserves off-mode profile selection and every rendered action
 
 function displaySnapshot(state, extra = {}) {
   return {
-    request: { id: 'request-current', state, usage: { responseStepsStarted: 2, imageJobsCreated: 1 }, authorization: { maxToolRounds: 5, maxImageJobs: 2 }, toolCalls: [], ...extra },
+    request: { id: 'request-current', conversationId: 'current', roundId: 'r1', state, usage: { responseStepsStarted: 2, imageJobsCreated: 1 }, authorization: { maxToolRounds: 5, maxImageJobs: 2 }, toolCalls: [], ...extra },
     conversation: { id: 'current', title: 'History', activeRoundId: 'r1', rounds: [{ id: 'r1', parentRoundId: null, index: 1, prompt: 'A short message', status: state === 'completed' ? 'done' : 'error', inputImageIds: [], outputTaskIds: [], requestId: 'request-current', assistantMessageId: 'a1', modelInfo: { requestedModel: 'historical-model', providerName: 'Historical provider', returnedModels: ['returned-alias'] } }], messages: [{ id: 'a1', role: 'assistant', roundId: 'r1', content: 'Answer text' }] },
   };
 }
@@ -925,8 +931,9 @@ test('failed images receive current shared settings and retain distinct retry re
   assert.equal(retry.job.prompt_text, 'execution prompt'); assert.deepEqual(retry.params, shared.params);
   assert.deepEqual(retry.selection, { profileId: 'gallery', model: 'shared-current' }); assert.equal(retry.sizeMode, 'auto4k');
   assert.deepEqual(savedDraft(h), before); assert.equal(h.submissions.length, 0);
+  const readsBeforeReceipt = h.conversationReads.length;
   retry.onReceipt({ retryId: 'retry', sourceJobId: 'failed', job: updated.jobs[1] }); await h.flush();
-  assert.equal(h.conversationReads.length, 2);
+  assert.equal(h.conversationReads.length, readsBeforeReceipt + 1, 'an accepted image retry refreshes once');
   assert.equal(h.find('section', p => p['aria-label'] === '本轮图片的重试结果').length, 1);
   assert.match(JSON.stringify(h.find('p', p => p.className === 'agent-round-outcome')), /本次未生成图片/);
   assert.deepEqual(savedDraft(h), before); assert.equal(h.submissions.length, 0);
@@ -950,7 +957,7 @@ test('reply retry immediately resubmits the original message and references whil
   assert.deepEqual(sent.authorization, { scope: 'this_request', allowImageGeneration: false, allowWebSearch: false, maxImageJobs: 0, maxToolRounds: 5 });
   assert.equal(JSON.parse(h.storage.get('ipl.agent.pending-submissions.v1'))[0].preserveDraft, true);
   assert.deepEqual(savedDraft(h), before);
-  h.submissions[0].resolve({ ...h.snapshot, revision: 2 }); await h.flush();
+  h.submissions[0].resolve({ ...h.snapshot, revision: 2, request: { ...h.snapshot.request, id: sent.requestId } }); await h.flush();
   assert.deepEqual(savedDraft(h), before, 'successful retry cannot clear an unrelated composer');
   assert.equal(h.find('textarea')[0].value, before.text); assert.deepEqual(h.find('img').map(p => p.src), before.refs.map(item => item.url));
   assert.deepEqual(JSON.parse(h.storage.get('ipl.agent.pending-submissions.v1')), []);
@@ -983,7 +990,7 @@ test('an unknown reply retry and reload retain the unsent draft and only reconci
   assert.equal(refreshed.find('image-options')[0].selection.model, newerShared.model); await refreshed.close();
   refreshed.find('button', p => p['aria-label'] === '检查原请求状态')[0].onClick(); await refreshed.flush();
   assert.equal(refreshed.requestReads[0].id, journal[0].payload.requestId);
-  refreshed.requestReads[0].resolve(refreshed.snapshot); await refreshed.flush();
+  refreshed.requestReads[0].resolve({ ...refreshed.snapshot, request: { ...refreshed.snapshot.request, id: journal[0].payload.requestId } }); await refreshed.flush();
   assert.deepEqual(savedDraft(refreshed), before); assert.equal(refreshed.submissions.length, 0);
   assert.deepEqual(JSON.parse(refreshed.storage.get('ipl.agent.pending-submissions.v1')), []);
   await refreshed.open('生图设置');
@@ -1643,4 +1650,222 @@ test('initial Gallery reference handoff keeps the new draft visible when a delay
   assert.deepEqual(allDrafts(h).new, beforeList);
   assert.deepEqual(h.find('img').map(props => props.src), ['http://isolated.test/img.png', job.result_path]);
   assert.equal(h.submissions.length, 0); assert.equal(h.creations.length, 0); assert.deepEqual(h.conversationReads, []);
+});
+
+
+test('actual run hook detaches on page leave, ignores late callbacks and restores the same request without stopping or submitting', async t => {
+  const h = harness(t, { snapshot: displaySnapshot('running') }); await h.flush();
+  const before = structuredClone(savedDraft(h)), first = h.watchers[0];
+  h.hide(); await h.flush(); assert.equal(first.stopped, true);
+  first.next({ ...h.snapshot, revision: 100, request: { ...h.snapshot.request, state: 'completed' } }); first.error(Error('late observer error')); await h.flush();
+  assert.equal(h.stops.length, 0); assert.equal(h.submissions.length, 0); assert.deepEqual(savedDraft(h), before);
+  h.show(); await h.flush(); assert.equal(h.watchers.length, 2); assert.equal(h.watchers[1].id, first.id);
+  assert.equal(h.find('p', p => p.role === 'alert').length, 0);
+  h.unmount(); h.watchers[1].next(h.snapshot); h.watchers[1].error(Error('after unmount')); await h.flush(); assert.equal(h.late, 0);
+});
+
+test('actual hook stop is one explicit command and its receipt invalidates the old observer baseline', async t => {
+  const h = harness(t, { snapshot: displaySnapshot('running') }); await h.flush();
+  const before = structuredClone(savedDraft(h)), first = h.watchers[0];
+  const stop = h.find('button', p => p['aria-label'] === '停止后续调用')[0].onClick;
+  stop(); stop(); await h.flush(); assert.equal(h.stops.length, 1); assert.equal(h.stops[0].id, 'request-current');
+  const stopping = { ...h.snapshot, revision: 2, request: { ...h.snapshot.request, state: 'stop_requested', stopRequested: true, upstreamMayContinue: true } };
+  h.stops[0].resolve(stopping); await h.flush();
+  assert.equal(first.stopped, true); assert.equal(h.watchers.length, 2);
+  first.next({ ...h.snapshot, revision: 999 }); first.error(Error('old baseline')); await h.flush();
+  assert.equal(h.find('p', p => p.role === 'alert').length, 0); assert.equal(h.jobsChanged.length, 1);
+  const second = h.watchers[1]; second.next({ ...stopping, revision: 3, request: { ...stopping.request, state: 'stopped' } }); await h.flush();
+  assert.equal(second.stopped, true); assert.equal(h.find('button', p => p['aria-label'] === '发送 Agent 消息').length, 1);
+  assert.deepEqual(savedDraft(h), before); assert.equal(h.submissions.length, 0);
+});
+
+test('late stop failures and receipts cannot alter a newly selected conversation or an unmounted hook', async t => {
+  for (const mode of ['switch-failure', 'switch-receipt', 'unmount']) {
+    const h = harness(t, { snapshot: displaySnapshot('running'), snapshots: { next: { schemaVersion: 1, revision: 1, conversation: { id: 'next', title: 'Next', rounds: [], messages: [] }, request: null, jobs: [], images: [] } }, drafts: { next: { text: 'New draft', refs: [], params, editId: null, origin: 'send' } } }); await h.flush();
+    h.find('button', p => p['aria-label'] === '停止后续调用')[0].onClick(); await h.flush();
+    if (mode === 'unmount') h.unmount(); else { h.updateProps({ focusConversationId: 'next', focusToken: 1 }); await h.flush(); }
+    if (mode === 'switch-failure') h.stops[0].reject(Error('old stop failed')); else h.stops[0].resolve({ ...h.snapshot, revision: 2, request: { ...h.snapshot.request, state: 'stopped' } });
+    await h.flush(); assert.equal(h.late, 0);
+    if (mode !== 'unmount') { assert.equal(h.find('textarea')[0].value, 'New draft'); assert.equal(h.find('p', p => p.role === 'alert').length, 0); }
+    assert.equal(h.submissions.length, 0);
+  }
+});
+
+test('safe continuation keeps its persisted resume ID and never silently retries an uncertain command', async t => {
+  const h = harness(t, { snapshot: displaySnapshot('interrupted', { canResume: true }) }); await h.flush();
+  const resume = () => h.find('button', p => p['aria-label'] === '继续已确认安全的步骤')[0].onClick();
+  resume(); resume(); await h.flush(); assert.equal(h.resumes.length, 1);
+  h.resumes[0].reject(Error('response lost')); await h.flush(); assert.equal(h.resumes.length, 1);
+  resume(); await h.flush(); assert.equal(h.resumes.length, 2); assert.equal(h.resumes[1].resumeId, h.resumes[0].resumeId);
+  h.resumes[1].resolve({ ...h.snapshot, revision: 2, request: { ...h.snapshot.request, state: 'running', canResume: false } }); await h.flush();
+  assert.equal(h.watchers.length, 1); assert.equal(h.submissions.length, 0); assert.equal(h.find('textarea')[0].value, 'Keep my draft');
+});
+
+test('late accepted submit clears its durable journal after unmount without touching component state', async t => {
+  const h = harness(t); await h.flush(); h.find('button', p => p['aria-label'] === '发送 Agent 消息')[0].onClick(); await h.flush();
+  assert.equal(h.submissions.length, 1); h.unmount(); h.submissions[0].resolve(h.snapshot); await h.flush();
+  assert.deepEqual(JSON.parse(h.storage.get('ipl.agent.pending-submissions.v1')), []); assert.equal(h.late, 0);
+});
+
+test('a mismatched submit receipt retains frozen input and cannot acknowledge the draft', async t => {
+  const h = harness(t); await h.flush(); const before = structuredClone(savedDraft(h));
+  h.find('button', p => p['aria-label'] === '发送 Agent 消息')[0].onClick(); await h.flush();
+  h.submissions[0].resolve({ ...h.snapshot, request: { id: 'another-request', state: 'completed' } }); await h.flush();
+  assert.equal(JSON.parse(h.storage.get('ipl.agent.pending-submissions.v1')).length, 1); assert.deepEqual(savedDraft(h), before);
+  assert.match(JSON.stringify(h.find('p', p => p.role === 'alert')), /身份不匹配/);
+});
+
+test('cross-tab pending journal changes lock only that conversation and never replay on storage notifications', async t => {
+  const h = harness(t); await h.flush(); const before = structuredClone(savedDraft(h));
+  const entry = { conversationId: 'current', payload: { requestId: 'from-other-tab', prompt: 'Other frozen draft', refs: [], params, authorization: { allowImageGeneration: false } } };
+  h.storage.set('ipl.agent.pending-submissions.v1', JSON.stringify([entry]));
+  h.window.dispatchEvent({ type: 'storage', key: 'ipl.agent.pending-submissions.v1' }); await h.flush();
+  assert.equal(h.find('textarea')[0].disabled, true); assert.equal(h.submissions.length, 0); assert.equal(h.requestReads.length, 0); assert.deepEqual(savedDraft(h), before);
+  h.storage.set('ipl.agent.pending-submissions.v1', '[]'); h.window.dispatchEvent({ type: 'storage', key: 'ipl.agent.pending-submissions.v1' }); await h.flush();
+  assert.equal(h.find('textarea')[0].disabled, false); assert.equal(h.submissions.length, 0);
+});
+
+test('ordinary text observation does not refresh Gallery; job status changes do', async t => {
+  const h = harness(t, { snapshot: displaySnapshot('running') }); await h.flush(); const watcher = h.watchers[0];
+  for (let n = 0; n < 4; n++) watcher.next({ ...h.snapshot, revision: n + 2, conversation: { ...h.snapshot.conversation, messages: [{ ...h.snapshot.conversation.messages[0], content: 'word '.repeat(n + 1) }] } });
+  await h.flush(); assert.equal(h.jobsChanged.length, 0);
+  watcher.next({ ...h.snapshot, revision: 6, jobs: [{ id: 'job', status: 'running' }] }); await h.flush(); assert.equal(h.jobsChanged.length, 1);
+  watcher.next({ ...h.snapshot, revision: 7, jobs: [{ id: 'job', status: 'running' }] }); await h.flush(); assert.equal(h.jobsChanged.length, 1);
+});
+
+
+test('new-conversation receipt wins over its delayed initial GET for both the main view and sidebar', async t => {
+  for (const failure of [false, true]) {
+    const delayed = deferred(); const h = harness(t, { activeId: null, conversation: () => delayed.promise }); await h.flush();
+    h.find('button', p => p['aria-label'] === '发送 Agent 消息')[0].onClick(); await h.flush();
+    const created = { ...h.snapshot, revision: 0, conversation: { ...h.snapshot.conversation, id: 'created', title: 'Empty title' } };
+    h.creations[0].resolve(created); await h.flush(); assert.equal(h.submissions.length, 1);
+    const accepted = { ...h.snapshot, ...displaySnapshot('running'), revision: 1 };
+    accepted.conversation = { ...accepted.conversation, id: 'created', title: 'Accepted title' };
+    accepted.request = { ...accepted.request, id: h.submissions[0].payload.requestId, conversationId: 'created' };
+    h.submissions[0].resolve(accepted); await h.flush();
+    if (failure) delayed.reject(Error('old detail load failed')); else delayed.resolve(created);
+    await h.flush();
+    assert.equal(h.find('button', p => p['aria-label'] === '打开会话 Accepted title').length, 1);
+    assert.equal(h.find('button', p => p['aria-label'] === '打开会话 Empty title').length, 0);
+    assert.equal(h.find('button', p => p['aria-label'] === '停止后续调用').length, 1);
+    assert.equal(h.find('p', p => p.role === 'alert').length, 0); assert.equal(h.submissions.length, 1);
+  }
+});
+
+test('an idle tab discovers another tab accepted run by read-only storage refresh', async t => {
+  let live;
+  const h = harness(t, { conversation: () => live }); await h.flush();
+  const before = structuredClone(savedDraft(h));
+  const accepted = { ...h.snapshot, ...displaySnapshot('running'), revision: 2 };
+  live = accepted;
+  h.storage.set('ipl.agent.pending-submissions.v1', '[]');
+  h.window.dispatchEvent({ type: 'storage', key: 'ipl.agent.pending-submissions.v1' }); await h.flush();
+  assert.equal(h.conversationReads.length, 2); assert.equal(h.watchers.length, 1); assert.equal(h.watchers[0].id, accepted.request.id);
+  assert.equal(h.submissions.length, 0); assert.equal(h.stops.length, 0); assert.deepEqual(savedDraft(h), before);
+  h.hide(); await h.flush(); live = { ...accepted, revision: 3, request: { ...accepted.request, state: 'completed' } };
+  h.show(); await h.flush(); h.watchers.at(-1).next(live); await h.flush();
+  assert.equal(h.find('button', p => p['aria-label'] === '发送 Agent 消息').length, 1);
+  assert.equal(h.conversationReads.length, 2, 'active runs reattach through their observer baseline');
+  assert.equal(h.submissions.length, 0); assert.deepEqual(savedDraft(h), before);
+});
+
+
+test('two actual run hooks observe a single accepted cross-tab submission without replaying it or stopping each other', async t => {
+  const storage = new Map([['ipl.agent.active-conversation', 'current']]); let live;
+  const a = harness(t, { storage, conversation: () => live });
+  const b = harness(t, { storage, conversation: () => live }); await a.flush(); await b.flush();
+  b.find('button', p => p['aria-label'] === '发送 Agent 消息')[0].onClick(); await b.flush();
+  a.window.dispatchEvent({ type: 'storage', key: 'ipl.agent.pending-submissions.v1' }); await a.flush();
+  assert.equal(a.find('textarea')[0].disabled, true);
+  live = { ...b.snapshot, ...displaySnapshot('running'), revision: 2 };
+  live.request.id = b.submissions[0].payload.requestId;
+  b.submissions[0].resolve(live); await b.flush();
+  a.window.dispatchEvent({ type: 'storage', key: 'ipl.agent.pending-submissions.v1' }); await a.flush();
+  assert.equal(a.submissions.length + b.submissions.length, 1);
+  assert.equal(a.watchers.at(-1).id, live.request.id); assert.equal(b.watchers.at(-1).id, live.request.id);
+  a.unmount(); assert.equal(a.watchers.at(-1).stopped, true); assert.equal(b.watchers.at(-1).stopped, false);
+  b.watchers.at(-1).next({ ...live, revision: 3, request: { ...live.request, state: 'completed' } }); await b.flush();
+  assert.equal(a.stops.length + b.stops.length, 0); assert.equal(a.late, 0);
+});
+
+test('a wrong stop receipt cannot replace the active request or its next draft', async t => {
+  const h = harness(t, { snapshot: displaySnapshot('running') }); await h.flush(); const before = structuredClone(savedDraft(h));
+  h.find('button', p => p['aria-label'] === '停止后续调用')[0].onClick(); await h.flush();
+  h.stops[0].resolve({ ...h.snapshot, revision: 10, request: { ...h.snapshot.request, id: 'foreign', state: 'stopped' } }); await h.flush();
+  assert.equal(h.find('button', p => p['aria-label'] === '停止后续调用').length, 1); assert.deepEqual(savedDraft(h), before);
+  assert.match(JSON.stringify(h.find('p', p => p.role === 'alert')), /身份不匹配/); assert.equal(h.submissions.length, 0);
+});
+
+
+test('reconciling a historical pending request cannot replace a later selected run even at the same revision', async t => {
+  const current = displaySnapshot('running');
+  const pending = [{ conversationId: 'current', preserveDraft: true, payload: { requestId: 'old-request', prompt: 'Old prompt', refs: [], params } }];
+  const h = harness(t, { snapshot: current, pending }); await h.flush();
+  h.find('button', p => p['aria-label'] === '检查原请求状态')[0].onClick(); await h.flush();
+  h.requestReads[0].resolve({ ...h.snapshot, request: { ...h.snapshot.request, id: 'old-request', roundId: 'old-round', state: 'completed' } }); await h.flush();
+  assert.deepEqual(JSON.parse(h.storage.get('ipl.agent.pending-submissions.v1')), []);
+  assert.equal(h.watchers.some(watcher => watcher.id === 'old-request'), false);
+  h.find('button', p => p['aria-label'] === '停止后续调用')[0].onClick(); await h.flush();
+  assert.equal(h.stops[0].id, 'request-current'); assert.equal(h.submissions.length, 0);
+});
+
+
+test('the first explicit send after stop refreshes late metadata revision before its only POST and preserves newer queued draft edits', async t => {
+  const pendingRead = deferred(); let reads = 0;
+  const h = harness(t, { snapshot: displaySnapshot('stopped', { stopRequested: true }), conversation: () => ++reads === 1 ? undefined : pendingRead.promise }); await h.flush();
+  const original = structuredClone(savedDraft(h)); const edit = h.find('textarea')[0].onChange;
+  await h.open('添加图片或引用'); h.find('button', p => p['aria-label'] === '从 Library 或画廊选择图片')[0].onClick(); await h.flush();
+  const pick = h.find('reference-picker')[0].onSelect;
+  h.find('button', p => p['aria-label'] === '发送 Agent 消息')[0].onClick(); await h.flush();
+  assert.equal(h.submissions.length, 0); assert.equal(h.conversationReads.length, 2);
+  assert.equal(h.storage.has('ipl.agent.pending-submissions.v1'), false, 'preflight does not freeze a submission that has not been dispatched');
+  edit({ target: { value: 'Newer queued draft', selectionStart: 18 } }); pick([reference('later-file')]); await h.flush();
+  const latest = { ...h.snapshot, revision: 27, conversation: { ...h.snapshot.conversation, rounds: h.snapshot.conversation.rounds.map(round => ({ ...round, execution: { phase: 'stopped', timings: { resultProcessingMs: 8 } } })) } };
+  pendingRead.resolve(latest); await h.flush(); assert.equal(h.submissions.length, 1);
+  const sent = h.submissions[0]; assert.equal(sent.payload.expectedRevision, 27); assert.equal(sent.payload.prompt, original.text);
+  assert.deepEqual(sent.payload.refs, original.refs.map(choice => choice.reference)); assert.equal(sent.payload.configRevision, 1);
+  assert.equal(sent.payload.authorization.allowImageGeneration, false); assert.equal(sent.payload.parentRoundId, 'r1');
+  sent.resolve({ ...latest, request: { ...latest.request, id: sent.payload.requestId, state: 'completed' } }); await h.flush();
+  assert.equal(savedDraft(h).text, 'Newer queued draft'); assert.equal(savedDraft(h).refs.length, 2); assert.equal(h.submissions.length, 1);
+});
+
+test('post-stop refresh cannot silently submit into a changed branch, target, mask or image binding', async t => {
+  for (const change of ['branch', 'target', 'input', 'mask', 'parent']) {
+    let latest; const h = harness(t, { snapshot: displaySnapshot('stopped', { stopRequested: true }), conversation: () => latest }); await h.flush();
+    const before = structuredClone(savedDraft(h)); latest = structuredClone(h.snapshot); latest.revision = 4;
+    if (change === 'branch') latest.conversation.activeRoundId = 'another-leaf';
+    if (change === 'target') latest.editingTask = { target: { assetId: 'changed-target' }, auxiliaries: [], requirements: 'new edit', constraints: [] };
+    if (change === 'input') latest.conversation.rounds[0].inputImageIds = ['different-input'];
+    if (change === 'mask') latest.conversation.rounds[0].maskImageId = 'different-mask';
+    if (change === 'parent') latest.conversation.rounds[0].parentRoundId = 'different-parent';
+    h.find('button', p => p['aria-label'] === '发送 Agent 消息')[0].onClick(); await h.flush();
+    assert.equal(h.submissions.length, 0, change); assert.deepEqual(savedDraft(h), before, change);
+    assert.equal(h.storage.has('ipl.agent.pending-submissions.v1'), false);
+    assert.match(JSON.stringify(h.find('p', p => p.role === 'alert')), /请确认后再发送/);
+  }
+});
+
+test('a late post-stop revision read cannot send after switching conversations or unmounting', async t => {
+  for (const mode of ['switch', 'unmount']) {
+    const pendingRead = deferred(); let reads = 0;
+    const h = harness(t, { snapshot: displaySnapshot('stopped', { stopRequested: true }), conversation: id => id === 'current' && ++reads > 1 ? pendingRead.promise : undefined }); await h.flush();
+    h.find('button', p => p['aria-label'] === '发送 Agent 消息')[0].onClick(); await h.flush();
+    if (mode === 'switch') { h.updateProps({ focusConversationId: 'next', focusToken: 1 }); await h.flush(); } else h.unmount();
+    pendingRead.resolve({ ...h.snapshot, revision: 30 }); await h.flush();
+    assert.equal(h.submissions.length, 0); assert.equal(h.late, 0); assert.equal(h.storage.has('ipl.agent.pending-submissions.v1'), false);
+  }
+});
+
+test('a real revision conflict refreshes only through GET and requires another explicit send', async t => {
+  let latest; const h = harness(t, { conversation: () => latest }); await h.flush(); const before = structuredClone(savedDraft(h));
+  h.find('button', p => p['aria-label'] === '发送 Agent 消息')[0].onClick(); await h.flush(); assert.equal(h.submissions.length, 1);
+  latest = { ...h.snapshot, revision: 9, conversation: { ...h.snapshot.conversation, activeRoundId: 'new-selected-branch' } };
+  h.submissions[0].reject(new h.AgentApiError(409, '对话已改变，请重新加载。', 'revision_conflict')); await h.flush();
+  assert.equal(h.conversationReads.length, 2); assert.equal(h.submissions.length, 1, 'GET recovery must not replay the rejected POST');
+  assert.deepEqual(savedDraft(h), before); assert.deepEqual(JSON.parse(h.storage.get('ipl.agent.pending-submissions.v1')), []);
+  assert.match(JSON.stringify(h.find('p', p => p.role === 'alert')), /请确认后再次发送/);
+  h.find('button', p => p['aria-label'] === '发送 Agent 消息')[0].onClick(); await h.flush();
+  assert.equal(h.submissions.length, 2); assert.equal(h.submissions[1].payload.expectedRevision, 9); assert.equal(h.submissions[1].payload.parentRoundId, 'new-selected-branch');
+  assert.equal(h.submissions[1].payload.prompt, before.text); assert.deepEqual(h.submissions[1].payload.refs, before.refs.map(choice => choice.reference));
 });

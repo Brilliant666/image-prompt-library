@@ -9,13 +9,14 @@ import { useModalFocus } from '../../hooks/useModalFocus';
 import { AgentMarkdown } from './AgentMarkdown';
 import { useAgentConversations } from './useAgentConversations';
 import { useAgentScroll } from './useAgentScroll';
+import { useAgentRunState, type AgentSubmissionBoundary } from './useAgentRunState';
 import { api, mediaUrl } from '../../api/client';
-import { AgentApiError, agentApi, getAgentConfig, watchAgentRequest, type AgentConfigResponse, type AgentConversationSummary, type AgentImage, type AgentImageRetryReceipt, type AgentRound, type AgentRoundCreate, type AgentSnapshot } from '../../api/agentClient';
+import { AgentApiError, agentApi, getAgentConfig, type AgentConfigResponse, type AgentImage, type AgentImageRetryReceipt, type AgentRound, type AgentRoundCreate, type AgentSnapshot } from '../../api/agentClient';
 import type { GenerationJobRecord } from '../../types';
 import { getActiveAgentRounds, getAgentBranchLeafId, getAgentSiblingRounds } from '../../utils/playground/agentConversationState';
 import { agentPhaseLabels, getAgentAssistantBlocks, getAgentJobFailure, getAgentRoundStatus, getAgentRoundSummary, getAgentToolLabel, isAgentRequestActive } from '../../utils/playground/agentAssistantBlocks';
 import { insertMention, referenceKey, resolveAgentPromptImageReferences, type ReferenceChoice } from '../../utils/playground/agentImageReferences';
-import { AGENT_DRAFT_KEY, AGENT_IMAGE_MODE_PREFIX, acknowledgeAgentDraft, clearPendingAgentSubmission, draftFromPendingAgentSubmission, getAgentResumeId, readAgentDrafts, readAgentImageMode, readPendingAgentSubmissions, saveAgentImageMode, savePendingAgentSubmission, shouldSubmitAgentOnKey, type AgentDraft, type PendingAgentSubmission } from '../../utils/playground/agentSubmission';
+import { AGENT_DRAFT_KEY, AGENT_IMAGE_MODE_PREFIX, acknowledgeAgentDraft, draftFromPendingAgentSubmission, readAgentDrafts, readAgentImageMode, readPendingAgentSubmissions, saveAgentImageMode, shouldSubmitAgentOnKey, type AgentDraft, type PendingAgentSubmission } from '../../utils/playground/agentSubmission';
 import { resolveAuto4k } from '../../utils/compatibleRecipe';
 import { agentJobSource, sharedImageCount, type AgentGalleryCommand, type GalleryImageSettings } from '../../utils/agentGalleryBridge';
 import { readLocalPreferences } from '../../utils/localPreferences';
@@ -45,8 +46,6 @@ type Draft = AgentDraft;
 type AgentPanel = 'model' | 'add' | 'options' | 'mentions' | 'details';
 const emptyDraft = (): Draft => ({ text: '', refs: [], params: { size: 'auto', quality: 'auto', background: 'auto', output_format: 'png' }, editId: null, origin: 'send' });
 const statusText: Record<string, string> = { queued: '等待执行', running: '正在响应', waiting_for_jobs: '等待图片任务', stop_requested: '正在停止后续调用', completed: '已完成', stopped: '已停止后续调用', failed: '执行失败', interrupted: '执行已中断', unknown: '上游结果未知', succeeded: '已生成', accepted: '已收录', discarded: '已清理', cancelled: '已取消', pending: '等待执行' };
-const ACTIVE_KEY = 'ipl.agent.active-conversation';
-function safeStorageGet(key: string) { try { return localStorage.getItem(key); } catch { return null; } }
 function safeStorageSet(key: string, value: string) { try { localStorage.setItem(key, value); } catch { /* UI preferences may be unavailable; submission journal is handled separately. */ } }
 function errorText(reason: unknown) { return reason instanceof Error ? reason.message : '请求未完成'; }
 function sameOriginImage(url?: string | null) { if (!url) return ''; try { const value = new URL(url, location.origin); return value.origin === location.origin ? value.href : ''; } catch { return ''; } }
@@ -73,29 +72,20 @@ function ResultCard({ job, preview, onOpen, onSaved, onError, onReference, refer
 
 export default function AgentWorkspace({ active, onOpenSettings, onProfileChange, onOpenJob, onLibraryChanged, onJobsChanged, focusConversationId, focusToken, galleryCommand, galleryImageSettings, onGalleryImageSettingsChange }: AgentWorkspaceProps) {
   const [config, setConfig] = useState<AgentConfigResponse | null>(null);
-  const [snapshot, setSnapshot] = useState<AgentSnapshot | null>(null);
   const [preferences, setPreferences] = useState(readLocalPreferences);
   const [inputPreferences, setInputPreferences] = useState(readAgentInputPreferences);
-  const [activeId, setActiveId] = useState<string | null>(() => safeStorageGet(ACTIVE_KEY));
   const [drafts, setDrafts] = useState<Record<string, Draft>>(() => {
     const restored = readAgentDrafts(localStorage, readLocalPreferences().persistInputOnRestart);
     for (const entry of readPendingAgentSubmissions(localStorage)) if (!entry.preserveDraft) restored[entry.conversationId] = draftFromPendingAgentSubmission(entry, restored[entry.conversationId]);
     return restored;
   });
-  const [pending, setPending] = useState<PendingAgentSubmission[]>(() => readPendingAgentSubmissions(localStorage));
   const [loading, setLoading] = useState(true);
-  const [conversationLoading, setConversationLoading] = useState(false);
-  const [conversationLoadError, setConversationLoadError] = useState('');
-  const [conversationRetry, setConversationRetry] = useState(0);
-  const [busy, setBusy] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [handoffBusy, setHandoffBusy] = useState(false);
   const [sizeOpen, setSizeOpen] = useState(false);
   const [referenceGeometry, setReferenceGeometry] = useState<{url:string;size?:{width:number;height:number};status:'loading'|'ready'|'error'}>();
   const [focusRoundId, setFocusRoundId] = useState<string>();
   const consumedHandoff = useRef<number | undefined>(undefined);
-  const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
   const [search, setSearch] = useState('');
   const { rows: conversations, nextCursor, loading: searching, error: searchError, stale: searchStale, refresh: refreshList, upsert: upsertConversation, remove: removeConversation } = useAgentConversations(active, search);
   const [collapsed, setCollapsed] = useState(() => window.innerWidth < 760);
@@ -120,21 +110,15 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
   const scrollContent = useRef<HTMLDivElement>(null);
   const [scrollbarActive, setScrollbarActive] = useState(false);
   const scrollbarTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const requestSequence = useRef(0);
-  const activeIdRef = useRef(activeId);
-  const sending = useRef(false);
   const draftRevisions = useRef<Record<string, number>>({});
   const authorizationRevision = useRef({ images: 0, search: 0 });
-  // A restored pending entry initialized its frozen draft above; revisions
-  // start at zero. New requests bind their original send boundary below.
-  const submissionBoundaries = useRef<Record<string, { conversationId: string; draft: number; authorization: { images: number; search: number } }>>(Object.fromEntries(pending.map(entry => [entry.payload.requestId, { conversationId: entry.conversationId, draft: 0, authorization: { images: 0, search: 0 } }])));
-  const lastCompleted = useRef(new Set<string>());
-  // Browser-only observation. A refresh intentionally loses the start boundary;
-  // neither wall-clock timestamps nor old requests can manufacture this duration.
-  const submissionStarts = useRef(new Map<string, number>());
-  const [terminalObservations, setTerminalObservations] = useState<Record<string, number>>({});
   const settingsHandoff = useRef(false);
-  activeIdRef.current = activeId;
+  const { activeId, activeIdRef, setActiveId, current, pending, busy, error, setError, notice, setNotice,
+    conversationLoading, conversationLoadError, reloadConversation, inFlight, terminalObservations,
+    applySnapshot, runCommand, submitPrepared, reconcile, stop, resume, newConversation } = useAgentRunState({
+      active, useStream: config?.capabilities.progressTransport === 'sse', onSummary: upsertConversation,
+      onJobsChanged, onAccepted: acknowledgeSubmission, onSelection: () => setAllowWebSearch(false),
+    });
   const draftsRef = useRef(drafts);
   draftsRef.current = drafts;
   const draftKey = activeId || 'new';
@@ -147,11 +131,9 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
   // Shared pending choices never replace a submitted request or composer text/images.
   const draft = sharedImages && galleryImageSettings && (!uncertain || uncertain.preserveDraft) ? { ...storedDraft, params: galleryImageSettings.params, sizeMode: galleryImageSettings.sizeMode, imageConfig: { profileId: galleryImageSettings.profileId, model: galleryImageSettings.model } } : storedDraft;
   const imageCount = sharedImages ? sharedImageCount(galleryImageSettings?.count) : nativeImageCount;
-  const current = snapshot?.conversation.id === activeId ? snapshot : null;
   const scrollToLatest = useAgentScroll({ containerRef: scroll, contentRef: scrollContent, active, conversationId: activeId, ready: Boolean(current) && !conversationLoading && !conversationLoadError, revision: current?.revision, focusRoundId, onFocusResolved: () => setFocusRoundId(undefined) });
   const conversationUnavailable = Boolean(activeId && !current);
   const rounds = useMemo(() => current ? getActiveAgentRounds(current.conversation) : [], [current]);
-  const inFlight = Boolean(current && isAgentRequestActive(current.request?.state));
   const draftLocked = busy || Boolean(uncertain);
   const inputLimit = config?.capabilities.maxInputImages ?? 4;
   const imageProfile = config?.profiles.find(profile => profile.id === (config.config.apiConfigMode === 'hybrid' ? draft.imageConfig?.profileId || config.config.imageProfileId : config.config.apiConfigMode === 'off' ? activeProfileId : config.config.textProfileId));
@@ -285,7 +267,7 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
       if (readPendingAgentSubmissions(localStorage).some(entry => entry.conversationId === key)) throw new Error('目标会话有尚未确认的请求，未添加图片，请先确认原请求状态。');
       const latestDraft = draftsRef.current[key] || emptyDraft();
       if (command.intent === 'reference' && latestDraft.refs.length >= inputLimit && !latestDraft.refs.some(choice => choice.reference.kind === 'job' && choice.reference.jobId === job.id)) throw new Error(`最多使用 ${inputLimit} 张参考图，未添加画廊图片；原草稿和附件保留。`);
-      if (target) { activeIdRef.current = target.conversation.id; setActiveId(target.conversation.id); applySnapshot(target); setFocusRoundId(roundId); }
+      if (target) { setActiveId(target.conversation.id); applySnapshot(target); setFocusRoundId(roundId); }
       if (command.intent === 'reference') {
         const choice: ReferenceChoice = {reference:{kind:'job',jobId:job.id},label:'画廊结果',url:mediaUrl(job.result_path!)};
         draftRevisions.current[key] = (draftRevisions.current[key] || 0) + 1;
@@ -368,28 +350,10 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
     if (activeIdRef.current !== key) return;
     if (authorizationRevision.current.search === revision.search) setAllowWebSearch(false);
   }
-  function acknowledgeSubmission(entry: PendingAgentSubmission) {
-    if (entry.preserveDraft) { delete submissionBoundaries.current[entry.payload.requestId]; return; }
-    const boundary = submissionBoundaries.current[entry.payload.requestId];
-    // A foreign/missing boundary cannot establish that the visible draft or
-    // its permissions still belong to this request. Keep them conservatively.
-    if (!boundary || boundary.conversationId !== entry.conversationId) return;
-    if (!entry.preserveDraft) acknowledgeDraft(entry.conversationId, boundary.draft);
+  function acknowledgeSubmission(entry: PendingAgentSubmission, boundary: AgentSubmissionBoundary) {
+    acknowledgeDraft(entry.conversationId, boundary.draft);
     acknowledgeAuthorization(entry.conversationId, boundary.authorization);
-    delete submissionBoundaries.current[entry.payload.requestId];
   }
-  const applySnapshot = useCallback((value: AgentSnapshot) => {
-    const request = value.request;
-    const started = request ? submissionStarts.current.get(request.id) : undefined;
-    if (request && started !== undefined && !isAgentRequestActive(request.state)) {
-      submissionStarts.current.delete(request.id);
-      const elapsed = Math.max(0, performance.now() - started);
-      setTerminalObservations(old => ({ ...old, [request.id]: elapsed }));
-    }
-    if (activeIdRef.current === value.conversation.id) setSnapshot(old => !old || old.conversation.id !== value.conversation.id || value.revision >= old.revision ? value : old);
-    const row: AgentConversationSummary = { id: value.conversation.id, title: value.conversation.title, activeRoundId: value.conversation.activeRoundId, createdAt: value.conversation.createdAt, updatedAt: value.conversation.updatedAt, roundCount: value.conversation.rounds.length, runningRequestId: isAgentRequestActive(value.request?.state) ? value.request!.id : null, revision: value.revision };
-    upsertConversation(row);
-  }, [upsertConversation]);
   async function retryAccepted(_receipt: AgentImageRetryReceipt, conversationId: string) {
     onJobsChanged?.();
     try { const value = await agentApi.conversation(conversationId); if (activeIdRef.current === conversationId) applySnapshot(value); }
@@ -418,17 +382,6 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
     if (active && !galleryCommand && !search.trim() && !activeIdRef.current && conversations.length) setActiveId(conversations[0].id);
   }, [active, galleryCommand, search, conversations]);
   useEffect(() => {
-    const sequence = ++requestSequence.current;
-    let disposed = false;
-    setConversationLoadError('');
-    if (!activeId) { setSnapshot(null); setConversationLoading(false); try { localStorage.removeItem(ACTIVE_KEY); } catch { /* optional UI preference */ } return; }
-    setConversationLoading(true); setError(''); setAllowWebSearch(false);
-    safeStorageSet(ACTIVE_KEY, activeId);
-    const relevant = () => !disposed && sequence === requestSequence.current;
-    void agentApi.conversation(activeId).then(value => { if (relevant()) applySnapshot(value); }).catch(reason => { if (relevant()) setConversationLoadError(errorText(reason)); }).finally(() => { if (relevant()) setConversationLoading(false); });
-    return () => { disposed = true; };
-  }, [activeId, applySnapshot, conversationRetry]);
-  useEffect(() => {
     const refreshPreferences = () => setPreferences(readLocalPreferences());
     window.addEventListener('ipl:local-preferences-changed', refreshPreferences);
     window.addEventListener('storage', refreshPreferences);
@@ -445,37 +398,6 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
     safeStorageSet(AGENT_DRAFT_KEY, JSON.stringify(drafts));
   }, [drafts, preferences.persistInputOnRestart]);
   useEffect(() => {
-    if (!active || !current?.request || !isAgentRequestActive(current.request.state)) return;
-    const requestId = current.request.id;
-    const jobVersion = (value: AgentSnapshot) => JSON.stringify(value.jobs.map(job => [job.id, job.status, job.result_path, job.accepted_image_id, job.error]));
-    let lastJobs = jobVersion(current);
-    return watchAgentRequest(requestId, value => {
-      applySnapshot(value);
-      // Text deltas do not change Gallery jobs. Avoid refreshing the other
-      // workspaces for each token while keeping image progress synchronized.
-      const nextJobs = jobVersion(value);
-      if (nextJobs !== lastJobs) { lastJobs = nextJobs; onJobsChanged?.(); }
-      if (!isAgentRequestActive(value.request?.state) && !lastCompleted.current.has(requestId)) {
-        lastCompleted.current.add(requestId);
-        if (readLocalPreferences().notifyOnCompletion) setNotice(value.request?.state === 'completed' ? 'Agent 本轮已完成' : 'Agent 本轮已结束，请查看状态');
-      }
-    }, reason => setError(`状态读取失败：${errorText(reason)}。不会重新提交模型请求。`), config?.capabilities.progressTransport === 'sse');
-  }, [active, current?.request?.id, inFlight, config?.capabilities.progressTransport, applySnapshot, onJobsChanged]);
-  const retryProgress = current?.jobs.filter(job => (job.metadata?.agentRetry || current.conversation.rounds.some(round => round.retryTaskIds?.includes(job.id))) && ['queued', 'running'].includes(job.status)).map(job => job.id).join(',') || '';
-  useEffect(() => {
-    if (!active || !current || !retryProgress || inFlight) return;
-    let disposed = false;
-    let timer: ReturnType<typeof setTimeout>;
-    const conversationId = current.conversation.id;
-    const poll = async () => {
-      try { const value = await agentApi.conversation(conversationId); if (!disposed) { applySnapshot(value); onJobsChanged?.(); } }
-      catch { /* A missed read never retries the image POST. */ }
-      if (!disposed) timer = setTimeout(poll, 1500);
-    };
-    timer = setTimeout(poll, 1500);
-    return () => { disposed = true; clearTimeout(timer); };
-  }, [active, current?.conversation.id, retryProgress, inFlight, applySnapshot, onJobsChanged]);
-  useEffect(() => {
     setScrollbarActive(false);
     return () => {
       if (scrollbarTimer.current !== null) clearTimeout(scrollbarTimer.current);
@@ -489,11 +411,6 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
     scrollbarTimer.current = setTimeout(() => { scrollbarTimer.current = null; setScrollbarActive(false); }, 1000);
   }
 
-  async function newConversation() {
-    setBusy(true); setError('');
-    try { const value = await agentApi.createConversation(crypto.randomUUID()); activeIdRef.current = value.conversation.id; setActiveId(value.conversation.id); applySnapshot(value); }
-    catch (reason) { setError(errorText(reason)); } finally { setBusy(false); }
-  }
   function rememberImageMode(conversationId: string, enabled: boolean) {
     setImageModes(old => ({ ...old, [conversationId]: enabled }));
     try { saveAgentImageMode(localStorage, conversationId, enabled); }
@@ -501,37 +418,35 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
   }
   async function selectBranch(id: string) {
     if (!current || busy) return;
-    setBusy(true);
-    try { applySnapshot(await agentApi.updateConversation(current.conversation.id, { expectedRevision: current.revision, activeRoundId: getAgentBranchLeafId(current.conversation, id) })); updateDraft({ editId: null, origin: 'send' }); }
-    catch (reason) { setError(errorText(reason)); } finally { setBusy(false); }
+    await runCommand(async command => {
+      const value = await agentApi.updateConversation(current.conversation.id, { expectedRevision: current.revision, activeRoundId: getAgentBranchLeafId(current.conversation, id) });
+      if (command.current()) { applySnapshot(value); updateDraft({ editId: null, origin: 'send' }); }
+    });
   }
   async function prepareEdit(round: AgentRound, origin: 'edit' | 'regenerate') {
     if (!current || inFlight || uncertain) return;
     const key = draftKey, revision = draftRevisions.current[draftKey] || 0;
-    setBusy(true); setError('');
-    try {
+    await runCommand(async command => {
       const original = await agentApi.request(round.requestId);
       const choices = round.inputImageIds.map(id => {
         const image = original.images.find(image => image.id === id) || current.images.find(image => image.id === id);
         return image ? { reference: image.source, label: '原始参考图', url: sameOriginImage(image.thumbnailUrl || image.url), missing: image.status !== 'available' } : null;
       });
       if (choices.some(choice => !choice)) throw new Error('原始参考图记录缺失，不能悄悄改为无参考图生成。');
-      if (activeIdRef.current !== key || (draftRevisions.current[key] || 0) !== revision) return;
+      if (!command.current() || activeIdRef.current !== key || (draftRevisions.current[key] || 0) !== revision) return;
       updateDraft({ text: round.prompt, refs: choices as ReferenceChoice[], editId: round.id, origin });
       textarea.current?.focus();
-    } catch (reason) { setError(errorText(reason)); } finally { setBusy(false); }
+    });
   }
   async function retryText(round: AgentRound) {
-    if (!current || !config || sending.current || busy || inFlight || uncertain || uploading || handoffBusy) return;
+    if (!current || !config || busy || inFlight || uncertain || uploading || handoffBusy) return;
     const conversation = current, key = current.conversation.id;
     const frozenConfig = structuredClone(config), frozenParams = emptyDraft().params;
-    sending.current = true; setBusy(true); setError('');
-    let entry: PendingAgentSubmission | undefined;
-    try {
+    const value = await submitPrepared(async command => {
       const original = await agentApi.request(round.requestId);
       const images = round.inputImageIds.map(id => original.images.find(image => image.id === id));
       if (images.some(image => !image || image.status !== 'available')) throw new Error('原参考图片不可用，不能省略或换图重试。');
-      if (activeIdRef.current !== key) return;
+      if (!command.current() || activeIdRef.current !== key) return null;
       const payload: AgentRoundCreate = {
         requestId: crypto.randomUUID(), expectedRevision: conversation.revision,
         parentRoundId: round.parentRoundId, origin: 'regenerate', derivedFromRoundId: round.id,
@@ -540,21 +455,9 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
         authorization: { scope: 'this_request', allowImageGeneration: false, allowWebSearch: false,
           maxImageJobs: 0, maxToolRounds: frozenConfig.config.maxToolRounds },
       };
-      // A reply retry is independent of the user's unsent draft, including after reload.
-      entry = { conversationId: key, payload, preserveDraft: true };
-      savePendingAgentSubmission(localStorage, entry); setPending(readPendingAgentSubmissions(localStorage));
-      submissionStarts.current.set(payload.requestId, performance.now());
-      const value = await agentApi.submit(key, payload);
-      clearPendingAgentSubmission(localStorage, payload.requestId); setPending(readPendingAgentSubmissions(localStorage));
-      applySnapshot(value); onJobsChanged?.();
-      if (activeIdRef.current === key) scrollToLatest();
-    } catch (reason) {
-      if (entry && reason instanceof AgentApiError && [400, 401, 403, 404, 409, 422].includes(reason.status)) {
-        clearPendingAgentSubmission(localStorage, entry.payload.requestId); setPending(readPendingAgentSubmissions(localStorage));
-        submissionStarts.current.delete(entry.payload.requestId);
-      }
-      setError(errorText(reason));
-    } finally { sending.current = false; setBusy(false); }
+      return { entry: { conversationId: key, payload, preserveDraft: true } };
+    });
+    if (value && activeIdRef.current === key) scrollToLatest();
   }
   async function addFiles(files: File[]) {
     if (uploading || busy || uncertain) return;
@@ -569,32 +472,8 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
       setDrafts(old => ({ ...old, [targetKey]: { ...(old[targetKey] || emptyDraft()), refs: [...(old[targetKey]?.refs || []), ...added] } }));
     } catch (reason) { setError(errorText(reason)); } finally { setUploading(false); }
   }
-  async function reconcile(entry: PendingAgentSubmission, retry = false) {
-    setBusy(true); setError('');
-    let replayedMissingRequest = false;
-    try {
-      let value: AgentSnapshot;
-      try { value = await agentApi.request(entry.payload.requestId); }
-      catch (reason) {
-        if (!(reason instanceof AgentApiError) || reason.status !== 404 || !retry) throw reason;
-        replayedMissingRequest = true;
-        value = await agentApi.submit(entry.conversationId, entry.payload);
-      }
-      applySnapshot(value); clearPendingAgentSubmission(localStorage, entry.payload.requestId); setPending(readPendingAgentSubmissions(localStorage)); onJobsChanged?.();
-      acknowledgeSubmission(entry);
-      setNotice('已确认原请求状态；没有创建第二个请求。');
-    } catch (reason) {
-      if (replayedMissingRequest && reason instanceof AgentApiError && [400, 404, 409, 422].includes(reason.status)) {
-        // A missing request followed by an explicit local validation rejection
-        // has not entered the paid execution queue. Unlock the preserved draft.
-        clearPendingAgentSubmission(localStorage, entry.payload.requestId); setPending(readPendingAgentSubmissions(localStorage));
-        delete submissionBoundaries.current[entry.payload.requestId];
-        setError(`${errorText(reason)}。图库已明确拒绝该请求；图文仍保留，可修改后发送。`);
-      } else setError(`${errorText(reason)}。原请求 ID 与内容已保留。`);
-    } finally { setBusy(false); }
-  }
   async function submit() {
-    if (activeIdRef.current !== activeId || sending.current || busy || handoffBusy || uploading || inFlight || uncertain || conversationUnavailable || !draft.text.trim() || !config) return;
+    if (activeIdRef.current !== activeId || busy || handoffBusy || uploading || inFlight || uncertain || conversationUnavailable || !draft.text.trim() || !config) return;
     if (imagesAllowed && incompatibleImageSelection) {setError('生图方式已改变，旧供应商选择不适用于当前方式。请在生图设置中重新选择生图模型；原草稿和附件保留。');return;}
     if (imagesAllowed && (!imageReady || imageCount > config.config.maxImageJobs)) { setError(sharedUnavailable || (!imageReady ? '请先完善生图设置，草稿与附件保留。' : `当前数量 ${imageCount} 超出 Agent 已配置的 ${config.config.maxImageJobs} 张安全上限，请调整数量或设置中的上限。`)); return; }
     if (draft.refs.some(ref => ref.missing)) { setError('存在缺失参考图，请明确替换或移除后再发送。'); return; }
@@ -612,17 +491,16 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
       resolvedParams = {...resolvedParams,size:auto.size};
     }
     const restoreComposerFocus = textarea.current !== null && document.activeElement === textarea.current;
-    sending.current = true; setBusy(true); setError(''); setNotice('');
+    setNotice('');
     let submittedRevision = draftRevisions.current[draftKey] || 0;
     const submittedAuthorizationRevision = { ...authorizationRevision.current };
-    let entry: PendingAgentSubmission | null = null;
-    try {
+    const result = await submitPrepared(async command => {
       let value = current;
       if (!value && !activeId) {
-        value = await agentApi.createConversation(crypto.randomUUID());
+        value = await command.createConversation();
+        if (!value) return null;
         if (newImageMode) rememberImageMode(value.conversation.id, true);
         setNewImageMode(false);
-        activeIdRef.current = value.conversation.id; setActiveId(value.conversation.id); applySnapshot(value);
         const originalRevision = submittedRevision;
         submittedRevision = draftRevisions.current[value.conversation.id] || 0;
         setDrafts(old => {
@@ -631,7 +509,7 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
           return next;
         });
       }
-      if (!value) return;
+      if (!value) return null;
       const payload: AgentRoundCreate = {
         requestId: crypto.randomUUID(), expectedRevision: value.revision, parentRoundId: derived ? derived.parentRoundId : value.conversation.activeRoundId,
         origin: draft.origin, derivedFromRoundId: derived?.id, prompt: draft.text, refs: resolved.refs,
@@ -639,24 +517,13 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
         ...(imagesAllowed && draft.imageConfig ? {imageConfig:structuredClone(draft.imageConfig)} : {}),
         authorization: { scope: 'this_request', allowImageGeneration: imagesAllowed, allowWebSearch: Boolean(allowWebSearch && config.config.webSearch && config.capabilities.webSearch), maxImageJobs: imagesAllowed ? config.config.maxImageJobs : 0, maxToolRounds: config.config.maxToolRounds },
       };
-      entry = { conversationId: value.conversation.id, payload };
-      savePendingAgentSubmission(localStorage, entry);
-      submissionBoundaries.current[payload.requestId] = { conversationId: entry.conversationId, draft: submittedRevision, authorization: submittedAuthorizationRevision };
-      setPending(readPendingAgentSubmissions(localStorage));
-      submissionStarts.current.set(payload.requestId, performance.now());
-      const result = await agentApi.submit(entry.conversationId, payload);
-      clearPendingAgentSubmission(localStorage, payload.requestId); setPending(readPendingAgentSubmissions(localStorage)); applySnapshot(result); onJobsChanged?.();
-      acknowledgeSubmission(entry);
-      requestAnimationFrame(() => {
-        if (activeIdRef.current === entry!.conversationId) scrollToLatest();
-        if (restoreComposerFocus && activeIdRef.current === entry!.conversationId && textarea.current?.isConnected && document.activeElement === document.body) textarea.current.focus();
-      });
-    } catch (reason) {
-      // An explicit schema/config rejection is safe to edit. Network errors and
-      // server errors retain the frozen request for read-only reconciliation.
-      if (entry && reason instanceof AgentApiError && [400, 404, 409, 422].includes(reason.status)) { clearPendingAgentSubmission(localStorage, entry.payload.requestId); setPending(readPendingAgentSubmissions(localStorage)); delete submissionBoundaries.current[entry.payload.requestId]; submissionStarts.current.delete(entry.payload.requestId); }
-      setError(`${errorText(reason)}${entry && !(reason instanceof AgentApiError) ? '。提交结果不确定；请检查原请求，不要重新发起。' : ''}`);
-    } finally { sending.current = false; setBusy(false); }
+      const entry = { conversationId: value.conversation.id, payload };
+      return { entry, boundary: { conversationId: entry.conversationId, draft: submittedRevision, authorization: submittedAuthorizationRevision } };
+    });
+    if (result) requestAnimationFrame(() => {
+      if (activeIdRef.current === result.conversation.id) scrollToLatest();
+      if (restoreComposerFocus && activeIdRef.current === result.conversation.id && textarea.current?.isConnected && document.activeElement === document.body) textarea.current.focus();
+    });
   }
   function mention(value: string, choice?: ReferenceChoice) {
     if (busy || uncertain) return;
@@ -703,13 +570,6 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
       {!draft.refs.length && !priorRounds.some(round => round.outputTaskIds.length || round.taskImageIds?.length) && <span>先添加图片，或等待生成结果。</span>}
     </>;
   }
-  async function stop() {
-    if (!current?.request || busy) return;
-    setBusy(true);
-    try { applySnapshot(await agentApi.stop(current.request.id)); onJobsChanged?.(); }
-    catch (reason) { setError(errorText(reason)); } finally { setBusy(false); }
-  }
-
   const renderResult = (job: GenerationJobRecord) => <ResultCard key={job.id} job={job} onReference={() => addResultReference(job)} referenceDisabled={draftLocked || uploading || handoffBusy || inFlight} preview={current?.images.find(image => image.id === (job.metadata?.agent as Record<string, unknown> | undefined)?.partialImageId)} onOpen={() => onOpenJob(job.id)} onSaved={() => { onLibraryChanged(); onJobsChanged?.(); if (current) void agentApi.conversation(current.conversation.id).then(applySnapshot).catch(() => {}); }} onError={setError} retry={config && current && ['succeeded', 'accepted', 'failed'].includes(job.status) ? <AgentImageRetryButton key={job.id} job={job} conversationId={current.conversation.id} config={config} selection={draft.imageConfig} params={draft.params} sizeMode={draft.sizeMode} disabled={draftLocked || uploading || handoffBusy || inFlight || !imageReady || incompatibleImageSelection} onReceipt={value => void retryAccepted(value, current.conversation.id)} /> : undefined} />;
   return <section className={`agent-workspace ${collapsed ? 'sidebar-collapsed' : ''}`} aria-label="Agent 创作工作区" hidden={!active}>
     <aside className="agent-conversations">
@@ -721,11 +581,11 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
       {search.trim() && searchStale && !searching && <button aria-label="刷新会话搜索结果" onClick={() => void refreshList()}>会话已更新，刷新搜索结果</button>}
       {!searching && !searchError && search.trim() && !conversations.length && <p className="agent-help">没有匹配的会话</p>}
       <nav aria-busy={searching}>{conversations.map(item => <div key={item.id} className={`agent-conversation-row ${item.id === activeId ? 'selected' : ''}`}>
-        {renaming === item.id ? <form onSubmit={async event => { event.preventDefault(); try { const existing = await agentApi.conversation(item.id); const value = await agentApi.updateConversation(item.id, { expectedRevision: existing.revision, title: titleDraft }); applySnapshot(value); setRenaming(null); } catch (reason) { setError(errorText(reason)); } }}><input aria-label="会话名称" autoFocus value={titleDraft} onChange={event => setTitleDraft(event.target.value)} maxLength={200} /><button title="保存名称" aria-label="保存名称" type="submit"><Check size={15} /></button><button aria-label="取消重命名" type="button" onClick={() => setRenaming(null)}><X size={15} /></button></form> : <>
+        {renaming === item.id ? <form onSubmit={async event => { event.preventDefault(); await runCommand(async command => { const existing = await agentApi.conversation(item.id); if (!command.current()) return; const value = await agentApi.updateConversation(item.id, { expectedRevision: existing.revision, title: titleDraft }); if (command.current()) { applySnapshot(value); setRenaming(null); } }); }}><input aria-label="会话名称" autoFocus value={titleDraft} onChange={event => setTitleDraft(event.target.value)} maxLength={200} /><button title="保存名称" aria-label="保存名称" type="submit"><Check size={15} /></button><button aria-label="取消重命名" type="button" onClick={() => setRenaming(null)}><X size={15} /></button></form> : <>
           <button className="agent-conversation-link" aria-label={`打开会话 ${item.title}`} onClick={() => { setActiveId(item.id); setDeleteTarget(null); }}><span>{item.runningRequestId ? <LoaderCircle size={15} className="spin" /> : <MessageSquare size={15} />}{item.title}</span><small>{item.roundCount} 轮 · {new Date(item.updatedAt).toLocaleDateString()}</small></button>
           <div className="agent-conversation-actions"><button title="重命名会话" aria-label={`重命名 ${item.title}`} onClick={() => { setRenaming(item.id); setTitleDraft(item.title); }}><Pencil size={14} /></button><button title="删除会话" aria-label={`删除 ${item.title}`} onClick={() => setDeleteTarget(item.id)}><Trash2 size={14} /></button></div>
         </>}
-        {deleteTarget === item.id && <div className="agent-delete-confirm"><p>删除会话？画廊结果与 Library 资产会保留。</p><button aria-label="确认删除会话" onClick={async () => { try { await agentApi.deleteConversation(item.id); removeConversation(item.id); rememberImageMode(item.id, false); if (item.id === activeId) { setNewImageMode(false); setActiveId(null); setSnapshot(null); } setDeleteTarget(null); } catch (reason) { setError(errorText(reason)); } }}>确认删除</button><button aria-label="取消删除会话" onClick={() => setDeleteTarget(null)}>取消</button></div>}
+        {deleteTarget === item.id && <div className="agent-delete-confirm"><p>删除会话？画廊结果与 Library 资产会保留。</p><button aria-label="确认删除会话" onClick={() => void runCommand(async command => { await agentApi.deleteConversation(item.id); if (!command.current()) return; removeConversation(item.id); rememberImageMode(item.id, false); if (item.id === activeIdRef.current) { setNewImageMode(false); setActiveId(null); } setDeleteTarget(null); })}>确认删除</button><button aria-label="取消删除会话" onClick={() => setDeleteTarget(null)}>取消</button></div>}
       </div>)}</nav>
       {nextCursor && <button aria-label="加载更多会话" disabled={searching} onClick={() => void refreshList(nextCursor)}>加载更多会话</button>}
     </aside>
@@ -739,7 +599,7 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
       <div className={`agent-messages${scrollbarActive ? ' is-scrolling' : ''}`} ref={scroll} role="region" aria-label="对话消息" tabIndex={0} onScroll={revealScrollbar}>
         <div className="agent-content-column" ref={scrollContent}>
         {(loading || conversationLoading) && !current && <p className="agent-center"><LoaderCircle className="spin" />读取会话…</p>}
-        {conversationLoadError && <p className="agent-error" role="alert">会话读取失败：{conversationLoadError}。草稿和参考图已保留。<button aria-label="重试读取当前会话" disabled={conversationLoading} onClick={() => setConversationRetry(value => value + 1)}>重试</button></p>}
+        {conversationLoadError && <p className="agent-error" role="alert">会话读取失败：{conversationLoadError}。草稿和参考图已保留。<button aria-label="重试读取当前会话" disabled={conversationLoading} onClick={reloadConversation}>重试</button></p>}
         {!loading && !conversationLoading && !conversationUnavailable && !rounds.length && <div className="agent-welcome"><MessageSquare size={34} /><h2>从一个想法开始</h2><p>讨论提示词，选入参考图，再按需要授权本轮生成。<br />文字讨论不会调用图片工具。</p><button aria-label="配置 Agent 调用路径" onClick={onOpenSettings}>配置 Agent 调用路径</button></div>}
         {rounds.map((round, roundIndex) => {
           const assistant = current!.conversation.messages.find(message => message.id === round.assistantMessageId || message.roundId === round.id && message.role === 'assistant');
@@ -775,7 +635,7 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
             </div>
           </article>;
         })}
-        {current?.request && requestNeedsAttention && (current.request.upstreamMayContinue || current.request.canResume) && <div className="agent-request-attention" role="alert">{current.request.upstreamMayContinue && <p>已发送的上游请求可能仍在执行或计费；请先检查原请求，不会自动重复提交。</p>}{current.request.canResume && <button aria-label="继续已确认安全的步骤" disabled={busy} onClick={async () => { setBusy(true); try { applySnapshot(await agentApi.resume(current.request!.id, getAgentResumeId(localStorage, [current.request!.id, current.request!.usage.responseStepsStarted, current.request!.usage.imageJobsCreated].join(':'), () => crypto.randomUUID()))); } catch (reason) { setError(errorText(reason)); } finally { setBusy(false); } }}>继续已确认安全的步骤</button>}</div>}
+        {current?.request && requestNeedsAttention && (current.request.upstreamMayContinue || current.request.canResume) && <div className="agent-request-attention" role="alert">{current.request.upstreamMayContinue && <p>已发送的上游请求可能仍在执行或计费；请先检查原请求，不会自动重复提交。</p>}{current.request.canResume && <button aria-label="继续已确认安全的步骤" disabled={busy} onClick={() => void resume()}>继续已确认安全的步骤</button>}</div>}
       </div>
       </div>
       <div className="agent-scroll-anchor">

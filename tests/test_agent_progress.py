@@ -7,8 +7,18 @@ import pytest
 from backend.db import connect
 from backend.main import create_app
 from backend.services.agent_repository import AgentRepository
+from backend.services.agent_progress import limited_view
 from backend.services.openai_compatible import OpenAICompatibleConfig
 from test_agent_workspaces import configure, isolated, payload, provider, wait_request
+
+
+def small_snapshot(revision=1, state='running', text=''):
+    return {'schemaVersion': 1, 'revision': revision,
+            'conversation': {'id': 'conv', 'title': 'Synthetic', 'activeRoundId': 'round', 'createdAt': 1, 'updatedAt': revision,
+                             'rounds': [{'id': 'round', 'inputImageIds': [], 'outputTaskIds': []}],
+                             'messages': [{'id': 'message', 'roundId': 'round', 'role': 'assistant', 'content': text}]},
+            'request': {'id': 'req', 'conversationId': 'conv', 'roundId': 'round', 'state': state},
+            'images': [], 'jobs': [], 'editingTask': None}
 
 
 @pytest.mark.parametrize("api_mode", ["off", "native", "hybrid"])
@@ -84,14 +94,20 @@ def test_progress_endpoint_replays_terminal_snapshot_without_upstream_requests(i
         result = wait_request(client, "req_1")
         monkeypatch.setattr(routes, "schedule_request", lambda *args: pytest.fail("A progress read scheduled provider work"))
         monkeypatch.setattr(routes, "stop_request", lambda *args: pytest.fail("A progress read stopped provider work"))
-        for _ in range(2):
-            response = client.get("/api/agent/requests/req_1/events")
+        epochs = []
+        for cursor in ('expired:999999', 'foreign-backend:0'):
+            response = client.get("/api/agent/requests/req_1/events", headers={'Last-Event-ID': cursor})
             assert response.status_code == 200
             assert response.headers["content-type"].startswith("text/event-stream")
             assert response.headers["cache-control"] == "no-store"
             assert response.text.count("event: snapshot") == 1
             restored = json.loads(response.text.split("data: ", 1)[1])
+            stream = restored.pop('stream')
+            assert stream['version'] == 1 and stream['sequence'] == 0
+            epochs.append(stream['epoch'])
+            assert stream['view'] == limited_view(result)
             assert restored == result
+        assert epochs[0] != epochs[1]
         assert len(requests) == 1
         assert client.get("/api/agent/requests/missing/events").status_code == 404
         assert client.get("/api/agent/requests/req_1/events", headers={"host": "untrusted.invalid"}).status_code == 400
@@ -103,8 +119,7 @@ def test_progress_stream_coalesces_changes_heartbeats_and_closes_on_terminal(mon
     import backend.routers.agent as routes
     monkeypatch.setattr(routes, "PROGRESS_INTERVAL", 0.001)
     monkeypatch.setattr(routes, "PROGRESS_HEARTBEAT", 0)
-    snapshots = [{"revision": 1, "request": {"state": "running"}},
-                 {"revision": 2, "request": {"state": "completed"}}]
+    snapshots = [small_snapshot(), small_snapshot(2, 'completed', 'A finished answer')]
     class Request:
         async def is_disconnected(self):
             return False
@@ -116,14 +131,21 @@ def test_progress_stream_coalesces_changes_heartbeats_and_closes_on_terminal(mon
             return 1 if self.reads == 1 else 2
         def snapshot(self, **_kwargs):
             self.snapshots += 1
-            return snapshots[1]
+            pytest.fail('Normal progress assembled full history')
+        def progress_structure(self, _request_id):
+            return 'stable'
+        def progress_view(self, _request_id):
+            return limited_view(snapshots[1])
     repository = Repository()
     async def observe():
         return [event async for event in routes.progress_events(Request(), repository, "req", 1, snapshots[0])]
     events = asyncio.run(observe())
-    assert [event.splitlines()[0] for event in events] == ["event: snapshot", "event: heartbeat", "event: snapshot"]
-    assert json.loads(events[-1].split("data: ", 1)[1]) == snapshots[1]
-    assert repository.snapshots == 1
+    assert [event.splitlines()[0] for event in events] == ["event: snapshot", "event: heartbeat", "event: heartbeat", "event: patch"]
+    patch = json.loads(events[-1].split('data: ', 1)[1])
+    assert patch['sequence'] == 1 and patch['baseSequence'] == 0
+    assert {'op': 'replace', 'path': ['request', 'state'], 'value': 'completed'} in patch['operations']
+    assert any(op['path'] == ['messages', 0, 'content'] and op['value'] == 'A finished answer' for op in patch['operations'])
+    assert repository.snapshots == 0
 
 
 def test_progress_stream_disconnect_does_not_change_durable_request(isolated, monkeypatch):
@@ -162,12 +184,14 @@ def test_progress_reads_leave_event_loop_responsive_and_support_cancellation(mon
         async def is_disconnected(self):
             return False
     class Repository:
+        def progress_structure(self, _request_id):
+            return 'stable'
         def progress_token(self, _request_id):
             started.set()
             assert released.wait(2), "Progress database read blocked the event loop"
             return 1
     async def observe():
-        stream = routes.progress_events(Request(), Repository(), "req", 1, {"request": {"state": "running"}})
+        stream = routes.progress_events(Request(), Repository(), "req", 1, small_snapshot())
         await anext(stream)
         pending = asyncio.create_task(anext(stream))
         try:
