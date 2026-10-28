@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 import socket
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 
 import httpx
 import pytest
@@ -44,6 +46,36 @@ def test_measure_closes_connections_even_when_callback_fails(fails):
     assert len(connections) == 1
     with pytest.raises(sqlite3.ProgrammingError, match="closed"):
         connections[0].execute("SELECT 1")
+
+
+def test_measure_counts_worker_sql_without_taking_connection_ownership():
+    ready, release = Event(), Event()
+    connections = []
+
+    def worker():
+        conn = sqlite3.connect(":memory:")
+        connections.append(conn)
+        try:
+            assert conn.execute("SELECT 7").fetchone()[0] == 7
+            ready.set()
+            assert release.wait(5)
+            # The measurement has ended, but the worker still owns this handle.
+            return conn.execute("SELECT 8").fetchone()[0]
+        finally:
+            conn.close()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        def callback():
+            pending = pool.submit(worker)
+            assert ready.wait(5)
+            return pending
+        try:
+            pending, cost = diagnostic.measure(callback, 1)
+            assert cost["connections"] == cost["selects"] == 1
+        finally:
+            release.set()
+        assert pending.result(timeout=5) == 8
+    assert len(connections) == 1
 
 
 def test_real_context_and_snapshot_grow_without_claiming_provider_cache(small_baseline):

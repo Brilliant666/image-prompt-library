@@ -12,6 +12,7 @@ import base64
 from collections import Counter
 from contextlib import closing, contextmanager
 import gc
+from threading import get_ident
 from io import BytesIO
 import json
 import hashlib
@@ -79,10 +80,14 @@ def measure(callback, repeats):
     for _ in range(repeats):
         counts = {"connections": 0, "statements": 0, "selects": 0}
         connections = []
+        owner_thread = get_ident()
 
         def traced_connect(*args, **kwargs):
             conn = original(*args, **kwargs)
-            connections.append(conn)
+            # Count worker connections too, but their lifecycle belongs to the
+            # worker. Retaining and closing them here violates SQLite affinity.
+            if get_ident() == owner_thread:
+                connections.append(conn)
             counts["connections"] += 1
 
             def trace(statement):
