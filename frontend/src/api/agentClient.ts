@@ -15,6 +15,7 @@ export interface AgentConfig {
   webSearch: boolean;
   mathFormattingPrompt: boolean;
   professionalPromptWorkflows: boolean;
+  experimentalImageDeduplication?: boolean;
 }
 export interface AgentConfigResponse {
   revision: number;

@@ -1,8 +1,11 @@
 """Exercise production request construction and stream persistence without providers."""
+import base64
 import copy
+from io import BytesIO
 import json
 
 import httpx
+from PIL import Image
 import pytest
 
 from backend.agent_schemas import AgentRoundCreate
@@ -134,19 +137,29 @@ def test_late_real_message_identity_cannot_bypass_secret_redaction(repo, monkeyp
 
 
 @pytest.mark.parametrize(("prompt", "expected"), [("根据参考图修改背景", ["old", "generated", "current"]), ("你好", []), ("比较之前的图片", ["old", "generated", "current"])])
-def test_actual_input_preserves_uncertain_images_text_and_tool_pairs(prompt, expected):
-    class Images:
-        def data_url(self, aid):
-            return "data:image/png;base64," + aid
-    old = {"index": 1, "prompt": "Original exact prompt\n  whitespace", "inputImageIds": ["old"], "outputTaskIds": ["job"],
+def test_actual_input_preserves_uncertain_images_text_and_tool_pairs(repo, prompt, expected):
+    colors = {"old": (255, 0, 0), "generated": (0, 255, 0), "current": (0, 0, 255)}
+    assets = {}
+    for name, color in colors.items():
+        data = BytesIO()
+        Image.new("RGB", (8, 8), color).save(data, "PNG")
+        assets[name] = repo.store_asset(data.getvalue(), None)["id"]
+    old = {"index": 1, "prompt": "Original exact prompt\n  whitespace", "inputImageIds": [assets["old"]], "outputTaskIds": ["job"],
            "responseOutput": [{"type": "function_call", "call_id": "c", "name": "generate_image", "arguments": "{}"},
                               {"type": "function_call_output", "call_id": "c", "output": "{}"},
                               {"type": "reasoning", "encrypted_content": "continuation"}]}
-    current = {"index": 2, "prompt": prompt, "inputImageIds": [] if prompt == "你好" else ["current"], "outputTaskIds": []}
+    current = {"index": 2, "prompt": prompt, "inputImageIds": [] if prompt == "你好" else [assets["current"]], "outputTaskIds": []}
     request = {"history": [old], "round": current}
     before = copy.deepcopy(request)
-    body = build_input(Images(), request, {"round-1-reference-1": "old", "round-1-image-1": "generated", "round-2-reference-1": "current"})
-    images = [p["image_url"].split(",")[-1] for m in body for p in m.get("content", []) if p["type"] == "input_image"]
+    body = build_input(repo, request, {"round-1-reference-1": assets["old"], "round-1-image-1": assets["generated"], "round-2-reference-1": assets["current"]})
+    names_by_color = {color: name for name, color in colors.items()}
+    images = []
+    for message in body:
+        for part in message.get("content", []):
+            if part["type"] == "input_image":
+                with Image.open(BytesIO(base64.b64decode(part["image_url"].split(",", 1)[1], validate=True))) as image:
+                    assert image.size == (8, 8)
+                    images.append(names_by_color[image.convert("RGB").getpixel((0, 0))])
     assert images == expected
     assert body[0]["content"][0]["text"] == old["prompt"]
     assert [o for o in body if o.get("type")] == old["responseOutput"]

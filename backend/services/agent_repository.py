@@ -1,7 +1,6 @@
 """Durable Agent conversations, frozen requests and references in the main library."""
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import re
@@ -25,7 +24,6 @@ from backend.services.openai_compatible import OpenAICompatibleConfig, OpenAICom
 from backend.services import agent_execution_timing as timing
 from backend.services import agent_editing_task as editing
 from backend.services.api_network import NETWORK_DEFAULTS, network_identity
-from backend.services.agent_image_encoding import optimize_request_image
 
 ACTIVE_STATES = {"queued", "running", "waiting_for_jobs", "stop_requested"}
 ROUND_MENTION = re.compile(r"@(?:第)?(\d+)轮图(\d+)")
@@ -538,15 +536,8 @@ class AgentRepository:
         return self._freeze_source(ref, legacy_asset_id)
 
     def data_url(self, asset_id):
-        asset = self.asset(asset_id)
-        path, mime = resolve_generation_input_image_path(self.library, asset["path"])
-        data = path.read_bytes()
-        # Persisted request histories bypass resolve_ref. Verify their original
-        # bytes as well, before any paid request can observe a changed image.
-        if hashlib.sha256(data).hexdigest() != asset["sha256"]:
-            raise AgentError("frozen_reference_invalid", "已冻结的参考图片缺失或损坏；不会用其他图片替换。", 400)
-        data = optimize_request_image(data, mime)
-        return f"data:{mime};base64," + base64.b64encode(data).decode("ascii")
+        from backend.services.agent_image_inputs import ImageInputSession
+        return ImageInputSession(self).data_url(asset_id)
 
     def resolve_config(self, body):
         document = self.config()
@@ -818,6 +809,16 @@ class AgentRepository:
             conn.execute("UPDATE agent_requests SET state=?,error=?,upstream_outcome=?,updated_at=? WHERE id=?",
                          (state or row["state"], encoded(error) if error else row["error"], outcome or row["upstream_outcome"], milliseconds(), request_id))
             self._touch(conn, row["conversation_id"])
+
+    def record_context_diagnostics(self, request_id, summary):
+        """Latest bounded composition receipt, part of the existing round backup."""
+        with connect(self.library) as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            row = conn.execute('SELECT round_id,conversation_id FROM agent_requests WHERE id=?', (request_id,)).fetchone()
+            data = json.loads(conn.execute('SELECT data FROM agent_rounds WHERE id=?', (row['round_id'],)).fetchone()[0])
+            data['contextDiagnostics'] = summary
+            self._save_round(conn, data)
+            self._touch(conn, row['conversation_id'])
 
     def record_execution(self, request_id, *, phase=None, step=None, state=None, add=False, **durations):
         """Finite phase boundaries only; never called for each text delta."""
