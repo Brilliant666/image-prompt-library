@@ -21,6 +21,7 @@ class AgentConfig(AgentModel):
     webSearch: bool = False
     mathFormattingPrompt: bool = True
     professionalPromptWorkflows: bool = True
+    experimentalImageDeduplication: bool = False
 
 
 class AgentConfigSave(AgentModel):

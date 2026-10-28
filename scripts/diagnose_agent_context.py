@@ -10,7 +10,9 @@ from __future__ import annotations
 import argparse
 import base64
 from collections import Counter
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
+import gc
+from threading import get_ident
 from io import BytesIO
 import json
 import hashlib
@@ -77,9 +79,15 @@ def measure(callback, repeats):
     original = sqlite3.connect
     for _ in range(repeats):
         counts = {"connections": 0, "statements": 0, "selects": 0}
+        connections = []
+        owner_thread = get_ident()
 
         def traced_connect(*args, **kwargs):
             conn = original(*args, **kwargs)
+            # Count worker connections too, but their lifecycle belongs to the
+            # worker. Retaining and closing them here violates SQLite affinity.
+            if get_ident() == owner_thread:
+                connections.append(conn)
             counts["connections"] += 1
 
             def trace(statement):
@@ -88,10 +96,17 @@ def measure(callback, repeats):
             conn.set_trace_callback(trace)
             return conn
 
-        with patch.object(sqlite3, "connect", traced_connect):
-            start = time.perf_counter()
-            value = callback()
-            elapsed = (time.perf_counter() - start) * 1000
+        try:
+            with patch.object(sqlite3, "connect", traced_connect):
+                start = time.perf_counter()
+                value = callback()
+                elapsed = (time.perf_counter() - start) * 1000
+        finally:
+            # sqlite3's transaction context does not close its connection.
+            # Release diagnostic-owned handles outside the measurement window,
+            # including when the measured operation raises.
+            for conn in connections:
+                conn.close()
         samples.append({"ms": round(elapsed, 3), **counts})
     return value, {"median_ms": statistics.median(s["ms"] for s in samples),
                    "min_ms": min(s["ms"] for s in samples), "max_ms": max(s["ms"] for s in samples),
@@ -135,9 +150,8 @@ def asset_inventory(repo):
     files = {path.relative_to(repo.library).as_posix(): path
              for path in root.rglob("*") if path.is_file()} if root.exists() else {}
     hashes = Counter(hashlib.sha256(path.read_bytes()).hexdigest() for path in files.values())
-    with connect(repo.library) as conn:
+    with closing(connect(repo.library)) as conn, conn:
         assets = conn.execute("SELECT path,sha256 FROM agent_assets").fetchall()
-    conn.close()
     paths = {row[0] for row in assets}
     return {
         "agent_asset_rows": len(assets),
@@ -190,15 +204,13 @@ def scope_probes(repo, request_id):
             ("exact_reference_only", '<ref id="round-1-reference-1" />'),
             ("greeting", "你好"),
         ):
-            with connect(repo.library) as conn:
+            with closing(connect(repo.library)) as conn, conn:
                 conn.execute("UPDATE agent_rounds SET data=? WHERE id=?", (encoded({**original, "prompt": prompt}), original["id"]))
-            conn.close()
             body, size = capture(repo, request_id)
             rows.append({"intent": name, **body_metrics(body, size)})
     finally:
-        with connect(repo.library) as conn:
+        with closing(connect(repo.library)) as conn, conn:
             conn.execute("UPDATE agent_rounds SET data=? WHERE id=?", (encoded(original), original["id"]))
-        conn.close()
     return rows
 
 
@@ -230,7 +242,7 @@ def scenario(root, checkpoints, repeats, with_images):
                 snap, snapshot_cost = measure(lambda: repo.snapshot(request_id=request_id), repeats)
                 body, wire_bytes = capture(repo, request_id)
                 skills = default_skill_sections()
-                with connect(repo.library) as conn:
+                with closing(connect(repo.library)) as conn, conn:
                     history_bytes = conn.execute("SELECT sum(length(CAST(history AS BLOB))) FROM agent_requests").fetchone()[0]
                 inventory, _ = asset_inventory(repo)
                 rows.append({"scenario": "image_history" if with_images else "text_history", "rounds": n,
@@ -266,7 +278,7 @@ def scenario(root, checkpoints, repeats, with_images):
         ])
         followups = []
         for used in (0, 1, 2):
-            with connect(repo.library) as conn:
+            with closing(connect(repo.library)) as conn, conn:
                 usage = repo.request(request_id)["usage"]
                 usage["imageJobsCreated"] = used
                 conn.execute("UPDATE agent_requests SET usage=? WHERE id=?", (encoded(usage), request_id))
@@ -278,7 +290,7 @@ def scenario(root, checkpoints, repeats, with_images):
                 "unchanged_input_item_occurrences": unchanged_input_item_occurrences(body["input"], following["input"]),
                 "skill_tool_output_bytes": len(encoded(skill).encode())})
         # Task changes keep the same two foundation bodies; deeper chapters come from model tool requests.
-        with connect(repo.library) as conn:
+        with closing(connect(repo.library)) as conn, conn:
             current = repo.request(request_id)
             usage = dict(current["usage"], imageJobsCreated=0)
             conn.execute("UPDATE agent_requests SET usage=? WHERE id=?", (encoded(usage), request_id))
@@ -294,10 +306,15 @@ def scenario(root, checkpoints, repeats, with_images):
 def run(checkpoints=(1, 5, 25, 50, 100), repeats=3):
     with tempfile.TemporaryDirectory(prefix="ipl-agent-diagnostic-") as temporary:
         root = Path(temporary)
-        return {"schema": 1, "environment": {"os": platform.system(), "python": platform.python_version()},
-                "repeats": repeats, "network": "blocked; MockTransport only", "provider_cache": "not measured",
-                "scenarios": [scenario(root / name, checkpoints, repeats, images)
-                              for name, images in (("text", False), ("images", True))]}
+        try:
+            return {"schema": 1, "environment": {"os": platform.system(), "python": platform.python_version()},
+                    "repeats": repeats, "network": "blocked; MockTransport only", "provider_cache": "not measured",
+                    "scenarios": [scenario(root / name, checkpoints, repeats, images)
+                                  for name, images in (("text", False), ("images", True))]}
+        finally:
+            # Repository calls outside the measured operations may leave SQLite
+            # reference cycles. Release them before Windows removes the database.
+            gc.collect()
 
 
 if __name__ == "__main__":

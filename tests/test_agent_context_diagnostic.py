@@ -4,6 +4,9 @@ import hashlib
 import os
 from pathlib import Path
 import socket
+import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 
 import httpx
 import pytest
@@ -15,6 +18,64 @@ from scripts import diagnose_agent_result_snapshots as result_diagnostic
 @pytest.fixture(scope="module")
 def small_baseline():
     return diagnostic.run(checkpoints=(1, 3), repeats=1)
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_measure_closes_connections_even_when_callback_fails(fails):
+    # Retain a strong reference so collection cannot hide a leaked SQLite handle.
+    connections = []
+    original_connect = sqlite3.connect
+
+    def callback():
+        conn = sqlite3.connect(":memory:")
+        connections.append(conn)
+        with conn:
+            value = conn.execute("SELECT 42").fetchone()[0]
+        if fails:
+            raise ValueError("measured operation failed")
+        return value
+
+    if fails:
+        with pytest.raises(ValueError, match="measured operation failed"):
+            diagnostic.measure(callback, 1)
+    else:
+        value, cost = diagnostic.measure(callback, 1)
+        assert value == 42
+        assert cost["connections"] == cost["statements"] == cost["selects"] == 1
+    assert sqlite3.connect is original_connect
+    assert len(connections) == 1
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        connections[0].execute("SELECT 1")
+
+
+def test_measure_counts_worker_sql_without_taking_connection_ownership():
+    ready, release = Event(), Event()
+    connections = []
+
+    def worker():
+        conn = sqlite3.connect(":memory:")
+        connections.append(conn)
+        try:
+            assert conn.execute("SELECT 7").fetchone()[0] == 7
+            ready.set()
+            assert release.wait(5)
+            # The measurement has ended, but the worker still owns this handle.
+            return conn.execute("SELECT 8").fetchone()[0]
+        finally:
+            conn.close()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        def callback():
+            pending = pool.submit(worker)
+            assert ready.wait(5)
+            return pending
+        try:
+            pending, cost = diagnostic.measure(callback, 1)
+            assert cost["connections"] == cost["selects"] == 1
+        finally:
+            release.set()
+        assert pending.result(timeout=5) == 8
+    assert len(connections) == 1
 
 
 def test_real_context_and_snapshot_grow_without_claiming_provider_cache(small_baseline):

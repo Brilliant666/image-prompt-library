@@ -89,14 +89,19 @@ def _queue_duration(library_path: Path, job_id: str) -> float | None:
 logger = logging.getLogger(__name__)
 
 
-def _verify_image_file(path: Path) -> str:
+def _verify_image_source(source) -> str:
+    """Apply the same input-image checks to a file or already-read original bytes."""
     try:
-        with Image.open(path) as image:
+        with Image.open(source) as image:
             image_format = image.format
             image.verify()
     except (UnidentifiedImageError, OSError, ValueError) as exc:
         raise GenerationJobConflict("Generation edit input image is invalid") from exc
     return Image.MIME.get(image_format or "", "image/png")
+
+
+def _verify_image_file(path: Path) -> str:
+    return _verify_image_source(path)
 
 
 def _validate_storeable_image_bytes(data: bytes) -> None:
@@ -153,12 +158,13 @@ def resolve_generation_write_path(
     return dest_abs
 
 
-def resolve_generation_input_image_path(
+def resolve_generation_input_image_file(
     library_path: Path | str,
     result_path: str,
     *,
     allowed_roots: set[str] | None = None,
-) -> tuple[Path, str]:
+) -> Path:
+    """Resolve an existing safe input path; callers still validate image bytes."""
     roots = allowed_roots or GENERATION_INPUT_IMAGE_ROOTS
     rel = Path(result_path)
     if not result_path or rel.is_absolute() or ".." in rel.parts or len(rel.parts) < 3 or rel.parts[0] not in roots:
@@ -177,6 +183,16 @@ def resolve_generation_input_image_path(
         raise GenerationJobConflict("Generation edit input image path is invalid") from exc
     if not candidate.is_file():
         raise GenerationJobConflict("Generation edit input image is missing")
+    return candidate
+
+
+def resolve_generation_input_image_path(
+    library_path: Path | str,
+    result_path: str,
+    *,
+    allowed_roots: set[str] | None = None,
+) -> tuple[Path, str]:
+    candidate = resolve_generation_input_image_file(library_path, result_path, allowed_roots=allowed_roots)
     return candidate, _verify_image_file(candidate)
 
 

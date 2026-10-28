@@ -18,7 +18,7 @@ from backend.schemas import GenerationJobCreate
 from backend.services.agent_diagnostics import classify_failure, safe_diagnostics
 from backend.services.agent_repository import AgentError, AgentRepository, encoded, fingerprint, profile_digest
 from backend.services.api_network import ApiNetworkError, create_api_client
-from backend.services.agent_image_encoding import optimize_request_image
+from backend.services.agent_image_inputs import encode_verified_image
 from backend.services.generation_jobs import (
     GenerationJobConflict, GenerationJobRepository, _remember_queue_start, now, resolve_generation_input_image_path,
     sanitize_generation_parameters,
@@ -380,15 +380,13 @@ def _run_native_retry(library, job, profile):
             inputs.sort(key=lambda spec: spec['result_path'] != mask['targetPath'])
         for spec in inputs:
             path, mime = resolve_generation_input_image_path(library, spec['result_path'], allowed_roots={'generation-references'})
-            data = optimize_request_image(path.read_bytes(), mime)
-            content.append({'type': 'input_image', 'image_url': f'data:{mime};base64,' + base64.b64encode(data).decode('ascii')})
+            content.append({'type': 'input_image', 'image_url': encode_verified_image(path.read_bytes(), mime)})
         image_tool = {'type': 'image_generation', 'action': 'auto', **native_image_parameters(job.parameters)}
         if job.model:
             image_tool['model'] = job.model
         if mask:
             path, mime = resolve_generation_input_image_path(library, mask['path'], allowed_roots={'generation-references'})
-            data = optimize_request_image(path.read_bytes(), mime)
-            image_tool['input_image_mask'] = {'image_url': f'data:{mime};base64,' + base64.b64encode(data).decode('ascii')}
+            image_tool['input_image_mask'] = {'image_url': encode_verified_image(path.read_bytes(), mime)}
         body = {'model': link['textModel'], 'stream': False, 'input': [{'role': 'user', 'content': content}],
                 'tools': [image_tool], 'tool_choice': {'type': 'image_generation'}, 'max_tool_calls': 1}
         check_owner()
