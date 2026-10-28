@@ -29,7 +29,9 @@ function harness(overrides = {}, geometry = {}) {
   let props = { label: 'Sort', prefix: 'Sort', value: 'created', options, ...overrides };
   const eventTarget = map => ({ addEventListener(name, fn) { if (!map.has(name)) map.set(name, new Set()); map.get(name).add(fn); }, removeEventListener(name, fn) { map.get(name)?.delete(fn); if (!map.get(name)?.size) map.delete(name); } });
   const document = { body: {}, activeElement: null, ...eventTarget(listeners) };
-  const window = { innerWidth: geometry.width ?? 1200, innerHeight: geometry.height ?? 800, ...eventTarget(windowListeners), visualViewport: undefined };
+  const window = { innerWidth: geometry.width ?? 1200, innerHeight: geometry.height ?? 800, ...eventTarget(windowListeners), visualViewport: undefined,
+    getComputedStyle(element) { return { zIndex: element.zIndex ?? 'auto' }; } };
+  const modal = geometry.modalLayers?.reduceRight((parentElement, zIndex) => ({ parentElement, zIndex }), document.body);
   const effect = (callback, dependencies) => {
     const i = cursor++, previous = effects.get(i);
     if (previous && dependencies.length === previous.dependencies.length && dependencies.every((value, j) => Object.is(value, previous.dependencies[j]))) return;
@@ -63,7 +65,7 @@ function harness(overrides = {}, geometry = {}) {
       const element = previous[index]?.node.type === node.type ? previous[index] : {};
       element.node = node;
       element.parentElement = null;
-      element.closest = () => unavailable ? {} : null;
+      element.closest = selector => selector.includes('[role="dialog"]') ? modal ?? null : unavailable ? {} : null;
       element.focus = () => { document.activeElement = element; };
       element.contains = target => target === element || (node.props?.role === 'listbox' && target?.node?.props?.role === 'option');
       element.getBoundingClientRect = () => rect;
@@ -188,6 +190,24 @@ test('body portal flips above at the viewport edge, clamps horizontally on mobil
   assert.equal(h.menu().props['data-placement'], 'below');
   assert.ok(h.menu().props.style.left + h.menu().props.style.width <= 312);
   h.unmount(); assert.equal(h.listeners.size, 0); assert.equal(h.windowListeners.size, 0); assert.equal(h.activeObservers(), 0);
+});
+
+test('a modal-owned portal follows the dialog or overlay layer without raising normal page menus', () => {
+  for (const [modalLayers, expected] of [[undefined, undefined], [['120'], 121], [['auto', '140'], 141], [['200', '120'], 121]]) {
+    const h = harness({}, { modalLayers });
+    h.open();
+    assert.equal(h.menu().props.style.zIndex, expected);
+    assert.equal(h.menu().props.style.top, 144, 'position remains relative to the viewport');
+    assert.equal(h.document.activeElement, null, 'opening never steals focus into the portal');
+    assert.deepEqual(h.key('Escape'), { prevented: true, stopped: true }, 'Escape cannot bubble and close the owning dialog');
+    assert.equal(h.menu(), undefined);
+    assert.equal(h.document.activeElement.node.props.role, 'combobox');
+    h.open(); h.choose(2);
+    assert.deepEqual(h.changes, ['title']);
+    h.inert(true);
+    assert.equal(h.menu(), undefined);
+    h.unmount();
+  }
 });
 
 test('short visual viewports bound menu height and invalidated options repair the active descendant', () => {

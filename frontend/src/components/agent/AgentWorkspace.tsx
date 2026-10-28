@@ -15,7 +15,7 @@ import type { GenerationJobRecord } from '../../types';
 import { getActiveAgentRounds, getAgentBranchLeafId, getAgentSiblingRounds } from '../../utils/playground/agentConversationState';
 import { agentPhaseLabels, getAgentAssistantBlocks, getAgentJobFailure, getAgentRoundStatus, getAgentRoundSummary, getAgentToolLabel, isAgentRequestActive } from '../../utils/playground/agentAssistantBlocks';
 import { insertMention, referenceKey, resolveAgentPromptImageReferences, type ReferenceChoice } from '../../utils/playground/agentImageReferences';
-import { AGENT_DRAFT_KEY, acknowledgeAgentDraft, clearPendingAgentSubmission, draftFromPendingAgentSubmission, getAgentResumeId, readAgentDrafts, readPendingAgentSubmissions, savePendingAgentSubmission, shouldSubmitAgentOnKey, type AgentDraft, type PendingAgentSubmission } from '../../utils/playground/agentSubmission';
+import { AGENT_DRAFT_KEY, AGENT_IMAGE_MODE_PREFIX, acknowledgeAgentDraft, clearPendingAgentSubmission, draftFromPendingAgentSubmission, getAgentResumeId, readAgentDrafts, readAgentImageMode, readPendingAgentSubmissions, saveAgentImageMode, savePendingAgentSubmission, shouldSubmitAgentOnKey, type AgentDraft, type PendingAgentSubmission } from '../../utils/playground/agentSubmission';
 import { resolveAuto4k } from '../../utils/compatibleRecipe';
 import { agentJobSource, sharedImageCount, type AgentGalleryCommand, type GalleryImageSettings } from '../../utils/agentGalleryBridge';
 import { readLocalPreferences } from '../../utils/localPreferences';
@@ -104,9 +104,10 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
   const [inlineMentions, setInlineMentions] = useState(false);
   const [detailRoundId, setDetailRoundId] = useState<string | null>(null);
   const [panelPosition, setPanelPosition] = useState<{ left: number; top?: number; bottom?: number; maxHeight: number }>({ left: 12, top: 64, maxHeight: 440 });
-  // Explicit opt-in for this open conversation; never restored from storage
-  // or inferred from a past request's one-turn authorization.
-  const [imageModeConversation, setImageModeConversation] = useState<string | null>(null);
+  // Restore only explicit per-conversation choices, never a past request's
+  // authorization. A new unsent conversation remains off until opted in.
+  const [imageModes, setImageModes] = useState<Record<string, boolean>>({});
+  const [newImageMode, setNewImageMode] = useState(false);
   const [allowWebSearch, setAllowWebSearch] = useState(false);
   const [nativeImageCount, setNativeImageCount] = useState<1 | 3 | 5 | 10>(1);
   const [activeProfileId, setActiveProfileId] = useState('');
@@ -137,7 +138,7 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
   const draftsRef = useRef(drafts);
   draftsRef.current = drafts;
   const draftKey = activeId || 'new';
-  const imageMode = imageModeConversation === draftKey;
+  const imageMode = activeId ? (Object.hasOwn(imageModes, activeId) ? imageModes[activeId] : readAgentImageMode(localStorage, activeId)) : newImageMode;
   const imagesAllowed = imageMode;
   const uncertain = pending.find(entry => entry.conversationId === activeId);
   const storedDraft = drafts[draftKey] || emptyDraft();
@@ -162,9 +163,18 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
   const detailRequest = current?.request?.id === detailRound?.requestId ? current?.request : null;
   const requestNeedsAttention = Boolean(current?.request && (['failed', 'unknown', 'interrupted'].includes(current.request.state) || current.request.error || current.request.recoveryReason || current.request.upstreamMayContinue || current.request.canResume));
   const closePanel = useCallback(() => setPanel(null), []);
+  useEffect(() => { if (activeId) setNewImageMode(false); }, [activeId]);
   useEffect(() => {
-    setImageModeConversation(key => key === draftKey ? key : null);
-  }, [draftKey]);
+    const refresh = (event: StorageEvent) => {
+      if (event.key === null) setImageModes({});
+      else if (event.key?.startsWith(AGENT_IMAGE_MODE_PREFIX)) {
+        const id = event.key.slice(AGENT_IMAGE_MODE_PREFIX.length);
+        setImageModes(old => ({ ...old, [id]: readAgentImageMode(localStorage, id) }));
+      }
+    };
+    window.addEventListener('storage', refresh);
+    return () => window.removeEventListener('storage', refresh);
+  }, []);
   useEffect(() => {
     if (!notice) return;
     const timer = setTimeout(() => setNotice(''), 4500);
@@ -484,6 +494,11 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
     try { const value = await agentApi.createConversation(crypto.randomUUID()); activeIdRef.current = value.conversation.id; setActiveId(value.conversation.id); applySnapshot(value); }
     catch (reason) { setError(errorText(reason)); } finally { setBusy(false); }
   }
+  function rememberImageMode(conversationId: string, enabled: boolean) {
+    setImageModes(old => ({ ...old, [conversationId]: enabled }));
+    try { saveAgentImageMode(localStorage, conversationId, enabled); }
+    catch { setError(`当前生图模式已${enabled ? '开启' : '关闭'}，但浏览器无法保存此选择；刷新后请检查开关状态。`); }
+  }
   async function selectBranch(id: string) {
     if (!current || busy) return;
     setBusy(true);
@@ -605,7 +620,8 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
       let value = current;
       if (!value && !activeId) {
         value = await agentApi.createConversation(crypto.randomUUID());
-        setImageModeConversation(key => key === 'new' ? value!.conversation.id : key);
+        if (newImageMode) rememberImageMode(value.conversation.id, true);
+        setNewImageMode(false);
         activeIdRef.current = value.conversation.id; setActiveId(value.conversation.id); applySnapshot(value);
         const originalRevision = submittedRevision;
         submittedRevision = draftRevisions.current[value.conversation.id] || 0;
@@ -709,7 +725,7 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
           <button className="agent-conversation-link" aria-label={`打开会话 ${item.title}`} onClick={() => { setActiveId(item.id); setDeleteTarget(null); }}><span>{item.runningRequestId ? <LoaderCircle size={15} className="spin" /> : <MessageSquare size={15} />}{item.title}</span><small>{item.roundCount} 轮 · {new Date(item.updatedAt).toLocaleDateString()}</small></button>
           <div className="agent-conversation-actions"><button title="重命名会话" aria-label={`重命名 ${item.title}`} onClick={() => { setRenaming(item.id); setTitleDraft(item.title); }}><Pencil size={14} /></button><button title="删除会话" aria-label={`删除 ${item.title}`} onClick={() => setDeleteTarget(item.id)}><Trash2 size={14} /></button></div>
         </>}
-        {deleteTarget === item.id && <div className="agent-delete-confirm"><p>删除会话？画廊结果与 Library 资产会保留。</p><button aria-label="确认删除会话" onClick={async () => { try { await agentApi.deleteConversation(item.id); removeConversation(item.id); if (item.id === activeId) { setActiveId(null); setSnapshot(null); } setDeleteTarget(null); } catch (reason) { setError(errorText(reason)); } }}>确认删除</button><button aria-label="取消删除会话" onClick={() => setDeleteTarget(null)}>取消</button></div>}
+        {deleteTarget === item.id && <div className="agent-delete-confirm"><p>删除会话？画廊结果与 Library 资产会保留。</p><button aria-label="确认删除会话" onClick={async () => { try { await agentApi.deleteConversation(item.id); removeConversation(item.id); rememberImageMode(item.id, false); if (item.id === activeId) { setNewImageMode(false); setActiveId(null); setSnapshot(null); } setDeleteTarget(null); } catch (reason) { setError(errorText(reason)); } }}>确认删除</button><button aria-label="取消删除会话" onClick={() => setDeleteTarget(null)}>取消</button></div>}
       </div>)}</nav>
       {nextCursor && <button aria-label="加载更多会话" disabled={searching} onClick={() => void refreshList(nextCursor)}>加载更多会话</button>}
     </aside>
@@ -778,7 +794,7 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
           {inlineMentions && <div className="agent-inline-mentions" aria-label="图片引用建议" onMouseDown={event => event.preventDefault()}>{mentionChoices()}</div>}
           <div className="agent-composer-toolbar">
             <div><button className="agent-add-trigger" aria-label="添加图片或引用" title="添加图片或引用" disabled={draftLocked} aria-haspopup="dialog" aria-expanded={panel === 'add'} onClick={event => openPanel('add', event.currentTarget)}><Plus size={20} /></button><button className="agent-options-trigger" aria-label="生图设置" aria-haspopup="dialog" aria-expanded={panel === 'options'} onClick={event => openPanel('options', event.currentTarget)}><SlidersHorizontal size={17} /><span>生图设置</span></button>{uploading && <LoaderCircle size={17} className="spin" aria-label="正在上传图片" />}</div>
-            <button type="button" className="agent-image-mode" aria-label="持续生图模式" aria-pressed={imageMode} disabled={draftLocked || (!imageMode && !imageReady)} title={imageMode ? '关闭后，后续消息不再持续授权生图' : '开启后，本会话后续发送持续允许生图；可随时关闭'} onClick={() => { setImageModeConversation(imageMode ? null : draftKey); setRequestAuthorization('images', false); }}><ImagePlus size={16} />{imageMode ? '生图模式 · 开' : '生图模式'}</button>
+            <button type="button" className="agent-image-mode" aria-label="持续生图模式" aria-pressed={imageMode} disabled={draftLocked || (!imageMode && !imageReady)} title={imageMode ? '已为本会话开启，刷新后保留；关闭后只进行对话和提示词创作' : '已关闭：只进行对话和提示词创作；开启后为本会话记住选择'} onClick={() => { if (activeId) rememberImageMode(activeId, !imageMode); else setNewImageMode(!imageMode); setRequestAuthorization('images', false); }}><ImagePlus size={16} />{imageMode ? '生图模式 · 开' : '生图模式 · 关'}</button>
             <span className="agent-reference-count">{draft.refs.length > 0 ? `${draft.refs.length} / ${inputLimit} 张参考` : ''}</span>
             <button className="agent-send" title={inFlight ? '停止后续调用' : '发送本轮'} aria-label={inFlight ? '停止后续调用' : '发送 Agent 消息'} disabled={inFlight ? busy : busy || handoffBusy || uploading || conversationUnavailable || !draft.text.trim() || Boolean(uncertain) || !config || (!config.ready && config.config.apiConfigMode !== 'off')} onClick={() => void (inFlight ? stop() : submit())}>{busy ? <LoaderCircle className="spin" size={18} /> : inFlight ? <Square size={17} /> : <ArrowUp size={19} />}</button>
           </div>

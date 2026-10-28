@@ -44,9 +44,11 @@ fi
 
 # shellcheck disable=SC1091
 source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e '.[dev]'
-npm install
+python -m pip install uv==0.12.16
+# Keep local tooling (including uv itself); resolve application dependencies only from the lock.
+# Pin the destination so an inherited UV_PROJECT_ENVIRONMENT cannot target another environment.
+UV_PROJECT_ENVIRONMENT="$PWD/.venv" python -m uv sync --locked --extra dev --inexact --python "$PWD/.venv/bin/python"
+npm ci
 
 if [ ! -f .env ]; then
   cp .env.example .env

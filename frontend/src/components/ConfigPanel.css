@@ -41,7 +41,7 @@
 .settings-switch-row input:checked:before{transform:translateX(12px)}
 .settings-status{padding:10px 12px;border:1px solid var(--studio-hairline,#eceef1);border-radius:10px;font-size:12px;line-height:1.65;background:rgb(127 127 127 / .035)}
 .settings-status p{margin:4px 0 0}
-.settings-field-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.settings-field-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;align-items:start}
 .agent-settings fieldset{padding:0;margin:0;border:0;min-width:0}
 .agent-settings-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:22px}
 .settings-connection-tabs{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:20px}

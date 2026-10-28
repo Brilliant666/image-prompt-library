@@ -1,101 +1,119 @@
-"""Task routing contracts; actual HTTP execution is covered separately."""
+"""The real worker exposes fixed foundations and follows model-selected chapters."""
+import base64
+import json
+
 import pytest
 
-from backend.services.agent_skills import read_agent_skill, selected_skill_sections
+from backend.services.agent_skills import default_skill_sections, read_agent_skill
+from test_agent_workflow_execution import application, answer, pixels, submit, upload, used_sections
+from test_agent_workspaces import image_bytes, isolated
 
 
-def chapters(prompt, images=False, previous=None):
-    return [(part['skill'], part['section']) for part in selected_skill_sections(prompt, images, previous)]
+FOUNDATIONS = {('image-prompt-reverse', 'overview'), ('gpt-image', 'overview')}
 
 
-@pytest.mark.parametrize('prompt,images,expected', [
-    ('使用图片反推工作流，给我简短中文提示词', True, ('image-prompt-reverse', 'analysis')),
-    ('Use image-prompt-reverse for a detailed English prompt.', True, ('image-prompt-reverse', 'analysis')),
-    ('使用 GPT Image Skill 优化', False, ('gpt-image', 'composition')),
-    ('Use GPT Image Skill to polish this brief.', False, ('gpt-image', 'composition')),
-    ('使用 GPT Image Skill 优化刚才反推的提示词', True, ('gpt-image', 'composition')),
-    ('优化刚才反推的提示词，给更短的英文版本', True, ('gpt-image', 'composition')),
-    ('把刚才反推的提示词优化成英文', True, ('gpt-image', 'composition')),
-    ('Refine the reverse-engineered prompt into concise English.', True, ('gpt-image', 'composition')),
-    ('使用 GPT Image Skill 根据这张图片优化提示词', True, ('gpt-image', 'composition')),
-    ('保持主体不变，调整光线', False, ('gpt-image', 'editing')),
-    ('保留人物姿势和画幅，只修改背景', True, ('gpt-image', 'editing')),
-    ('Change the lighting while preserving the subject and outfit.', True, ('gpt-image', 'editing')),
-    ('使用 GPT Image Skill 编写带精确文字的海报排版提示词', False, ('gpt-image', 'text')),
+def strings(value):
+    if isinstance(value, str):
+        # Responses function outputs are JSON strings, unlike instructions.
+        try:
+            decoded = json.loads(value)
+        except (ValueError, TypeError):
+            decoded = None
+        if isinstance(decoded, (dict, list)):
+            yield from strings(decoded)
+        else:
+            yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from strings(item)
+
+
+def chapter_call(skill, section, identity):
+    return {'id': identity, 'call_id': identity, 'type': 'function_call', 'name': 'read_agent_skill',
+            'arguments': json.dumps({'skill': skill, 'section': section})}
+
+
+def assert_foundations_once(sent):
+    for section in default_skill_sections():
+        assert sent['instructions'].count(section['content']) == 1
+        assert sum(part.count(section['content']) for part in strings(sent)) == 1
+
+
+@pytest.mark.parametrize('prompt,with_image', [
+    ('你好', False),
+    ('先说说你的看法，暂时什么也别画。', True),
+    ('接着来，不过衣服换成另一身，其他照旧。', True),
+    ('使用图片反推工作流，再使用 GPT Image Skill。', True),
 ])
-def test_explicit_professional_tasks_select_only_required_guidance(prompt, images, expected):
-    skill, section = expected
-    assert chapters(prompt, images) == [(skill, 'overview'), (skill, section)]
+def test_tasks_receive_same_default_foundations_without_keyword_loading(isolated, monkeypatch, prompt, with_image):
+    with application(isolated, monkeypatch) as (client, calls, replies):
+        refs = [upload(client)] if with_image else []
+        result, _ = submit(client, isolated, prompt, refs=refs)
+        assert result['request']['state'] == 'completed'
+        assert used_sections(result) == FOUNDATIONS
+        assert len(calls) == 1 and calls[0][0] == '/v1/responses'
+        sent = calls[0][1]
+        assert_foundations_once(sent)
+        assert bool(pixels(sent)) == with_image
+        if with_image:
+            assert pixels(sent)[0].endswith(base64.b64encode(image_bytes('blue')).decode())
+        assert 'read_agent_skill' in {tool.get('name') for tool in sent['tools']}
+        for skill, section in [('image-prompt-reverse', 'analysis'), ('gpt-image', 'editing'), ('gpt-image', 'composition')]:
+            assert read_agent_skill(skill, section)['content'] not in sent['instructions']
+        assert result['jobs'] == [] and client.get('/api/items').json()['items'] == []
 
 
-@pytest.mark.parametrize('prompt', [
-    '使用图片反推工作流分析参考图，再用 GPT Image Skill 优化成英文 Prompt。',
-    '先反推这张图，再使用 GPT Image Skill 优化成英文',
-    'Reverse-engineer this image and refine the prompt for controlled lighting.',
+@pytest.mark.parametrize('skill,section', [
+    ('image-prompt-reverse', 'analysis'), ('gpt-image', 'editing'), ('gpt-image', 'text'),
 ])
-def test_complex_task_can_combine_two_finite_skills_without_loading_all_sections(prompt):
-    selected = selected_skill_sections(prompt, True)
-    assert [(part['skill'], part['section']) for part in selected] == [
-        ('image-prompt-reverse', 'overview'), ('image-prompt-reverse', 'analysis'),
-        ('gpt-image', 'overview'), ('gpt-image', 'composition'),
-    ]
-    assert len({(part['skill'], part['section']) for part in selected}) == len(selected)
-    assert all(part['section'] not in ('illustration', 'text', 'editing') for part in selected)
+def test_model_selected_chapter_reaches_real_followup_request_without_application_routing(isolated, monkeypatch, skill, section):
+    with application(isolated, monkeypatch) as (client, calls, replies):
+        replies.extend([
+            {'id': 'read-chapter', 'status': 'completed', 'output': [chapter_call(skill, section, 'chapter')]},
+            answer('Only the requested text response.\n\n```text\nPreserved wording.\n```'),
+        ])
+        # No fixed keyword is required for the model's selected chapter to work.
+        result, original = submit(client, isolated, '再试另一种表达，细节都照着上面的要求来。', refs=[upload(client)])
+        assert result['request']['state'] == 'completed'
+        assert [path for path, _ in calls] == ['/v1/responses', '/v1/responses']
+        assert used_sections(result) == FOUNDATIONS | {(skill, section)}
+        expected = read_agent_skill(skill, section)
+        output = next(part for part in calls[1][1]['input'] if part.get('type') == 'function_call_output' and part['call_id'] == 'chapter')
+        assert json.loads(output['output']) == expected
+        assert sum(part.count(expected['content']) for part in strings(calls[1][1])) == 1
+        for _, sent in calls:
+            assert_foundations_once(sent)
+            assert pixels(sent)
+        assert result['conversation']['messages'][-1]['content'].startswith('Only the requested text response.')
+        assert result['jobs'] == [] and client.get('/api/items').json()['items'] == []
+        assert client.post('/api/agent/conversations/conv/rounds', json=original).status_code == 200
+        assert len(calls) == 2
 
 
-@pytest.mark.parametrize('prompt', [
-    '给我一个更短的英文版本',
-    '改成更适合 GPT Image 2.5 的写法',
-    'Translate it in English',
-    'Make it shorter please',
-])
-def test_language_length_and_model_followups_require_an_existing_prompt_task(prompt):
-    assert chapters(prompt, False, '根据参考图反推中文提示词') == [
-        ('gpt-image', 'overview'), ('gpt-image', 'composition'),
-    ]
-    assert chapters(prompt, False, '解释数据库事务') == []
-    assert chapters(prompt, False) == []
-
-
-@pytest.mark.parametrize('prompt', [
-    '这张图为什么好看？', '它的光线有什么特点？', '我该怎么还原这种肤色？',
-    '仅描述画面中的几何形状', '介绍一下 GPT Image Skill',
-    '解释一下提示词怎么优化', 'How do I optimize a prompt?',
-    '如何使用 GPT Image Skill？', '介绍一下如何使用图片反推工作流',
-    '请告诉我如何使用 GPT Image Skill', '请告诉我，如何使用图片反推工作流？',
-    'Please tell me how to use GPT Image Skill.',
-    '不要反推提示词，只分析这张图的光线', '不要反推这张图的提示词，只描述主体。',
-    "Don't reverse-engineer a prompt; describe the lighting in this image.",
-    '不要使用技能，只优化我给的文字提示词',
-])
-def test_visual_conversation_and_opt_out_do_not_force_prompt_workflows(prompt):
-    assert chapters(prompt, True, '请优化这段提示词：蓝色方块') == []
-
-
-def test_missing_pixels_do_not_activate_reverse_workflow():
-    assert chapters('使用图片反推工作流，给我中文 Prompt', False) == []
-
-
-@pytest.mark.parametrize('prompt', [
-    '不要使用图片反推工作流，只优化现有提示词',
-    "Don't use image-prompt-reverse; optimize this prompt.",
-])
-def test_named_workflow_opt_out_cannot_activate_the_negated_name(prompt):
-    assert chapters(prompt, True) == [('gpt-image', 'overview'), ('gpt-image', 'composition')]
-    assert chapters('不要使用图片反推工作流，帮我反推这张图片', True) == []
-    assert chapters('不要使用 GPT Image Skill，优化这段提示词', False) == []
-    assert chapters('不要使用 GPT Image Skill，使用图片反推工作流反推这张图', True) == [
-        ('image-prompt-reverse', 'overview'), ('image-prompt-reverse', 'analysis'),
-    ]
-
-
-def test_negating_reverse_task_still_allows_a_separate_prompt_optimization_request():
-    assert chapters('不要反推图片，只优化现有提示词：蓝色矩形', True) == [
-        ('gpt-image', 'overview'), ('gpt-image', 'composition'),
-    ]
-    assert chapters('请使用图片反推工作流，给我中文 Prompt', True) == [
-        ('image-prompt-reverse', 'overview'), ('image-prompt-reverse', 'analysis'),
-    ]
+def test_model_can_combine_two_chapters_without_extra_classifier_or_image_calls(isolated, monkeypatch):
+    chapters = [('image-prompt-reverse', 'analysis'), ('gpt-image', 'composition')]
+    with application(isolated, monkeypatch) as (client, calls, replies):
+        replies.extend([
+            {'id': 'combined', 'status': 'completed', 'output': [
+                chapter_call(skill, section, 'chapter-' + str(index))
+                for index, (skill, section) in enumerate(chapters)]},
+            answer(),
+        ])
+        result, _ = submit(client, isolated, '用两套专业方法帮我完成这个思路。', refs=[upload(client)])
+        assert result['request']['state'] == 'completed'
+        assert [path for path, _ in calls] == ['/v1/responses', '/v1/responses']
+        assert used_sections(result) == FOUNDATIONS | set(chapters)
+        outputs = {part['call_id']: json.loads(part['output']) for part in calls[1][1]['input']
+                   if part.get('type') == 'function_call_output'}
+        for index, (skill, section) in enumerate(chapters):
+            expected = read_agent_skill(skill, section)
+            assert outputs['chapter-' + str(index)] == expected
+            assert sum(part.count(expected['content']) for part in strings(calls[1][1])) == 1
+        assert_foundations_once(calls[1][1])
+        assert result['jobs'] == []
 
 
 def test_prompt_contract_distinguishes_derivation_and_preserves_user_format_and_original():

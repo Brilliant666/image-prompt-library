@@ -22,6 +22,10 @@ from backend.services.image_store import MAX_IMAGE_PIXELS
 from backend.services.image_download import download_image, ImageDownloadError, MAX_IMAGE_BYTES
 from backend.services.image_api_stream import ImageStreamError, iter_image_events, read_json_response
 from backend.services.agent_diagnostics import safe_diagnostics
+from backend.services.api_network import (
+    NETWORK_DEFAULTS, ApiNetworkError, create_api_client, public_network_settings,
+    update_network_settings, validate_network_settings,
+)
 from backend.services.model_catalog import (
     ERRORS as CATALOG_ERRORS, ModelCatalogCache, ModelCatalogError,
     connection_fingerprint, empty_catalog, fetch_models,
@@ -212,10 +216,11 @@ class OpenAICompatibleConfig:
     def _defaults():
         return {"display_name": "Third-party API", "base_url": "", "api_key": "", "model": "", "timeout": 300,
                 "models": [], "base_url_mode": "versioned", "stream": False, "partial_images": 0,
-                "response_format": "auto"}
+                "response_format": "auto", **NETWORK_DEFAULTS}
 
     @staticmethod
     def _validate_options(value):
+        value.update(validate_network_settings(value))
         if not isinstance(value["models"], list) or len(value["models"]) > 100 or any(
             not isinstance(model, str) or not model.strip() or len(model.strip()) > 200 or
             any(ord(char) < 32 for char in model) for model in value["models"]
@@ -279,8 +284,10 @@ class OpenAICompatibleConfig:
         catalog = self._cached_model_catalog(value)
         value = dict(value)
         present = bool(value.pop("api_key", ""))
+        network = public_network_settings(value)
+        value.pop("proxy_url", None)
         return {**value, "api_key_present": present, "configured": bool(value["base_url"] and present),
-                "model_catalog": catalog}
+                "model_catalog": catalog, **network}
 
     def _cached_model_catalog(self, settings):
         if not settings["base_url"] or not settings["api_key"]:
@@ -319,7 +326,7 @@ class OpenAICompatibleConfig:
         try:
             models, error = None, None
             try:
-                models = fetch_models(root, settings["api_key"], http_client)
+                models = fetch_models(root, settings["api_key"], http_client, network_settings=settings)
             except ModelCatalogError as exc:
                 error = CATALOG_ERRORS[exc.code]
             checked_at = datetime.now(timezone.utc).isoformat()
@@ -383,6 +390,7 @@ class OpenAICompatibleConfig:
             profile_id = profile_id or document["default_profile_id"] or "legacy"
             self._validate_id(profile_id)
             value = dict(document["profiles"].get(profile_id, self._defaults()))
+            value.update(update_network_settings(value, payload))
             for field in ("display_name", "base_url", "model"):
                 if field in payload:
                     value[field] = str(payload[field] or "").strip()
@@ -587,8 +595,9 @@ class OpenAICompatibleProvider:
             # Never concatenate upstream prose/JSON into a persisted or visible error.
             raise OpenAICompatibleError(message + "; no automatic retry was attempted.", dict(diagnostics)) from None
 
-        client = self.http_client or httpx.Client(timeout=settings["timeout"], follow_redirects=False, transport=httpx.HTTPTransport(retries=0))
+        client = self.http_client
         try:
+            client = client or create_api_client(settings, timeout=settings["timeout"])
             kwargs = {"data": {k: (str(v).lower() if type(v) is bool else str(v)) for k, v in payload.items()}, "files": [("image[]", item) for item in inputs]} if inputs else {"json": payload}
             accept = "text/event-stream, application/json" if transport["stream"] else "application/json"
             http_started = time.monotonic()
@@ -608,6 +617,8 @@ class OpenAICompatibleProvider:
                 diagnostics['provider_ms'] = round((time.monotonic() - http_started) * 1000, 3)
         except OpenAICompatibleError:
             raise
+        except ApiNetworkError as error:
+            fail("local_validation", str(error))
         except ImageStreamError as error:
             fail(error.category, str(error))
         except httpx.ConnectTimeout:
@@ -619,7 +630,7 @@ class OpenAICompatibleProvider:
         finally:
             if http_started is not None:
                 diagnostics.setdefault('provider_ms', round((time.monotonic() - http_started) * 1000, 3))
-            if self.http_client is None:
+            if self.http_client is None and client is not None:
                 client.close()
         if not isinstance(body, dict):
             fail("invalid_json_response", "Image API JSON must be an object")
@@ -651,7 +662,7 @@ class OpenAICompatibleProvider:
         elif isinstance(image_url, str) and image_url:
             diagnostics["image_response"]["transport"] = "url"
             try:
-                data = download_image(image_url, settings["timeout"], self.download_client)
+                data = download_image(image_url, settings["timeout"], self.download_client, network_settings=settings)
             except ImageDownloadError as error:
                 fail(error.category, str(error))
         else:

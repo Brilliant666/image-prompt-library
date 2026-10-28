@@ -35,7 +35,7 @@ from backend.agent_schemas import AgentConfigSave, AgentConversationCreate, Agen
 from backend.db import connect
 from backend.services.agent_execution import build_input, call_responses, refs_for_request
 from backend.services.agent_repository import AgentRepository, encoded
-from backend.services.agent_skills import read_agent_skill, selected_skill_sections, skill_catalog_instructions
+from backend.services.agent_skills import read_agent_skill, default_skill_sections, skill_catalog_instructions
 from backend.services.openai_compatible import OpenAICompatibleConfig
 
 
@@ -229,7 +229,7 @@ def scenario(root, checkpoints, repeats, with_images):
                 _, build_cost = measure(lambda: build_input(repo, request, fixed_refs), repeats)
                 snap, snapshot_cost = measure(lambda: repo.snapshot(request_id=request_id), repeats)
                 body, wire_bytes = capture(repo, request_id)
-                skills = selected_skill_sections(PROMPT + f"Round {n}.", with_images, PROMPT if n > 1 else None)
+                skills = default_skill_sections()
                 with connect(repo.library) as conn:
                     history_bytes = conn.execute("SELECT sum(length(CAST(history AS BLOB))) FROM agent_requests").fetchone()[0]
                 inventory, _ = asset_inventory(repo)
@@ -277,7 +277,7 @@ def scenario(root, checkpoints, repeats, with_images):
                 "repeated_leading_input_items": common_input_prefix(body["input"], following["input"]),
                 "unchanged_input_item_occurrences": unchanged_input_item_occurrences(body["input"], following["input"]),
                 "skill_tool_output_bytes": len(encoded(skill).encode())})
-        # Task changes can alter preloaded sections without changing configuration.
+        # Task changes keep the same two foundation bodies; deeper chapters come from model tool requests.
         with connect(repo.library) as conn:
             current = repo.request(request_id)
             usage = dict(current["usage"], imageJobsCreated=0)

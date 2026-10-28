@@ -106,10 +106,67 @@ test('details show reported tokens, attributed skills and public summary without
   assert.doesNotMatch(html, /SECRET RAW REASONING/);
   assert.match(html, /https:\/\/github.com\/LunarXuan\/image-prompt-reverse/);
   const primary = html.split('<details')[0];
-  assert.match(primary, /使用的技能/);
+  assert.match(primary, /已提供的技能指引/);
   assert.doesNotMatch(primary, /12345678|GPL-3.0|github.com|公开摘要：/);
   assert.match(html, /<details class="agent-response-summary"><summary>公开摘要/);
   assert.doesNotMatch(html, /<details[^>]* open/);
+});
+
+test('transport phases and exact request bytes stay inside collapsed advanced details for each step', () => {
+  const round = {
+    id: 'transport', requestId: 'transport-request', status: 'done', outputTaskIds: [],
+    execution: { version: 1, phase: 'completed', timings: {}, modelSteps: [
+      { step: 1, state: 'completed', preparationMs: 20, headersMs: 12500, firstEventMs: 12600, responseMs: 15000,
+        connectionMs: 15, tlsMs: 485, uploadMs: 4000, waitHeadersMs: 8000, requestBytes: 3145728 },
+      { step: 2, state: 'completed', preparationMs: 5, headersMs: 900, firstEventMs: 950, responseMs: 1300,
+        connectionMs: null, tlsMs: null, uploadMs: 0, waitHeadersMs: 800, requestBytes: 2048 },
+    ] },
+  };
+  const html = render(undefined, { round });
+  const primary = html.split('<details')[0];
+  assert.doesNotMatch(primary, /连接|TLS|上传|请求体大小|3.00 MiB|2.00 KiB/);
+  assert.match(html, /<details class="agent-response-advanced"><summary>高级信息/);
+  assert.doesNotMatch(html, /<details[^>]* open/);
+  const first = html.split('文字模型步骤 1')[1].split('文字模型步骤 2')[0];
+  assert.match(first, /连接（含 DNS \/ TCP）<\/dt><dd>0.015 秒/);
+  assert.match(first, /TLS 握手<\/dt><dd>0.485 秒/);
+  assert.match(first, /上传请求体<\/dt><dd>4.000 秒/);
+  assert.match(first, /上传后等待响应头<\/dt><dd>8.000 秒/);
+  assert.match(first, /请求体大小<\/dt><dd title="3145728 字节">3.00 MiB/);
+  assert.match(first, /请求至响应头<\/dt><dd>12.500 秒/);
+  assert.match(first, /请求至首个有效事件<\/dt><dd>12.600 秒/);
+  const second = html.split('文字模型步骤 2')[1];
+  assert.match(second, /连接（含 DNS \/ TCP）<\/dt><dd>未记录/);
+  assert.match(second, /TLS 握手<\/dt><dd>未记录/);
+  assert.match(second, /上传请求体<\/dt><dd>0.000 秒/);
+  assert.match(second, /上传后等待响应头<\/dt><dd>0.800 秒/);
+  assert.match(second, /请求体大小<\/dt><dd title="2048 字节">2.00 KiB/);
+  assert.match(html, /不代表服务端已收齐/);
+  assert.match(html, /并非纯模型耗时/);
+});
+
+test('legacy or partial transport measurements do not invent zero durations or byte counts', () => {
+  const step = { step: 1, state: 'interrupted', preparationMs: 20, headersMs: null, firstEventMs: null, responseMs: 1500 };
+  const round = {
+    id: 'legacy', requestId: 'legacy-request', status: 'error', outputTaskIds: [],
+    execution: { version: 1, phase: 'unknown', timings: {}, modelSteps: [step] },
+  };
+  const legacy = render(undefined, { round });
+  for (const label of ['连接（含 DNS / TCP）', 'TLS 握手', '上传请求体', '上传后等待响应头', '请求体大小']) {
+    assert.ok(legacy.includes(`${label}</dt><dd>未记录</dd>`), label);
+  }
+  assert.doesNotMatch(legacy, /0.000 秒|>0 B</);
+  Object.assign(step, { connectionMs: 10, tlsMs: null, uploadMs: null, waitHeadersMs: null, requestBytes: null });
+  const partial = render(undefined, { round });
+  assert.match(partial, /连接（含 DNS \/ TCP）<\/dt><dd>0.010 秒/);
+  assert.match(partial, /上传后等待响应头<\/dt><dd>未记录/);
+  assert.match(partial, /请求体大小<\/dt><dd>未记录/);
+  step.requestBytes = 0;
+  assert.match(render(undefined, { round }), /请求体大小<\/dt><dd title="0 字节">0 B/);
+  for (const invalid of [-1, NaN, Infinity, 1.25, Number.MAX_SAFE_INTEGER + 1]) {
+    step.requestBytes = invalid;
+    assert.match(render(undefined, { round }), /请求体大小<\/dt><dd>未记录/);
+  }
 });
 
 test('several sections of the same skill have one compact skill name and retain source details', () => {

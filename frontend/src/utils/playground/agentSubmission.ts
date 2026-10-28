@@ -11,6 +11,23 @@ export interface AgentDraft {
   origin: AgentRoundCreate['origin'];
 }
 export const AGENT_DRAFT_KEY = 'ipl.agent.drafts.v1';
+export const AGENT_IMAGE_MODE_PREFIX = 'ipl.agent.image-mode.v1.';
+
+// Store explicit conversation preferences separately from drafts and frozen
+// request permissions. An unsent new conversation must never inherit a mode.
+export function readAgentImageMode(storage: Pick<Storage, 'getItem'>, conversationId: string): boolean {
+  try { return Boolean(conversationId && conversationId !== 'new' && storage.getItem(AGENT_IMAGE_MODE_PREFIX + conversationId) === 'true'); }
+  catch { return false; }
+}
+
+export function saveAgentImageMode(storage: Pick<Storage, 'setItem' | 'removeItem'>, conversationId: string, enabled: boolean): void {
+  if (!conversationId || conversationId === 'new') return;
+  // Independent keys prevent another tab updating a different conversation
+  // from restoring a choice this tab has just switched off.
+  const key = AGENT_IMAGE_MODE_PREFIX + conversationId;
+  if (enabled) storage.setItem(key, 'true');
+  else storage.removeItem(key);
+}
 
 export function acknowledgeAgentDraft(draft: AgentDraft, clearInput: boolean): AgentDraft {
   return { ...draft, ...(clearInput ? { text: '', refs: [] } : {}), origin: 'send', editId: null };

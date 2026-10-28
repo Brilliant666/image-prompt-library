@@ -74,8 +74,11 @@ def test_native_windows_smoke_and_ci_contract():
     assert "actions/setup-node@v5" in windows_job
     assert "node-version: 24" in windows_job
     assert "cache: npm" in windows_job
-    assert "python -m pip install -e '.[dev]'" in windows_job
-    assert "npm install" in windows_job
+    assert "python -m pip install uv==0.12.16" in windows_job
+    assert "python -m uv sync --locked --extra dev --python 3.11" in windows_job
+    assert "python -m uv run --no-sync python -m pytest" in windows_job
+    assert "npm ci" in windows_job
+    assert "(Join-Path $PWD '.venv\\Scripts') + [IO.Path]::PathSeparator + $env:Path" in windows_job
     assert "npm run build" in windows_job
     assert "tests/test_windows_installer.py" in windows_job
     assert "tests/windows-installer-smoke.ps1" in windows_job

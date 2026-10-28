@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 import httpx
+from backend.services.api_network import ApiNetworkError, create_api_client, network_identity
 
 MAX_CATALOG_BYTES = 2 * 1024 * 1024
 MAX_CATALOG_MODELS = 1000
@@ -29,6 +30,7 @@ ERRORS = {
     "changed": "The saved connection changed during refresh. Refresh the current connection again.",
     "superseded": "A newer model refresh has started. The older response was discarded.",
     "cache": "The saved model cache could not be read. Refresh the model list again.",
+    "network_config": "The API network connection could not be prepared. Check the selected network mode, proxy and direct route.",
 }
 
 
@@ -39,6 +41,9 @@ def empty_catalog():
 def connection_fingerprint(settings, normalized_root):
     # The digest is private cache metadata, never a credential or a public field.
     value = [normalized_root, settings.get("base_url_mode", "versioned"), settings.get("api_key", "")]
+    network = network_identity(settings)
+    if network:
+        value.append(network)
     return hashlib.sha256(json.dumps(value, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
@@ -90,12 +95,12 @@ def parse_models(payload, secret=""):
     return list(models.values())
 
 
-def fetch_models(normalized_root, api_key, http_client=None):
+def fetch_models(normalized_root, api_key, http_client=None, *, network_settings=None):
     """One GET only. Never follow redirects, retry, or send a generation request."""
-    client = http_client or httpx.Client(
-        timeout=CATALOG_TIMEOUT, follow_redirects=False, transport=httpx.HTTPTransport(retries=0))
+    client = http_client
     started = time.monotonic()
     try:
+        client = client or create_api_client(network_settings or {}, timeout=CATALOG_TIMEOUT)
         with client.stream("GET", normalized_root + "/models", headers={
             "Authorization": "Bearer " + api_key, "Accept": "application/json",
         }, timeout=CATALOG_TIMEOUT, follow_redirects=False) as response:
@@ -120,12 +125,14 @@ def fetch_models(normalized_root, api_key, http_client=None):
             except (ValueError, UnicodeError, RecursionError):
                 raise ModelCatalogError("invalid") from None
             return parse_models(payload, api_key)
+    except ApiNetworkError:
+        raise ModelCatalogError("network_config") from None
     except httpx.TimeoutException:
         raise ModelCatalogError("timeout") from None
     except (httpx.HTTPError, OSError):
         raise ModelCatalogError("connection") from None
     finally:
-        if http_client is None:
+        if http_client is None and client is not None:
             client.close()
 
 

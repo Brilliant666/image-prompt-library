@@ -56,25 +56,21 @@ def test_image_and_skill_bytes_prefixes_are_measured_without_dropping_history(ba
         assert row["unreferenced_agent_files"] == 0
         followup = row["tool_followup"]
         assert followup["image_occurrences"] == n + 1
-        if n == 1:
-            # The first preload moves from instructions into durable guidance
-            # on the next call. Report that prefix change rather than hiding it.
-            assert followup["equal_leading_input_items"] == 0
-            assert not followup["instructions_equal"]
-        else:
-            assert followup["equal_leading_input_items"] == row["input_items"]
-            assert followup["instructions_equal"]
+        assert followup["equal_leading_input_items"] == row["input_items"]
+        # Foundations stay fixed; a consumed image-job allowance changes the
+        # dynamic authorization metadata at the end of instructions.
+        assert not followup["instructions_equal"]
         # Exhausting image authorization intentionally removes image tools.
         assert not followup["tools_equal"]
         assert followup["tools_json_bytes"] < row["tools_json_bytes"]
-        assert set(row["skills"]["selected_sections"]) == {"gpt-image/overview", "gpt-image/editing"}
+        assert set(row["skills"]["selected_sections"]) == {"image-prompt-reverse/overview", "gpt-image/overview"}
         assert row["skills"]["selected_section_utf8_bytes"] > 0
     comparison, = baseline["prefix_comparisons"]
-    assert not comparison["instructions_equal"] and comparison["tools_equal"]
+    assert comparison["instructions_equal"] and comparison["tools_equal"]
     assert comparison["equal_leading_input_items"] == 0
     assert first["skills"]["section_occurrences_in_instructions"] == 2
-    assert second["skills"]["section_occurrences_in_instructions"] == 0
-    assert second["skills"]["section_occurrences_in_input"] == 2
+    assert second["skills"]["section_occurrences_in_instructions"] == 2
+    assert second["skills"]["section_occurrences_in_input"] == 0
     # Do not leak the fake key, local filesystem, raw prompts or images into stdout.
     report = json.dumps(baseline)
     assert "synthetic-diagnostic-only" not in report and "base64," not in report

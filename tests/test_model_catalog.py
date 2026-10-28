@@ -277,7 +277,7 @@ def test_real_routes_use_only_saved_profile_and_get_is_local(config, monkeypatch
         return httpx.Response(200, json={"data": [{"id": "route-model"}]})
     with httpx.Client(transport=httpx.MockTransport(reply)) as upstream:
         original = openai_compatible.fetch_models
-        monkeypatch.setattr(openai_compatible, "fetch_models", lambda root, key, client=None: original(root, key, upstream))
+        monkeypatch.setattr(openai_compatible, "fetch_models", lambda root, key, client=None, **kwargs: original(root, key, upstream, **kwargs))
         client = TestClient(create_app(library_path=config.library_path))
         root = "/api/generation-providers/openai-compatible/profiles"
         assert client.get(root + "/one/models").json() == empty_catalog()

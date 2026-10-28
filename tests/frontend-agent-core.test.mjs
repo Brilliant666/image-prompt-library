@@ -158,6 +158,7 @@ const compatibleRecipe = instantiate(await compile('../frontend/src/utils/compat
 const galleryBridge = instantiate(await compile('../frontend/src/utils/agentGalleryBridge.ts'), {});
 const imageRetry = instantiate(await compile('../frontend/src/utils/playground/agentImageRetry.ts'), {});
 const recipeInputs = instantiate(await compile('../frontend/src/utils/recipeInputs.ts'), {});
+const imageModeKey = id => `ipl.agent.image-mode.v1.${id}`;
 function nodes(node) { return !node || typeof node !== 'object' ? [] : [node, ...[node.props?.children].flat(Infinity).flatMap(nodes)]; }
 function deferred() { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; }
 function harness(t, options = {}) {
@@ -165,7 +166,8 @@ function harness(t, options = {}) {
   const submissions = [], creations = [], requestReads = [], watchers = [], profileChanges = [], panelFocusCalls = [], settingsOpens = [], sharedChanges = [];
   const jobReads = [], jobReplies = [], conversationReads = [], conversationUpdates = [], imageDecodes = [], taskUpdates = [], uploads = [], referenceReads = [];
   const root = { inert: false };
-  const storage = new Map([['ipl.agent.active-conversation', options.activeId === null ? null : 'current']]);
+  const storage = options.storage || new Map([['ipl.agent.active-conversation', options.activeId === null ? null : 'current']]);
+  for (const [id, value] of Object.entries(options.imageModes || {})) storage.set(imageModeKey(id), value);
   if (options.inputPreferences) storage.set('ipl.agent.input-preferences.v1', JSON.stringify(options.inputPreferences));
   if (options.pending) storage.set('ipl.agent.pending-submissions.v1', JSON.stringify(options.pending));
   let cursor = 0, dirty = false, tree, timerId = 0, unmounted = false, late = 0;
@@ -182,7 +184,7 @@ function harness(t, options = {}) {
     fetch: (url, init) => { referenceReads.push([url, init]); return options.fetch?.(url, init) ?? Promise.resolve(new Response(new Blob(['synthetic-image'], { type: 'image/png' }))); },
     setTimeout: cb => { timers.set(++timerId, cb); return timerId; }, clearTimeout: id => timers.delete(id),
     window: { innerWidth: 1280, innerHeight: 900, addEventListener: (name, cb) => { if (!listeners.has(name)) listeners.set(name, new Set()); listeners.get(name).add(cb); }, removeEventListener: (name, cb) => listeners.get(name)?.delete(cb), dispatchEvent: event => { listeners.get(event.type)?.forEach(cb => cb(event)); return true; } },
-    localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) },
+    localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => { if (options.imageModeWriteFails && key.startsWith(imageModeKey(''))) throw Error('storage unavailable'); storage.set(key, value); }, removeItem: key => { if (options.imageModeWriteFails && key.startsWith(imageModeKey(''))) throw Error('storage unavailable'); storage.delete(key); } },
     location: { origin: 'http://isolated.test' },
     document: { activeElement: null, body: {}, getElementById: id => id === 'root' ? root : null },
     crypto: { randomUUID: () => `request-${submissions.length}-${creations.length}` }, requestAnimationFrame: callback => { if (options.scrollNodes) { scrollFrames.set(++timerId, callback); return timerId; } callback(); return 1; }, cancelAnimationFrame: id => scrollFrames.delete(id),
@@ -194,6 +196,7 @@ function harness(t, options = {}) {
   const snapshot = { conversation: { id: 'current', title: 'Open conversation', rounds: [], messages: [] }, revision: 1, request: null, jobs: [], images: [], ...options.snapshot };
   const snapshots = new Map([['current', snapshot], ...Object.entries(options.snapshots || {})]);
   const agentApi = {
+    deleteConversation: async id => options.deleteConversation?.(id),
     upload: async file => { uploads.push(file); return options.upload?.(file) ?? { uploadId: `restored-${uploads.length}`, image: { status: 'available', url: `http://isolated.test/restored-${uploads.length}.png` } }; },
     updateEditingTask: async (id, body) => { taskUpdates.push({ id, body }); return options.updateEditingTask?.(id, body) ?? { ...snapshot, revision: snapshot.revision + 1, editingTask: body.task }; },
     conversations(cursor, signal, query) { const reply = deferred(); calls.push({ cursor, signal, query, ...reply }); return reply.promise; },
@@ -1154,7 +1157,7 @@ test('explicit image mode survives accepted and reconciled sends, while search s
   h.submissions[2].resolve(h.snapshot); await h.flush();
 });
 
-test('image mode transfers only during first conversation creation, and resets on conversation change and remount', async t => {
+test('explicit image mode follows its conversation across switching and remount; new conversations default off', async t => {
   const h = harness(t, { activeId: null }); await h.flush(); await configureImages(h);
   const mode = () => h.find('button', p => p['aria-label'] === '持续生图模式')[0];
   mode().onClick(); await h.flush(); h.find('button', p => p['aria-label'] === '发送 Agent 消息')[0].onClick(); await h.flush();
@@ -1163,9 +1166,105 @@ test('image mode transfers only during first conversation creation, and resets o
   h.submissions[0].resolve(h.snapshot); await h.flush(); assert.equal(mode()['aria-pressed'], true);
   h.calls.at(-1).resolve(result(['other', 'current'])); await h.flush();
   h.find('button', p => p['aria-label'] === '打开会话 Title other')[0].onClick(); await h.flush(); assert.equal(mode()['aria-pressed'], false);
-  h.find('button', p => p['aria-label'] === '打开会话 Title current')[0].onClick(); await h.flush(); assert.equal(mode()['aria-pressed'], false);
-  assert.ok(![...h.storage.keys()].some(key => key.includes('image-mode')), 'permission is not persisted');
-  const fresh = harness(t); await fresh.flush(); assert.equal(fresh.find('button', p => p['aria-label'] === '持续生图模式')[0]['aria-pressed'], false);
+  h.find('button', p => p['aria-label'] === '打开会话 Title current')[0].onClick(); await h.flush(); assert.equal(mode()['aria-pressed'], true);
+  assert.equal(h.storage.get(imageModeKey('current')), 'true'); assert.equal(h.storage.has(imageModeKey('other')), false);
+  h.unmount();
+  const fresh = harness(t, { storage: h.storage }); await fresh.flush(); await configureImages(fresh);
+  assert.equal(fresh.find('button', p => p['aria-label'] === '持续生图模式')[0]['aria-pressed'], true);
+  assert.equal(fresh.submissions.length, 0, 'restoring a mode never submits a request');
+  fresh.find('button', p => p['aria-label'] === '发送 Agent 消息')[0].onClick(); await fresh.flush();
+  assert.equal(fresh.submissions[0].payload.authorization.allowImageGeneration, true, 'the restored UI mode reaches the real submit callback');
+  fresh.submissions[0].resolve(fresh.snapshot); await fresh.flush();
+  fresh.find('button', p => p['aria-label'] === '新建会话')[0].onClick(); await fresh.flush();
+  fresh.creations[0].resolve({ ...fresh.snapshot, conversation: { ...fresh.snapshot.conversation, id: 'brand-new' } }); await fresh.flush();
+  assert.equal(fresh.find('button', p => p['aria-label'] === '持续生图模式')[0]['aria-pressed'], false);
+  assert.equal(fresh.storage.get(imageModeKey('current')), 'true'); assert.equal(fresh.storage.has(imageModeKey('brand-new')), false);
+  assert.equal(fresh.submissions.length, 1);
+});
+
+test('turning image mode off persists without clearing drafts or reference images, including after reload', async t => {
+  const h = harness(t, { imageModes: { current: 'true', other: 'true' } }); await h.flush(); await configureImages(h);
+  const draftBefore = structuredClone(savedDraft(h));
+  h.find('button', p => p['aria-label'] === '持续生图模式')[0].onClick(); await h.flush();
+  assert.deepEqual(savedDraft(h), draftBefore);
+  assert.equal(h.storage.has(imageModeKey('current')), false); assert.equal(h.storage.get(imageModeKey('other')), 'true');
+  const mode = h.find('button', p => p['aria-label'] === '持续生图模式')[0];
+  assert.match(JSON.stringify(mode.children), /生图模式 · 关/); assert.match(mode.title, /已关闭/);
+  h.unmount();
+  const fresh = harness(t, { storage: h.storage, draft: draftBefore }); await fresh.flush(); await configureImages(fresh);
+  assert.equal(fresh.find('button', p => p['aria-label'] === '持续生图模式')[0]['aria-pressed'], false);
+  assert.deepEqual(savedDraft(fresh), draftBefore); assert.equal(fresh.submissions.length, 0);
+  fresh.find('button', p => p['aria-label'] === '发送 Agent 消息')[0].onClick(); await fresh.flush();
+  assert.equal(fresh.submissions[0].payload.authorization.allowImageGeneration, false);
+  assert.equal(fresh.submissions[0].payload.authorization.maxImageJobs, 0);
+  assert.equal(fresh.submissions[0].payload.prompt, draftBefore.text);
+  assert.deepEqual(fresh.submissions[0].payload.refs, draftBefore.refs.map(ref => ref.reference));
+});
+
+test('image mode never restores from malformed values or an unsent new draft', async t => {
+  for (const value of ['invalid-json', 'null', '["current"]', '{"current":"true"}', '1', '"true"']) {
+    const h = harness(t, { imageModes: { current: value } }); await h.flush();
+    assert.equal(h.find('button', p => p['aria-label'] === '持续生图模式')[0]['aria-pressed'], false);
+    assert.equal(h.submissions.length, 0); h.unmount();
+  }
+  const h = harness(t, { activeId: null, imageModes: { current: 'true', new: 'true' } }); await h.flush(); await configureImages(h);
+  assert.equal(h.find('button', p => p['aria-label'] === '持续生图模式')[0]['aria-pressed'], false);
+  h.find('button', p => p['aria-label'] === '持续生图模式')[0].onClick(); await h.flush(); h.unmount();
+  const fresh = harness(t, { activeId: null, storage: h.storage }); await fresh.flush();
+  assert.equal(fresh.find('button', p => p['aria-label'] === '持续生图模式')[0]['aria-pressed'], false);
+  assert.equal(fresh.creations.length, 0); assert.equal(fresh.submissions.length, 0);
+});
+
+test('mode changes from another tab affect future sends only, not a frozen request or its receipt', async t => {
+  const h = harness(t, { imageModes: { current: 'true' } }); await h.flush(); await configureImages(h);
+  const draftBefore = structuredClone(savedDraft(h));
+  h.find('button', p => p['aria-label'] === '发送 Agent 消息')[0].onClick(); await h.flush();
+  const submitted = JSON.stringify(h.submissions[0].payload);
+  h.storage.delete(imageModeKey('current')); h.window.dispatchEvent({ type: 'storage', key: imageModeKey('current') }); await h.flush();
+  assert.equal(h.find('button', p => p['aria-label'] === '持续生图模式')[0]['aria-pressed'], false);
+  assert.equal(JSON.stringify(h.submissions[0].payload), submitted);
+  assert.deepEqual(savedDraft(h), draftBefore);
+  h.submissions[0].reject(Error('response lost')); await h.flush();
+  h.find('button', p => p['aria-label'] === '检查原请求状态')[0].onClick(); await h.flush();
+  h.requestReads[0].resolve(h.snapshot); await h.flush();
+  assert.equal(h.find('button', p => p['aria-label'] === '持续生图模式')[0]['aria-pressed'], false);
+  assert.equal(h.submissions.length, 1, 'receipt reconciliation does not re-enable or repeat a paid request');
+});
+
+test('image mode storage errors are visible and do not discard the current preference, draft or attachments', async t => {
+  const h = harness(t, { imageModeWriteFails: true }); await h.flush(); await configureImages(h);
+  const before = structuredClone(savedDraft(h));
+  h.find('button', p => p['aria-label'] === '持续生图模式')[0].onClick(); await h.flush();
+  assert.equal(h.find('button', p => p['aria-label'] === '持续生图模式')[0]['aria-pressed'], true);
+  assert.match(JSON.stringify(h.find('p', p => p.role === 'alert')), /浏览器无法保存此选择/);
+  assert.deepEqual(savedDraft(h), before); assert.equal(h.submissions.length, 0);
+});
+
+test('interleaved mode updates in different tabs cannot restore another conversation that was switched off', () => {
+  const { readAgentImageMode, saveAgentImageMode } = instantiate(submissionJs, {});
+  const values = new Map([[imageModeKey('current'), 'true']]);
+  const plainStorage = { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value), removeItem: key => values.delete(key) };
+  const interleaved = {
+    ...plainStorage,
+    setItem(key, value) {
+      saveAgentImageMode(plainStorage, 'current', false);
+      plainStorage.setItem(key, value);
+    },
+  };
+  saveAgentImageMode(interleaved, 'other', true);
+  assert.equal(readAgentImageMode(plainStorage, 'current'), false);
+  assert.equal(readAgentImageMode(plainStorage, 'other'), true);
+});
+
+test('deleting a conversation removes only its remembered image mode', async t => {
+  const removed = [];
+  const h = harness(t, { imageModes: { current: 'true', other: 'true' }, deleteConversation: id => removed.push(id) }); await h.flush();
+  h.calls[0].resolve(result(['current', 'other'])); await h.flush();
+  h.find('button', p => p['aria-label'] === '删除 Title current')[0].onClick(); await h.flush();
+  h.find('button', p => p['aria-label'] === '确认删除会话')[0].onClick(); await h.flush();
+  assert.deepEqual(removed, ['current']);
+  assert.equal(h.storage.has(imageModeKey('current')), false); assert.equal(h.storage.get(imageModeKey('other')), 'true');
+  assert.equal(h.submissions.length, 0);
 });
 
 test('image mentions show thumbnails and failure status, then attach a deduplicated visual reference without losing draft', async t => {

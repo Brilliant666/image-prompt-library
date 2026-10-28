@@ -24,6 +24,8 @@ from backend.services.image_store import _atomic_write_bytes
 from backend.services.openai_compatible import OpenAICompatibleConfig, OpenAICompatibleError, normalize_image_parameters
 from backend.services import agent_execution_timing as timing
 from backend.services import agent_editing_task as editing
+from backend.services.api_network import NETWORK_DEFAULTS, network_identity
+from backend.services.agent_image_encoding import optimize_request_image
 
 ACTIVE_STATES = {"queued", "running", "waiting_for_jobs", "stop_requested"}
 ROUND_MENTION = re.compile(r"@(?:第)?(\d+)轮图(\d+)")
@@ -40,6 +42,11 @@ def encoded(value):
 
 def fingerprint(value):
     return hashlib.sha256(encoded(value).encode("utf-8")).hexdigest()
+
+
+def profile_digest(profile):
+    return fingerprint({**{k: v for k, v in profile.items() if k not in NETWORK_DEFAULTS},
+                        **network_identity(profile)})
 
 
 class AgentError(ValueError):
@@ -538,6 +545,7 @@ class AgentRepository:
         # bytes as well, before any paid request can observe a changed image.
         if hashlib.sha256(data).hexdigest() != asset["sha256"]:
             raise AgentError("frozen_reference_invalid", "已冻结的参考图片缺失或损坏；不会用其他图片替换。", 400)
+        data = optimize_request_image(data, mime)
         return f"data:{mime};base64," + base64.b64encode(data).decode("ascii")
 
     def resolve_config(self, body):
@@ -587,9 +595,9 @@ class AgentRepository:
             if not image["api_key"] or not image["base_url"] or not model:
                 raise AgentError("configuration_incomplete", "图像 API 配置不完整。", 400)
             config["imageModel"] = model
-        digests = {text["id"]: fingerprint(text)}
+        digests = {text["id"]: profile_digest(text)}
         if image:
-            digests[image["id"]] = fingerprint(image)
+            digests[image["id"]] = profile_digest(image)
         config.update(textProfileId=text["id"], imageProfileId=image["id"] if image else None,
                       textProfileFingerprint=public_profile_digest(text),
                       imageProfileFingerprint=public_profile_digest(image) if image else None,
@@ -606,7 +614,7 @@ class AgentRepository:
             profile = OpenAICompatibleConfig(library_path=self.library).read(pid)
         except (ValueError, OpenAICompatibleError):
             raise AgentError("profile_changed", "本轮 API 配置已删除，请明确发起新请求。") from None
-        if fingerprint(profile) != frozen["_profileDigests"].get(pid):
+        if profile_digest(profile) != frozen["_profileDigests"].get(pid):
             raise AgentError("profile_changed", "本轮 API 配置已改变，请明确发起新请求。")
         return profile
 

@@ -4,11 +4,16 @@ on:
   push:
     branches: [main, codex/sub2api-images]
   pull_request:
-    branches: [main, codex/sub2api-images, feat/quick-capture]
+    # Include stacked PRs targeting another feature branch.
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  # Only a newer run of the same PR replaces an older run. Keep all push/manual runs.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
@@ -30,14 +35,14 @@ jobs:
           cache: npm
       - name: Install Python dependencies
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e '.[dev]'
+          python -m pip install uv==0.12.16
+          python -m uv sync --locked --extra dev --python 3.11
       - name: Install frontend dependencies
-        run: npm install
+        run: npm ci
       - name: Build local app
         run: npm run build
       - name: Run tests
-        run: python -m pytest -q
+        run: python -m uv run --no-sync python -m pytest -q
       - name: Run frontend behavior tests
         run: npm run test:frontend
       - name: Check native browser extension and capture behavior
@@ -63,16 +68,20 @@ jobs:
           node-version: 24
           cache: npm
       - name: Install Python dependencies
-        run: python -m pip install -e '.[dev]'
+        run: |
+          python -m pip install uv==0.12.16
+          python -m uv sync --locked --extra dev --python 3.11
       - name: Install frontend dependencies
-        run: npm install
+        run: npm ci
       - name: Build local app
         run: npm run build
       - name: Run Windows installer contracts
-        run: python -m pytest -p no:cacheprovider -q tests/test_windows_installer.py tests/test_library_archives.py
+        run: python -m uv run --no-sync python -m pytest -p no:cacheprovider -q tests/test_windows_installer.py tests/test_library_archives.py
       - name: Run native Windows installer smoke
         shell: powershell
-        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/windows-installer-smoke.ps1
+        run: |
+          $env:Path = (Join-Path $PWD '.venv\Scripts') + [IO.Path]::PathSeparator + $env:Path
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/windows-installer-smoke.ps1
 
   macos-backup-restore:
     runs-on: macos-latest
@@ -85,6 +94,8 @@ jobs:
           python-version: '3.11'
           cache: pip
       - name: Install Python dependencies
-        run: python -m pip install -e '.[dev]'
+        run: |
+          python -m pip install uv==0.12.16
+          python -m uv sync --locked --extra dev --python 3.11
       - name: Run portable backup and restore contracts
-        run: python -m pytest -p no:cacheprovider -q tests/test_library_archives.py
+        run: python -m uv run --no-sync python -m pytest -p no:cacheprovider -q tests/test_library_archives.py

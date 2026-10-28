@@ -68,7 +68,10 @@ export interface AgentExecution {
   version: 1;
   phase: 'preparing' | 'waiting_model' | 'receiving_model' | 'waiting_jobs' | 'generating_images' | 'processing_results' | 'completed' | 'failed' | 'stopped' | 'unknown';
   timings: { preparationMs: number | null; modelHeadersMs: number | null; modelFirstEventMs: number | null; modelResponseMs: number | null; toolsMs: number | null; resultProcessingMs: number | null };
-  modelSteps: Array<{ step: number; state: string; preparationMs: number | null; headersMs: number | null; firstEventMs: number | null; responseMs: number | null }>;
+  modelSteps: Array<{
+    step: number; state: string; preparationMs: number | null; headersMs: number | null; firstEventMs: number | null; responseMs: number | null;
+    connectionMs?: number | null; tlsMs?: number | null; uploadMs?: number | null; waitHeadersMs?: number | null; requestBytes?: number | null;
+  }>;
 }
 export interface AgentRound {
   id: string; index: number; parentRoundId: string | null; userMessageId: string; assistantMessageId?: string;

@@ -8,7 +8,7 @@ In **Settings → Agent**, **Enable professional image-prompt workflows** is on 
 
 | Request | Expected workflow |
 | --- | --- |
-| Ordinary conversation | Text response; no automatic skill body or image request |
+| Ordinary conversation | Natural text response; both skills' core guidance is available without forcing a prompt template or image request |
 | Attach an image and ask about its light or composition | Normal visual analysis, distinguishing observation from inference |
 | “使用图片反推工作流，给我简短中文提示词” | Reverse guidance applied to the supplied image pixels; a derived prompt, not a claim to know the original prompt |
 | “使用 GPT Image Skill 优化，给我更短的英文版本” | Prompt refinement with the original intent and constraints retained |
@@ -16,13 +16,13 @@ In **Settings → Agent**, **Enable professional image-prompt workflows** is on 
 | “先反推图片，再优化成英文 Prompt” | Relevant sections from both skills, without loading every chapter |
 | Request generation with image permission enabled | Existing Native or Hybrid tools and Gallery task receipts |
 
-Uploading an image or enabling image permission alone does not request generation. When the switch is off, ordinary chat, visual input and authorized generation remain available, but automatic skill loading and `read_agent_skill` are disabled. Previously recorded conversation and genuine tool results remain history; switching off does not erase them or silently activate a new skill read. The local selector is conservative, not an extra paid classifier; unusual phrasing can still require a model-driven finite section read. See [skill sources, chapters and adaptation](agent-skills/README.md).
+Uploading an image or enabling image permission alone does not request generation. When professional workflows are enabled, every request contains both skills' overview bodies, in a stable order. The model uses the conversation to decide whether to apply them and whether to read a deeper chapter; the application does not classify requests using trigger words or an extra model call. Turning professional workflows off removes skill guidance and `read_agent_skill` from new requests while preserving ordinary chat, visual input and authorized generation. Saved conversation records are not changed. See [skill sources, chapters and adaptation](agent-skills/README.md).
 
 ### Continue a professional task
 
-Short messages such as “就换白色的”, “保持原来的姿势”, “接着改背景” and “按照刚才的效果继续” can inherit the current editing task's target, confirmed requirements and relevant workflow. They do not depend only on keywords in the immediately preceding user message. An answer to the assistant's clarification can continue the same task. An explicit task change or ending the task stops that inheritance; a greeting, ordinary visual-analysis question or unrelated request does not reactivate the old workflow.
+Short messages such as “就换白色的”, “保持原来的姿势” and “换一身女仆装” have the same skill foundations available as longer instructions. The model interprets them using the current conversation, editing target and confirmed requirements. An answer to its clarification can continue the same task. A task change, greeting or unrelated question is interpreted in context; it does not have to satisfy a local list of trigger words.
 
-Only the relevant sections of the two pinned local skills are used. An automatic preload records the section identity and source revision once per round, and later requests can reuse the validated section as application-supplied guidance. Repeating a short continuation does not append another copy of the same automatic guidance for every previous round. Genuine `read_agent_skill` calls and their paired results remain in conversation history. A receipt is not a fabricated tool call, and neither a receipt nor a skill grants image permission. Disabling professional workflows also disables reuse of automatic guidance; re-enabling permits task-relevant reuse or loading again.
+Both pinned overview bodies are supplied once per model request. Further chapters are available through the read-only `read_agent_skill` tool, chosen by the model rather than a local task router. Already supplied chapter bodies can be reused without adding another copy of the same automatic guidance for every previous round. The record distinguishes supplied guidance from an actual tool call; neither grants image permission. Disabling professional workflows also disables guidance reuse in new requests; re-enabling restores the foundations and chapter reader.
 
 ### Read and copy a prompt
 
@@ -40,7 +40,9 @@ The current editing task records a stable target image, auxiliary references and
 
 For continuous edits, local image tools can select the subject and auxiliary roles in the same call that supplies the execution prompt. The server validates the entire batch's references before changing the selection or creating jobs. This removes a separate model round trip when selection and generation can be decided together; it does not bypass image permission, job limits or uncertain-result recovery. A direct Native image tool still requires selection to be resolved before its upstream call; Native batch functions validate locally first. Actual provider latency and whether the model uses this shorter path depend on the provider.
 
-The composer keeps one **Image mode** switch, initially off. Turning it on permits the model to interpret a full visual prompt or a natural generation request; it does not force generation for a request to analyze or refine text. **Image settings** in Hybrid share the Gallery's provider, model, dimensions, quality, format and image count. Changes work in both directions, while each workspace retains its own draft and attachments. Automatic dimensions are resolved from the prompt and references of the request being sent. Previously submitted requests retain their frozen settings. Native and Current API continue to use their Responses image tool and do not silently inherit an incompatible Gallery protocol.
+The composer keeps one **Image mode** switch, initially off for each new conversation. Explicit choices are remembered per conversation in this browser and restored after reload or switching conversations; historical request permissions never enable the switch. An unsent new conversation's choice is saved only when that conversation is created by sending. Turning the switch off is also remembered. Storage failures are reported without clearing the current draft or attachments. The switch visibly shows on/off, and the model receives the frozen request's authorization state so it can explain that image mode is off instead of claiming the application lacks image capabilities.
+
+Turning image mode on permits the model to interpret a full visual prompt or a natural generation request; it does not force generation for analysis or prompt refinement. Skill availability is independent of this switch. **Image settings** in Hybrid share the Gallery's provider, model, dimensions, quality, format and image count. Changes work in both directions, while each workspace retains its own draft and attachments. Automatic dimensions are resolved from the prompt and references of the request being sent. Previously submitted requests retain their frozen settings. Native and Current API continue to use their Responses image tool and do not silently inherit an incompatible Gallery protocol.
 
 The configured maximum jobs and model steps remain backend safeguards, without duplicate per-turn controls. Image count is a requested default, separate from the safety maximum; a choice above that maximum is rejected explicitly. These limits are request-count controls, not monetary budgets.
 
@@ -146,11 +148,47 @@ Creation itself took 89.303 / 450.914 / 946.936 / 1,778.339 ms; `run_request` to
 
 ### Skill content and cache prefixes
 
+The measurements below describe the earlier task-selected preload implementation. The current implementation supplies both overview bodies at a fixed position in instructions on every enabled request, without moving them from instructions into history on the next turn. This is a bounded request-size change, not evidence of provider cache hits or a repeat of the historical timing measurements.
+
 The full execution fixture uses `gpt-image/overview` and `gpt-image/editing`, totalling 3,292 UTF-8 bytes. After the initial load, their bodies appear once each in the reusable input guidance and not again in instructions. They still travel in the full-context HTTP request; local reuse does not mean the supplier has cached them or that no bytes are transmitted.
 
 The first preload moves from instructions into durable input guidance on the next request, changing the prefix once. Across the later 5→25, 25→50 and 50→100 checkpoints, instructions and tools match; 17/18, 98/99 and 199/200 previous input items remain equal from the beginning. The current editing-task data is not identical when that user turn later becomes history. Within a checkpoint's tool follow-up, the existing input prefix is preserved, but the tool schema shrinks from 2,078 to 449 bytes after image permission is exhausted. New tasks, different skill sections or configuration changes can also change prefixes. No optimization keeps an unauthorized tool available merely for cache stability.
 
 For usage-parsing verification, the synthetic provider reports fixed 120 input, 20 output and 140 total tokens per model call. It omits `cached_tokens` in 52 receipts and explicitly reports 0 in the other 52; both cases remain distinct after persistence. These values are **fixture reports, not actual token usage, cache measurements or cost savings**. Real supplier cache eligibility, routing and lifetime remain unverified. A missing cache field cannot establish a zero hit rate, and stable local prefixes alone cannot establish cache hits.
+
+### Transport phase observations
+
+For new Agent requests, **Answer details → Advanced information → Stage timings** includes per-model-call connection time (DNS and TCP together), TLS handshake time, request-body upload time, the subsequent wait for response headers, and request-body size. These observations use the existing HTTP request and do not send probes, retry requests, or change model instructions. Only durations and a byte count are saved; transport headers, credentials and payloads are not recorded by the observer.
+
+Upload time measures local socket writes, not proof that the server has consumed the entire body. Waiting for headers can include network, gateway and upstream processing; it is not pure model inference time. Header and first-event milestones share the request's start and must not be added to these phases. Request bytes are not tokens or cost. Missing, unfinished or unavailable phases remain unrecorded, including older conversations and connection phases absent on a reused connection. Measurements are persisted when the model call ends; refreshing a completed conversation preserves them without replaying the request.
+
+### Lossless image request encoding
+
+Agent Responses requests can losslessly recompress static PNG image data before
+Base64 encoding, including reference images and masks. Original asset files,
+frozen identities, dimensions, scanline data and all retained PNG metadata stay
+unchanged. Image selection, order and reference labels are not changed. Native
+batch/retry requests use the same encoding; Hybrid Images API uploads continue
+to use the original files.
+
+Only PNGs between 64 KiB and 32 MiB with supported structures and at most 128 MiB
+of decompressed scanline data are considered. PNGs marked as using normal or
+maximum compression are skipped; the others use a fast deflate pass to limit
+preparation time. The result must save both 1 KiB and
+5%; otherwise the original encoding is sent. Animations, other formats and
+unsupported or invalid encodings pass through unchanged. No resizing, JPEG
+conversion, colour reduction or image omission is performed.
+
+An in-memory cache retains at most 128 compression decisions and 32 MiB of
+compressed bytes. It creates no new Library assets or on-disk copies. Frozen
+source checks still run before cache lookup: a missing or changed reference
+continues to fail rather than silently using cached pixels.
+
+The API setting **Request Base64 image data** controls the image response format
+(`response_format: b64_json`); it does not compress Agent inputs or remove the
+Base64 expansion. Already compressed PNGs and photographs may save little or
+nothing. Smaller request bytes alone do not establish a particular token, cost
+or latency reduction; supplier-side timing still needs separate measurement.
 
 ## Validation scope
 

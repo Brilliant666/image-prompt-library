@@ -16,7 +16,9 @@ from backend.agent_schemas import AgentImageConfig
 from backend.db import connect
 from backend.schemas import GenerationJobCreate
 from backend.services.agent_diagnostics import classify_failure, safe_diagnostics
-from backend.services.agent_repository import AgentError, AgentRepository, encoded, fingerprint
+from backend.services.agent_repository import AgentError, AgentRepository, encoded, fingerprint, profile_digest
+from backend.services.api_network import ApiNetworkError, create_api_client
+from backend.services.agent_image_encoding import optimize_request_image
 from backend.services.generation_jobs import (
     GenerationJobConflict, GenerationJobRepository, _remember_queue_start, now, resolve_generation_input_image_path,
     sanitize_generation_parameters,
@@ -284,7 +286,7 @@ class AgentImageRetryRepository:
                 'conversationId': body.conversationId, 'roundId': source['roundId'],
                 'sourceRequestId': source.get('sourceRequestId') or source.get('requestId'),
                 'sourceJobId': job.id, 'rootSourceJobId': root_id,
-                'profileId': profile_id, 'profileDigest': fingerprint(profile), 'referenceHashes': reference_hashes,
+                'profileId': profile_id, 'profileDigest': profile_digest(profile), 'referenceHashes': reference_hashes,
                 **({'textModel': text_model} if native else {}), **({'maskReference': mask} if mask else {})}
             metadata = {'agentRetry': lineage, 'retry_of_generation_job_id': job.id, 'retry_reason': 'agent_current_config',
                         **({'reference_image_copies': copies} if copies else {})}
@@ -316,7 +318,7 @@ def run_agent_image_retry(library, job_id):
     link = (job.metadata or {}).get('agentRetry', {})
     try:
         profile = OpenAICompatibleConfig(library_path=library).read(link['profileId'])
-        if fingerprint(profile) != link.get('profileDigest'):
+        if profile_digest(profile) != link.get('profileDigest'):
             raise AgentError('profile_changed', '本次重试的生图连接已改变，请明确重新确认配置。')
         with connect(library) as conn:
             owner = conn.execute('''SELECT 1 FROM agent_rounds r JOIN agent_conversations c ON c.id=r.conversation_id
@@ -378,20 +380,21 @@ def _run_native_retry(library, job, profile):
             inputs.sort(key=lambda spec: spec['result_path'] != mask['targetPath'])
         for spec in inputs:
             path, mime = resolve_generation_input_image_path(library, spec['result_path'], allowed_roots={'generation-references'})
-            content.append({'type': 'input_image', 'image_url': f'data:{mime};base64,' + base64.b64encode(path.read_bytes()).decode('ascii')})
+            data = optimize_request_image(path.read_bytes(), mime)
+            content.append({'type': 'input_image', 'image_url': f'data:{mime};base64,' + base64.b64encode(data).decode('ascii')})
         image_tool = {'type': 'image_generation', 'action': 'auto', **native_image_parameters(job.parameters)}
         if job.model:
             image_tool['model'] = job.model
         if mask:
             path, mime = resolve_generation_input_image_path(library, mask['path'], allowed_roots={'generation-references'})
-            image_tool['input_image_mask'] = {'image_url': f'data:{mime};base64,' + base64.b64encode(path.read_bytes()).decode('ascii')}
+            data = optimize_request_image(path.read_bytes(), mime)
+            image_tool['input_image_mask'] = {'image_url': f'data:{mime};base64,' + base64.b64encode(data).decode('ascii')}
         body = {'model': link['textModel'], 'stream': False, 'input': [{'role': 'user', 'content': content}],
                 'tools': [image_tool], 'tool_choice': {'type': 'image_generation'}, 'max_tool_calls': 1}
         check_owner()
         jobs.record_execution(job.id, phase='generating', preparationMs=timing.elapsed(started))
         payload = None
-        with httpx.Client(timeout=httpx.Timeout(profile['timeout'], connect=min(10, profile['timeout'])), follow_redirects=False,
-                          transport=httpx.HTTPTransport(retries=0)) as client:
+        with create_api_client(profile, timeout=httpx.Timeout(profile['timeout'], connect=min(10, profile['timeout']))) as client:
             provider_started = timing.monotonic()
             with response_stream(client, 'POST', profile['base_url'].rstrip('/') + '/responses', is_complete=lambda: payload is not None,
                                  headers={'Authorization': 'Bearer ' + profile['api_key']}, json=body) as response:
@@ -439,6 +442,6 @@ def _run_native_retry(library, job, profile):
         if claimed and jobs.get_job(job.id).status == 'running':
             diagnostics = exception_diagnostics(exc) if provider_started is not None else safe_diagnostics({'category': 'local_validation'})
             measurements = {'providerMs': provider_ms if provider_ms is not None else timing.elapsed(provider_started)} if provider_started is not None else {'preparationMs': timing.elapsed(started)}
-            jobs.mark_failed(job.id, exc.message if isinstance(exc, AgentError) else '原生图片请求未完成；不会自动重试。', diagnostics=diagnostics)
+            jobs.mark_failed(job.id, exc.message if isinstance(exc, (AgentError, ApiNetworkError)) else '原生图片请求未完成；不会自动重试。', diagnostics=diagnostics)
             jobs.record_execution(job.id, phase='unknown' if classify_failure(diagnostics)['outcomeUnknown'] else 'failed', **measurements)
         raise

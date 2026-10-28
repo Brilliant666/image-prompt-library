@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Sparkles } from 'lucide-react';
+import ApiNetworkSettings from './ApiNetworkSettings';
+import { apiNetworkErrorMessage, apiNetworkMode } from '../utils/apiNetwork';
 import type { UiLanguage } from '../types';
 import { captureOrganizerLabels } from '../utils/captureOrganizerLabels';
 import { organizerFields, organizerHasChanges, organizerPayload, organizerSettingsRequest, testOrganizerConnection, OrganizerSettingsError,
@@ -11,6 +13,8 @@ export default function CaptureOrganizerSettings({ uiLanguage }: { uiLanguage: U
   const [saved, setSaved] = useState<CaptureOrganizerConfig>();
   const [form, setForm] = useState<CaptureOrganizerFields>();
   const [apiKey, setApiKey] = useState('');
+  const [proxyUrl, setProxyUrl] = useState('');
+  const [removeProxy, setRemoveProxy] = useState(false);
   const [busy, setBusy] = useState<'load' | 'save' | 'test'>();
   const [message, setMessage] = useState<'saved'>();
   const [testResult, setTestResult] = useState<OrganizerConnectionTestResult>();
@@ -29,7 +33,7 @@ export default function CaptureOrganizerSettings({ uiLanguage }: { uiLanguage: U
     try {
       const config = await organizerSettingsRequest('load', undefined, controller.current.signal);
       if (request !== epoch.current) return;
-      setSaved(config); setForm(organizerFields(config)); setApiKey('');
+      setSaved(config); setForm(organizerFields(config)); setApiKey(''); setProxyUrl(''); setRemoveProxy(false);
     } catch (failure) {
       if (request === epoch.current) setError(failure instanceof OrganizerSettingsError ? failure.code : 'service');
     } finally {
@@ -49,25 +53,29 @@ export default function CaptureOrganizerSettings({ uiLanguage }: { uiLanguage: U
     const request = ++epoch.current;
     controller.current = new AbortController();
     setBusy('save'); setError(undefined); setMessage(undefined); setTestResult(undefined);
+    let submitted = false;
     try {
-      const payload = organizerPayload(form, apiKey, saved);
+      const payload = organizerPayload(form, apiKey, saved, { proxyUrl, removeProxy });
+      submitted = true;
       const config = await organizerSettingsRequest('save', payload, controller.current.signal);
       if (request !== epoch.current) return;
       setSaved(config); setForm(organizerFields(config));
+      setRemoveProxy(false);
       setMessage('saved');
     } catch (failure) {
       if (request === epoch.current) setError(failure instanceof OrganizerSettingsError ? failure.code : 'service');
     } finally {
       if (request === epoch.current) {
         // Never retain a submitted secret in the UI after either response outcome.
-        setApiKey('');
+        // Local validation failures leave the unsent draft available to correct.
+        if (submitted) { setApiKey(''); setProxyUrl(''); }
         inFlight.current = false; setBusy(undefined);
       }
     }
   };
 
   const testConnection = async () => {
-    if (inFlight.current || !form || !saved || !saved.configured || organizerHasChanges(form, apiKey, saved)) return;
+    if (inFlight.current || !form || !saved || !saved.configured || organizerHasChanges(form, apiKey, saved, { proxyUrl, removeProxy })) return;
     inFlight.current = true;
     const request = ++epoch.current;
     controller.current = new AbortController();
@@ -85,8 +93,9 @@ export default function CaptureOrganizerSettings({ uiLanguage }: { uiLanguage: U
     setError(undefined); setMessage(undefined); setTestResult(undefined);
   };
   const save = (event: FormEvent) => { event.preventDefault(); void performSave(); };
-  const dirty = Boolean(form && saved && organizerHasChanges(form, apiKey, saved));
-  const errorText = error ? labels[error === 'model' ? 'modelError' : error === 'timeout' ? 'timeoutError' : error] : '';
+  const dirty = Boolean(form && saved && organizerHasChanges(form, apiKey, saved, { proxyUrl, removeProxy }));
+  const errorText = error === 'proxy_required' || error === 'proxy_url' ? apiNetworkErrorMessage(error, uiLanguage)
+    : error ? labels[error === 'model' ? 'modelError' : error === 'timeout' ? 'timeoutError' : error] : '';
   const testFailures = {
     configuration: labels.testConfiguration, authentication: labels.testAuthentication, model: labels.testModelError,
     rate_limit: labels.testRateLimit, timeout: labels.testTimeout, connection: labels.testConnectionError,
@@ -109,6 +118,11 @@ export default function CaptureOrganizerSettings({ uiLanguage }: { uiLanguage: U
           <p className="capture-organizer-help">{labels.privacy}</p>
           <label className="capture-organizer-field">Base URL<input type="url" value={form.base_url} placeholder="https://api.example.com/v1" maxLength={2048} spellCheck={false} autoComplete="off" onChange={event => change('base_url', event.target.value)} /></label>
           <label className="capture-organizer-field">API Key<input type="password" value={apiKey} placeholder={saved.has_api_key ? labels.keySaved : labels.keyNew} autoComplete="new-password" spellCheck={false} onChange={event => { setApiKey(event.target.value); setMessage(undefined); setError(undefined); setTestResult(undefined); }} /><small>{labels.keyHelp}</small></label>
+          <ApiNetworkSettings uiLanguage={uiLanguage} mode={apiNetworkMode(form.network_mode)} proxyUrl={proxyUrl}
+            proxyUrlPresent={saved.proxy_url_present === true} proxyEndpoint={saved.proxy_endpoint} removeProxy={removeProxy} disabled={Boolean(busy)}
+            onModeChange={mode => change('network_mode', mode)}
+            onProxyUrlChange={value => { setProxyUrl(value); setMessage(undefined); setError(undefined); setTestResult(undefined); }}
+            onRemoveProxyChange={remove => { setRemoveProxy(remove); setMessage(undefined); setError(undefined); setTestResult(undefined); }} />
           <label className="capture-organizer-field">{labels.model}<input value={form.model} placeholder="gpt-6-luna" required maxLength={120} spellCheck={false} autoComplete="off" onChange={event => change('model', event.target.value)} /><small>{labels.modelHelp}</small></label>
           <details className="capture-organizer-options"><summary>{labels.advanced}</summary>
             <div>
