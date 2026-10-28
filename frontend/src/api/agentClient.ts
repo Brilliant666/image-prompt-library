@@ -1,5 +1,6 @@
 import type { GenerationJobRecord, OpenAICompatibleProfile } from '../types';
 import type { AgentReference } from '../utils/playground/agentImageReferences';
+import { acceptAgentSnapshot, applyAgentProgress, type AgentProgressState } from './agentProgress';
 
 export interface AgentConfig {
   apiConfigMode: 'off' | 'native' | 'hybrid';
@@ -193,6 +194,8 @@ export function watchAgentRequest(id: string, onSnapshot: (value: AgentSnapshot)
   let timer: ReturnType<typeof setTimeout> | undefined;
   let watchdog: ReturnType<typeof setTimeout> | undefined;
   let polling = false;
+  let state: AgentProgressState | undefined;
+  let resyncs = 0;
   const controller = new AbortController();
   const active = (value: AgentSnapshot) => ['queued', 'running', 'waiting_for_jobs', 'stop_requested'].includes(value.request?.state || '');
   const stopStream = () => { source?.close(); source = undefined; clearTimeout(watchdog); };
@@ -212,19 +215,39 @@ export function watchAgentRequest(id: string, onSnapshot: (value: AgentSnapshot)
     polling = true; stopStream(); void poll();
   };
   const heartbeat = () => { if (disposed || polling) return; clearTimeout(watchdog); watchdog = setTimeout(fallback, 20_000); };
-  if (useStream && typeof EventSource !== 'undefined') {
+  const openStream = () => {
     try {
-      source = new EventSource(`/api/agent/requests/${encodeURIComponent(id)}/events`);
-      source.addEventListener('snapshot', event => {
-        if (disposed || polling) return;
-        try { const value = JSON.parse((event as MessageEvent).data) as AgentSnapshot; heartbeat(); accept(value); }
-        catch { fallback(); }
-      });
-      source.addEventListener('heartbeat', heartbeat);
-      source.onerror = fallback;
+      const stream = new EventSource(`/api/agent/requests/${encodeURIComponent(id)}/events`);
+      source = stream;
+      const live = () => !disposed && !polling && source === stream;
+      const resync = () => {
+        if (!live()) return;
+        stopStream(); state = undefined;
+        // A new GET establishes an epoch from persisted state. If a bounded
+        // baseline stays unavailable, settle on read-only polling.
+        if (++resyncs > 2) fallback(); else timer = setTimeout(openStream, 100);
+      };
+      const receive = (kind: 'snapshot' | 'patch', event: Event) => {
+        if (!live()) return;
+        try {
+          const data = (event as MessageEvent).data as string;
+          if (typeof data !== 'string' || data.length > (kind === 'patch' ? 512 * 1024 : 8 * 1024 * 1024)) { fallback(); return; }
+          const result = kind === 'snapshot' ? acceptAgentSnapshot(JSON.parse(data), id) : applyAgentProgress(state, JSON.parse(data), id);
+          heartbeat();
+          if (result.kind === 'resync') { resync(); return; }
+          if (result.kind === 'applied') { state = result.state; accept(state.snapshot); }
+        } catch { fallback(); }
+      };
+      stream.addEventListener('snapshot', event => receive('snapshot', event));
+      stream.addEventListener('patch', event => receive('patch', event));
+      stream.addEventListener('resync', resync);
+      stream.addEventListener('fallback', () => { if (live()) fallback(); });
+      stream.addEventListener('heartbeat', () => { if (live()) heartbeat(); });
+      stream.onerror = () => { if (live()) fallback(); };
       heartbeat();
     } catch { fallback(); }
-  } else fallback();
+  };
+  if (useStream && typeof EventSource !== 'undefined') openStream(); else fallback();
   return close;
 }
 

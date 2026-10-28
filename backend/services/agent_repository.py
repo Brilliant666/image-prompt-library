@@ -198,6 +198,11 @@ class AgentRepository:
     def _save_round(self, conn, value):
         conn.execute("UPDATE agent_rounds SET data=?,parent_round_id=? WHERE id=?",
                      (encoded(value), value["parentRoundId"], value["id"]))
+        # Every round mutation, including late timing/diagnostic receipts, must
+        # advance its observation marker in the same transaction. Millisecond
+        # wall time alone can alias two writes and hide a historical change.
+        conn.execute('UPDATE agent_requests SET updated_at=MAX(updated_at+1,?) WHERE round_id=?',
+                     (milliseconds(), value['id']))
 
     def create_conversation(self, payload):
         now = milliseconds()
@@ -806,8 +811,8 @@ class AgentRepository:
             if error:
                 round_data["error"] = error["message"]
             self._save_round(conn, round_data)
-            conn.execute("UPDATE agent_requests SET state=?,error=?,upstream_outcome=?,updated_at=? WHERE id=?",
-                         (state or row["state"], encoded(error) if error else row["error"], outcome or row["upstream_outcome"], milliseconds(), request_id))
+            conn.execute("UPDATE agent_requests SET state=?,error=?,upstream_outcome=? WHERE id=?",
+                         (state or row["state"], encoded(error) if error else row["error"], outcome or row["upstream_outcome"], request_id))
             self._touch(conn, row["conversation_id"])
 
     def record_context_diagnostics(self, request_id, summary):
@@ -918,6 +923,11 @@ class AgentRepository:
             if request is None and rounds:
                 current = next((r for r in rounds if r["id"] == conversation["active_round_id"]), rounds[-1])
                 request = self.request(current["requestId"])
+        return self._public_snapshot(conversation, rounds, request, historical_requests, completed_text, task)
+
+    def _public_snapshot(self, conversation, rounds, request, historical_requests, completed_text, task):
+        """Shared public projection for complete history and one observed round."""
+        cid = conversation['id']
         jobs, assets, messages = {}, {}, []
         for r in rounds:
             for aid in editing.all_input_ids(r) + ([r["maskImageId"]] if r["maskImageId"] else []):
@@ -982,6 +992,65 @@ class AgentRepository:
                 "request": request_view, "editingTask": task,
                 "jobs": [_sanitize_generation_job_record(GenerationJobRecord(**j)).model_dump() for j in jobs.values()], "images": list(assets.values())}
 
+    def progress_view(self, request_id):
+        """Read only the observed round; never parse its frozen full history.
+
+        Caller captures the progress token first so a concurrent write while
+        resolving current jobs/images is observed again on the next poll.
+        """
+        from backend.services.agent_progress import limited_view
+        with connect(self.library) as conn:
+            conn.execute('BEGIN')
+            row = conn.execute('''SELECT id,conversation_id,round_id,body,frozen,state,usage,error,
+                stop_requested,upstream_outcome FROM agent_requests WHERE id=?''', (request_id,)).fetchone()
+            if row is None:
+                raise AgentError('not_found', '请求不存在。', 404)
+            request = dict(row)
+            for key in ('body', 'frozen', 'usage', 'error'):
+                request[key] = json.loads(request[key]) if request[key] else None
+            conversation = self._conversation(conn, request['conversation_id'])
+            if conversation['active_round_id'] != request['round_id']:
+                raise AgentError('progress_branch_changed', '当前分支已改变，请重新读取状态。')
+            stored = conn.execute('SELECT data FROM agent_rounds WHERE id=? AND deleted=0', (request['round_id'],)).fetchone()
+            if stored is None:
+                raise AgentError('not_found', '请求不存在。', 404)
+            round_data = json.loads(stored['data'])
+            round_data['retryTaskIds'] = [row['id'] for row in conn.execute('''SELECT id FROM generation_jobs
+                WHERE json_extract(metadata,'$.agentRetry.conversationId')=?
+                AND json_extract(metadata,'$.agentRetry.roundId')=? ORDER BY created_at,id''',
+                (request['conversation_id'], request['round_id']))]
+            round_data['modelInfo'] = model_info(request['frozen'], round_data)
+            request['round'] = round_data
+            completed_text = {request_id} if conn.execute("SELECT 1 FROM agent_steps WHERE request_id=? AND state='completed' LIMIT 1",
+                                                         (request_id,)).fetchone() else set()
+            task = editing.current_task(conversation, [round_data], request['round_id'])
+        return limited_view(self._public_snapshot(conversation, [round_data], request, {request_id: request}, completed_text, task))
+
+    def progress_structure(self, request_id):
+        """Small structural marker, excluding text and current-round progress.
+
+        Old-round request/job changes require a complete resync. SQL reads only
+        identities/status markers, never historical prompts, frozen inputs or
+        image files. Ordinary current-request tokens keep this marker stable.
+        """
+        with connect(self.library) as conn:
+            row = conn.execute('''SELECT c.id,c.title,c.active_round_id,c.editing_tasks,r.round_id
+                FROM agent_requests r JOIN agent_conversations c ON c.id=r.conversation_id
+                WHERE r.id=? AND c.deleted=0''', (request_id,)).fetchone()
+            if row is None:
+                raise AgentError('not_found', '请求不存在。', 404)
+            structure = [tuple(row), [tuple(value) for value in conn.execute('''SELECT a.id,a.parent_round_id,a.deleted,
+                CASE WHEN r.id!=? THEN r.updated_at ELSE NULL END
+                FROM agent_rounds a JOIN agent_requests r ON r.id=a.request_id
+                WHERE a.conversation_id=? ORDER BY a.rowid''', (request_id, row['id']))]]
+            structure.append([tuple(value) for value in conn.execute('''SELECT j.id,j.status,j.updated_at,j.result_path,j.accepted_image_id
+                FROM agent_tool_jobs t JOIN agent_requests r ON r.id=t.request_id JOIN generation_jobs j ON j.id=t.job_id
+                WHERE r.conversation_id=? AND r.id!=? ORDER BY j.id''', (row['id'], request_id))])
+            structure.append([tuple(value) for value in conn.execute('''SELECT id,status,updated_at,result_path,accepted_image_id
+                FROM generation_jobs WHERE json_extract(metadata,'$.agentRetry.conversationId')=?
+                AND json_extract(metadata,'$.agentRetry.roundId')!=? ORDER BY id''', (row['id'], row['round_id']))])
+        return fingerprint(structure)
+
     def progress_token(self, request_id):
         """Read a small change marker without assembling images or full history."""
         with connect(self.library) as conn:
@@ -991,9 +1060,11 @@ class AgentRepository:
                 WHERE r.id=? AND c.deleted=0""", (request_id,)).fetchone()
             if row is None or row["deleted"]:
                 raise AgentError("not_found", "请求不存在。", 404)
-            jobs = conn.execute("""SELECT j.id,j.status,j.updated_at FROM agent_tool_jobs t
-                LEFT JOIN generation_jobs j ON j.id=t.job_id WHERE t.request_id=?
-                ORDER BY t.job_id""", (request_id,)).fetchall()
+            jobs = conn.execute("""SELECT j.id,j.status,j.updated_at,j.result_path,j.accepted_image_id,j.error,j.metadata
+                FROM generation_jobs j WHERE j.id IN (SELECT job_id FROM agent_tool_jobs WHERE request_id=?)
+                OR (json_extract(j.metadata,'$.agentRetry.conversationId')=(SELECT conversation_id FROM agent_requests WHERE id=?)
+                    AND json_extract(j.metadata,'$.agentRetry.roundId')=(SELECT round_id FROM agent_requests WHERE id=?))
+                ORDER BY j.id""", (request_id, request_id, request_id)).fetchall()
             return tuple(row), tuple(tuple(job) for job in jobs)
 
     def stop(self, request_id):
