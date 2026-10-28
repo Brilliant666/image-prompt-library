@@ -76,7 +76,9 @@ Responses 进度会实时推送至浏览器，连接不可用时退回只读轮�
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e '.[dev]'
+.\.venv\Scripts\python.exe -m pip install uv==0.12.16
+$env:UV_PROJECT_ENVIRONMENT = Join-Path (Get-Location) '.venv'
+.\.venv\Scripts\python.exe -m uv sync --locked --extra dev --inexact --python .\.venv\Scripts\python.exe
 npm ci
 npm run build
 $env:IMAGE_PROMPT_LIBRARY_PATH = Join-Path $HOME 'ImagePromptLibrary'
@@ -84,6 +86,8 @@ $env:IMAGE_PROMPT_LIBRARY_PATH = Join-Path $HOME 'ImagePromptLibrary'
 ```
 
 启动前选择图库路径，确认没有其他实例占用同一图库，且 8000 端口空闲。打开 [127.0.0.1:8000](http://127.0.0.1:8000)，在终端按 `Ctrl-C` 停止。macOS/Linux 启动方式见[开发指南](docs/DEVELOPMENT.md)。
+
+**开发与验证：**请使用[隔离开发示例](docs/INDEPENDENT_MAINTENANCE.md#从源码开发与启动)，同时隔离图库和凭据，并使用 8010 端口。上面的快速开始用于日常本地使用。
 
 新图库默认是空的。选择**快捷收录**，加入图片与原始提示词即可保存，不必先配置 AI。已有安装版可使用以下命令检查状态：
 

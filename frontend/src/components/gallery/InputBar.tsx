@@ -6,7 +6,7 @@ import type { GenerationJobRecord, GenerationProviderStatus, GenerationSetCount,
 import type { Translator } from '../../utils/i18n';
 import type { LocalPreferences } from '../../utils/localPreferences';
 import { resolveAuto4k, clearCompatibleTransportOverrides, compatibleValidation, IMAGE25_QUALITIES } from '../../utils/compatibleRecipe';
-import { agentJobSource, type GalleryImageSettings } from '../../utils/agentGalleryBridge';
+import { agentJobSource, applyGalleryImageSettings, sharedImageCount, type GalleryImageSettings, type GalleryImageSettingsCommand } from '../../utils/agentGalleryBridge';
 import { readGenerationPreference, writeGenerationPreference, lastGenerationProfile } from '../../utils/generationPreferences';
 import { isGptImageModelName, profileModelChoices } from '../../utils/profileSettings';
 import { recipeInputs, restoreRecipeInputs, type RecipeInput } from '../../utils/recipeInputs';
@@ -18,14 +18,14 @@ import { extractPromptTemplateVariableRecords, resolvePromptTemplate } from '../
 import './InputBar.css';
 
 export interface GalleryCommand {id:number;item?:ItemDetail;imageId?:string;job?:GenerationJobRecord;editResult?:boolean}
-interface Props {command?:GalleryCommand;preferences:LocalPreferences;t:Translator;active:boolean;onCreated:(jobs?:GenerationJobRecord[])=>void;onOpenSettings:()=>void;configurationRevision:number;promptVariablesEnabled?:boolean;promptLanguage?:string;preferredProvider?:string;onOpenAgent?:(id:string)=>void;onImageSettingsChange?:(settings:GalleryImageSettings)=>void;onSendToAgent?:(job:GenerationJobRecord,intent:'reference'|'conversation')=>void}
+interface Props {command?:GalleryCommand;imageSettingsCommand?:GalleryImageSettingsCommand;preferences:LocalPreferences;t:Translator;active:boolean;onCreated:(jobs?:GenerationJobRecord[])=>void;onOpenSettings:()=>void;configurationRevision:number;promptVariablesEnabled?:boolean;promptLanguage?:string;preferredProvider?:string;onOpenAgent?:(id:string)=>void;onImageSettingsChange?:(settings:GalleryImageSettings)=>void;onSendToAgent?:(job:GenerationJobRecord,intent:'reference'|'conversation')=>void}
 export function imageDataUrl(blob: Blob): Promise<string> {return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result));reader.onerror=()=>reject(new Error('图片读取失败'));reader.readAsDataURL(blob);});}
 async function verifiedInput(input:RecipeInput) {
   let data=input.dataUrl;
   if(!data){let url=input.resultPath?mediaUrl(input.resultPath):'';if(!url&&input.sourceItemId&&input.imageId){const image=(await api.item(input.sourceItemId)).images.find(candidate=>candidate.id===input.imageId);if(image)url=mediaUrl(image.original_path);}if(!url)throw new Error('参考图缺失');const result=await fetch(url);if(!result.ok)throw new Error('参考图无法读取');data=await imageDataUrl(await result.blob());}
   const image=new Image();image.src=data;await image.decode();return data;
 }
-export default function InputBar({command,preferences,t,active,onCreated,onOpenSettings,configurationRevision,promptVariablesEnabled=false,promptLanguage,preferredProvider,onOpenAgent,onImageSettingsChange,onSendToAgent}:Props) {
+export default function InputBar({command,imageSettingsCommand,preferences,t,active,onCreated,onOpenSettings,configurationRevision,promptVariablesEnabled=false,promptLanguage,preferredProvider,onOpenAgent,onImageSettingsChange,onSendToAgent}:Props) {
   const [draft,setDraft]=useState<GalleryDraft>(emptyGalleryDraft),[providers,setProviders]=useState<GenerationProviderStatus[]>([]),[profiles,setProfiles]=useState<OpenAICompatibleProfile[]>([]);
   const [loading,setLoading]=useState(true),[refreshing,setRefreshing]=useState(false),[reading,setReading]=useState(false),[busy,setBusy]=useState(false),[error,setError]=useState(''),[uncertain,setUncertain]=useState(false),[count,setCount]=useState<GenerationSetCount>(1);
   const [referenceSize,setReferenceSize]=useState<{width:number;height:number}>();
@@ -40,6 +40,8 @@ export default function InputBar({command,preferences,t,active,onCreated,onOpenS
   const mounted=useRef(true);
   const catalogUpdates=useRef(new Map<string,ModelCatalog>());
   const reportedImageSettings=useRef('');
+  const consumedImageSettings=useRef<number|undefined>(undefined);
+  const [appliedImageSettings,setAppliedImageSettings]=useState<number>();
   // Every intentional edit owns the draft from this point onward. Pending history,
   // attachment, submission and first-load callbacks may only write to their original epoch.
   const beginEdit=()=>{editRevision.current++;readSequence.current++;consumedCommand.current=command?.id;setReading(pendingFiles.current);};
@@ -123,6 +125,17 @@ export default function InputBar({command,preferences,t,active,onCreated,onOpenS
     })().catch(e=>current()&&setError(String(e))).finally(()=>current()&&setReading(false));
     return()=>{if(sequence===readSequence.current){readSequence.current++;setReading(false);}};
   },[command?.id,loading,active]);
+  useEffect(()=>{
+    if(!imageSettingsCommand||consumedImageSettings.current===imageSettingsCommand.id||loading||refreshing||reading||busy)return;
+    consumedImageSettings.current=imageSettingsCommand.id;
+    reportedImageSettings.current='';
+    // Wait for pending restoration/submission to finish, then change only settings.
+    // Do not cancel an attachment read or replace either workspace's input text.
+    editRevision.current++;
+    setDraft(current=>applyGalleryImageSettings(current,imageSettingsCommand.settings));
+    setCount(sharedImageCount(imageSettingsCommand.settings.count));
+    setAppliedImageSettings(imageSettingsCommand.id);
+  },[imageSettingsCommand,loading,refreshing,reading,busy]);
   const recipe=(patch:Partial<GalleryDraft['recipe']>)=>editDraft(current=>({...current,recipe:{...current.recipe,...patch}}));
   async function addFiles(files:File[]) {
     if(busy||!files.length)return;if(pendingFiles.current){setError('上一批图片尚未读完，本次添加未处理；请稍后重新添加。');return;} if(files.length+draft.inputs.filter(input=>!input.missing).length>limit){setError(`最多 ${limit} 张参考图，未截断本次选择`);return;}
@@ -147,33 +160,24 @@ export default function InputBar({command,preferences,t,active,onCreated,onOpenS
   const variables=promptVariablesEnabled?extractPromptTemplateVariableRecords(draft.prompt):[];
   useEffect(()=>{
     if(!onImageSettingsChange)return;
-    let size=draft.recipe.size;
+    // An Agent change owns the next report. An older render cannot echo stale
+    // Gallery values back into the shared state before that change is applied.
+    if(imageSettingsCommand&&imageSettingsCommand.id!==appliedImageSettings)return;
+    const size=draft.recipe.size;
     let unavailable:string|undefined;
     const model=draft.recipe.model.trim();
-    if(loading||refreshing||reading)unavailable='画廊配置或参考图正在读取，请稍后使用。';
+    if(loading||refreshing)unavailable='画廊配置正在读取，请稍后使用。';
     else if(draft.provider!=='openai_compatible')unavailable='当前画廊供应商不能直接用于 Agent 图片接口，请选择 API 配置。';
     else if(!ready||!model)unavailable='请先完成画廊图片 API 配置并选择生图模型。';
-    else if(draft.inputs.some(input=>input.missing))unavailable='请先补齐或移除画廊中缺失的参考图。';
-    else if(draft.recipe.size_mode==='auto4k'){
-      const templateVariables=promptVariablesEnabled?extractPromptTemplateVariableRecords(draft.prompt):[];
-      if(templateVariables.some(variable=>!draft.templateValues?.[variable.key]?.trim()))unavailable='请先填写画廊提示词变量，再确定自动比例。';
-      else{
-        const prompt=templateVariables.length?resolvePromptTemplate(draft.prompt,draft.templateValues||{}):draft.prompt;
-        const resolved=resolveAuto4k(prompt,measuredReferenceSize);
-        if('error' in resolved)unavailable='画廊提示词存在多个冲突比例，请先确定本轮比例。';
-        else if(resolved.source!=='prompt'&&draft.inputs.length&&!measuredReferenceSize)unavailable=referenceStatus==='error'?'无法读取画廊首张参考图比例，请重新选择图片。':'正在读取画廊首张参考图比例，请稍后使用。';
-        else size=resolved.size;
-      }
-    }
-    const validation=compatibleValidation({...draft.recipe,model,size});
+    const validation=compatibleValidation({...draft.recipe,model,size:draft.recipe.size_mode==='auto4k'?'auto':size});
     if(!unavailable&&validation)unavailable=t(validation);
     // Transfer only image settings; a historical transport override never owns
     // the Agent's endpoint, credentials, streaming or response format.
     const params:GalleryImageSettings['params']={size,quality:draft.recipe.quality,background:draft.recipe.background,output_format:draft.recipe.output_format as GalleryImageSettings['params']['output_format'],...(draft.recipe.output_format!=='png'&&draft.recipe.output_compression!==undefined?{output_compression:draft.recipe.output_compression}:{}),...(draft.recipe.moderation!==undefined?{moderation:draft.recipe.moderation}:{})};
-    const settings:GalleryImageSettings={provider:draft.provider,profileId:draft.profileId,model,params,...(unavailable?{unavailable}:{})};
+    const settings:GalleryImageSettings={provider:draft.provider,profileId:draft.profileId,model,params,count,...(draft.recipe.size_mode==='auto4k'?{sizeMode:'auto4k' as const}:{}),...(unavailable?{unavailable}:{})};
     const signature=JSON.stringify(settings);
     if(signature!==reportedImageSettings.current){reportedImageSettings.current=signature;onImageSettingsChange(settings);}
-  },[onImageSettingsChange,draft.provider,draft.profileId,draft.recipe,draft.prompt,draft.templateValues,draft.inputs,ready,loading,refreshing,reading,promptVariablesEnabled,measuredReferenceSize,referenceStatus,t]);
+  },[onImageSettingsChange,draft.provider,draft.profileId,draft.recipe,count,ready,loading,refreshing,t,imageSettingsCommand,appliedImageSettings]);
   const sizePreview=draft.provider==='openai_compatible'&&draft.recipe.size_mode==='auto4k'?resolveAuto4k(variables.length?resolvePromptTemplate(draft.prompt,draft.templateValues||{}):draft.prompt,referenceSize):undefined;
   const models=draft.provider==='openai_compatible'?profileModelChoices(profile,draft.recipe.model):[...new Set([draft.recipe.model,provider?.default_image_model||'',...(provider?.image_models||[])].map(model=>model.trim()).filter(Boolean))];
   const catalog=draft.provider==='openai_compatible'?profile?.model_catalog:undefined;

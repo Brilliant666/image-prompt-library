@@ -22,5 +22,5 @@ def get_retry(request: Request, retry_id: str = Path(..., min_length=1, max_leng
 def create_retry(job_id: str, payload: AgentImageRetryCreate, request: Request):
     receipt, created = AgentImageRetryRepository(request.app.state.library_path).create(job_id, payload)
     if created:
-        enqueue_generation_jobs(request.app.state.library_path, provider='openai_compatible')
+        enqueue_generation_jobs(request.app.state.library_path, provider=receipt['job'].provider)
     return JSONResponse(public_receipt(receipt), status_code=202 if created else 200)

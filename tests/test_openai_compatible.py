@@ -557,7 +557,8 @@ def test_url_result_uses_existing_decode_and_metadata(config, monkeypatch, use_e
         calls.append(request)
         return httpx.Response(200, json={"data": [{"url": "https://cdn.example/image?signature=private", "size": "8x6"}]})
     downloads = []
-    def download(url, timeout, client):
+    def download(url, timeout, client, *, network_settings):
+        assert network_settings['network_mode'] == 'direct'
         downloads.append(url)
         return png()
     monkeypatch.setattr("backend.services.openai_compatible.download_image", download)
@@ -577,7 +578,7 @@ def test_url_download_failure_never_resubmits_post(config, monkeypatch):
     def handler(request):
         calls.append(request)
         return httpx.Response(200, json={"data": [{"url": "https://cdn.example/image?secret=value"}]})
-    def download(*args):
+    def download(*args, **kwargs):
         raise ImageDownloadError("image_download_http", "Image download returned HTTP 410")
     monkeypatch.setattr("backend.services.openai_compatible.download_image", download)
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:

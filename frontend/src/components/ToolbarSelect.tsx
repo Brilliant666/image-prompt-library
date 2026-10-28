@@ -19,7 +19,19 @@ interface Props<Value extends string> {
   disabled?: boolean;
 }
 
-interface MenuPosition { left: number; top: number; width: number; maxHeight: number; above: boolean }
+interface MenuPosition { left: number; top: number; width: number; maxHeight: number; above: boolean; zIndex?: number }
+
+function modalMenuLayer(trigger: HTMLElement) {
+  // Keep the viewport-positioned portal outside transformed/scrolling dialogs,
+  // but above its own modal. The layer may belong to an overlay ancestor.
+  // The outermost explicit layer determines that modal's order at body level.
+  let zIndex: number | undefined;
+  for (let owner = trigger.closest<HTMLElement>('[role="dialog"][aria-modal="true"]'); owner && owner !== document.body; owner = owner.parentElement) {
+    const layer = Number.parseInt(window.getComputedStyle(owner).zIndex, 10);
+    if (Number.isFinite(layer)) zIndex = layer + 1;
+  }
+  return zIndex;
+}
 
 /** A short, explicit-choice list. Keyboard navigation never commits a value. */
 export default function ToolbarSelect<Value extends string>({ value, options, onChange, label, prefix, className = '', disabled = false }: Props<Value>) {
@@ -109,8 +121,9 @@ export default function ToolbarSelect<Value extends string>({ value, options, on
       const maxHeight = Math.min(280, above ? aboveSpace : below);
       const actualHeight = Math.min(desiredHeight, maxHeight);
       const top = Math.max(y + margin, Math.min(above ? rect.top - gap - actualHeight : rect.bottom + gap, y + height - margin - actualHeight));
-      setPosition(current => current && current.left === left && current.top === top && current.width === menuWidth && current.maxHeight === maxHeight && current.above === above
-        ? current : { left, top, width: menuWidth, maxHeight, above });
+      const zIndex = modalMenuLayer(trigger);
+      setPosition(current => current && current.left === left && current.top === top && current.width === menuWidth && current.maxHeight === maxHeight && current.above === above && current.zIndex === zIndex
+        ? current : { left, top, width: menuWidth, maxHeight, above, zIndex });
     };
     place();
     window.addEventListener('resize', place);
@@ -165,7 +178,7 @@ export default function ToolbarSelect<Value extends string>({ value, options, on
     </button>
     {open && createPortal(<div ref={menuRef} id={`${id}-listbox`} className="toolbar-select-menu" role="listbox" aria-label={label}
       data-placement={position?.above ? 'above' : 'below'}
-      style={position ? { left: position.left, top: position.top, width: position.width, maxHeight: position.maxHeight } : { visibility: 'hidden' }}>
+      style={position ? { left: position.left, top: position.top, width: position.width, maxHeight: position.maxHeight, zIndex: position.zIndex } : { visibility: 'hidden' }}>
       {options.map((option, index) => <div key={option.value} id={`${id}-option-${index}`} role="option"
         className={`toolbar-select-option${activeIndex === index ? ' is-active' : ''}${option.value === value ? ' is-selected' : ''}`}
         aria-selected={option.value === value} aria-disabled={option.disabled || undefined} data-option-index={index}

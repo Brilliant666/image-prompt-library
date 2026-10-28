@@ -13,35 +13,27 @@ Sample data and third-party assets are licensed separately and retain their orig
 
 ## Local setup
 
-```bash
-./scripts/setup.sh
-./scripts/dev.sh
-```
+Use an isolated development library, as shown in the [development guide](docs/DEVELOPMENT.md). Do not use your daily library or an installed app's port for experiments.
 
-For single-service local mode:
+Follow the complete platform-specific setup there rather than substituting daily configuration into a partial startup command. Source edits do not update an installed application.
 
-```bash
-./scripts/start.sh
-```
+## Draft PR, local trial and final acceptance
 
-## Run tests
+Follow [AGENTS.md](AGENTS.md) for the authoritative workflow and merge gates. Create a Draft PR after the first meaningful commit; opening a Draft does not require the full test suite. Run tests relevant to the changed behavior during development. An authorized local trial can precede remote CI completion and merge; low-impact documentation edits do not require rebuilding or restarting the app.
 
-Before opening a PR, run:
+After user acceptance, review and push the accumulated changes to the same PR. Final CI runs the backend, frontend and extension checks, production and standalone Demo builds, native Windows installer smoke, and macOS backup/restore checks. The exact commands live in [CI](.github/workflows/ci.yml); the final Head and merge requirements live in [AGENTS.md](AGENTS.md). Do not substitute an older green run or weaken tests to pass a gate.
 
-```bash
-source .venv/bin/activate
-python -m pytest -q
-npm run test:frontend
-npm run build
-```
+CI and local setup use `uv.lock` (`uv sync --locked --extra dev`) and `package-lock.json` (`npm ci`). Local setup preserves extra development tools with `--inexact`; fresh CI environments use an exact sync. A dependency change must update the lock intentionally, then revalidate the affected environment. Do not reuse validation solely because source files match.
 
-If you have a running local server, also run:
+For an already running **isolated** test server, the optional smoke helper is:
 
 ```bash
-./scripts/smoke-test.sh
+BASE_URL=http://127.0.0.1:8010 ./scripts/smoke-test.sh
 ```
 
-## Release assets
+## Release assets — retained design, currently disabled
+
+This fork is source-maintained. Public Release, Pages and release-candidate workflows are disabled; the procedure below describes the retained release design for a future, explicitly authorized publishing policy. It is not an available update path today. See [independent maintenance](docs/INDEPENDENT_MAINTENANCE.md).
 
 Release tags must use `v<major>.<minor>.<patch>` with an optional SemVer prerelease suffix, such as `v1.2.3` or `v1.2.3-rc.1`. Build-metadata suffixes (`+...`) are not accepted because release asset filenames must remain exact. Manual release workflow dispatches are candidate-only and must run from `main`: the workflow binds the schema-v2 manifest to that commit, verifies the package locally, creates the exact tag only after those checks, uploads only the archive, checksum, and manifest to a draft release, downloads them back through the GitHub API, verifies them again, and publishes the release as a prerelease without changing GitHub Latest. If a run stops after creating the draft, rerunning the same tag removes only those exact expected draft assets and resumes the gate. If publication completed, an exact three-asset published prerelease is reverified idempotently; incomplete, duplicate, unknown, orphaned, or retargeted release state is retained and rejected for manual review. Do not publish a draft or stable release manually without completing the same verification.
 

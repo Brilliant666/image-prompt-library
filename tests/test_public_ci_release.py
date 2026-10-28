@@ -31,12 +31,28 @@ def test_ci_workflow_runs_full_public_alpha_checks():
     assert "node-version: 24" in workflow
     assert "actions/setup-python@v6" in workflow
     assert "python-version: '3.11'" in workflow
-    assert "python -m pip install -e '.[dev]'" in workflow
-    assert "npm install" in workflow
+    assert workflow.count("python -m pip install uv==0.12.16") == 3
+    assert workflow.count("python -m uv sync --locked --extra dev --python 3.11") == 3
+    assert workflow.count("python -m uv run --no-sync python -m pytest") == 3
+    assert workflow.count("run: npm ci") == 2
+    assert "run: npm install" not in workflow
     assert "python -m pytest -q" in workflow
     assert "npm run build" in workflow
     assert "npm run build:demo" in workflow
-    assert workflow.index("run: npm run build\n") < workflow.index("run: python -m pytest -q")
+    assert workflow.index("run: npm run build\n") < workflow.index("run: python -m uv run --no-sync python -m pytest -q")
+
+
+def test_ci_covers_stacked_prs_without_cancelling_push_or_manual_runs():
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    pr_event = workflow.split("  pull_request:", 1)[1].split("  workflow_dispatch:", 1)[0]
+    assert "branches" not in pr_event
+    assert "paths" not in pr_event
+    assert "github.event_name }}-${{ github.event.pull_request.number || github.run_id" in workflow
+    assert "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in workflow
+    assert "pull_request_target:" not in workflow
+    for name in ("test", "windows-installer", "macos-backup-restore"):
+        assert re.search(rf"(?m)^  {name}:$", workflow)
+    assert "if: ${{ false }}" not in workflow
 
 
 def test_alpha_release_notes_are_public_safe_and_actionable():
@@ -168,6 +184,8 @@ def test_release_assets_workflow_packages_only_current_version_assets():
     assert workflow.count("--capability portable-backup-v1") == 2
 
     contributing = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    assert "retained design, currently disabled" in contributing
+    assert "not an available update path today" in contributing
     assert "Manual release workflow dispatches are candidate-only" in contributing
     assert "Release candidate install update rollback smoke" in contributing
     assert "Leave the release marked as a prerelease if any platform fails" in contributing

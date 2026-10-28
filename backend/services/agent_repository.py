@@ -24,6 +24,8 @@ from backend.services.image_store import _atomic_write_bytes
 from backend.services.openai_compatible import OpenAICompatibleConfig, OpenAICompatibleError, normalize_image_parameters
 from backend.services import agent_execution_timing as timing
 from backend.services import agent_editing_task as editing
+from backend.services.api_network import NETWORK_DEFAULTS, network_identity
+from backend.services.agent_image_encoding import optimize_request_image
 
 ACTIVE_STATES = {"queued", "running", "waiting_for_jobs", "stop_requested"}
 ROUND_MENTION = re.compile(r"@(?:第)?(\d+)轮图(\d+)")
@@ -40,6 +42,11 @@ def encoded(value):
 
 def fingerprint(value):
     return hashlib.sha256(encoded(value).encode("utf-8")).hexdigest()
+
+
+def profile_digest(profile):
+    return fingerprint({**{k: v for k, v in profile.items() if k not in NETWORK_DEFAULTS},
+                        **network_identity(profile)})
 
 
 class AgentError(ValueError):
@@ -538,6 +545,7 @@ class AgentRepository:
         # bytes as well, before any paid request can observe a changed image.
         if hashlib.sha256(data).hexdigest() != asset["sha256"]:
             raise AgentError("frozen_reference_invalid", "已冻结的参考图片缺失或损坏；不会用其他图片替换。", 400)
+        data = optimize_request_image(data, mime)
         return f"data:{mime};base64," + base64.b64encode(data).decode("ascii")
 
     def resolve_config(self, body):
@@ -556,12 +564,16 @@ class AgentRepository:
         if not text["api_key"] or not text["base_url"]:
             raise AgentError("configuration_incomplete", "文本 API 配置不完整。", 400)
         auth = body.authorization
+        if auth.allowImageGeneration and body.imageCount > config['maxImageJobs']:
+            raise AgentError('authorization_denied', f'本轮希望生成 {body.imageCount} 张图片，超过当前设置的图片上限 {config["maxImageJobs"]} 张。', 400)
         if auth.maxToolRounds > config["maxToolRounds"] or auth.maxImageJobs > config["maxImageJobs"]:
             raise AgentError("authorization_denied", "请求额度超过当前设置。", 400)
         if auth.allowWebSearch and not config["webSearch"]:
             raise AgentError("authorization_denied", "当前设置未启用网络搜索。", 400)
         if (not auth.allowImageGeneration and auth.maxImageJobs != 0) or (auth.allowImageGeneration and auth.maxImageJobs < 1):
             raise AgentError("authorization_denied", "生图授权与图片额度不一致。", 400)
+        if auth.allowImageGeneration and body.imageCount > auth.maxImageJobs:
+            raise AgentError('authorization_denied', f'本轮希望生成 {body.imageCount} 张图片，超过本轮可生成的 {auth.maxImageJobs} 张。', 400)
         selection = body.imageConfig
         if selection is not None:
             if config["apiConfigMode"] != "hybrid" and selection.profileId is not None:
@@ -583,9 +595,9 @@ class AgentRepository:
             if not image["api_key"] or not image["base_url"] or not model:
                 raise AgentError("configuration_incomplete", "图像 API 配置不完整。", 400)
             config["imageModel"] = model
-        digests = {text["id"]: fingerprint(text)}
+        digests = {text["id"]: profile_digest(text)}
         if image:
-            digests[image["id"]] = fingerprint(image)
+            digests[image["id"]] = profile_digest(image)
         config.update(textProfileId=text["id"], imageProfileId=image["id"] if image else None,
                       textProfileFingerprint=public_profile_digest(text),
                       imageProfileFingerprint=public_profile_digest(image) if image else None,
@@ -602,7 +614,7 @@ class AgentRepository:
             profile = OpenAICompatibleConfig(library_path=self.library).read(pid)
         except (ValueError, OpenAICompatibleError):
             raise AgentError("profile_changed", "本轮 API 配置已删除，请明确发起新请求。") from None
-        if fingerprint(profile) != frozen["_profileDigests"].get(pid):
+        if profile_digest(profile) != frozen["_profileDigests"].get(pid):
             raise AgentError("profile_changed", "本轮 API 配置已改变，请明确发起新请求。")
         return profile
 
@@ -610,6 +622,10 @@ class AgentRepository:
         preparation_started = timing.monotonic()
         serialized = body.model_dump(exclude_none=True)
         digest_body = {k: v for k, v in serialized.items() if k != "expectedRevision"}
+        if body.imageCount == 1:
+            # The compatible default must preserve receipts created before the
+            # explicit count field existed; omitted and explicit one are equal.
+            digest_body.pop('imageCount', None)
         digest_body["conversationId"] = cid
         digest = fingerprint(digest_body)
         with connect(self.library) as conn:
@@ -722,7 +738,7 @@ class AgentRepository:
                       "maskImageId": mask_id, "outputTaskIds": [], "responseOutput": [], "status": "running", "error": None,
                       "createdAt": now, "finishedAt": None, "requestId": body.requestId, "derivedFromRoundId": body.derivedFromRoundId,
                       "assistantContent": "", "execution": timing.empty_execution(timing.elapsed(preparation_started)),
-                      "editingTask": task, "taskImageIds": task_inputs}
+                      "editingTask": task, "taskImageIds": task_inputs, "imageCount": body.imageCount}
         with connect(self.library) as conn:
             conn.execute("BEGIN IMMEDIATE")
             replay = conn.execute("SELECT fingerprint FROM agent_requests WHERE id=?", (body.requestId,)).fetchone()
@@ -753,6 +769,21 @@ class AgentRepository:
             value["round"] = json.loads(conn.execute("SELECT data FROM agent_rounds WHERE id=?", (row["round_id"],)).fetchone()[0])
             value["steps"] = [dict(r) for r in conn.execute("SELECT * FROM agent_steps WHERE request_id=? ORDER BY step", (request_id,))]
         return value
+
+    def select_request_references(self, request_id, arguments, refs):
+        request = self.request(request_id)
+        task = editing.select_references(self, request, arguments, refs)
+        with connect(self.library) as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            stored = conn.execute('SELECT * FROM agent_requests WHERE id=?', (request_id,)).fetchone()
+            if stored['stop_requested'] or stored['state'] not in ACTIVE_STATES:
+                raise AgentError('stopped', '本轮已结束，不能继续修改图片选择。')
+            current = json.loads(conn.execute('SELECT data FROM agent_rounds WHERE id=? AND deleted=0',
+                                             (stored['round_id'],)).fetchone()[0])
+            current['editingTask'] = task
+            self._save_round(conn, current)
+            self._touch(conn, stored['conversation_id'])
+        return editing.context_data(task, refs)
 
     def update(self, request_id, *, state=None, output=None, text=None, response_id=None, error=None, outcome=None, returned_model=None):
         with connect(self.library) as conn:
@@ -843,8 +874,9 @@ class AgentRepository:
             self._save_round(conn, round_data)
             self._touch(conn, request["conversation_id"])
 
-    def record_skill_read(self, request_id, result):
-        # Only bundled attribution is public; the skill body stays in tool history.
+    def record_skill_read(self, request_id, result, *, preloaded=False):
+        # Only bundled attribution is public; preloads keep an authenticated,
+        # finite application-guidance receipt separate from real tool history.
         fields = ("skill", "section", "title", "source", "revision", "license")
         value = {key: safe_model_label(result.get(key)) for key in fields}
         if not all(value.values()):
@@ -856,6 +888,13 @@ class AgentRepository:
             details = round_data.setdefault("responseDetails", {"version": 1, "steps": [], "skills": []})
             if value not in details["skills"]:
                 details["skills"].append(value)
+            if preloaded:
+                from backend.services.agent_skills import validated_skill_preloads
+                receipt = validated_skill_preloads([{'skillPreloads': [result]}])
+                if receipt:
+                    records = round_data.setdefault('skillPreloads', [])
+                    if receipt[0] not in records:
+                        records.append(receipt[0])
             details["usage"] = aggregate_response_usage(details["steps"])
             self._save_round(conn, round_data)
             self._touch(conn, request["conversation_id"])
@@ -894,6 +933,7 @@ class AgentRepository:
             own_request = historical_requests.get(r['requestId'])
             r['resultSummary'] = timing.result_summary(r, own_request, jobs, r['requestId'] in completed_text)
             r['execution'] = r.get('execution')
+            r.pop('skillPreloads', None)  # Public details expose attribution, not repeated guidance bodies.
             from backend.services.agent_diagnostics import classify_failure
             failures = [classify_failure((jobs[jid].get('metadata') or {}).get('error_diagnostics'))
                         for jid in r['outputTaskIds'] if jid in jobs and jobs[jid]['status'] == 'failed']
@@ -925,7 +965,8 @@ class AgentRepository:
             request_view = {"id": request["id"], "conversationId": request["conversation_id"], "roundId": request["round_id"],
                             "state": request["state"], "frozenConfig": {k: v for k, v in request["frozen"].items() if not k.startswith("_")},
                             "modelInfo": model_info(request["frozen"], request["round"]),
-                            "params": request["body"]["params"], "authorization": request["body"]["authorization"], "usage": request["usage"], "toolCalls": list(calls.values()),
+                            "params": request["body"]["params"], "imageCount": request["body"].get('imageCount', 1),
+                            "authorization": request["body"]["authorization"], "usage": request["usage"], "toolCalls": list(calls.values()),
                             "canResume": request["state"] == "interrupted" and request["upstream_outcome"] != "unknown" and not request["stop_requested"],
                             "recoveryReason": request["error"]["message"] if request["error"] else None,
                             "upstreamOutcome": request["upstream_outcome"], "stopRequested": bool(request["stop_requested"]),

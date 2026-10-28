@@ -76,7 +76,9 @@ Requires **Python 3.10+** and **Node.js 24** for source builds. In an existing c
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e '.[dev]'
+.\.venv\Scripts\python.exe -m pip install uv==0.12.16
+$env:UV_PROJECT_ENVIRONMENT = Join-Path (Get-Location) '.venv'
+.\.venv\Scripts\python.exe -m uv sync --locked --extra dev --inexact --python .\.venv\Scripts\python.exe
 npm ci
 npm run build
 $env:IMAGE_PROMPT_LIBRARY_PATH = Join-Path $HOME 'ImagePromptLibrary'
@@ -84,6 +86,8 @@ $env:IMAGE_PROMPT_LIBRARY_PATH = Join-Path $HOME 'ImagePromptLibrary'
 ```
 
 Choose your library path before starting; ensure no other instance owns that library and port 8000 is free. Open [127.0.0.1:8000](http://127.0.0.1:8000); press `Ctrl-C` in the terminal to stop. For macOS/Linux, see the [development guide](docs/DEVELOPMENT.md).
+
+**Development and validation:** use the [isolated development setup](docs/INDEPENDENT_MAINTENANCE.md#从源码开发与启动), which separates both the library and credentials and uses port 8010. The quick start above is for normal local use.
 
 A fresh local library starts empty. Choose **Quick capture**, add an image and its original prompt, and save. AI configuration is optional. Existing installed copies can be inspected with:
 

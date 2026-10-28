@@ -23,6 +23,8 @@ def test_real_context_and_snapshot_grow_without_claiming_provider_cache(small_ba
     for scenario in small_baseline["scenarios"]:
         first, third = scenario["rows"]
         assert [first["rounds"], third["rounds"]] == [1, 3]
+        # Both foundations stay in instructions; history remains the five
+        # real conversation items without a synthetic leading guidance message.
         assert [first["input_items"], third["input_items"]] == [1, 5]
         for field in ("request_json_bytes", "snapshot_json_bytes", "stored_history_json_bytes_all_requests"):
             assert third[field] > first[field] > 0
@@ -62,14 +64,19 @@ def test_tool_followups_preserve_history_and_measure_skill_repetition(small_base
         followups = scenario["tool_followups"]
         assert [row["simulated_image_jobs_used"] for row in followups] == [0, 1, 2]
         for row in followups:
+            # An overview tool receipt points to the existing instructions body;
+            # all original conversation items and their order remain exact.
             assert row["repeated_leading_input_items"] == last["input_items"]
+            assert row["unchanged_input_item_occurrences"] == last["input_items"]
             assert row["input_items"] == last["input_items"] + 2
             assert row["skill_tool_output_bytes"] > 0
             assert row["attached_image_bytes"] == last["attached_image_bytes"]
         assert followups[0]["same_tools_as_first_call"]
         assert not followups[-1]["same_tools_as_first_call"]
         assert followups[-1]["tools_json_bytes"] < followups[0]["tools_json_bytes"]
-        assert not scenario["task_switch"]["instructions_equal"]
+        assert scenario["task_switch"]["instructions_equal"]
+        assert followups[0]["same_instructions_as_first_call"]
+        assert not followups[-1]["same_instructions_as_first_call"]  # Remaining quota metadata changed.
 
 
 def test_isolation_restores_environment_blocks_network_and_keeps_cache_unknown(tmp_path, monkeypatch):

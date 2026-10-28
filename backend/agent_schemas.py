@@ -104,6 +104,7 @@ class AgentRoundCreate(AgentModel):
     configRevision: int = Field(ge=0)
     activeProfileId: str | None = None
     imageConfig: AgentImageConfig | None = None
+    imageCount: Literal[1, 3, 5, 10] = 1
     params: AgentParams = Field(default_factory=AgentParams)
     authorization: AgentAuthorization
 

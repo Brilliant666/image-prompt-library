@@ -68,7 +68,10 @@ export interface AgentExecution {
   version: 1;
   phase: 'preparing' | 'waiting_model' | 'receiving_model' | 'waiting_jobs' | 'generating_images' | 'processing_results' | 'completed' | 'failed' | 'stopped' | 'unknown';
   timings: { preparationMs: number | null; modelHeadersMs: number | null; modelFirstEventMs: number | null; modelResponseMs: number | null; toolsMs: number | null; resultProcessingMs: number | null };
-  modelSteps: Array<{ step: number; state: string; preparationMs: number | null; headersMs: number | null; firstEventMs: number | null; responseMs: number | null }>;
+  modelSteps: Array<{
+    step: number; state: string; preparationMs: number | null; headersMs: number | null; firstEventMs: number | null; responseMs: number | null;
+    connectionMs?: number | null; tlsMs?: number | null; uploadMs?: number | null; waitHeadersMs?: number | null; requestBytes?: number | null;
+  }>;
 }
 export interface AgentRound {
   id: string; index: number; parentRoundId: string | null; userMessageId: string; assistantMessageId?: string;
@@ -101,8 +104,8 @@ export interface AgentEditingTask {
 }
 export interface AgentImageRetryInput {
   retryId: string; conversationId: string; configRevision: number;
-  imageConfig: { profileId: string; model: string };
-  params?: Partial<AgentImageParams>; confirmed: true;
+  imageConfig: { profileId?: string | null; model: string };
+  params: AgentImageParams; confirmed: true;
 }
 export interface AgentImageRetryReceipt { retryId: string; sourceJobId: string; job: GenerationJobRecord }
 export interface AgentMessage {
@@ -126,6 +129,7 @@ export interface AgentRoundCreate {
   origin: 'send' | 'edit' | 'regenerate'; derivedFromRoundId?: string | null;
   prompt: string; refs: AgentReference[]; mask?: { targetRefIndex: number; uploadId: string } | null;
   configRevision: number; activeProfileId?: string | null; params: AgentImageParams;
+  imageCount?: 1 | 3 | 5 | 10;
   imageConfig?: { profileId?: string | null; model: string };
   authorization: { scope: 'this_request'; allowImageGeneration: boolean; allowWebSearch: boolean; maxToolRounds: number; maxImageJobs: number };
 }

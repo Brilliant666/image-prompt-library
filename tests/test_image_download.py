@@ -278,7 +278,8 @@ def test_tiny_stream_chunks_do_not_hide_deadline(monkeypatch):
 
 
 @pytest.mark.parametrize("phase", ["headers", "body", "stalled_body"])
-def test_real_socket_total_deadline_bounds_slow_response(monkeypatch, phase):
+@pytest.mark.parametrize("api_network", [False, True])
+def test_real_socket_total_deadline_bounds_slow_response(monkeypatch, phase, api_network):
     """A peer sending within each read timeout must not reset the total budget."""
     import time
     from threading import Event, Thread
@@ -315,12 +316,16 @@ def test_real_socket_total_deadline_bounds_slow_response(monkeypatch, phase):
     # This isolated test bypasses address validation only for its own local peer.
     url = httpx.URL(f"http://127.0.0.1:{port}/image")
     monkeypatch.setattr(download, "_public_target", lambda *args: (url, url, "127.0.0.1"))
+    if api_network:
+        from backend.services import api_network as network
+        monkeypatch.setattr(network, "create_api_transport", lambda settings, url=None: httpx.HTTPTransport(retries=0))
     worker = Thread(target=serve, daemon=True)
     worker.start()
     started = time.monotonic()
     try:
         with pytest.raises(download.ImageDownloadError) as error:
-            download.download_image("https://cdn.example.invalid/image", 0.25)
+            download.download_image("https://cdn.example.invalid/image", 0.25,
+                                    network_settings={"network_mode": "direct"} if api_network else None)
         elapsed = time.monotonic() - started
         assert error.value.category == "image_download_timeout"
         assert accepted.is_set()

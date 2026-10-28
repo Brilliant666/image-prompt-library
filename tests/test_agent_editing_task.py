@@ -331,3 +331,104 @@ def test_continue_generated_result_preserves_confirmed_task_constraints_and_work
     assert next_job.parameters['input_images'][0]['result_path'] == repo.asset(task['target']['assetId'])['path']
     assert repo.jobs.get_job(result.id).status == 'succeeded'
     assert repo.request('generate')['round']['editingTask']['target']['assetId'] == red
+
+
+def selection_call(target, auxiliaries=(), call_id='selection'):
+    return {'id': call_id, 'call_id': call_id, 'type': 'function_call', 'name': 'select_image_references',
+            'arguments': json.dumps({'targetRef': target, 'auxiliaries': list(auxiliaries)})}
+
+
+@pytest.mark.parametrize('mode', ['hybrid', 'native'])
+def test_conversation_selection_resolves_second_image_and_auxiliary_before_real_queue(isolated, monkeypatch, mode):
+    from test_agent_workflow_execution import application, submit, upload as http_upload, answer, image_reply
+    with application(isolated, monkeypatch, mode=mode) as (client, calls, replies):
+        refs = [http_upload(client, color) for color in ('red', 'blue')]
+        replies.append(answer('要修改哪张图片？'))
+        first, _ = submit(client, isolated, '帮她修改衣服，保留姿势', refs=refs, images=True, rid='first')
+        assert first['editingTask']['needsTargetSelection'] and not first['jobs']
+        replies.extend([{'id': 'selection-response', 'status': 'completed', 'output': [
+            selection_call('round-1-reference-2', [{'ref': 'round-1-reference-1', 'role': 'lighting'}])]}, image_reply(mode)])
+        second, _ = submit(client, isolated, '就改第二张，第一张只参考光线', images=True, rid='second')
+        repository = AgentRepository(isolated)
+        task = second['editingTask']
+        assert second['request']['state'] == 'completed' and not task['needsTargetSelection']
+        assert task['target']['source'] == refs[1] and task['auxiliaries'][0]['source'] == refs[0]
+        assert '保留姿势' in task['requirements']
+        job = next(job for job in second['jobs'] if job['status'] == 'succeeded')
+        target_path = repository.asset(task['target']['assetId'])['path']
+        auxiliary_path = repository.asset(task['auxiliaries'][0]['assetId'])['path']
+        # Hybrid submits the selected editing subject first. Native stores the
+        # actual Responses attachment order, which includes the earlier context.
+        assert [entry['result_path'] for entry in job['parameters']['input_images']] == (
+            [target_path, auxiliary_path] if mode == 'hybrid' else [auxiliary_path, target_path])
+        model_calls = [sent for path, sent in calls if path == '/v1/responses']
+        # Local generation functions can validate an inline selection before
+        # dispatch; the upstream native tool still needs a resolved target.
+        assert not any(tool['type'] == 'image_generation' for tool in model_calls[1]['tools'])
+        local_tool = next(tool for tool in model_calls[1]['tools']
+                          if tool.get('name') == ('generate_image' if mode == 'hybrid' else 'generate_image_batch'))
+        assert 'referenceSelection' in local_tool['parameters']['required']
+        assert any(tool.get('name') == 'generate_image' or tool['type'] == 'image_generation' for tool in model_calls[2]['tools'])
+        receipt = next(item for item in model_calls[2]['input'] if item.get('type') == 'function_call_output' and item['call_id'] == 'selection')
+        assert json.loads(receipt['output'])['editingTask']['targetRef'] == 'round-1-reference-2'
+        assert repository.request('first')['round']['editingTask']['needsTargetSelection']
+
+
+def test_selection_can_clear_stale_ambiguity_and_does_not_grant_generation(repo):
+    refs = [{'kind': 'upload', 'uploadId': upload(repo, color)} for color in ('red', 'blue')]
+    first = turn(repo, 'first', '帮她修改衣服', refs)
+    done(repo, 'first')
+    value = body(repo, 'next', images=False).model_copy(update={'prompt': '现在聊聊另一个项目', 'parentRoundId': first['round']['id']})
+    repo.create_round('conversation', value)
+    request = repo.request('next')
+    assert request['round']['editingTask']['needsTargetSelection']
+    bound = execution.refs_for_request(repo, request)
+    call = selection_call(None)
+    execution.execute_calls(repo, 'next', 1, [call], bound)
+    execution.execute_calls(repo, 'next', 1, [call], bound)
+    current = repo.request('next')
+    assert current['round']['editingTask'] is None
+    assert len([item for item in current['round']['responseOutput'] if item.get('call_id') == 'selection']) == 1
+    assert not any(tool.get('name') in {'generate_image', 'generate_image_batch'} or tool['type'] == 'image_generation'
+                   for tool in execution.tools_for(current))
+    assert repo.request('first')['round']['editingTask']['needsTargetSelection']
+
+
+def test_conversation_correction_replaces_old_target_only_in_current_branch(repo):
+    red, blue = upload(repo, 'red'), upload(repo, 'blue')
+    first = turn(repo, 'first', '修改 @图1 的衣服，保持姿势', [
+        {'kind': 'upload', 'uploadId': red}, {'kind': 'upload', 'uploadId': blue}])
+    done(repo, 'first')
+    current = turn(repo, 'next', '我说的是另一张', parent=first['round']['id'])
+    assert current['round']['editingTask']['target']['assetId'] == red
+    bound = execution.refs_for_request(repo, current)
+    execution.execute_calls(repo, 'next', 1, [selection_call('round-1-reference-2')], bound)
+    changed = repo.request('next')['round']['editingTask']
+    assert changed['target']['assetId'] == blue and '保持姿势' in changed['requirements']
+    job = execution.create_image_job(repo, 'next', 2, 'image', 'single', 'Edit the chosen subject', bound)
+    assert job.parameters['input_images'][0]['result_path'] == repo.asset(blue)['path']
+    assert repo.request('first')['round']['editingTask']['target']['assetId'] == red
+
+
+@pytest.mark.parametrize('bad', ['missing', 'sibling', 'corrupt', 'duplicate'])
+def test_selection_rejects_invalid_branch_pixels_without_replacing_task(repo, bad):
+    red, blue = upload(repo, 'red'), upload(repo, 'blue')
+    first = turn(repo, 'first', '帮她修改衣服', [{'kind': 'upload', 'uploadId': red}])
+    done(repo, 'first')
+    sibling = turn(repo, 'sibling', '帮她修改衣服', [{'kind': 'upload', 'uploadId': blue}])
+    done(repo, 'sibling')
+    current = turn(repo, 'next', '就改另一张', parent=first['round']['id'])
+    bound = execution.refs_for_request(repo, current)
+    target, auxiliaries = 'round-1-reference-1', []
+    if bad == 'missing':
+        target = 'round-99-reference-1'
+    elif bad == 'sibling':
+        target = blue  # An existing asset outside this branch is not a reference ID.
+    elif bad == 'corrupt':
+        (repo.library / repo.asset(red)['path']).write_bytes(image_bytes('green'))
+    else:
+        auxiliaries = [{'ref': target, 'role': 'lighting'}]
+    with pytest.raises(AgentError):
+        execution.execute_calls(repo, 'next', 1, [selection_call(target, auxiliaries)], bound)
+    assert repo.request('next')['round']['editingTask'] == current['round']['editingTask']
+    assert not repo.request('next')['round']['outputTaskIds']

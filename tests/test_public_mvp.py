@@ -272,8 +272,9 @@ def test_public_install_helper_files_exist_and_document_local_data():
     assert "python3.12" in setup_script
     assert "python3.10" in setup_script
     assert "Python 3.10 or newer" in setup_script
-    assert "python -m pip install -e '.[dev]'" in setup_script
-    assert "npm install" in setup_script
+    assert "python -m pip install uv==0.12.16" in setup_script
+    assert 'UV_PROJECT_ENVIRONMENT="$PWD/.venv" python -m uv sync --locked --extra dev --inexact --python "$PWD/.venv/bin/python"' in setup_script
+    assert "npm ci" in setup_script
 
     assert "npm run build" in start_script
     assert "choose_python" in start_script

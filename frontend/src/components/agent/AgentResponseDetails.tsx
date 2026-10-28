@@ -22,7 +22,13 @@ function TokenRows({ usage, fields, showMissing = false }: { usage: AgentTokenUs
 }
 
 const duration = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? `${(value / 1000).toFixed(3)} 秒` : '未记录';
+function requestSize(value: number | null | undefined) {
+  if (!reportedCount(value)) return '未记录';
+  if (value < 1024) return `${value} B`;
+  return value < 1024 * 1024 ? `${(value / 1024).toFixed(2)} KiB` : `${(value / (1024 * 1024)).toFixed(2)} MiB`;
+}
 const timingFields = [['preparationMs', '本地准备'], ['modelResponseMs', '文字模型请求'], ['toolsMs', '工具执行（含图片等待）'], ['resultProcessingMs', '结果处理']] as const;
+const transportTimingFields = [['connectionMs', '连接（含 DNS / TCP）'], ['tlsMs', 'TLS 握手'], ['uploadMs', '上传请求体'], ['waitHeadersMs', '上传后等待响应头']] as const;
 const jobTimingFields = [['queueMs', '队列等待'], ['preparationMs', '图片准备'], ['providerMs', '图片接口'], ['resultWriteMs', '图片结果写入']] as const;
 
 export function AgentResponseDetails({ details, modelInfo, request, round, jobs = [], terminalObservationMs }: {
@@ -54,7 +60,7 @@ export function AgentResponseDetails({ details, modelInfo, request, round, jobs 
       <div className="agent-response-heading"><h4>用量</h4>{!details.usage.complete && <span>部分调用</span>}</div>
       <dl><TokenRows usage={details.usage} fields={tokenFields.slice(0, 2)} /></dl>
     </section>}
-    {skillNames.length > 0 && <section aria-label="本轮使用的技能"><h4>使用的技能</h4><p>{skillNames.join('、')}</p></section>}
+    {skillNames.length > 0 && <section aria-label="本轮提供的技能指引"><h4>已提供的技能指引</h4><p>{skillNames.join('、')}</p></section>}
     {summaries.length > 0 && <details className="agent-response-summary"><summary>公开摘要</summary>
       {summaries.map((summary, index) => <div key={`${summary.id}:${index}`}>{summaries.length > 1 && <p className="agent-help">模型步骤 {summary.step}</p>}<AgentMarkdown text={summary.text} /></div>)}
     </details>}
@@ -86,9 +92,12 @@ export function AgentResponseDetails({ details, modelInfo, request, round, jobs 
             <div><dt>请求至响应头</dt><dd>{duration(step.headersMs)}</dd></div>
             <div><dt>请求至首个有效事件</dt><dd>{duration(step.firstEventMs)}</dd></div>
             <div><dt>模型请求整体</dt><dd>{duration(step.responseMs)}</dd></div>
+            {transportTimingFields.map(([field, label]) => <div key={field}><dt>{label}</dt><dd>{duration(step[field])}</dd></div>)}
+            <div><dt>请求体大小</dt><dd title={reportedCount(step.requestBytes) ? `${step.requestBytes} 字节` : undefined}>{requestSize(step.requestBytes)}</dd></div>
           </dl>
         </div>)}
         <p className="agent-help">响应头和首个事件是同一次请求的时间节点，不能相加。工具执行包含图片排队与调用，不能再与图片耗时相加。</p>
+        {Boolean(round.execution?.modelSteps.length) && <p className="agent-help">上传耗时是客户端写入时间，不代表服务端已收齐；之后等待响应头包含网络与上游处理，并非纯模型耗时。</p>}
         {roundJobs.map((job, index) => {
           const execution = job.metadata?.execution as { timings?: Record<string, unknown> } | undefined;
           const failure = ['failed', 'unknown'].includes(job.status) ? getAgentJobFailure(job) : null;

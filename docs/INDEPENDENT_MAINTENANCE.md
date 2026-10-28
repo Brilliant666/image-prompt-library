@@ -16,14 +16,23 @@
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e '.[dev]'
+.\.venv\Scripts\python.exe -m pip install uv==0.12.16
+$env:UV_PROJECT_ENVIRONMENT = Join-Path (Get-Location) '.venv'
+.\.venv\Scripts\python.exe -m uv sync --locked --extra dev --inexact --python .\.venv\Scripts\python.exe
 npm ci
 npm run build
-$env:IMAGE_PROMPT_LIBRARY_PATH = Join-Path $HOME 'ImagePromptLibrary'
-.\.venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+$devRoot = Join-Path (Get-Location) '.local-work/dev'
+$env:IMAGE_PROMPT_LIBRARY_PATH = Join-Path $devRoot 'library'
+$env:IMAGE_PROMPT_LIBRARY_AUTH_PATH = Join-Path $devRoot 'auth.json'
+$env:IMAGE_PROMPT_LIBRARY_GROK_AUTH_PATH = Join-Path $devRoot 'grok-auth.json'
+$env:IMAGE_PROMPT_LIBRARY_CONFIG_PATH = Join-Path $devRoot 'config.json'
+$env:IMAGE_PROMPT_LIBRARY_OPENAI_COMPATIBLE_CONFIG_PATH = Join-Path $devRoot 'openai-compatible.json'
+$env:IMAGE_PROMPT_LIBRARY_CAPTURE_CLIENTS_PATH = Join-Path $devRoot 'capture-clients.json'
+$env:IMAGE_PROMPT_LIBRARY_CAPTURE_ORGANIZER_CONFIG_PATH = Join-Path $devRoot 'capture-organizer.json'
+.\.venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8010
 ```
 
-运行前确认同一图库没有其他实例运行，且 8000 端口空闲。上例显式使用用户目录中的图库，不复制或迁移数据。新环境请自行选择图库路径。终端按 `Ctrl-C` 停止。macOS/Linux 可使用现有 `scripts/setup.sh`、`scripts/start.sh`，详见 [开发指南](DEVELOPMENT.md)。
+上例为开发与验证使用独立图库及凭据路径，使用 8010 端口；不复制日常图库或生产配置。运行前确认该路径没有其他实例使用、端口空闲，旧测试目录没有待恢复任务。仅使用合成内容与模拟供应商，不填入生产密钥。终端按 `Ctrl-C` 停止。日常使用的路径与 8000 启动示例见 [README](../README_zh-CN.md#快速开始)；开发分支不要直接指向日常图库。macOS/Linux 可使用现有 `scripts/setup.sh`、`scripts/start.sh`，详见 [开发指南](DEVELOPMENT.md)。
 
 已安装的本地定制版仍使用原有 `image-prompt-library start`、`stop` 和 `status` 管理。安装发行目录与源码目录是不同副本；编辑源码不会自动修改安装版。替换安装版前应备份图库、运行测试、构建并逐步停止/更新/启动，保留上一版本作为回退。
 
@@ -39,7 +48,7 @@ git push -u origin HEAD
 
 当前采用源码维护，尚未建立本仓库 Releases。安装上游发行包的更新入口暂停；不要运行来源仓库的远程一键安装命令。未来更新通过本仓库审查后的源码提交完成，不自动合并上游。上游链接保留用于来源、发布历史和致谢，不代表当前定制版的更新源。
 
-CI 对 `main` 和历史分支 `codex/sub2api-images` 的推送，以及以 `main`、`codex/sub2api-images` 或 `feat/quick-capture` 为目标的 PR 运行，也可手动触发。当前启用三个 job：`test`（后端、前端、浏览器扩展测试及应用/示例构建）、`windows-installer`（安装器合同测试及 Windows 原生安装冒烟）和 `macos-backup-restore`（备份恢复合同测试）。功能分支向 `main` 提交 PR 即进入这套检查。
+CI 对 `main` 和历史分支 `codex/sub2api-images` 的推送、所有目标分支的 PR（包括叠放 PR）运行，也可手动触发。同一 PR 的新运行取消旧运行，push 和手动运行不互相取消。当前启用三个 job：`test`（后端、前端、浏览器扩展测试及应用/示例构建）、`windows-installer`（安装器合同测试及 Windows 原生安装冒烟）和 `macos-backup-restore`（备份恢复合同测试）。本地试用不必等待远端 CI；合并前最终 Head 的完整检查不可省略，具体流程以 [AGENTS.md](../AGENTS.md) 为准。Python 使用 `uv.lock` 锁定安装（uv 0.12.16、`--locked --extra dev`），前端使用 `npm ci`。本地 `--inexact` 保留既有开发工具，CI 在新环境中精确同步；锁文件不匹配时停止，不自动更新。
 
 Pages 发布、Release 发布和依赖已发布安装包的 Release candidate 安装/更新/回退冒烟工作流使用 job 级 `if: ${{ false }}` 停用；这些流程只保留手动触发入口。CI 内从源码验证 Windows 安装器的冒烟仍启用。建立自己的发行策略后再明确启用发布流程；当前没有自动发布或上游同步。
 

@@ -5,9 +5,11 @@ import ts from 'typescript';
 
 async function compile(path) { return ts.transpileModule(await readFile(new URL(path, import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText; }
 function evaluate(js, dependencies, globals = {}) { const module = { exports: {} }; new Function('require', 'module', 'exports', ...Object.keys(globals), js)(name => { assert.ok(name in dependencies, name); return dependencies[name]; }, module, module.exports, ...Object.values(globals)); return module.exports; }
-const code = Object.fromEntries(await Promise.all(['AgentImageRetryDialog', 'AgentEditingTaskDialog', 'AgentFailedImageEditDialog'].map(async name => [name, await compile(`../frontend/src/components/agent/${name}.tsx`)])));
+const code = Object.fromEntries(await Promise.all(['AgentImageRetryDialog', 'AgentImageRetryButton', 'AgentEditingTaskDialog', 'AgentFailedImageEditDialog'].map(async name => [name, await compile(`../frontend/src/components/agent/${name}.tsx`)])));
 const retryUtility = evaluate(await compile('../frontend/src/utils/playground/agentImageRetry.ts'), {});
 const referenceUtility = evaluate(await compile('../frontend/src/utils/playground/agentImageReferences.ts'), {});
+const recipeUtility = evaluate(await compile('../frontend/src/utils/recipeInputs.ts'), {});
+const compatibleUtility = evaluate(await compile('../frontend/src/utils/compatibleRecipe.ts'), {});
 const clientCode = await compile('../frontend/src/api/agentClient.ts');
 const nodes = node => !node || typeof node !== 'object' ? [] : [node, ...[node.props?.children].flat(Infinity).flatMap(nodes)];
 const text = node => typeof node === 'string' ? node : Array.isArray(node) ? node.map(text).join('') : node && typeof node === 'object' ? text(node.props?.children) : '';
@@ -15,7 +17,7 @@ const deferred = () => { let resolve, reject; const promise = new Promise((yes, 
 const config = () => ({ revision: 3, config: { apiConfigMode: 'hybrid', imageProfileId: 'a', imageModel: 'current-a' }, profiles: [{ id: 'a', display_name: 'Provider A', model: 'default-a', configured: true }, { id: 'b', display_name: 'Provider B', model: 'default-b', configured: true }] });
 const job = () => ({ id: 'failed-job', provider: 'openai_compatible', status: 'failed', prompt_text: '  Actual execution prompt\n\nnot the original user question  ', parameters: { size: '1536x1024', quality: 'high', output_format: 'webp', output_compression: 0, background: 'opaque', moderation: 'low' } });
 function harness(t, component, initialProps = {}, options = {}) {
-  const slots = [], effects = [], posts = [], reads = [], receipts = [], applied = [], saves = [];
+  const slots = [], effects = [], posts = [], reads = [], receipts = [], applied = [], saves = [], jobReads = [], imageReads = [];
   const storage = options.storage || new Map();
   let cursor = 0, dirty = false, tree, unmounted = false, late = 0, id = 0;
   const hooks = {
@@ -30,15 +32,19 @@ function harness(t, component, initialProps = {}, options = {}) {
     submit: () => { throw new Error('Retry must not call text planning'); },
   };
   const jsx = (type, props) => ({ type, props });
-  const dependencies = { react: hooks, 'react/jsx-runtime': { jsx, jsxs: jsx }, '../../api/agentClient': { AgentApiError, agentApi: api }, '../../utils/playground/agentImageRetry': retryUtility, '../../utils/playground/agentImageReferences': referenceUtility, '../ToolbarSelect': { __esModule: true, default: 'select-control' }, '../settings/AgentModelPicker': { __esModule: true, default: 'model-control' }, './AgentActionDialog': { AgentActionDialog: 'dialog-shell' } };
-  const Component = evaluate(code[component], dependencies, { crypto: { randomUUID: () => `retry-${++id}` }, localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) } }).default;
-  const props = { job: job(), config: config(), conversationId: 'conversation', onClose() {}, onReceipt: value => receipts.push(value), onEdit() {}, onSave: value => { saves.push(value); return options.save?.(value) ?? Promise.resolve(); }, onApply: value => { applied.push(value); return options.apply?.(value) ?? Promise.resolve(); }, ...initialProps };
+  const dependencies = { react: hooks, 'react/jsx-runtime': { jsx, jsxs: jsx }, 'lucide-react': { LoaderCircle: 'loading-icon', RotateCcw: 'retry-icon' },
+    '../../api/client': { api: { generationJob: id => { jobReads.push(id); return options.readJob?.(id) ?? Promise.resolve(job()); } }, mediaUrl: path => `/media/${path}` },
+    '../../utils/recipeInputs': recipeUtility, '../../utils/compatibleRecipe': compatibleUtility,
+    '../../api/agentClient': { AgentApiError, agentApi: api }, '../../utils/playground/agentImageRetry': retryUtility, '../../utils/playground/agentImageReferences': referenceUtility, '../ToolbarSelect': { __esModule: true, default: 'select-control' }, '../settings/AgentModelPicker': { __esModule: true, default: 'model-control' }, './AgentActionDialog': { AgentActionDialog: 'dialog-shell' } };
+  class MockImage { src = ''; naturalWidth = options.width ?? 1024; naturalHeight = options.height ?? 768; decode() { imageReads.push(this.src); return options.decode?.(this) ?? Promise.resolve(); } }
+  const Component = evaluate(code[component], dependencies, { Image: MockImage, crypto: { randomUUID: () => `retry-${++id}` }, localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) } }).default;
+  const props = { job: job(), config: config(), params: { size: '1024x1024', quality: 'low', output_format: 'png', background: 'auto' }, conversationId: 'conversation', onClose() {}, onReceipt: value => receipts.push(value), onEdit() {}, onSave: value => { saves.push(value); return options.save?.(value) ?? Promise.resolve(); }, onApply: value => { applied.push(value); return options.apply?.(value) ?? Promise.resolve(); }, ...initialProps };
   const render = () => { cursor = 0; dirty = false; tree = Component(props); effects.splice(0).forEach(effect => effect()); };
   const flush = async () => { for (let n = 0; n < 24; n++) { if (dirty && !unmounted) render(); await Promise.resolve(); } };
   const find = (type, label) => nodes(tree).find(node => node.type === type && (!label || node.props.label === label || node.props['aria-label'] === label || text(node) === label))?.props;
   const unmount = () => { unmounted = true; slots.forEach(slot => slot?.cleanup?.()); };
   render(); t.after(() => { if (!unmounted) unmount(); });
-  return { posts, reads, receipts, saves, applied, storage, flush, find, unmount, AgentApiError, text: () => text(tree), get late() { return late; } };
+  return { posts, reads, receipts, saves, applied, storage, jobReads, imageReads, flush, find, unmount, AgentApiError, update(next) { Object.assign(props, next); render(); }, text: () => text(tree), get late() { return late; } };
 }
 
 test('actual retry confirmation changes only image routing and parameters, then creates one authorized task with no text planning', async t => {
@@ -128,4 +134,113 @@ test('production API uses retry-current, receipt GET and branch PATCH without au
   assert.equal(calls.length, 3); assert.equal(calls[0][0], '/api/generation-jobs/job%2F1/retry-current');
   assert.equal(calls[1][0], '/api/generation-jobs/retry-submissions/retry%2F1?conversation_id=conversation%2F1'); assert.equal(calls[1][1].body, undefined);
   assert.equal(calls[2][1].method, 'PATCH'); assert.equal(JSON.parse(calls[2][1].body).branchRoundId, 'branch');
+});
+
+test('image retry icon double click posts once with current controls and the original source identity', async t => {
+  const pending = deferred(), original = { ...job(), status: 'succeeded', parameters: { ...job().parameters, input_images: [{ result_path: 'generation-references/original.png', name: 'original-ref' }] } };
+  const before = structuredClone(original);
+  const params = { size: '2048x2048', quality: 'max', output_format: 'jpeg', output_compression: 67, background: 'opaque' };
+  const h = harness(t, 'AgentImageRetryButton', { job: original, params, selection: { profileId: 'b', model: 'chosen-model' } }, { post: () => pending.promise });
+  await h.flush();
+  const retry = h.find('button', '重试图片'); retry.onClick(); retry.onClick(); await h.flush();
+  assert.equal(h.posts.length, 1);
+  assert.deepEqual(h.posts[0], { jobId: original.id, payload: { retryId: 'retry-1', conversationId: 'conversation', configRevision: 3,
+    imageConfig: { profileId: 'b', model: 'chosen-model' }, params, confirmed: true } });
+  assert.deepEqual(original, before);
+  assert.equal(Object.hasOwn(h.posts[0].payload, 'refs'), false);
+  assert.equal(Object.hasOwn(h.posts[0].payload, 'prompt'), false);
+  assert.equal(h.find('button', '检查图片重试状态').disabled, true);
+  pending.resolve({ retryId: 'retry-1', sourceJobId: original.id, job: { id: 'retry-result', status: 'queued' } }); await h.flush();
+  assert.equal(h.receipts.length, 1); assert.equal(h.reads.length, 0);
+});
+
+test('native retry icon preserves an explicit empty image model and uses current shared parameters', async t => {
+  const current = config(); current.config = { ...current.config, apiConfigMode: 'native', textProfileId: 'text', textModel: 'responses', imageModel: 'old-image-model' };
+  const h = harness(t, 'AgentImageRetryButton', { job: { ...job(), provider: 'agent_native' }, config: current, selection: { profileId: 'unused-gallery-profile', model: '' } });
+  h.find('button', '重试图片').onClick(); await h.flush();
+  assert.equal(h.posts.length, 1);
+  assert.deepEqual(h.posts[0].payload.imageConfig, { profileId: null, model: '' });
+  assert.deepEqual(h.posts[0].payload.params, { size: '1024x1024', quality: 'low', output_format: 'png', background: 'auto' });
+});
+
+test('uncertain retry remains GET-only and readable after current settings become disabled', async t => {
+  let checks = 0, h;
+  h = harness(t, 'AgentImageRetryButton', {}, { post: async () => { throw new TypeError('connection lost'); }, read: async retryId => {
+    if (++checks === 1) throw new h.AgentApiError(404, 'Not yet confirmed');
+    return { retryId, sourceJobId: 'failed-job', job: { id: 'original-receipt', status: 'queued' } };
+  } });
+  h.find('button', '重试图片').onClick(); await h.flush();
+  assert.equal(h.posts.length, 1); assert.match(h.text(), /结果尚未确认/);
+  h.update({ disabled: true, config: { ...config(), config: { ...config().config, apiConfigMode: 'off' } } }); await h.flush();
+  assert.equal(h.find('button', '检查图片重试状态').disabled, false);
+  h.find('button', '检查图片重试状态').onClick(); await h.flush();
+  assert.equal(h.posts.length, 1); assert.equal(retryUtility.readImageRetries({ getItem: key => h.storage.get(key) }).length, 1);
+  h.find('button', '检查图片重试状态').onClick(); await h.flush();
+  assert.deepEqual(h.reads, [{ retryId: 'retry-1', conversationId: 'conversation' }, { retryId: 'retry-1', conversationId: 'conversation' }]);
+  assert.equal(h.posts.length, 1); assert.equal(h.receipts[0].job.id, 'original-receipt');
+  assert.equal(retryUtility.readImageRetries({ getItem: key => h.storage.get(key) }).length, 0);
+  assert.equal(h.find('button', '重试图片').disabled, true);
+});
+
+test('disabled fresh retry icon cannot post or create a journal identity', async t => {
+  const h = harness(t, 'AgentImageRetryButton', { disabled: true });
+  h.find('button', '重试图片').onClick(); await h.flush();
+  assert.equal(h.posts.length, 0); assert.equal(h.reads.length, 0);
+  assert.equal(retryUtility.readImageRetries({ getItem: key => h.storage.get(key) }).length, 0);
+});
+
+test('late icon receipt clears its journal without updating an unmounted view', async t => {
+  const pending = deferred(), h = harness(t, 'AgentImageRetryButton', {}, { post: () => pending.promise });
+  h.find('button', '重试图片').onClick(); await h.flush(); h.unmount();
+  pending.resolve({ retryId: 'retry-1', sourceJobId: 'failed-job', job: { id: 'known', status: 'queued' } }); await h.flush();
+  assert.equal(h.late, 0); assert.equal(h.receipts.length, 0);
+  assert.equal(retryUtility.readImageRetries({ getItem: key => h.storage.get(key) }).length, 0);
+});
+
+test('unknown icon submission survives unmount and disabled reload with the same receipt identity', async t => {
+  const pending = deferred(), storage = new Map(), first = harness(t, 'AgentImageRetryButton', {}, { storage, post: () => pending.promise });
+  first.find('button', '重试图片').onClick(); await first.flush(); first.unmount();
+  pending.reject(new TypeError('connection lost')); await first.flush();
+  assert.equal(first.late, 0); assert.equal(retryUtility.readImageRetries({ getItem: key => storage.get(key) }).length, 1);
+  const next = harness(t, 'AgentImageRetryButton', { disabled: true }, { storage }); await next.flush();
+  assert.equal(next.posts.length, 0); assert.equal(next.reads.length, 0);
+  next.find('button', '检查图片重试状态').onClick(); await next.flush();
+  assert.deepEqual(next.reads, [{ retryId: 'retry-1', conversationId: 'conversation' }]);
+  assert.equal(next.posts.length, 0); assert.equal(next.receipts.length, 1);
+});
+
+test('automatic 4K retry reads the original frozen image and freezes settings before the read', async t => {
+  const pending = deferred(), params = { size: 'auto', quality: 'max', output_format: 'webp' };
+  const h = harness(t, 'AgentImageRetryButton', { sizeMode: 'auto4k', params, selection: { profileId: 'b', model: 'clicked-model' } }, { readJob: () => pending.promise });
+  h.find('button', '重试图片').onClick(); await h.flush();
+  assert.deepEqual(h.jobReads, ['failed-job']); assert.equal(h.posts.length, 0);
+  h.update({ config: { ...config(), revision: 99 }, params: { ...params, quality: 'low' }, selection: { profileId: 'a', model: 'newer-model' } });
+  const original = { ...job(), prompt_text: 'Original prompt without a ratio', mode: 'image_edit', parameters: { input_images: [{ name: 'original', result_path: 'generation-references/original.png' }] } };
+  const before = structuredClone(original); pending.resolve(original); await h.flush();
+  assert.deepEqual(h.imageReads, ['/media/generation-references/original.png']);
+  assert.equal(h.posts.length, 1); assert.equal(h.posts[0].payload.configRevision, 3);
+  assert.deepEqual(h.posts[0].payload.imageConfig, { profileId: 'b', model: 'clicked-model' });
+  assert.deepEqual(h.posts[0].payload.params, { ...params, size: '3264x2448' });
+  assert.deepEqual(original, before);
+});
+
+test('automatic 4K retry honors the original prompt ratio before reading any reference image', async t => {
+  const h = harness(t, 'AgentImageRetryButton', { sizeMode: 'auto4k' }, { readJob: async () => ({ ...job(), prompt_text: '原图比例 16:9', parameters: { input_images: [{ result_path: 'generation-references/original.png' }] } }) });
+  h.find('button', '重试图片').onClick(); await h.flush();
+  assert.deepEqual(h.imageReads, []); assert.equal(h.posts[0].payload.params.size, '3840x2160');
+});
+
+test('automatic 4K retry blocks a missing original reference without falling back to draft images', async t => {
+  const h = harness(t, 'AgentImageRetryButton', { sizeMode: 'auto4k' }, { readJob: async () => ({ ...job(), mode: 'image_edit', parameters: { input_images: [] } }) });
+  h.find('button', '重试图片').onClick(); await h.flush();
+  assert.equal(h.posts.length, 0); assert.match(h.text(), /原参考图缺失/);
+  assert.equal(retryUtility.readImageRetries({ getItem: key => h.storage.get(key) }).length, 0);
+});
+
+test('unmount during automatic 4K preflight never creates a paid submission or journal', async t => {
+  const pending = deferred(), h = harness(t, 'AgentImageRetryButton', { sizeMode: 'auto4k' }, { readJob: () => pending.promise });
+  h.find('button', '重试图片').onClick(); await h.flush(); h.unmount();
+  pending.resolve({ ...job(), prompt_text: 'Original prompt ratio 16:9' }); await h.flush();
+  assert.equal(h.posts.length, 0); assert.equal(h.late, 0);
+  assert.equal(retryUtility.readImageRetries({ getItem: key => h.storage.get(key) }).length, 0);
 });

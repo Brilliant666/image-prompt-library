@@ -76,7 +76,9 @@ Responses 的進度會串流至瀏覽器，無法串流時改用唯讀輪詢。�
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e '.[dev]'
+.\.venv\Scripts\python.exe -m pip install uv==0.12.16
+$env:UV_PROJECT_ENVIRONMENT = Join-Path (Get-Location) '.venv'
+.\.venv\Scripts\python.exe -m uv sync --locked --extra dev --inexact --python .\.venv\Scripts\python.exe
 npm ci
 npm run build
 $env:IMAGE_PROMPT_LIBRARY_PATH = Join-Path $HOME 'ImagePromptLibrary'
@@ -84,6 +86,8 @@ $env:IMAGE_PROMPT_LIBRARY_PATH = Join-Path $HOME 'ImagePromptLibrary'
 ```
 
 啟動前請選定圖庫路徑，確認沒有其他執行個體使用同一圖庫，且 8000 連接埠空閒。開啟 [127.0.0.1:8000](http://127.0.0.1:8000)；在終端機按 `Ctrl-C` 停止。macOS/Linux 請參閱[開發指南](docs/DEVELOPMENT.md)。
+
+**開發與驗證：**請使用[隔離開發範例](docs/INDEPENDENT_MAINTENANCE.md#从源码开发与启动)，同時隔離圖庫與憑證，並使用 8010 連接埠。上方快速開始用於日常本機使用。
 
 新圖庫預設為空。選擇**快速收錄**，加入圖片與原始提示詞後儲存；AI 設定為選用。既有安裝副本可透過以下指令檢查：
 

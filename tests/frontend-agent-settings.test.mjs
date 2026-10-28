@@ -136,20 +136,20 @@ test('image recommendation mode reuses Gallery filtering and preserves custom se
 
 function imageOptions(t, overrides = {}) {
   const select = () => null, model = () => null;
-  const changes = [], copies = [], resets = [], sizes = [];
+  const changes = [], sizes = [];
   const params = { size: '1024x1024', quality: 'high', background: 'auto', output_format: 'webp', output_compression: 87, moderation: 'low' };
   const config = { revision: 3, config: { apiConfigMode: 'hybrid', textProfileId: 'a', imageProfileId: 'b', textModel: 'text-model', imageModel: '' }, profiles: [profile('a'), profile('b')], capabilities: {}, ready: true, imageReady: true, issues: [], imageIssues: [] };
   let h;
   h = harness(t, imageOptionsCode, { '../ToolbarSelect': select, '../settings/AgentModelPicker': model, './AgentImageOptions.css': {} }, {
-    config, activeProfileId: 'a', params, galleryAvailable: true, onChange(change) { changes.push(change); h.update({ ...(change.params ? { params: change.params } : {}), ...(change.imageConfig ? { selection: change.imageConfig } : {}) }); },
-    onUseGallery() { copies.push(true); }, onResetSelection() { resets.push(true); h.update({ selection: undefined }); }, onChooseSize() { sizes.push(true); }, ...overrides,
+    config, activeProfileId: 'a', params, shared: true, onChange(change) { changes.push(change); h.update({ ...(change.params ? { params: change.params } : {}), ...(change.imageConfig ? { selection: change.imageConfig } : {}), ...(change.count !== undefined ? { count: change.count } : {}) }); },
+    onChooseSize() { sizes.push(true); }, ...overrides,
   });
-  return { ...h, changes, copies, resets, sizes, config, fields: () => h.find(select), models: () => h.find(model) };
+  return { ...h, changes, sizes, config, fields: () => h.find(select), models: () => h.find(model) };
 }
 
 test('image profile changes use its own default while text routing and parameters stay unchanged; manual overrides remain available', async t => {
   const h = imageOptions(t); await h.flush();
-  assert.ok(h.text().includes('Profile a · text-model'));
+  assert.ok(h.text().includes('与画廊同步'));
   assert.ok(h.text().includes('b-image · 供应商默认模型'));
   assert.equal(h.models()[0].profile.id, 'b'); assert.equal(h.models()[0].imageRecommendations, true);
   h.models()[0].onChange('historical-image-model'); await h.flush();
@@ -161,6 +161,7 @@ test('image profile changes use its own default while text routing and parameter
   assert.match(h.text(), /手动覆盖模型/);
   h.fields().find(field => field.label === '图片质量').onChange('max'); await h.flush();
   assert.deepEqual(h.changes.at(-1), { params: { size: '1024x1024', quality: 'max', background: 'auto', output_format: 'webp', output_compression: 87, moderation: 'low' } });
+  assert.equal(h.config.config.textProfileId, 'a'); assert.equal(h.config.config.textModel, 'text-model');
   assert.equal(h.find('select').length, 0, 'all visible choices use project controls');
 });
 
@@ -173,21 +174,49 @@ for (const selection of [{ model: '' }, { profileId: null, model: '' }]) {
     assert.deepEqual(h.changes, [], 'rendering a fallback does not rewrite the draft');
     h.models()[0].onChange('manual-override'); await h.flush();
     assert.deepEqual(h.changes.at(-1), { imageConfig: { profileId: 'b', model: 'manual-override' } });
-    assert.ok(h.text().includes('Profile a · text-model'), 'text routing remains independent');
+    assert.equal(h.config.config.textProfileId, 'a', 'text routing remains independent');
+    assert.equal(h.config.config.textModel, 'text-model');
   });
 }
 
-test('image options opens parent size dialog and copies Gallery only on explicit action, while reset leaves image parameters intact', async t => {
+test('shared image options opens the parent size dialog without obsolete copy or reset controls', async t => {
   const h = imageOptions(t, { selection: { profileId: 'b', model: 'my-image' }, sizeMode: 'auto4k' }); await h.flush();
-  assert.deepEqual(h.copies, []); assert.ok(h.text().includes('4K · 自动比例'));
+  assert.deepEqual(h.changes, []); assert.ok(h.text().includes('4K · 自动比例'));
   h.find('button', props => props['aria-label'] === '设置图像尺寸')[0].onClick();
   assert.equal(h.sizes.length, 1); assert.deepEqual(h.changes, []);
-  h.find('button', props => text({ props }) === '使用画廊当前生图设置')[0].onClick();
-  assert.equal(h.copies.length, 1);
-  h.find('button', props => text({ props }).includes('恢复 Agent 默认模型'))[0].onClick(); await h.flush();
-  assert.equal(h.resets.length, 1); assert.deepEqual(h.changes, []);
+  assert.equal(h.find('button', props => /使用画廊当前生图设置|恢复 Agent 默认模型/.test(text({ props }))).length, 0);
   assert.equal(h.fields().find(field => field.label === '图片质量').value, 'high');
-  assert.equal(h.models()[0].value, '');
+  assert.equal(h.models()[0].value, 'my-image');
+});
+
+test('image quantity selects real Gallery batch counts while retaining other pending choices', async t => {
+  const h = imageOptions(t); await h.flush();
+  const field = () => h.fields().find(field => field.label === '生成数量');
+  assert.equal(field().value, '1', 'older callers without a count retain one-image behavior');
+  assert.deepEqual(field().options.map(option => option.value), ['1', '3', '5', '10']);
+  for (const count of [3, 5, 10, 1]) {
+    field().onChange(String(count)); await h.flush();
+    assert.deepEqual(h.changes.at(-1), { count }); assert.equal(field().value, String(count));
+    assert.equal(h.fields().find(field => field.label === '图片质量').value, 'high');
+    assert.equal(h.models()[0].profile.id, 'b');
+  }
+  const before = h.changes.length;
+  field().onChange('2'); await h.flush();
+  assert.equal(h.changes.length, before, 'unsupported batch sizes are not emitted');
+});
+
+test('shared Gallery updates render without echoing callbacks and unavailable settings remain repairable', async t => {
+  const h = imageOptions(t, { sharedUnavailable: '请选择生图模型' }); await h.flush();
+  assert.ok(h.text().includes('请选择生图模型'));
+  assert.equal(h.models()[0].disabled, false);
+  h.update({ selection: { profileId: 'a', model: 'from-gallery' }, count: 5, params: { size: 'auto', quality: 'low', background: 'auto', output_format: 'png' }, sizeMode: 'auto4k', sharedUnavailable: undefined }); await h.flush();
+  assert.deepEqual(h.changes, []);
+  assert.equal(h.models()[0].value, 'from-gallery');
+  assert.equal(h.fields().find(field => field.label === '生成数量').value, '5');
+  assert.equal(h.fields().find(field => field.label === '图片质量').value, 'low');
+  assert.ok(h.text().includes('4K · 自动比例'));
+  h.models()[0].onChange('repaired-model'); await h.flush();
+  assert.deepEqual(h.changes.at(-1), { imageConfig: { profileId: 'a', model: 'repaired-model' } });
 });
 
 test('native and current API modes use Responses image tools without Gallery Images configuration or gpt-image catalog filtering', async t => {
@@ -195,8 +224,9 @@ test('native and current API modes use Responses image tools without Gallery Ima
   h.update({ config: { ...h.config, config: { ...h.config.config, apiConfigMode: 'native' } } }); await h.flush();
   assert.equal(h.fields().some(field => field.label === '生图供应商'), false);
   assert.equal(h.models()[0].profile.id, 'a'); assert.equal(h.models()[0].imageRecommendations, false);
-  const copy = h.find('button', props => text({ props }) === '使用画廊当前生图设置')[0];
-  assert.equal(copy.disabled, true); copy.onClick(); assert.deepEqual(h.copies, []);
+  assert.ok(h.text().includes('Responses 生图工具'));
+  assert.equal(h.text().includes('与画廊同步'), false);
+  assert.equal(h.find('button', props => text({ props }) === '使用画廊当前生图设置').length, 0);
   h.models()[0].onChange('native-tool-model'); await h.flush();
   assert.deepEqual(h.changes.at(-1), { imageConfig: { model: 'native-tool-model' } });
   h.update({ activeProfileId: 'b', config: { ...h.config, config: { ...h.config.config, apiConfigMode: 'off' } } }); await h.flush();
@@ -211,6 +241,7 @@ test('image options disables mutations during submission and preserves compressi
   h.update({ disabled: true }); await h.flush();
   const before = h.changes.length;
   h.fields().find(field => field.label === '图片质量').onChange('low');
+  h.fields().find(field => field.label === '生成数量').onChange('5');
   h.models()[0].onChange('ignored-model');
   h.find('button', props => props['aria-label'] === '设置图像尺寸')[0].onClick();
   assert.equal(h.changes.length, before); assert.deepEqual(h.sizes, []);

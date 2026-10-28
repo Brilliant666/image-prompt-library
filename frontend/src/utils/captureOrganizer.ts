@@ -1,3 +1,6 @@
+import type { ApiNetworkConfig, ApiNetworkMode, ApiNetworkUpdate } from '../types';
+import { apiNetworkIssue, apiNetworkMode, apiNetworkPayload, safeProxyEndpoint, type ApiNetworkDraft } from './apiNetwork';
+
 export interface CaptureOrganizerFields {
   enabled: boolean;
   base_url: string;
@@ -6,10 +9,11 @@ export interface CaptureOrganizerFields {
   generate_title: boolean;
   assign_collection: boolean;
   allow_new_collections: boolean;
+  network_mode?: ApiNetworkMode;
 }
 
 export type OrganizerResultStatus = 'disabled' | 'pending' | 'running' | 'succeeded' | 'failed' | 'uncertain' | 'skipped';
-export interface CaptureOrganizerConfig extends CaptureOrganizerFields {
+export interface CaptureOrganizerConfig extends CaptureOrganizerFields, ApiNetworkConfig {
   has_api_key: boolean;
   configured: boolean;
   last_result?: { status: OrganizerResultStatus; category: string; completed_at: string | null };
@@ -18,9 +22,10 @@ export interface CaptureOrganizerConfig extends CaptureOrganizerFields {
 export const organizerDefaults: CaptureOrganizerFields = {
   enabled: false, base_url: '', model: 'gpt-6-luna', timeout_seconds: 60,
   generate_title: true, assign_collection: true, allow_new_collections: true,
+  network_mode: 'direct',
 };
 
-export type OrganizerErrorCode = 'url' | 'replacement_key' | 'model' | 'timeout' | 'options' | 'connection' | 'validation' | 'authorization' | 'service';
+export type OrganizerErrorCode = 'url' | 'replacement_key' | 'model' | 'timeout' | 'options' | 'connection' | 'validation' | 'authorization' | 'service' | 'proxy_required' | 'proxy_url';
 export class OrganizerSettingsError extends Error {
   constructor(public readonly code: OrganizerErrorCode) { super(code); }
 }
@@ -51,6 +56,9 @@ export function readOrganizerConfig(value: unknown): CaptureOrganizerConfig {
     allow_new_collections: input.allow_new_collections !== false,
     has_api_key: input.has_api_key === true,
     configured: input.configured === true,
+    network_mode: apiNetworkMode(input.network_mode),
+    proxy_url_present: input.proxy_url_present === true,
+    proxy_endpoint: safeProxyEndpoint(input.proxy_endpoint),
   };
   if (input.last_result && typeof input.last_result === 'object') {
     const last = input.last_result as Record<string, unknown>;
@@ -67,11 +75,12 @@ export function readOrganizerConfig(value: unknown): CaptureOrganizerConfig {
 
 export function organizerFields(config: CaptureOrganizerFields): CaptureOrganizerFields {
   return { enabled: config.enabled, base_url: config.base_url, model: config.model, timeout_seconds: config.timeout_seconds,
-    generate_title: config.generate_title, assign_collection: config.assign_collection, allow_new_collections: config.allow_new_collections };
+    generate_title: config.generate_title, assign_collection: config.assign_collection, allow_new_collections: config.allow_new_collections,
+    network_mode: apiNetworkMode(config.network_mode) };
 }
 
 /** Empty keys are omitted. A key must never silently follow a changed endpoint. */
-export function organizerPayload(form: CaptureOrganizerFields, apiKey: string, saved: CaptureOrganizerConfig): CaptureOrganizerFields & { api_key?: string } {
+export function organizerPayload(form: CaptureOrganizerFields, apiKey: string, saved: CaptureOrganizerConfig, network: ApiNetworkDraft = { proxyUrl: '', removeProxy: false }): CaptureOrganizerFields & ApiNetworkUpdate & { api_key?: string } {
   const fields = organizerFields(form);
   fields.base_url = fields.base_url.trim();
   fields.model = fields.model.trim();
@@ -82,11 +91,14 @@ export function organizerPayload(form: CaptureOrganizerFields, apiKey: string, s
   if (fields.enabled && !fields.generate_title && !fields.assign_collection) throw new OrganizerSettingsError('options');
   const key = apiKey.trim();
   if (saved.has_api_key && endpoint !== canonicalEndpoint(saved.base_url) && !key) throw new OrganizerSettingsError('replacement_key');
-  return { ...fields, ...(key ? { api_key: key } : {}) };
+  const networkMode = apiNetworkMode(fields.network_mode);
+  const issue = apiNetworkIssue(networkMode, network, saved.proxy_url_present === true);
+  if (issue) throw new OrganizerSettingsError(issue);
+  return { ...fields, ...apiNetworkPayload(networkMode, network), ...(key ? { api_key: key } : {}) };
 }
 
-export function organizerHasChanges(form: CaptureOrganizerFields, key: string, saved: CaptureOrganizerConfig): boolean {
-  return Boolean(key) || JSON.stringify(organizerFields(form)) !== JSON.stringify(organizerFields(saved));
+export function organizerHasChanges(form: CaptureOrganizerFields, key: string, saved: CaptureOrganizerConfig, network: ApiNetworkDraft = { proxyUrl: '', removeProxy: false }): boolean {
+  return Boolean(key || network.proxyUrl || network.removeProxy) || JSON.stringify(organizerFields(form)) !== JSON.stringify(organizerFields(saved));
 }
 
 /** Same-origin local settings only. This never calls the configured third-party endpoint. */

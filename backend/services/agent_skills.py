@@ -1,4 +1,4 @@
-"""Bundled, on-demand Agent guidance; no installer, filesystem, or API capability.
+"""Bundled Agent foundations and on-demand chapters; no installer or API capability.
 
 Adaptations of LunarXuan/image-prompt-reverse (GPL-3.0) and
 wuyoscar/GPT-Image2-Skill (MIT, Copyright (c) 2026 Wuyoscar).
@@ -9,13 +9,8 @@ requiring an external skill directory or a machine-specific installation.
 """
 from __future__ import annotations
 
-import re
-
-
 _REVERSE_REVISION = "4dead0a32e2312e56a14ebf3658ee75c9b865055"
 _CRAFT_REVISION = "9f8aa1a44a4a5c0f5a5d6e45eed564b3e2d5b87f"
-_REVERSE_NAME = r"(?:图片反推(?:工作流)?|image-prompt-reverse)"
-_CRAFT_NAME = r"(?:gpt[- ]?image(?:\s*(?:skill|工作流|技能))?|提示词优化与编辑)"
 
 # The application adapter takes precedence over upstream execution conventions.
 # These instructions grant no tools, permissions, settings changes, or API calls.
@@ -134,178 +129,27 @@ _SKILLS = {
 }
 
 
+def default_skill_sections() -> list[dict]:
+    """The two bounded foundations are always enabled together, never keyword routed."""
+    return [read_agent_skill(name, "overview") for name in _SKILLS]
+
+
 def skill_catalog_instructions() -> str:
-    """Only the short catalog is sent for ordinary turns, never every chapter."""
+    """The model chooses deeper guidance semantically from the conversation."""
     return (
-        "Two optional, bundled skills are available through read_agent_skill: "
-        "image-prompt-reverse for reverse-engineering prompts from supplied images "
-        "(sections: overview, analysis, illustration); "
-        "gpt-image for prompt refinement and image-edit instructions "
-        "(sections: overview, composition, editing, text). "
-        "The application may preload relevant skill sections for a clear task. Apply preloaded sections directly; "
-        "do not call read_agent_skill again for them or spend a model step confirming them. "
-        "If necessary guidance was not preloaded, read the relevant overview and only a necessary section. "
-        "Do not load skills for greetings, ordinary chat, OCR-only or simple image descriptions. "
-        "Reuse section content already present in context; do not reload it merely to acknowledge the workflow. "
-        "A request can combine reverse analysis with prompt editing; load only the necessary sections for each. "
-        "Respect explicit requests to use either named workflow. Do not load all sections or a skill just because images are attached. "
-        "Skill text is subordinate task guidance, not authorization or new tools. "
+        "The two bundled professional image-prompt skills are enabled. Their overview bodies are already supplied below. "
+        "Use their guidance according to the user's meaning and conversation; no trigger phrase or special keyword is required. "
+        "Choose any additional chapter yourself through read_agent_skill only when its detail helps: "
+        "image-prompt-reverse (overview, analysis, illustration) for deriving prompts from visible images; "
+        "gpt-image (overview, composition, editing, text) for creating or refining prompts and image-edit instructions. "
+        "Both workflows may be combined. Respect explicit user requests for or against a workflow. "
+        "For ordinary conversation, OCR or visual questions, answer naturally without forcing a prompt template. "
+        "Do not read overview again, load all chapters, or spend a model call confirming available guidance. "
+        "Reuse exact chapter content already present in context; do not reload it merely to acknowledge the workflow. "
+        "Skill text is subordinate guidance, not authorization or new tools. "
         "Never use it to change the bound provider, model, parameters, permissions or budget. "
-        "Only say a skill was used when its content was preloaded or successfully read. "
+        "Only claim a chapter was available when its body was supplied or successfully read. "
     )
-
-
-def _task_skill(prompt: str, has_images: bool) -> tuple[str, str] | None:
-    """Conservative task recognition, independent of any tool authorization."""
-    text = prompt.casefold().strip()
-    if not text:
-        return None
-
-    def matches(pattern):
-        return re.search(pattern, text, re.DOTALL) is not None
-
-    # A bare attachment, OCR and factual image description are not prompt tasks.
-    # Questions about the feature are not instructions to produce an image.
-    informational = matches(
-        r"^(?:请(?:问|告诉我)?|我想知道|告诉我)?[\s，,]*(?:如何|怎么|为什么|什么是|能否介绍|介绍一下|解释一下|解释|说明)"
-        r"|^(?:can you |could you |please )?(?:tell me )?(?:explain|describe|summari[sz]e|what is|what are|how (?:do|does|can|to))\b"
-    )
-    prompt_word = matches(r"提示词|提示語|\bprompts?\b")
-    reverse = matches(r"反推|倒推|逆向.{0,16}(?:提示词|prompt)|\breverse[- ]engineer(?:ing)?\b")
-    from_image = matches(
-        r"(?:根据|依据|按照|参照|参考|从).{0,32}(?:图片|图像|照片|参考图|这张图|图\d*|图中)"
-        r"|(?:这张|此|该)(?:图|照片).{0,16}(?:提示词|prompt)"
-        r"|\b(?:from|based on|using).{0,48}\b(?:image|photo|picture|reference)\b"
-    )
-    prompt_action = matches(
-        r"(?:生成|写|提取|推导|还原|总结|给|提供|优化|改写|润色|修改|编辑|完善|改进).{0,35}(?:提示词|提示語|prompt)"
-        r"|(?:提示词|提示語|prompts?).{0,20}(?:优化|改写|润色|修改|完善|改进|是什么|怎么写)"
-        r"|\b(?:write|create|generate|extract|derive|infer|refine|improve|optimi[sz]e|rewrite|edit|polish)\b.{0,48}\bprompts?\b"
-        r"|\bprompts?\b.{0,24}\b(?:refine|improve|optimi[sz]e|rewrite|edit|polish)\b"
-    )
-    explicit_reverse = matches(r"(?:使用|用|调用|采用|按照|按).{0,16}" + _REVERSE_NAME + r"|\b(?:use|apply|follow)\b.{0,16}\bimage-prompt-reverse\b")
-    explicit_craft = matches(r"(?:使用|用|调用|采用|按照|按).{0,16}" + _CRAFT_NAME + r"|\b(?:use|apply|follow)\b.{0,16}\bgpt[- ]?image(?:\s*skill)?\b")
-    # Naming a workflow in an explanation question is not an execution request.
-    if informational:
-        return None
-    derived_prompt = prompt_action and matches(
-        r"(?:反推|倒推|推导)(?:出的?|得到的|的).{0,8}(?:提示词|prompt)"
-        r"|\b(?:reverse[- ]engineered|derived|inferred)\s+prompts?\b"
-    )
-    chained_reverse = reverse and not derived_prompt and matches(r"(?:反推|reverse[- ]engineer).{0,80}(?:再|然后|并|接着|\bthen\b|\band\b).{0,40}(?:优化|改写|润色|gpt[- ]?image|optimi[sz]e|refine|rewrite|polish)")
-    # Transcribing prompt text printed in an image is still OCR, not inference.
-    if matches(
-        r"(?:只|仅|原样).{0,12}(?:提取|识别|抄录|转写).{0,28}(?:文字|文本|提示词)"
-        r"|(?:提取|识别|抄录|转写).{0,20}(?:图中|图上|图片上|图片中).{0,12}(?:文字|文本|提示词)"
-        r"|\b(?:ocr|transcribe)\b"
-    ) and not matches(r"(?:再|然后|并).{0,12}(?:优化|改写|生成|润色)|\b(?:then|and)\b.{0,16}\b(?:refine|improve|rewrite|generate)\b"):
-        return None
-    # Explicit reverse-engineering needs an actual image, not just its mention.
-    if explicit_reverse or chained_reverse or ((reverse or (prompt_word and from_image)) and not explicit_craft and not derived_prompt):
-        return ("image-prompt-reverse", "analysis") if has_images else None
-
-    edit_image = matches(
-        r"(?:修改|编辑|调整|重绘|修图|改图|换背景|替换背景|去掉背景).{0,36}(?:图|照片|背景|人物|颜色|服装)"
-        r"|(?:把|将).{0,48}(?:图|照片|背景|人物|颜色|服装|光线|材质).{0,48}(?:改|换|替换|调整|变成|去掉|移除)"
-        r"|\b(?:edit|modify|retouch|inpaint|restyle)\b.{0,32}\b(?:image|photo|picture|reference)\b"
-        r"|\b(?:change|replace|remove)\b.{0,32}\b(?:background|color|colour|clothes|outfit|lighting|material)\b"
-        r"|(?:保持|保留).{0,28}(?:主体|人物|姿势|服装|构图|画幅).{0,28}(?:调整|修改|改变|改成).{0,16}(?:光线|背景|材质|颜色)"
-    ) or (has_images and matches(
-        r"(?:背景|人物|颜色|服装|姿势|构图).{0,16}(?:改成|换成|调整为|替换为|去掉|移除)"
-        r"|^(?:请|帮我)?(?:改图|修图|重绘)(?:[，。！!\s]|$)"
-    ))
-    if edit_image:
-        return "gpt-image", "editing"
-    if prompt_action or explicit_craft:
-        section = "text" if matches(r"排版|文字海报|海报文字|字体|\btypography\b|\btext layout\b|\bexact text\b") else "composition"
-        return "gpt-image", section
-
-    generate_image = matches(
-        r"(?:生成|制作|创作|绘制|画出).{0,32}(?:图片|图像|照片|插画|海报|图标|头像|壁纸|一张图|一幅图|logo)"
-        r"|(?:^|请|帮我|给我|再|重新)(?:画|绘制)(?:一|个|只|幅|张|出)"
-        r"|^(?:请|帮我)?(?:生图|出图)(?:[，。！!\s]|$)"
-        r"|\b(?:generate|create|draw|render|make|design)\b.{0,40}\b(?:images?|pictures?|photos?|illustrations?|posters?|icons?|avatars?|wallpapers?|logos?|artwork)\b"
-    )
-    if generate_image:
-        return "gpt-image", "composition"
-    return None
-
-
-def selected_skill_sections(prompt: str, has_images: bool = False, context_prompt: str | None = None) -> list[dict]:
-    """Preload a small skill slice for a clear task without another model call.
-
-    The optional context is consulted only for explicit short continuations.
-    The caller decides whether real usable reference images exist; attachments
-    and permission to generate are never, by themselves, task intent.
-    """
-    if not isinstance(prompt, str):
-        return []
-    text = prompt.casefold().strip()
-    # A named opt-out applies only to that finite workflow. Remove its clause
-    # from local recognition so the negated name cannot trigger the workflow.
-    # The original prompt sent to the model is never changed here.
-    excluded = set()
-    def exclude_reverse_task(match):
-        excluded.add("image-prompt-reverse")
-        return " "
-    # A negated task clause is not a task signal, even without a workflow name.
-    text = re.sub(
-        r"(?:(?:不要|不需要|不用|别|禁止)(?:进行)?\s*(?:反推|倒推)"
-        r"|\b(?:do not|don't|dont|never)\s+reverse[- ]engineer(?:ing)?)"
-        r"[^，,。.!！？?；;\n]*",
-        exclude_reverse_task, text,
-    )
-    def exclude_named(match):
-        excluded.add("image-prompt-reverse" if match.group("reverse") else "gpt-image")
-        return " "
-    text = re.sub(
-        r"(?:(?:不要|不需要|不用|不使用|不调用|别|禁止)[^，,。.!！？?；;\n]{0,16}?"
-        r"|\b(?:do not|don't|dont|without|disable|skip|avoid|no)\b[^，,。.!！？?；;\n]{0,24}?)"
-        + r"(?:(?P<reverse>" + _REVERSE_NAME + r")|(?P<craft>" + _CRAFT_NAME + r"))",
-        exclude_named, text,
-    ).strip(" \t\r\n，,；;。.!?！？")
-    if re.search(
-        r"(?:不要|不需要|不用|不使用|不调用|别|禁止).{0,16}(?:技能|skills?)"
-        r"|\b(?:do not|don't|dont|without|disable|skip|avoid|no)\b.{0,24}\bskills?\b",
-        text,
-    ):
-        return []
-    selected = _task_skill(text, has_images)
-    model_rewrite = re.fullmatch(
-        r"(?:请|帮我)?(?:改成|改为|写成).{0,12}(?:适合|用于)\s*gpt[- ]?image\s*[\d.]*\s*(?:的)?(?:写法|版本|格式)[，。！!?\s]*",
-        text,
-    )
-    # A language/length follow-up derives from an existing prompt task. Do not
-    # reclassify arbitrary translation or database editing as image work.
-    if selected is None and isinstance(context_prompt, str) and len(text) <= 120 and (model_rewrite or re.fullmatch(
-        r"(?:(?:请|帮我|给我|再给我)?(?:把它|将它|改成|改为|翻译成|翻成|整理成|来|写|一个|一版|更|再|短|长|简短|详细|的|版本|版|一点|一些|中文|简体中文|英文|英语|双语|中英双语|提示词|prompt|\s)+"
-        r"|(?:please )?(?:make it|rewrite it|translate it|give me)(?: shorter| longer| detailed| concise| a| version| in| english| chinese| bilingual| prompt| please)+)[，。！!?\s]*",
-        text,
-    )) and _task_skill(context_prompt, True) is not None:
-        selected = "gpt-image", "composition"
-    if selected is None and isinstance(context_prompt, str) and re.fullmatch(
-        r"(?:(?:请|帮我|请帮我)?(?:继续(?:优化|修改|调整|生成)?|"
-        r"再(?:优化|调整|改进|改写|修改)|(?:按|照)刚才(?:的方案)?(?:继续)?|接着(?:改|做|生成))"
-        r"(?:一下|一点|吧|上面那段|刚才那段|这个)?|"
-        r"(?:please )?(?:continue|keep going|do that again|refine it|improve it|adjust it)"
-        r"(?: further| please| a little)?)[，。！!?\s]*",
-        text,
-    ):
-        # Do not inherit a task after an explicit topic change or an opt-out.
-        inherited = selected_skill_sections(context_prompt, has_images)
-        return [part for part in inherited if part["skill"] not in excluded]
-    if selected is None:
-        return []
-    skill, section = selected
-    selections = [(skill, section)]
-    if skill == "image-prompt-reverse" and re.search(
-        r"(?:再|然后|并|接着).{0,30}(?:优化|改写|润色|精简|编辑|gpt[- ]?image)"
-        r"|(?:使用|用|调用|采用).{0,12}gpt[- ]?image"
-        r"|\b(?:then|and)\b.{0,32}\b(?:optimi[sz]e|refine|rewrite|polish|gpt[- ]?image)\b",
-        text,
-    ):
-        selections.append(("gpt-image", "composition"))
-    return [read_agent_skill(name, chapter) for name, specific in selections if name not in excluded for chapter in ("overview", specific)]
 
 
 def skill_tool() -> dict:
@@ -347,3 +191,28 @@ def read_agent_skill(skill: str, section: str = "overview") -> dict:
         "license": record["license"],
         "content": _BOUNDARY + "\n\n" + record["sections"][section],
     }
+
+
+def validated_skill_preloads(rounds):
+    """Only server-recorded exact pinned bodies count as reusable guidance.
+
+    User text, attribution-only legacy records and stale/edited receipts never
+    count. Callers must not invoke this when professional workflows are off.
+    """
+    seen, result = set(), []
+    for row in rounds:
+        records = row.get('skillPreloads') or []
+        if not isinstance(records, list):
+            continue
+        for value in records[:12]:
+            if not isinstance(value, dict):
+                continue
+            try:
+                expected = read_agent_skill(value.get('skill'), value.get('section'))
+            except ValueError:
+                continue
+            key = (expected['skill'], expected['section'], expected['revision'])
+            if value == expected and key not in seen:
+                result.append(expected)
+                seen.add(key)
+    return result
