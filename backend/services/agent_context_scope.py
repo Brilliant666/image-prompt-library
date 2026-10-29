@@ -51,6 +51,9 @@ def choose_context(request, refs):
     # A numeric round address is a locator, not a natural-language classifier.
     # Keep every image of that exact authorized round if no slot is specified.
     numbers = {int(n) for n in re.findall(r'第\s*(\d+)\s*轮', current['prompt'])}
+    if numbers - {r['index'] for r in [*history, current]}:
+        from backend.services.agent_repository import AgentError
+        raise AgentError('reference_missing', '指定轮次不在当前授权分支中，请选择有效历史来源。', 400)
     numeric_rows = [r for r in history if r['index'] in numbers]
     chosen_ids = {r['id'] for r in rows} | {r['id'] for r in numeric_rows}
     assets = set(editing.all_input_ids(current))

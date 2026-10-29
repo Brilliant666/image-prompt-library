@@ -108,6 +108,16 @@ def test_selected_history_scope_excludes_unselected_ancestor_pixels(repo, monkey
     assert repo.data_url(other) not in json.dumps(sent)
 
 
+def test_numeric_round_locator_cannot_silently_ignore_missing_branch_source(repo, monkeypatch):
+    import pytest
+    from backend.services.agent_repository import AgentError
+    current = asset(repo, 'blue')
+    turn(repo, 'current', '参考第 99 轮的光线，修改这张图片。', assets=[current])
+    with pytest.raises(AgentError, match='当前授权分支') as missing:
+        capture_request(repo, monkeypatch, 'current')
+    assert missing.value.code == 'reference_missing'
+
+
 def test_genuine_legacy_request_retains_history_without_inventing_task_state(repo, monkeypatch):
     first, current = asset(repo, "red"), asset(repo, "blue")
     root = turn(repo, "first", "Legacy image requirement.", assets=[first])
