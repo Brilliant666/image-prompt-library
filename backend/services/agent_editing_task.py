@@ -156,6 +156,23 @@ def infer_task(repo, previous, *, conversation_id, parent_id, prompt, inputs, hi
     return value
 
 
+def execution_task(round_data):
+    """Bridge the frozen task's image bindings to the existing image executor.
+
+    Prompt-only discussion deliberately need not be an old editingTask. Its
+    bound target/auxiliaries nevertheless remain the recipe's exact inputs;
+    forgetting that envelope must never silently become text-to-image.
+    """
+    if round_data.get('editingTask') is not None:
+        return round_data['editingTask']
+    context = round_data.get('taskContext') or {}
+    target, auxiliaries = context.get('target'), context.get('auxiliaries', [])
+    if not target and not auxiliaries:
+        return None
+    return {'target': target, 'auxiliaries': auxiliaries,
+            'needsTargetSelection': not target or bool(context.get('unresolvedItems'))}
+
+
 def required_asset_ids(task):
     return list(dict.fromkeys(image['assetId'] for image in ([task['target']] if task and task.get('target') else []) +
                              (task.get('auxiliaries', []) if task else [])))

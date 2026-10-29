@@ -131,7 +131,7 @@ def create_image_job(repo, request_id, step, call_id, item_id, prompt, refs, *, 
         linked = conn.execute("SELECT job_id FROM agent_tool_jobs WHERE request_id=? AND step=? AND call_id=? AND item_id=?", (request_id, step, call_id, item_id)).fetchone()
     if linked:
         return repo.jobs.get_job(linked[0])
-    reference_ids = image_reference_ids(request['round'].get('editingTask'), prompt, refs,
+    reference_ids = image_reference_ids(editing.execution_task(request['round']), prompt, refs,
                                         reference_ids=reference_ids, native_context=native_context)
     parameters = dict(request["body"]["params"])
     parameters["input_images"] = [{"result_path": repo.asset(refs[ref])["path"], "name": ref} for ref in reference_ids]
@@ -596,7 +596,7 @@ def _execute_calls(repo, request_id, step, output, refs):
                 raise AgentError("budget_exhausted", "本批图片超过本轮剩余额度。")
             selection = arguments.get('referenceSelection')
             task = (editing.select_references(repo, request, selection, refs) if selection is not None
-                    else request['round'].get('editingTask'))
+                    else editing.execution_task(request['round']))
             # Preflight the whole batch before changing the branch selection or
             # creating its first job. Legacy calls without selection retain the
             # same unresolved-target protection as before.

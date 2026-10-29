@@ -128,7 +128,7 @@ def prepare_context(repo, request, refs=None, *, deduplicate_images=None):
     masked = bool(request['round'].get('maskImageId'))
     canonical, unique_assets, unique_pixels = {}, set(), set()
     occurrences = attached_count = duplicates = 0
-    task = request['round'].get('editingTask') or {}
+    task = editing.execution_task(request['round']) or {}
 
     def role_for(aid, ref_id):
         if aid == (task.get('target') or {}).get('assetId'):

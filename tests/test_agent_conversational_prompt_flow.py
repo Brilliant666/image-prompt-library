@@ -3,6 +3,7 @@ import base64
 import copy
 import json
 import httpx
+import pytest
 from scripts.preview_agent import synthetic_png
 from test_preview_agent import preview, submit, wait_request
 from test_agent_recipe_asset_cycle import capture_provider, multipart_value, wait_retry
@@ -12,11 +13,11 @@ EN = "  A blue block and orange sphere on ivory.\nKeep framing and natural side 
 SOFT = "  A blue block and orange sphere on ivory.\nKeep framing; use soft light.  \npreview-fail-once-conversational"
 
 
-def conversational_model(provider, monkeypatch):
+def conversational_model(provider, monkeypatch, *, soft_prompt=SOFT):
     original, captured = provider.handle, []
     answers = {"反推这张图": (ZH, "reverse", ("image-prompt-reverse", "analysis")),
                "改成英文": (EN, "prompt_optimization", ("gpt-image", "composition")),
-               "光线柔和一点，其他保持": (SOFT, "prompt_optimization", None)}
+               "光线柔和一点，其他保持": (soft_prompt, "prompt_optimization", None)}
     def handle(request):
         if not request.url.path.endswith("/responses"):
             return original(request)
@@ -233,3 +234,112 @@ def test_clicked_candidate_keeps_exact_source_instead_of_last_candidate_and_reje
     after = client.get("/api/agent/conversations/preview").json()
     assert after["revision"] == before["revision"] and after["taskContext"] == before["taskContext"]
     assert provider.counts["responses"] == 2 and provider.counts["images"] == 1
+
+
+
+@pytest.mark.parametrize("native", [False, True])
+def test_natural_generate_after_unselected_prompt_optimization_keeps_automatic_target_and_authorization(preview, monkeypatch, native):
+    client, provider, _, library = preview
+    from backend.services.agent_repository import AgentRepository
+    repo = AgentRepository(library)
+    if native:
+        config = client.get("/api/agent/config").json()
+        saved = client.put("/api/agent/config", json={"expectedRevision": config["revision"],
+            "config": {**config["config"], "apiConfigMode": "native"}})
+        assert saved.status_code == 200, saved.text
+    soft = SOFT.split("\npreview-fail-once-conversational")[0]
+    conversational_model(provider, monkeypatch, soft_prompt=soft)
+    previous_handler = provider.handle
+    def generate_without_ref_tags(request):
+        if not request.url.path.endswith("/responses"):
+            return previous_handler(request)
+        body = json.loads(request.read())
+        prompt, _, _ = provider.current_turn(body)
+        if prompt != "按刚才的版本生成":
+            return previous_handler(request)
+        with provider.lock:
+            provider.counts["responses"] += 1
+            number = provider.counts["responses"]
+        names = {tool.get("name") for tool in body.get("tools", [])}
+        native_tool = any(tool.get("type") == "image_generation" for tool in body.get("tools", []))
+        output = [{"id": f"natural-mode-{number}", "type": "message", "role": "assistant",
+                   "content": [{"type": "output_text", "text": "生图模式当前关闭；保留刚才的提示词。"}]}]
+        if native_tool:
+            output = [{"id": f"native-result-{number}", "type": "image_generation_call", "status": "completed",
+                       "result": base64.b64encode(synthetic_png(21)).decode(), "revised_prompt": soft}]
+        elif "generate_image_batch" in names:
+            output = [{"id": f"natural-tool-{number}", "call_id": f"natural-tool-{number}",
+                       "type": "function_call", "name": "generate_image_batch",
+                       "arguments": json.dumps({"images": [{"id": "one", "prompt": soft}],
+                                                "referenceSelection": None, "finish_after_generation": True})}]
+        elif "generate_image" in names:
+            output = [{"id": f"natural-tool-{number}", "call_id": f"natural-tool-{number}",
+                       "type": "function_call", "name": "generate_image",
+                       "arguments": json.dumps({"id": "one", "prompt": soft,
+                                                "referenceSelection": None, "finish_after_generation": True})}]
+        return httpx.Response(200, json={"id": f"natural-response-{number}", "status": "completed",
+                                        "model": "offline-conversational", "output": output})
+    monkeypatch.setattr(provider, "handle", generate_without_ref_tags)
+    calls = capture_provider(provider, monkeypatch)
+    raw = synthetic_png(20)
+    uploaded = client.post("/api/agent/uploads", files={"file": ("natural-current-target.png", raw, "image/png")})
+    assert uploaded.status_code == 200, uploaded.text
+    aid = uploaded.json()["uploadId"]
+    parent = None
+    for rid, prompt in [("natural-prompt-reverse", "反推这张图"),
+                        ("natural-prompt-english", "改成英文"),
+                        ("natural-prompt-soft", "光线柔和一点，其他保持")]:
+        submit(client, rid, prompt, parent=parent,
+               refs=[{"kind": "upload", "uploadId": aid}] if parent is None else [])
+        result = wait_request(client, rid)
+        assert result["request"]["state"] == "completed", result
+        parent = result["request"]["roundId"]
+    state = repo.request("natural-prompt-soft")["round"]["taskContext"]
+    assert state["taskType"] == "prompt_optimization" and state["target"]["assetId"] == aid
+    assert state["selectedPromptVersionId"] is None
+    assert next(p["text"] for p in state["promptVersions"] if p["id"] == state["workingPromptVersionId"]) == soft
+    assert provider.counts["responses"] == 5 and provider.counts["images"] == 0
+    assert not repo.request("natural-prompt-soft")["round"]["editingTask"]
+
+    submit(client, "natural-prompt-mode-off", "按刚才的版本生成", parent=parent)
+    off = wait_request(client, "natural-prompt-mode-off")
+    assert off["request"]["state"] == "completed" and off["request"]["usage"]["imageJobsCreated"] == 0
+    assert repo.request("natural-prompt-mode-off")["round"]["outputTaskIds"] == []
+    off_body = next(body for path, body in reversed(calls) if path == "/v1/responses")
+    assert not any(tool.get("name") in {"generate_image", "generate_image_batch"}
+                   or tool.get("type") == "image_generation" for tool in off_body["tools"])
+    assert provider.counts["responses"] == 6 and provider.counts["images"] == 0
+
+    submit(client, "natural-prompt-mode-on", "按刚才的版本生成",
+           parent=off["request"]["roundId"], images=True)
+    on = wait_request(client, "natural-prompt-mode-on")
+    assert on["request"]["state"] == "completed", on
+    row = repo.request("natural-prompt-mode-on")["round"]
+    assert row.get("kind") != "prompt_execution" and row["taskContext"]["selectedPromptVersionId"] is None
+    assert len(row["outputTaskIds"]) == 1 and on["request"]["usage"]["imageJobsCreated"] == 1
+    job = repo.jobs.get_job(row["outputTaskIds"][0])
+    assert job.prompt_text == soft
+    assert provider.counts["responses"] == 7
+    if native:
+        assert provider.counts["images"] == 0
+        on_body = next(body for path, body in reversed(calls) if path == "/v1/responses")
+        assert pixels(on_body) == [raw]
+        assert job.provider == "agent_native"
+        # Native receives its pixels in Responses, not a second Images POST.
+        # Its actual-wire snapshot is authoritative, rather than Images params.
+        bound = job.metadata["agent"]["nativeReferenceSnapshot"]
+        assert bound["complete"] and bound["count"] == 1
+        assert [entry["assetId"] for entry in bound["references"]] == [aid]
+        entry = bound["references"][0]
+        assert entry["sha256"] == repo.asset(aid)["sha256"]
+        assert (library / entry["path"]).read_bytes() == raw
+        assert entry["ref"] in row["contextDiagnostics"]["attachedRefs"]
+    else:
+        assert len(job.parameters["input_images"]) == 1
+        assert (library / job.parameters["input_images"][0]["result_path"]).read_bytes() == raw
+        assert provider.counts["images"] == 1
+        parts = next(value for path, value in reversed(calls) if path == "/v1/images/edits")
+        assert multipart_value(parts, "prompt").decode() == soft
+        assert [data for name, data in parts if name in {"image", "image[]"}] == [raw]
+        assert not any(path == "/v1/images/generations" for path, _ in calls)
+    assert provider.counts["blocked"] == 0

@@ -49,7 +49,7 @@ def tools_for(request, mask_url=None):
             tools.append(function_tool("generate_image", "Generate one image. Include exact <ref id=\"...\" /> tags in prompt for referenced images.",
                                        {**fields, "referenceSelection": selection, "finish_after_generation": finish},
                                        ["id", "prompt", "referenceSelection", "finish_after_generation"]))
-        elif not (request['round'].get('editingTask') or {}).get('needsTargetSelection'):
+        elif not (editing.execution_task(request['round']) or {}).get('needsTargetSelection'):
             # Unlike local function calls, a native tool may run upstream before
             # we can validate a new selection. Keep its unresolved-target gate.
             image_tool = {"type": "image_generation", "action": "auto", **native_image_parameters(params), "partial_images": config["partialImages"]}

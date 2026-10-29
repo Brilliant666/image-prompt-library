@@ -92,6 +92,46 @@ test('closing or switching away detaches an active stream and does not mutate th
   assert.equal(h.timers.size, 0);
 });
 
+test('production run-state refreshes task and branch conflicts with GET only while preserving draft and unknown-result journaling', async () => {
+  const compileHook = async path => ts.transpileModule(await readFile(new URL(path, import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+  const hookCode = await compileHook('../frontend/src/components/agent/useAgentRunState.ts');
+  const submissionCode = await compileHook('../frontend/src/utils/playground/agentSubmission.ts');
+  const blocksCode = await compileHook('../frontend/src/utils/playground/agentAssistantBlocks.ts');
+  const evaluate = (code, deps, globals = {}) => { const module = { exports: {} }; new Function('require', 'module', 'exports', ...Object.keys(globals), code)(name => { assert.ok(name in deps, `unmocked dependency ${name}`); return deps[name]; }, module, module.exports, ...Object.values(globals)); return module.exports; };
+  for (const failure of ['revision_conflict', 'task_revision_conflict', 'task_branch_conflict', 'unknown_network']) {
+    const slots = [], effects = [], posts = [], reads = [], accepted = [];
+    const rawDraft = JSON.stringify({ conversation: { text: '  保留新草稿\r\n', refs: [{ reference: { kind: 'upload', uploadId: 'draft-image' }, label: '图', url: '/image.png' }] } });
+    const storage = new Map([['ipl.agent.active-conversation', 'conversation'], ['ipl.agent.drafts.v1', rawDraft]]);
+    const globals = { localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) }, window: { addEventListener() {}, removeEventListener() {} } };
+    let cursor = 0, dirty = false, current;
+    const hooks = {
+      useState(value) { const index = cursor++; if (!(index in slots)) slots[index] = typeof value === 'function' ? value() : value; return [slots[index], next => { slots[index] = typeof next === 'function' ? next(slots[index]) : next; dirty = true; }]; },
+      useRef(value) { const index = cursor++; return slots[index] ||= { current: value }; },
+      useEffect(effect, deps) { const index = cursor++, old = slots[index]; if (!old || deps.some((value, offset) => !Object.is(value, old.deps[offset]))) { slots[index] = { deps }; effects.push(() => { old?.cleanup?.(); slots[index].cleanup = effect(); }); } },
+      useCallback(fn, deps) { const index = cursor++, old = slots[index]; if (!old || deps.some((value, offset) => !Object.is(value, old.deps[offset]))) slots[index] = { value: fn, deps }; return slots[index].value; },
+    };
+    class AgentApiError extends Error { constructor(status, code, message) { super(message); this.status = status; this.code = code; } }
+    const initial = snapshot(1, 'completed'), latest = { ...snapshot(20, 'completed'), taskContext: { taskId: 'updated-task', revision: 7 } };
+    const api = { conversation: async id => { reads.push(id); return reads.length === 1 ? initial : latest; }, submit: async (id, payload) => { posts.push({ id, payload }); if (failure === 'unknown_network') throw new TypeError('lost response'); throw new AgentApiError(409, failure, 'internal revision 19: 重新读取任务状态'); } };
+    const submission = evaluate(submissionCode, {}, globals), blocks = evaluate(blocksCode, {});
+    const { useAgentRunState } = evaluate(hookCode, { react: hooks, '../../api/agentClient': { AgentApiError, agentApi: api, watchAgentRequest: () => { throw Error('completed requests must not attach a stream'); } }, '../../utils/playground/agentAssistantBlocks': blocks, '../../utils/playground/agentSubmission': submission, '../../utils/localPreferences': { readLocalPreferences: () => ({}) } }, globals);
+    const render = () => { cursor = 0; dirty = false; current = useAgentRunState({ active: true, useStream: false, onSummary() {}, onAccepted: entry => accepted.push(entry), onSelection() {} }); effects.splice(0).forEach(effect => effect()); };
+    const flush = async () => { for (let index = 0; index < 25; index++) { if (dirty) render(); await Promise.resolve(); } };
+    render(); await flush(); assert.equal(current.current.revision, 1);
+    const payload = { requestId: `frozen-${failure}`, expectedRevision: 1, parentRoundId: 'round', prompt: '  Exact request\r\n', refs: [{ kind: 'upload', uploadId: 'request-image' }], params: { size: 'auto', quality: 'auto' }, origin: 'send', authorization: { scope: 'this_request', allowImageGeneration: false, allowWebSearch: false, maxImageJobs: 0, maxToolRounds: 5 } };
+    await current.submitPrepared(async () => ({ entry: { conversationId: 'conversation', payload }, boundary: { conversationId: 'conversation', draft: 0, authorization: { images: 0, search: 0 } } })); await flush();
+    assert.equal(posts.length, 1); assert.deepEqual(posts[0], { id: 'conversation', payload }); assert.deepEqual(accepted, []); assert.equal(storage.get('ipl.agent.drafts.v1'), rawDraft);
+    if (failure === 'unknown_network') {
+      assert.equal(reads.length, 1); assert.equal(current.current.revision, 1); assert.equal(current.pending.length, 1);
+      assert.deepEqual(current.pending[0].payload, payload); assert.match(current.error, /提交结果不确定/);
+    } else {
+      assert.equal(reads.length, 2); assert.deepEqual(reads, ['conversation', 'conversation']); assert.equal(current.current.revision, 20); assert.equal(current.current.taskContext.taskId, 'updated-task'); assert.equal(current.pending.length, 0);
+      assert.match(current.error, /已尝试读取最新状态/); assert.match(current.error, /草稿与附件保留/); assert.doesNotMatch(current.error, /revision|重新读取任务状态|task_branch|task_revision/);
+    }
+    slots.forEach(slot => slot?.cleanup?.());
+  }
+});
+
 
 test('bounded patches preserve history, append UTF-16 text once and close on persisted terminal truth', () => {
   const h = harness(), value = initial(5, 'Hi😀');

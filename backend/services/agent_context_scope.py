@@ -63,7 +63,15 @@ def choose_context(request, refs):
     assets = set(editing.all_input_ids(current))
     if reference:
         assets.update(reference[1])
-    if task and task.get('taskType') not in {'prompt', 'prompt_optimization'}:
+    authorization = request.get('body', {}).get('authorization', {})
+    native_generation = (request.get('frozen', {}).get('apiConfigMode') in {'native', 'off'}
+                         and authorization.get('allowImageGeneration')
+                         and request.get('usage', {}).get('imageJobsCreated', 0) < authorization.get('maxImageJobs', 0))
+    if task and (task.get('taskType') not in {'prompt', 'prompt_optimization'} or native_generation):
+        # A native image tool consumes this very Responses input. Attach the
+        # current bound recipe pixels before granting that tool, even when its
+        # preceding discussion was text-only. Hybrid execution binds the same
+        # frozen inputs locally; ordinary prompt iteration remains pixel-free.
         assets.update(image['assetId'] for image in ([task['target']] if task.get('target') else []) + task.get('auxiliaries', []))
     for name in ('maskTargetImageId', 'maskImageId'):
         if current.get(name):

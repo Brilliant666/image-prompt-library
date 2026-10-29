@@ -35,6 +35,16 @@ or visual evidence prevent submission. Ordinary unreconciled text additions do
 not block an explicitly confirmed complete recipe; they remain in chat history.
 The selected text is the execution text, not a summary of those additions.
 
+Ordinary conversational generation remains available: with image mode enabled,
+"generate the previous version" follows the normal Agent tool flow. Its default
+references come from the frozen task's bound target and auxiliaries even after
+the discussion became a Prompt-optimization task. Omitting reference tags must
+not silently turn that bound image recipe into text-to-image. Explicit tool
+reference selections remain validated and authoritative. For Native, an
+authorized request carries the bound current-task pixels through Responses;
+it cannot claim a reference was supplied merely because a local ID exists.
+Unauthorised text-only Prompt iterations retain their narrower pixel scope.
+
 Image parameters follow the existing Agent/Gallery controls. A direct operation
 freezes profile/model, size, quality, format, background, compression (including
 zero), count, original image hashes and order, task version, Prompt version and

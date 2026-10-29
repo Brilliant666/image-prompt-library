@@ -224,7 +224,7 @@ export function useAgentRunState(options: Options) {
       return command.current() ? value : undefined;
     } catch (reason) {
       if (rejected(reason)) { clearPendingAgentSubmission(localStorage, entry.payload.requestId); refreshPending(); delete boundaries.current[entry.payload.requestId]; starts.current.delete(entry.payload.requestId); }
-      if (reason instanceof AgentApiError && reason.code === 'revision_conflict' && command.current()) {
+      if (reason instanceof AgentApiError && ['revision_conflict', 'task_revision_conflict', 'task_branch_conflict'].includes(reason.code) && command.current()) {
         try {
           const latest = await agentApi.conversation(entry.conversationId);
           if (command.current() && latest.conversation.id === entry.conversationId) applySnapshot(latest);

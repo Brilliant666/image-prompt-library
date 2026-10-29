@@ -223,3 +223,94 @@ def test_inline_selection_receipt_recovery_reuses_already_completed_image_job(re
     assert request['round']['outputTaskIds'] == first_job_ids and actual_dispatches == first_job_ids
     assert request['usage']['imageJobsCreated'] == 1
     assert len([item for item in request['round']['responseOutput'] if item.get('call_id') == 'edit-call']) == 1
+
+
+@pytest.mark.parametrize('mode', ['hybrid', 'native'])
+def test_prompt_only_task_keeps_bound_target_and_auxiliary_for_authorized_generation(isolated, monkeypatch, mode):
+    from pathlib import Path
+    with application(isolated, monkeypatch, mode=mode) as (client, calls, replies):
+        ended = upload(client, 'green')
+        submit(client, isolated, 'Analyze this unrelated image', refs=[ended], rid='ended')
+        references = [upload(client, color) for color in ('red', 'blue')]
+        current, _ = submit(client, isolated, 'New task: compare these two pictures',
+                            refs=references, rid='compare')
+        candidate = '  EXACT_WORKING_PROMPT\nKeep composition and use the lighting reference.  '
+        patched = client.patch('/api/agent/conversations/conv/task-context', json={
+            'expectedRevision': current['revision'],
+            'branchRoundId': current['conversation']['activeRoundId'],
+            'taskRevision': current['taskContext']['revision'],
+            'operations': [
+                {'op': 'set_target', 'ref': references[0]},
+                {'op': 'set_auxiliaries', 'auxiliaries': [{'ref': references[1], 'role': 'lighting'}]},
+                {'op': 'set_task_type', 'taskType': 'prompt_optimization'},
+                {'op': 'set_prompt', 'text': candidate, 'kind': 'candidate'}]})
+        assert patched.status_code == 200, patched.text
+        snapshot = patched.json()
+        assert snapshot['editingTask'] is None
+        assert snapshot['taskContext']['selectedPromptVersionId'] is None
+        off, _ = submit(client, isolated, 'Use the current version to generate', rid='off')
+        assert off['request']['state'] == 'completed' and off['jobs'] == []
+        assert pixels(calls[-1][1]) == []
+        assert not any(t.get('type') == 'image_generation' or t.get('name') in
+                       {'generate_image', 'generate_image_batch'} for t in calls[-1][1]['tools'])
+        replies.append(image_call(None, prompt=candidate) if mode == 'hybrid' else image_reply('native'))
+        before = len(calls)
+        result, _ = submit(client, isolated, 'Use the current version to generate',
+                           images=True, rid='generate')
+        assert result['request']['state'] == 'completed', result['request']
+        assert result['taskContext']['selectedPromptVersionId'] is None
+        assert len(result['jobs']) == 1
+        job = result['jobs'][0]
+        assert job['status'] == 'succeeded' and job['mode'] == 'image_edit'
+        if mode == 'hybrid':
+            assert job['prompt_text'] == candidate
+        assert [Path(isolated / entry['result_path']).read_bytes() for entry in job['parameters']['input_images']] == [
+            image_bytes('red'), image_bytes('blue')]
+        new_calls = calls[before:]
+        if mode == 'hybrid':
+            assert [path for path, _ in new_calls] == ['/v1/responses', '/v1/images/edits']
+            assert pixels(new_calls[0][1]) == []
+            assert image_bytes('red') in new_calls[1][1] and image_bytes('blue') in new_calls[1][1]
+        else:
+            assert [path for path, _ in new_calls] == ['/v1/responses']
+            repository = AgentRepository(isolated)
+            task_text = next(part['text'] for item in new_calls[0][1]['input']
+                             for part in item.get('content', [])
+                             if part.get('text', '').startswith('Current creative task'))
+            task_data = json.loads(task_text.partition('): ')[2])
+            working = next(p for p in task_data['promptVersions'] if p['id'] == task_data['workingPromptVersionId'])
+            assert working['text'] == candidate and working['confirmedBy'] is None
+            assert pixels(new_calls[0][1]) == [repository.data_url(ref['uploadId']) for ref in references]
+            bound = job['metadata']['agent']['nativeReferenceSnapshot']
+            assert bound['complete'] and bound['count'] == 2
+            assert [item['assetId'] for item in bound['references']] == [ref['uploadId'] for ref in references]
+            assert repository.data_url(ended['uploadId']) not in json.dumps(new_calls[0][1])
+
+
+@pytest.mark.parametrize('problem', ['missing_frozen_ref', 'unresolved_roles'])
+def test_prompt_task_execution_bridge_preserves_reference_preflight_guards(repo, problem):
+    image = store_image(repo, 'blue')
+    first = turn(repo, 'first', 'Reverse this image', [{'kind': 'upload', 'uploadId': image}])
+    state = first['round']['taskContext']
+    repo.update_task_context('first', {
+        'taskId': state['taskId'], 'taskRevision': state['revision'],
+        'branchRoundId': first['round_id'], 'operations': [
+            {'op': 'set_task_type', 'taskType': 'prompt_optimization'},
+            {'op': 'set_prompt', 'text': 'Bound candidate', 'kind': 'candidate'}]}, {})
+    done(repo, 'first')
+    current = turn(repo, 'next', 'Generate the current version', parent=first['round_id'])
+    assert current['round']['editingTask'] is None
+    refs = execution.refs_for_request(repo, current)
+    if problem == 'missing_frozen_ref':
+        refs = {}
+    else:
+        state = current['round']['taskContext']
+        repo.update_task_context('next', {
+            'taskId': state['taskId'], 'taskRevision': state['revision'],
+            'branchRoundId': current['round_id'],
+            'operations': [{'op': 'set_unresolved', 'items': ['The editing objects are ambiguous.']}]}, refs)
+    with pytest.raises(AgentError) as failure:
+        execution.create_image_job(repo, 'next', 1, 'call', 'single', 'Bound candidate without tags', refs)
+    assert failure.value.code == ('reference_missing' if problem == 'missing_frozen_ref' else 'editing_target_required')
+    assert repo.request('next')['usage']['imageJobsCreated'] == 0
+    assert repo.request('next')['round']['outputTaskIds'] == []
