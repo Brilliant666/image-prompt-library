@@ -159,6 +159,12 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
   const selectedHistory = draft.historyRoundIds || [];
   const selectedPrompt = taskContext?.promptVersions.find(version => version.id === taskContext.selectedPromptVersionId);
   const promptVersionIndex = selectedPrompt ? taskContext!.promptVersions.indexOf(selectedPrompt) + 1 : 0;
+  const promptSourceRoundId = selectedPrompt?.source.roundId;
+  const promptSourceRound = promptSourceRoundId ? current?.conversation.rounds.find(round => round.id === promptSourceRoundId) : undefined;
+  const promptSourceActiveIndex = rounds.findIndex(round => round.id === promptSourceRoundId);
+  const promptSourceLocation = !promptSourceRoundId ? '' : !promptSourceRound ? '历史来源不可定位'
+    : promptSourceActiveIndex >= 0 ? `第 ${promptSourceActiveIndex + 1} 轮`
+      : Number.isSafeInteger(promptSourceRound.index) && promptSourceRound.index > 0 ? `历史分支第 ${promptSourceRound.index} 轮` : '历史来源不可定位';
   const replacingTaskTarget = !taskContext?.targetExplicit && draft.refs.length === 1 && taskContext?.target && referenceKey(draft.refs[0].reference) !== referenceKey(taskContext.target.source);
   const taskImages = [taskContext?.target, ...(taskContext?.auxiliaries || [])].filter((value): value is NonNullable<typeof value> => Boolean(value));
   const previewRefs = resolveAgentPromptImageReferences(draft.text, rounds, new Set((current?.jobs || []).filter(job => job.result_path && ['succeeded', 'accepted'].includes(job.status)).map(job => job.id)), draft.refs.map(choice => choice.reference)).refs;
@@ -871,7 +877,7 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
               {taskContext.latestUserAddition?.text && <p className="agent-task-addition">最近补充：{taskContext.latestUserAddition.text}</p>}
               {taskContext.unresolvedItems.length > 0 && <p className="agent-context-warning">待确认：{taskContext.unresolvedItems.join('；')}</p>}
               {taskContext.historyDependencies.length > 0 && <p className="agent-context-warning">回退历史的原因：{taskContext.historyDependencies.map(item => taskHistoryReasonText[item.reason] || item.reason).join('；')}</p>}
-              {selectedPrompt && <><p className="agent-help">当前 Prompt v{promptVersionIndex} · 来源：{selectedPrompt.source.kind === 'model' ? 'Agent 回答，由你明确选择' : selectedPrompt.source.kind === 'legacy' ? '旧记录' : '你的原文'}{selectedPrompt.source.roundId ? ` · 第 ${rounds.findIndex(round => round.id === selectedPrompt.source.roundId) + 1} 轮` : ''}</p><pre className="agent-task-prompt">{selectedPrompt.text}</pre></>}
+              {selectedPrompt && <><p className="agent-help">当前 Prompt v{promptVersionIndex} · 来源：{selectedPrompt.source.kind === 'model' ? 'Agent 回答，由你明确选择' : selectedPrompt.source.kind === 'legacy' ? '旧记录' : '你的原文'}{promptSourceLocation ? ` · ${promptSourceLocation}` : ''}</p><pre className="agent-task-prompt">{selectedPrompt.text}</pre></>}
               {selectedPrompt && <section className="agent-prompt-execution" aria-label="选定提示词操作">
                 <p>本次图片参数：{imageCount} 张 · {directModelLabel} · {directSizeUnavailable ? '尺寸待确认' : directParams.size} · {directParams.quality} · {directParams.output_format} · {directParams.background || 'auto'}{typeof directParams.output_compression === 'number' ? ` · 压缩 ${directParams.output_compression}` : ''}</p>
                 <p>配方参考图 {directImages.length} 张，按以下角色与顺序使用：</p>

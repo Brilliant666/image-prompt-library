@@ -119,6 +119,25 @@ test('explicit production Prompt callback keeps exact source; restoring and rese
   assert.ok(h.nodes().some(node => node.type === 'img' && node.props.src === 'http://isolated.test/draft.png')); assert.equal(h.submissions.length, 0);
 });
 
+test('a derived root displays the selected Prompt source from its historical branch without changing the raw text', async t => {
+  const original = snapshot(), derived = { ...round('new-root'), derivedFromRoundId: 'r1' };
+  const value = { ...original, conversation: { ...original.conversation, activeRoundId: derived.id, rounds: [...original.conversation.rounds, derived] }, taskContext: { ...original.taskContext, branchRoundId: derived.id } };
+  const h = harness(t, { snapshot: value }); await h.flush();
+  assert.match(h.text(), /来源：Agent 回答，由你明确选择 · 历史分支第 1 轮/);
+  assert.doesNotMatch(h.text(), /第 0 轮/);
+  assert.equal(h.nodes().find(node => node.type === 'pre' && node.props.className === 'agent-task-prompt').props.children, pickedPrompt);
+  assert.equal(h.mutations.length, 0); assert.equal(h.submissions.length, 0);
+});
+
+test('a deleted Prompt source stays explicitly unlocatable rather than borrowing the current branch position', async t => {
+  const original = snapshot(), derived = { ...round('new-root'), derivedFromRoundId: 'r1' };
+  const h = harness(t, { snapshot: { ...original, conversation: { ...original.conversation, activeRoundId: derived.id, rounds: [derived] }, taskContext: { ...original.taskContext, branchRoundId: derived.id } } }); await h.flush();
+  assert.match(h.text(), /来源：Agent 回答，由你明确选择 · 历史来源不可定位/);
+  assert.doesNotMatch(h.text(), /第 0 轮|历史分支第 1 轮/);
+  assert.equal(h.nodes().find(node => node.type === 'pre' && node.props.className === 'agent-task-prompt').props.children, pickedPrompt);
+  assert.equal(h.mutations.length, 0); assert.equal(h.submissions.length, 0);
+});
+
 test('production task CAS conflict reads the latest state without replaying a mutation or replacing draft attachments', async t => {
   const h = harness(t); await h.flush();
   h.node('button', '重置当前任务').onClick(); await h.flush();
