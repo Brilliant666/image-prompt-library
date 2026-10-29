@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 import httpx
 import pytest
 
-from scripts.preview_agent import main, preview_session, PROMPT_MARKERS, prompt_candidate
+from scripts.preview_agent import main, preview_session, PROMPT_MARKERS, REVERSE_PROMPT, prompt_candidate
 
 
 @pytest.fixture
@@ -277,6 +277,31 @@ def test_native_and_unknown_are_real_terminal_receipts(preview):
     counts = provider.counts.copy()
     client.get("/api/agent/requests/unknown")
     assert provider.counts == counts
+
+
+def test_natural_generate_uses_normal_authorized_agent_path_not_a_required_button(preview):
+    client, provider, seeds, library = preview
+    from backend.services.agent_repository import AgentRepository
+    submit(client, "natural-reverse", "反推这张图", refs=[{"kind": "upload", "uploadId": seeds["images"][0]["uploadId"]}])
+    first = wait_request(client, "natural-reverse")
+    repo = AgentRepository(library)
+    original = repo.request("natural-reverse")["round"]["taskContext"]
+    assert original['target']['assetId'] == seeds['images'][0]['uploadId']
+    assert original['selectedPromptVersionId'] is None
+    submit(client, "natural-off", "按刚才的版本生成", parent=first["request"]["roundId"])
+    off = wait_request(client, "natural-off")
+    assert "生图模式当前关闭" in repo.request('natural-off')['round']['assistantContent']
+    assert provider.counts['images'] == 0
+    submit(client, "natural-on", "按刚才的版本生成", parent=off["request"]["roundId"], images=True)
+    result = wait_request(client, "natural-on")
+    assert result['request']['state'] == 'completed', result
+    saved = repo.request('natural-on')['round']
+    assert saved.get('kind') != 'prompt_execution'
+    assert len(saved['outputTaskIds']) == provider.counts['images'] == 1
+    job = repo.jobs.get_job(saved['outputTaskIds'][0])
+    assert REVERSE_PROMPT in job.prompt_text
+    assert job.parameters['input_images']
+    assert repo.request('natural-on')['round']['taskContext']['selectedPromptVersionId'] is None
 
 
 def test_slow_stream_can_be_stopped_without_another_post(preview):

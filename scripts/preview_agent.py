@@ -43,11 +43,16 @@ OPTIMIZED_PROMPT = ("  A natural still-life photograph of a blue rectangular blo
                     "soft side lighting, and gentle shadows. No lettering.  ")
 
 
-def prompt_candidate(prompt):
+def prompt_candidate(prompt, task=None):
     """Explicit preview-only controls; never used by production task selection."""
+    versions = (task or {}).get('promptVersions', [])
+    working = next((item['text'] for item in versions if item['id'] == (task or {}).get('workingPromptVersionId')), '')
     english = (PROMPT_MARKERS["optimize"] in prompt or PROMPT_MARKERS["reverse"] not in prompt
-               and bool(re.search(r"英文|继续优化|\benglish\b", prompt, re.I)))
+               and bool(re.search(r"英文|继续优化|\benglish\b", prompt, re.I))
+               or bool(re.search(r'柔和|缩短', prompt)) and working.lstrip().startswith('A natural'))
     text = OPTIMIZED_PROMPT if english else REVERSE_PROMPT
+    if '柔和' in prompt:
+        text = text.replace('soft side lighting', 'softer, diffused side lighting') if english else text.replace('自然侧光', '更柔和的漫射侧光')
     if PROMPT_MARKERS["failure_once"] in prompt:
         text += "\npreview-fail-once-recipe"
     elif marker := re.search(r"\bpreview-fail-once-[a-zA-Z0-9_-]+", prompt):
@@ -175,10 +180,21 @@ class PreviewProvider:
         match = re.search(r"\[preview:([a-z]+)\]", prompt)
         scenario = (match[1] if match and match[1] in SCENARIOS else "text") if match else (
             "prompt" if "[preview:prompt]" in all_input else "text")
+        # Natural phrases below drive only deterministic offline browser fixtures.
+        # They are not imported by production intent/context routing.
+        if not match and re.search(r'反推这张图|改成英文|光线柔和一点|缩短一点', prompt):
+            scenario = 'prompt'
+        natural_generate = not match and '按刚才的版本生成' in prompt
+        if natural_generate:
+            scenario = 'image'
         names = {tool.get("name") for tool in body.get("tools", [])}
         native = any(tool.get("type") == "image_generation" for tool in body.get("tools", []))
         replied = any(item.get("type") == "function_call_output" for item in followups)
         image_text = "合成几何图形，保持主体，调整背景。"
+        if natural_generate:
+            current_task = self.task_context(body) or {}
+            image_text = next((version['text'] for version in current_task.get('promptVersions', [])
+                               if version['id'] == current_task.get('workingPromptVersionId')), image_text)
         refs = re.findall(r'<ref id="([^"]+)"', all_input.replace('\\"', '"'))
         explicit = re.findall(r'<ref id="([^"]+)"', prompt)
         # Current task references and freshly attached inputs remain real IDs.
@@ -190,7 +206,7 @@ class PreviewProvider:
         output = []
         message = {"id": f"preview-message-{number}", "type": "message", "role": "assistant",
                    "content": [{"type": "output_text", "text": "这是离线合成预览。文字、工具回执和图片经过真实保存链路。"}]}
-        candidate, prompt_skill = prompt_candidate(prompt) if scenario == "prompt" else (None, None)
+        candidate, prompt_skill = prompt_candidate(prompt, self.task_context(body)) if scenario == "prompt" else (None, None)
         if (scenario == "prompt" and "read_agent_skill" in names
                 and not self.skill_completed(followups, *prompt_skill)):
             output = [{"id": f"preview-skill-{number}", "call_id": f"preview-skill-{number}", "type": "function_call",
@@ -199,7 +215,7 @@ class PreviewProvider:
             english = prompt_skill[0] == "gpt-image"
             receipt = (f"已通过真实 read_agent_skill 回执读取 {prompt_skill[0]} / {prompt_skill[1]}。\n\n"
                        if self.skill_completed(followups, *prompt_skill) else "专业工作流已关闭；以下为普通离线候选。\n\n")
-            message["content"][0]["text"] = receipt + ("英文优化候选：" if english else "依据参考图推导的中文候选，并非图片的原始 Prompt：") + f"\n\n```prompt\n{candidate}\n```\n\n可明确选择此代码块，再决定继续优化或直接生成。"
+            message["content"][0]["text"] = receipt + ("英文优化候选：" if english else "依据参考图推导的中文候选，并非图片的原始 Prompt：") + f"\n\n```prompt\n{candidate}\n```\n\n你可以继续提出修改要求，或使用这份提示词生成图片。"
             output = [message]
             task = self.task_context(body)
             if "update_task_context" in names and task:
@@ -210,7 +226,8 @@ class PreviewProvider:
                     "type": "function_call", "name": "update_task_context", "arguments": json.dumps({
                         "taskId": task["taskId"], "taskRevision": task["revision"], "branchRoundId": task["branchRoundId"],
                         "operations": [operation("set_task_type", taskType="prompt_optimization" if english else "reverse"),
-                                       operation("set_prompt", text=candidate, kind="candidate")]}, ensure_ascii=False)})
+                                       operation("set_prompt", text=candidate, kind="candidate"),
+                                       *([operation("add_constraint", text='使用更柔和的光线，其他内容保持', sourceQuote=prompt)] if '光线柔和一点' in prompt else [])]}, ensure_ascii=False)})
         elif scenario == "skill" and "read_agent_skill" in names and not replied:
             output = [{"id": f"preview-skill-{number}", "call_id": f"preview-skill-{number}", "type": "function_call",
                        "name": "read_agent_skill", "arguments": json.dumps({"skill": "gpt-image", "section": "editing"})}]
@@ -233,7 +250,7 @@ class PreviewProvider:
             if scenario == "skill" and replied:
                 message["content"][0]["text"] = "已通过真实 read_agent_skill 回执读取 editing 章节。保留主体与构图，仅改变背景。"
             elif scenario in {"image", "edit", "native", "batch", "partial"} and not replied:
-                message["content"][0]["text"] = "本轮未提供对应生图工具。请在预览的生图模式和 Native/Hybrid 配置中选择后重试。"
+                message["content"][0]["text"] = "生图模式当前关闭；可以开启后发送生成要求，或点击提示词旁的“生成图片”。" if natural_generate else "本轮未提供对应生图工具。请在预览的生图模式和 Native/Hybrid 配置中选择后重试。"
             output = [message]
 
         payload = {"id": f"preview-response-{number}", "status": "completed", "model": "offline-preview", "output": output}

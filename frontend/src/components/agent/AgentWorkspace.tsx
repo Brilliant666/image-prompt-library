@@ -4,7 +4,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { ArrowDown, ArrowUp, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, Download, ImagePlus, Info, LoaderCircle, MessageSquare, PanelLeftClose, PanelLeftOpen, Pencil, Plus, RotateCcw, Search, SlidersHorizontal, Square, Trash2, X } from 'lucide-react';
+import { ArrowDown, ArrowUp, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, Download, ImagePlus, Info, LoaderCircle, MessageSquare, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, Plus, RotateCcw, Search, SlidersHorizontal, Square, Trash2, X } from 'lucide-react';
 import { useModalFocus } from '../../hooks/useModalFocus';
 import { AgentMarkdown } from './AgentMarkdown';
 import { useAgentConversations } from './useAgentConversations';
@@ -43,7 +43,11 @@ export interface AgentWorkspaceProps {
   onGalleryImageSettingsChange?: (settings: GalleryImageSettings) => void;
 }
 type Draft = AgentDraft;
-type AgentPanel = 'model' | 'add' | 'options' | 'mentions' | 'details';
+type AgentPanel = 'model' | 'add' | 'options' | 'mentions' | 'details' | 'context' | 'recipe';
+type PromptChoice = {
+  text: string; source: { kind: 'model'; roundId: string; messageId?: string }; sourceId: string;
+  confirmationBoundary?: { conversationId: string; conversationRevision: number; taskId: string | null; taskRevision: number | null; branchRoundId: string | null };
+};
 const emptyDraft = (): Draft => ({ text: '', refs: [], params: { size: 'auto', quality: 'auto', background: 'auto', output_format: 'png' }, editId: null, origin: 'send' });
 const statusText: Record<string, string> = { queued: '等待执行', running: '正在响应', waiting_for_jobs: '等待图片任务', stop_requested: '正在停止后续调用', completed: '已完成', stopped: '已停止后续调用', failed: '执行失败', interrupted: '执行已中断', unknown: '上游结果未知', succeeded: '已生成', accepted: '已收录', discarded: '已清理', cancelled: '已取消', pending: '等待执行' };
 const taskTypeText: Record<string, string> = { chat: '连续对话', image_edit: '图片编辑', image_generation: '图片生成', prompt: '提示词创作', analysis: '图片分析', reverse: '提示词反推', prompt_optimization: '提示词优化' };
@@ -87,7 +91,6 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
   const [handoffBusy, setHandoffBusy] = useState(false);
   const [sizeOpen, setSizeOpen] = useState(false);
   const [referenceGeometry, setReferenceGeometry] = useState<{url:string;size?:{width:number;height:number};status:'loading'|'ready'|'error'}>();
-  const [directGeometry, setDirectGeometry] = useState<{url:string;size?:{width:number;height:number};status:'loading'|'ready'|'error'}>();
   const [promptExecutions, setPromptExecutions] = useState(() => readPendingPromptExecutions(localStorage));
   const promptExecutionAlive = useRef(true);
   const directPostLock = useRef(false);
@@ -100,6 +103,7 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
   const [picker, setPicker] = useState(false);
   const [targetPicker, setTargetPicker] = useState(false);
   const [panel, setPanel] = useState<AgentPanel | null>(null);
+  const [recipeChoice, setRecipeChoice] = useState<PromptChoice | null>(null);
   const [inlineMentions, setInlineMentions] = useState(false);
   const [detailRoundId, setDetailRoundId] = useState<string | null>(null);
   const [panelPosition, setPanelPosition] = useState<{ left: number; top?: number; bottom?: number; maxHeight: number }>({ left: 12, top: 64, maxHeight: 440 });
@@ -155,18 +159,21 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
   const detailRound = current?.conversation.rounds.find(round => round.id === detailRoundId);
   const detailRequest = current?.request?.id === detailRound?.requestId ? current?.request : null;
   const taskContext = current?.taskContext;
-  const contextScope = draft.contextScope || 'task';
+  const overrideMatchesTask = !draft.contextOverrideFor || draft.contextOverrideFor.taskId === (taskContext?.taskId || null) && draft.contextOverrideFor.branchRoundId === (current?.conversation.activeRoundId || null);
+  const contextScope = overrideMatchesTask ? draft.contextScope || 'task' : 'task';
   const selectedHistory = draft.historyRoundIds || [];
-  const selectedPrompt = taskContext?.promptVersions.find(version => version.id === taskContext.selectedPromptVersionId);
+  const selectedPrompt = panel === 'context' ? taskContext?.promptVersions.find(version => version.id === taskContext.selectedPromptVersionId) : undefined;
   const promptVersionIndex = selectedPrompt ? taskContext!.promptVersions.indexOf(selectedPrompt) + 1 : 0;
   const promptSourceRoundId = selectedPrompt?.source.roundId;
   const promptSourceRound = promptSourceRoundId ? current?.conversation.rounds.find(round => round.id === promptSourceRoundId) : undefined;
-  const promptSourceActiveIndex = rounds.findIndex(round => round.id === promptSourceRoundId);
+  const promptSourceActiveIndex = promptSourceRoundId ? rounds.findIndex(round => round.id === promptSourceRoundId) : -1;
   const promptSourceLocation = !promptSourceRoundId ? '' : !promptSourceRound ? '历史来源不可定位'
     : promptSourceActiveIndex >= 0 ? `第 ${promptSourceActiveIndex + 1} 轮`
       : Number.isSafeInteger(promptSourceRound.index) && promptSourceRound.index > 0 ? `历史分支第 ${promptSourceRound.index} 轮` : '历史来源不可定位';
-  const replacingTaskTarget = !taskContext?.targetExplicit && draft.refs.length === 1 && taskContext?.target && referenceKey(draft.refs[0].reference) !== referenceKey(taskContext.target.source);
   const taskImages = [taskContext?.target, ...(taskContext?.auxiliaries || [])].filter((value): value is NonNullable<typeof value> => Boolean(value));
+  const inspection = useMemo(() => {
+    if (panel !== 'context') return null;
+  const replacingTaskTarget = !taskContext?.targetExplicit && draft.refs.length === 1 && taskContext?.target && referenceKey(draft.refs[0].reference) !== referenceKey(taskContext.target.source);
   const previewRefs = resolveAgentPromptImageReferences(draft.text, rounds, new Set((current?.jobs || []).filter(job => job.result_path && ['succeeded', 'accepted'].includes(job.status)).map(job => job.id)), draft.refs.map(choice => choice.reference)).refs;
   const taskHistoryHasImages = taskContext?.taskType === 'chat' && rounds.some(round => round.taskContext?.taskId === taskContext.taskId && (round.inputImageIds.length || round.taskImageIds?.length || round.outputTaskIds.length || round.retryTaskIds?.length));
   const unassignedDraftImages = taskContext?.targetExplicit && draft.refs.some(choice => !taskImages.some(image => referenceKey(image.source) === referenceKey(choice.reference)));
@@ -198,33 +205,14 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
     imagePreview.set(referenceKey(reference), { reference, label: choice?.label || '已引用的结果图', url: sameOriginImage(choice?.url || asset?.thumbnailUrl || asset?.url || (job?.result_path ? mediaUrl(job.result_path) : '')), missing: Boolean(choice?.missing || asset && asset.status !== 'available') });
   }
   const mainImageReference = taskContext?.targetExplicit ? taskContext.target?.source : draft.refs.length === 1 ? draft.refs[0].reference : taskContext?.target?.source;
-  const directImages = [taskContext?.target ? { ...taskContext.target, role: 'target' } : null, ...(taskContext?.auxiliaries || [])].filter((image): image is NonNullable<typeof image> => Boolean(image));
-  const directTarget = directImages[0] ? current?.images.find(image => image.id === directImages[0].assetId) : undefined;
-  const directTargetUrl = sameOriginImage(directTarget?.thumbnailUrl || directTarget?.url);
-  const directReferenceSize = directTarget?.width && directTarget.height ? { width: directTarget.width, height: directTarget.height } : directGeometry?.url === directTargetUrl ? directGeometry.size : undefined;
-  const directAutoSize = draft.sizeMode === 'auto4k' && selectedPrompt ? resolveAuto4k(selectedPrompt.text, directReferenceSize) : null;
-  const directSizeUnavailable = Boolean(directAutoSize && !('error' in directAutoSize) && directAutoSize.source !== 'prompt' && directImages.length && !directReferenceSize);
-  const directParams = directAutoSize && !('error' in directAutoSize) && !directSizeUnavailable ? { ...draft.params, size: directAutoSize.size } : draft.params;
-  const directHybrid = config?.config.apiConfigMode === 'hybrid';
-  const directProfileId = directHybrid ? draft.imageConfig?.profileId ?? config?.config.imageProfileId : null;
-  const directModel = draft.imageConfig ? draft.imageConfig.model : config?.config.imageModel || (directHybrid ? config?.profiles.find(profile => profile.id === directProfileId)?.model : '') || '';
-  const directModelLabel = directModel.trim() || (directHybrid ? config?.profiles.find(profile => profile.id === directProfileId)?.model : '') || '供应商默认图片模型';
-  const directHardHistory = taskContext?.historyDependencies.filter(item => item.reason !== 'unreconciled_user_addition').map(item => taskHistoryReasonText[item.reason] || item.reason) || [];
-  const directMask = current?.conversation.rounds.find(round => round.id === current.conversation.activeRoundId)?.maskImageId;
-  const directUnavailable = !selectedPrompt ? '请先明确选择提示词。' : !config ? '正在读取图片调用设置。' : config.config.apiConfigMode === 'off' ? 'Current API 尚无已验证的直接执行路径；可保留普通会话生图，或在设置中主动选择 Native / Hybrid。' : taskContext?.unresolvedItems.length || taskContext?.taskType === 'image_edit' && !taskContext.target ? '当前任务仍有待确认项或图片角色未明确，请先完成确认。' : directHardHistory.length ? `任务仍需核对必要历史证据：${directHardHistory.join('；')}。` : directMask ? '直接执行暂不支持带蒙版配方，请使用原编辑流程。' : directImages.length > 4 || new Set(directImages.map(image => image.assetId)).size !== directImages.length ? '配方图片角色重复或数量过多，请先明确选择。' : directImages.some(image => current?.images.find(asset => asset.id === image.assetId)?.status !== 'available') ? '配方参考图不可用，请先恢复或重新选择。' : incompatibleImageSelection || !imageReady ? '请先完善本次生图模型与供应商设置。' : imageCount > config.config.maxImageJobs ? '本次数量超出 Agent 已配置的图片安全上限。' : directAutoSize && 'error' in directAutoSize ? '选定提示词包含冲突比例，请设置明确尺寸。' : directSizeUnavailable ? directGeometry?.status === 'error' ? '无法读取主要图片尺寸，请重选图片或设置明确尺寸。' : '正在确认主要图片尺寸，暂不能直接生成。' : '';
+    return { imagePreview, mainImageReference, previewUncertain, replacingTaskTarget, scopedRounds };
+  }, [panel, current, rounds, draft.refs, draft.text, contextScope, selectedHistory]);
+  const imagePreview = inspection?.imagePreview || new Map();
+  const mainImageReference = inspection?.mainImageReference;
   const requestNeedsAttention = Boolean(current?.request && (['failed', 'unknown', 'interrupted'].includes(current.request.state) || current.request.error || current.request.recoveryReason || current.request.upstreamMayContinue || current.request.canResume));
   const closePanel = useCallback(() => setPanel(null), []);
   useEffect(() => { if (activeId) setNewImageMode(false); }, [activeId]);
   useEffect(() => { promptExecutionAlive.current = true; return () => { promptExecutionAlive.current = false; }; }, []);
-  useEffect(() => {
-    if (!active || draft.sizeMode !== 'auto4k' || !directTarget || directTarget.width && directTarget.height) return;
-    let disposed = false;
-    setDirectGeometry({ url: directTargetUrl, status: 'loading' });
-    if (!directTargetUrl) { setDirectGeometry({ url: directTargetUrl, status: 'error' }); return; }
-    const image = new Image(); image.src = directTargetUrl;
-    void image.decode().then(() => { if (!disposed) setDirectGeometry({ url: directTargetUrl, size: { width: image.naturalWidth, height: image.naturalHeight }, status: 'ready' }); }).catch(() => { if (!disposed) setDirectGeometry({ url: directTargetUrl, status: 'error' }); });
-    return () => { disposed = true; };
-  }, [active, draft.sizeMode, directTarget?.id, directTarget?.sha256, directTargetUrl]);
   useEffect(() => {
     const refresh = (event: StorageEvent) => {
       if (event.key !== null && event.key !== AGENT_PROMPT_EXECUTIONS_KEY) return;
@@ -263,8 +251,8 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
     const below = rect ? height - rect.bottom - 20 : height - 84;
     const above = rect ? rect.top - 20 : 0;
     const bottom = kind !== 'model' && above > below;
-    if (kind === 'details') {
-      setPanelPosition({ left: Math.max(12, Math.min(rect?.left || 12, width - 412)), top: 24, maxHeight: Math.max(100, height - 48) });
+    if (kind === 'details' || kind === 'context' || kind === 'recipe') {
+      setPanelPosition({ left: Math.max(12, Math.min(rect?.left || 12, width - (kind === 'context' ? 520 : 400) - 12)), top: 24, maxHeight: Math.max(100, height - 48) });
       setDetailRoundId(roundId || null); setPanel(kind); return;
     }
     setPanelPosition({ left: Math.max(12, Math.min(rect?.left || 12, width - (kind === 'add' ? 260 : 400) - 12)), ...(bottom ? { bottom: height - rect!.top + 8 } : { top: Math.max(12, rect ? rect.bottom + 8 : 64) }), maxHeight: Math.max(100, Math.min(height - 24, bottom ? above : below)) });
@@ -272,7 +260,7 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
     setPanel(kind);
   }
   useEffect(() => {
-    setPanel(null); setInlineMentions(false); setSizeOpen(false);
+    setPanel(null); setRecipeChoice(null); setInlineMentions(false); setSizeOpen(false);
   }, [active, activeId]);
   useEffect(() => {
     if (!active || !panel) return;
@@ -441,6 +429,7 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
   function acknowledgeSubmission(entry: PendingAgentSubmission, boundary: AgentSubmissionBoundary) {
     acknowledgeDraft(entry.conversationId, boundary.draft);
     acknowledgeAuthorization(entry.conversationId, boundary.authorization);
+    if (!entry.preserveDraft) setDrafts(old => { const saved = old[entry.conversationId]; return !saved || saved.contextScope !== entry.payload.contextScope || JSON.stringify(saved.historyRoundIds || []) !== JSON.stringify(entry.payload.historyRoundIds || []) ? old : { ...old, [entry.conversationId]: { ...saved, contextScope: 'task', historyRoundIds: [] } }; });
   }
   async function retryAccepted(_receipt: AgentImageRetryReceipt, conversationId: string) {
     onJobsChanged?.();
@@ -508,7 +497,7 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
     if (!current || busy) return;
     await runCommand(async command => {
       const value = await agentApi.updateConversation(current.conversation.id, { expectedRevision: current.revision, activeRoundId: getAgentBranchLeafId(current.conversation, id) });
-      if (command.current()) { applySnapshot(value); updateDraft({ editId: null, origin: 'send' }); }
+      if (command.current()) { applySnapshot(value); updateDraft({ editId: null, origin: 'send', contextScope: 'task', historyRoundIds: [] }); }
     });
   }
   async function changeTaskContext(operations: AgentTaskContextOperation[]) {
@@ -536,12 +525,12 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
           expectedRevision: value.revision, branchRoundId: value.conversation.activeRoundId || null,
           taskRevision: value.taskContext?.revision ?? null, operations,
         });
-        if (command.current()) { applySnapshot(updated); setNotice('当前任务已更新；输入框草稿和附件保留，尚未发送。'); }
+        if (command.current()) { applySnapshot(updated); if (operations.some(operation => operation.op === 'new_task')) updateDraft({ contextScope: 'task', historyRoundIds: [] }); }
       } catch (reason) {
         if (reason instanceof AgentApiError && reason.status === 409 && command.current()) {
           const latest = await agentApi.conversation(value.conversation.id);
           if (command.current()) applySnapshot(latest);
-          throw new Error('任务已在其他页面或后续轮次中改变，已读取最新状态。草稿和附件保留，请确认后重新操作。');
+          throw new Error('对话已在其他页面更新。你的输入和图片已保留，请重新操作。');
         }
         throw reason;
       }
@@ -597,7 +586,7 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
     const sameBranch = [entry.payload.branchRoundId, value.request.roundId].includes(live.conversation.activeRoundId);
     if (!sameBranch || live.taskContext?.taskId !== entry.payload.taskId || value.conversation.activeRoundId !== value.request.roundId) { reloadConversation(); return; }
     applySnapshot(value);
-    setNotice('已提交确认的提示词配方；草稿、附件和持续生图开关保留。');
+    setRecipeChoice(null); setPanel(null);
   }
   async function checkPromptExecution(entry: PendingPromptExecution) {
     if (directPostLock.current || activeIdRef.current !== entry.conversationId) return;
@@ -609,20 +598,102 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
       });
     } finally { directPostLock.current = false; }
   }
-  async function executeConfirmedPrompt() {
-    if (activeIdRef.current !== activeId || !current || !config || !taskContext || !selectedPrompt || draftLocked || inFlight || uploading || handoffBusy || directPostLock.current) return;
+  function directBlockReason(value: AgentSnapshot, choice: PromptChoice) {
+    const task = value.taskContext;
+    if (!choice.text.trim()) return '这段提示词为空。';
+    if (!config) return '正在读取生图设置，请稍后再试。';
+    if (config.config.apiConfigMode === 'off') return '当前调用方式暂不支持直接生成。可以继续对话，或在设置中主动选择 Native / Hybrid。';
+    if (!task || task.unresolvedItems.length || task.taskType === 'image_edit' && !task.target) return '还无法确定要编辑哪张图片，请在对话中说明或重新添加图片。';
+    if (task.historyDependencies.some(item => item.reason !== 'unreconciled_user_addition')) return '这份配方还依赖之前的要求，请先在对话中说明需要沿用的内容。';
+    if (value.conversation.rounds.find(round => round.id === value.conversation.activeRoundId)?.maskImageId) return '带蒙版的编辑请继续使用原编辑流程，暂不支持此按钮直接生成。';
+    const images = [task.target, ...task.auxiliaries].filter((image): image is NonNullable<typeof image> => Boolean(image));
+    if (images.length > inputLimit || new Set(images.map(image => image.assetId)).size !== images.length) return '参考图片数量或角色有冲突，请在对话中说明要使用哪几张。';
+    if (images.some(image => value.images.find(asset => asset.id === image.assetId)?.status !== 'available')) return '需要的参考图已丢失，请重新添加后再生成。';
+    if (incompatibleImageSelection || !imageReady) return sharedUnavailable || '请先完善生图模型与供应商设置。';
+    if (imageCount > config.config.maxImageJobs) return '生成数量超过当前安全上限，请调整生图设置。';
+    return '';
+  }
+  function promptGenerationSummary(prompt: string) {
+    const image = taskContext?.target ? current?.images.find(image => image.id === taskContext.target!.assetId) : undefined;
+    const automatic = draft.sizeMode === 'auto4k' ? resolveAuto4k(prompt, image?.width && image.height ? { width: image.width, height: image.height } : undefined) : null;
+    const size = automatic && !('error' in automatic) ? automatic.size : draft.params.size;
+    return `本次图片参数：${imageCount} 张 · ${imageModel || '供应商默认图片模型'} · ${size} · ${draft.params.quality} · ${draft.params.output_format} · ${draft.params.background || 'auto'}${typeof draft.params.output_compression === 'number' ? ` · 压缩 ${draft.params.output_compression}` : ''}`;
+  }
+  async function beginPromptGeneration(choice: PromptChoice) {
+    if (activeIdRef.current !== activeId || !current || draftLocked || inFlight || uploading || handoffBusy || directPostLock.current) return;
+    const sourceTask = current.conversation.rounds.find(round => round.id === choice.source.roundId)?.taskContext;
+    const bindings = (task: typeof sourceTask) => [task?.target ? { source: task.target.source, role: 'target' } : null, ...(task?.auxiliaries || [])].filter((image): image is NonNullable<typeof image> => Boolean(image)).map(image => `${referenceKey(image.source)}:${image.role}`);
+    const currentBindings = bindings(current.taskContext), sourceBindings = bindings(sourceTask);
+    if (choice.source.roundId !== current.conversation.activeRoundId && (sourceTask ? JSON.stringify(sourceBindings) !== JSON.stringify(currentBindings) : currentBindings.length > 0)) {
+      setError('这份提示词来自之前的图片任务，参考图与当前不同。请在对话中说明本次要沿用哪张图片，再点击生成。'); return;
+    }
+    const bound = [current.taskContext?.target, ...(current.taskContext?.auxiliaries || [])].filter(Boolean);
+    const conflicts = draft.refs.filter(reference => !bound.some(image => referenceKey(image!.source) === referenceKey(reference.reference)));
+    if (conflicts.length) {
+      setRecipeChoice({ ...structuredClone(choice), confirmationBoundary: { conversationId: current.conversation.id, conversationRevision: current.revision, taskId: current.taskContext?.taskId || null, taskRevision: current.taskContext?.revision ?? null, branchRoundId: current.conversation.activeRoundId || null } });
+      openPanel('recipe'); return;
+    }
+    await executeConfirmedPrompt(choice);
+  }
+  async function executeConfirmedPrompt(choice: PromptChoice, useDraftImages = false) {
+    if (activeIdRef.current !== activeId || !current || !config || draftLocked || inFlight || uploading || handoffBusy || directPostLock.current) return;
+    const boundary = choice.confirmationBoundary;
+    if (boundary && (boundary.conversationId !== current.conversation.id || boundary.conversationRevision !== current.revision || boundary.taskId !== (current.taskContext?.taskId || null) || boundary.taskRevision !== (current.taskContext?.revision ?? null) || boundary.branchRoundId !== (current.conversation.activeRoundId || null))) {
+      setRecipeChoice(null); closePanel(); setError('对话中的图片或要求已更新。你的输入和图片已保留，请重新点击对应提示词生成。'); return;
+    }
     const existing = readPendingPromptExecutions(localStorage).find(entry => entry.conversationId === current.conversation.id);
     if (existing) { await checkPromptExecution(existing); return; }
-    if (directUnavailable) { setError(directUnavailable); return; }
-    const payload: AgentPromptExecutionInput = {
-      requestId: crypto.randomUUID(), expectedRevision: current.revision, branchRoundId: current.conversation.activeRoundId,
-      taskId: taskContext.taskId, taskRevision: taskContext.revision, promptVersionId: selectedPrompt.id, configRevision: config.revision,
-      imageConfig: { profileId: directProfileId, model: directModel }, params: structuredClone(directParams), imageCount, confirmed: true,
-    };
-    const entry: PendingPromptExecution = { conversationId: current.conversation.id, payload };
+    const conversation = current, frozenConfig = structuredClone(config), frozenChoice = structuredClone(choice);
+    const frozenDraftRefs = structuredClone(draft.refs), frozenParams = structuredClone(draft.params), frozenSizeMode = draft.sizeMode;
+    const frozenImageConfig = { profileId: config.config.apiConfigMode === 'hybrid' ? draft.imageConfig?.profileId ?? config.config.imageProfileId : null,
+      model: draft.imageConfig ? draft.imageConfig.model : config.config.imageModel || (config.config.apiConfigMode === 'hybrid' ? config.profiles.find(profile => profile.id === config.config.imageProfileId)?.model : '') || '' };
     directPostLock.current = true;
     try {
       await runCommand(async command => {
+        let value = conversation;
+        if (useDraftImages && frozenDraftRefs.some(reference => reference.missing)) throw new Error('新添加的参考图不可用，请重新添加。');
+        const currentPrompt = value.taskContext?.promptVersions.find(prompt => prompt.id === value.taskContext?.selectedPromptVersionId);
+        const operations: AgentTaskContextOperation[] = [];
+        if (useDraftImages && frozenDraftRefs.length) operations.push({ op: 'set_target', ref: frozenDraftRefs[0].reference }, { op: 'set_auxiliaries', auxiliaries: frozenDraftRefs.slice(1).map(reference => ({ ref: reference.reference, role: 'other' })) });
+        if (currentPrompt?.text !== frozenChoice.text || currentPrompt.source.roundId !== frozenChoice.source.roundId || currentPrompt.source.messageId !== frozenChoice.source.messageId) operations.push({ op: 'set_prompt', text: frozenChoice.text, kind: 'selected', source: frozenChoice.source });
+        if (operations.length) {
+          try {
+            value = await agentApi.updateTaskContext(value.conversation.id, { expectedRevision: value.revision, branchRoundId: value.conversation.activeRoundId || null, taskRevision: value.taskContext?.revision ?? null, operations });
+          } catch (reason) {
+            if (reason instanceof AgentApiError && reason.status === 409 && command.current()) reloadConversation();
+            throw new Error(reason instanceof AgentApiError && reason.status === 409 ? '对话已在其他页面更新。你的输入和图片已保留，请重新点击生成。' : `${errorText(reason)}。尚未提交图片生成，你的输入和图片已保留。`);
+          }
+          if (command.current()) applySnapshot(value);
+        }
+        if (!command.current() || activeIdRef.current !== conversation.conversation.id) return;
+        const blocked = directBlockReason(value, frozenChoice);
+        if (blocked) throw new Error(blocked);
+        const task = value.taskContext!, selected = task.promptVersions.find(prompt => prompt.id === task.selectedPromptVersionId);
+        if (!selected || selected.text !== frozenChoice.text) throw new Error('这份提示词尚未确认，未提交图片生成。请重新点击对应提示词。');
+        const images = [task.target, ...task.auxiliaries].filter((image): image is NonNullable<typeof image> => Boolean(image));
+        if (frozenSizeMode === 'auto4k') {
+          const asset = images[0] ? value.images.find(image => image.id === images[0].assetId) : undefined;
+          let size = asset?.width && asset.height ? { width: asset.width, height: asset.height } : undefined;
+          const automatic = resolveAuto4k(selected.text, size);
+          if ('error' in automatic) throw new Error('提示词中的比例有冲突，请在生图设置中选择明确尺寸。');
+          if (automatic.source !== 'prompt' && asset && !size) {
+            const url = sameOriginImage(asset.url || asset.thumbnailUrl);
+            if (!url) throw new Error('参考图无法读取，请重新添加图片或选择明确尺寸。');
+            const image = new Image(); image.src = url;
+            try { await image.decode(); size = { width: image.naturalWidth, height: image.naturalHeight }; }
+            catch { throw new Error('参考图尺寸无法读取，请重新添加图片或选择明确尺寸。'); }
+          }
+          const resolved = resolveAuto4k(selected.text, size);
+          if ('error' in resolved) throw new Error('提示词中的比例有冲突，请在生图设置中选择明确尺寸。');
+          frozenParams.size = resolved.size;
+        }
+        if (!command.current() || activeIdRef.current !== conversation.conversation.id) return;
+        const payload: AgentPromptExecutionInput = {
+          requestId: crypto.randomUUID(), expectedRevision: value.revision, branchRoundId: value.conversation.activeRoundId,
+          taskId: task.taskId, taskRevision: task.revision, promptVersionId: selected.id, configRevision: frozenConfig.revision,
+          imageConfig: frozenImageConfig, params: frozenParams, imageCount, confirmed: true,
+        };
+        const entry: PendingPromptExecution = { conversationId: value.conversation.id, payload };
         let posted = false;
         try {
           savePendingPromptExecution(localStorage, entry);
@@ -631,28 +702,28 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
           const receipt = await agentApi.executePrompt(entry.conversationId, structuredClone(payload));
           acceptPromptExecution(entry, receipt, command.current());
         } catch (reason) {
-          if (!posted) throw new Error(`${errorText(reason)}。尚未发送，草稿和附件保留。`);
+          if (!posted) throw new Error(`${errorText(reason)}。尚未发送，输入和图片已保留。`);
           if (reason instanceof AgentApiError && [400, 401, 403, 404, 409, 422].includes(reason.status)) {
             clearPendingPromptExecution(localStorage, payload.requestId); refreshPromptExecutions();
             if (reason.status === 409 && command.current()) reloadConversation();
-            throw new Error(`${errorText(reason)}。请求已明确拒绝；草稿和附件保留，请核对后重新操作。`);
+            throw new Error(`${errorText(reason)}。本次未开始生成，输入和图片已保留。`);
           }
-          throw new Error('本次生成结果尚未确认。请检查原回执；原请求 ID 与冻结配方保留，不会自动重新生成。');
+          throw new Error('本次生成结果尚未确认。请检查原回执；不会自动重新生成。');
         }
       });
     } finally { directPostLock.current = false; }
   }
-  async function continuePromptOptimization() {
-    if (activeIdRef.current !== activeId || !current || !config || !taskContext || !selectedPrompt || draftLocked || inFlight || uploading || handoffBusy || directPostLock.current) return;
-    if (readPendingPromptExecutions(localStorage).some(entry => entry.conversationId === current.conversation.id)) { setError('此会话还有尚未确认的直接生成，请先检查原回执。'); return; }
-    const conversation = current, task = structuredClone(taskContext), prompt = selectedPrompt.text, frozenConfig = structuredClone(config);
+  async function continuePromptOptimization(choice: PromptChoice) {
+    if (activeIdRef.current !== activeId || !current || !config || draftLocked || inFlight || uploading || handoffBusy || directPostLock.current) return;
+    if (readPendingPromptExecutions(localStorage).some(entry => entry.conversationId === current.conversation.id)) { setError('此会话还有尚未确认的生成，请先检查原回执。'); return; }
+    const conversation = current, prompt = choice.text, frozenConfig = structuredClone(config);
     const result = await submitPrepared(async command => {
       if (!command.current() || activeIdRef.current !== conversation.conversation.id) return null;
       const payload: AgentRoundCreate = {
         requestId: crypto.randomUUID(), expectedRevision: conversation.revision, parentRoundId: conversation.conversation.activeRoundId,
-        origin: 'send', prompt: `请继续优化以下明确选定的提示词，保留已确认的约束；提供候选版本，等待我明确选择。\n\n${prompt}`,
+        origin: 'send', prompt: `请继续优化下面这份提示词，保留原意和明确要求，提供新的候选版本。\n\n${prompt}`,
         refs: [], configRevision: frozenConfig.revision, activeProfileId: activeProfileId || null, params: emptyDraft().params,
-        contextScope: 'task', historyRoundIds: [], taskRevision: task.revision,
+        contextScope: 'task', historyRoundIds: [], taskRevision: conversation.taskContext?.revision ?? null,
         authorization: { scope: 'this_request', allowImageGeneration: false, allowWebSearch: false, maxToolRounds: frozenConfig.config.maxToolRounds, maxImageJobs: 0 },
       };
       return { entry: { conversationId: conversation.conversation.id, payload, preserveDraft: true } };
@@ -802,7 +873,7 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
         <div>{collapsed && <button onClick={() => setCollapsed(false)} aria-label="展开会话列表"><PanelLeftOpen size={18} /></button>}
           <button className="agent-model-trigger" aria-label="当前模型与供应商" aria-haspopup="dialog" aria-expanded={panel === 'model'} onClick={event => openPanel('model', event.currentTarget)}><span>{config?.config.textModel || '选择模型'}</span><ChevronDown size={15} /></button>
         </div>
-        <span className="agent-conversation-title" title={current?.conversation.title}>{current?.conversation.title || (activeId ? '读取会话' : '新对话')}</span>
+        <span className="agent-conversation-title" title={current?.conversation.title}>{current?.conversation.title || (activeId ? '读取会话' : '新对话')}</span><button type="button" aria-label="对话更多选项" title="上下文详情" aria-haspopup="dialog" onClick={event => openPanel('context', event.currentTarget)}><MoreHorizontal size={18} /></button>
       </header>
       <div className={`agent-messages${scrollbarActive ? ' is-scrolling' : ''}`} ref={scroll} role="region" aria-label="对话消息" tabIndex={0} onScroll={revealScrollbar}>
         <div className="agent-content-column" ref={scrollContent}>
@@ -825,7 +896,11 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
             <div className="agent-assistant-message" aria-label={`Agent，第 ${roundIndex + 1} 轮`}>
               {round.kind === 'prompt_execution' && round.directRecipe && <section className="agent-confirmed-recipe-card" aria-label="已确认配方生成记录"><strong>按已确认配方生成，未经过额外文字规划</strong><p>{round.directRecipe.mode === 'native' ? '使用原生 Responses 图片协议，本次仍有图片请求。' : '通过已选 Images 图片接口生成。'}</p><p>{round.directRecipe.imageCount} 张 · {String(round.directRecipe.params.model || '供应商默认图片模型')} · {String(round.directRecipe.params.size || 'auto')} · {String(round.directRecipe.params.quality || 'auto')} · {String(round.directRecipe.params.output_format || 'png')}</p><p>Prompt 来源：{round.directRecipe.promptSource.kind === 'model' ? 'Agent 回答，由你明确选择' : '你明确选择的原文'} · 配方参考图 {round.directRecipe.references.length} 张</p>{round.directRecipe.references.length > 0 && <ol>{round.directRecipe.references.map(reference => <li key={reference.assetId}>{reference.order + 1}. {referenceRoleText[reference.role] || reference.role}</li>)}</ol>}</section>}
               {blocks.map(block => {
-                if (block.type === 'text') return <AgentMarkdown key={block.key} text={block.content} promptSelectionDisabled={draftLocked || inFlight} onSelectPrompt={text => void changeTaskContext([{ op: 'set_prompt', text, kind: 'selected', source: { kind: 'model', roundId: round.id, ...(assistant?.id ? { messageId: assistant.id } : {}) } }])} />;
+                if (block.type === 'text') {
+                  const choiceSource = { kind: 'model' as const, roundId: round.id, ...(assistant?.id ? { messageId: assistant.id } : {}) };
+                  const sourceId = `${round.id}:${assistant?.id || 'answer'}:${block.key === 'text:fallback' && assistant?.id ? `text:${assistant.id}` : block.key}`;
+                  return <AgentMarkdown key={block.key} text={block.content} sourceId={sourceId} getGenerationSummary={promptGenerationSummary} referenceSummary={taskImages.length ? taskImages.map((image, index) => `${index + 1}. ${referenceRoleText['role' in image && typeof image.role === 'string' ? image.role : 'target']}`).join('；') : '无参考图'} promptSelectionDisabled={draftLocked || inFlight || uploading || handoffBusy} onOptimizePrompt={text => void continuePromptOptimization({ text, source: choiceSource, sourceId })} onGeneratePrompt={text => void beginPromptGeneration({ text, source: choiceSource, sourceId })} />;
+                }
                 if (block.type === 'image-task') return renderResult(block.task);
                 if (block.type === 'deleted-image-task') return <p key={block.key} className="agent-missing-image">原图片任务已不可用，保留引用位置。</p>;
                 const label = agentPhaseLabels[block.state || ''] || statusText[block.state || ''] || (block.state === 'in_progress' ? '进行中' : '工具调用');
@@ -838,7 +913,6 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
               {Boolean(round.retryTaskIds?.length) && <section className="agent-retry-results" aria-label="本轮图片的重试结果"><h4>重试结果</h4>{round.retryTaskIds!.map(id => { const job = current!.jobs.find(row => row.id === id); return job ? renderResult(job) : <p key={id} className="agent-missing-image">重试任务记录不可用。</p>; })}</section>}
               <div className="agent-answer-actions">
                 {assistant?.content && <button className="agent-text-button" aria-label="复制回答" title="复制回答" onClick={() => void copyTextToClipboard(assistant.content).then(ok => setNotice(ok ? '已复制回答' : '复制失败'))}><Copy size={15} /></button>}
-                {assistant?.content && <button className="agent-text-button" aria-label={`将第 ${roundIndex + 1} 轮回答原文设为 Prompt`} disabled={draftLocked || inFlight} onClick={() => void changeTaskContext([{ op: 'set_prompt', text: assistant.content, kind: 'selected', source: { kind: 'model', roundId: round.id, messageId: assistant.id } }])}>使用回答原文</button>}
                 {!round.outputTaskIds.length && !round.retryTaskIds?.length && <button className="agent-text-button" aria-label="重试回答" title="重试回答，保留当前草稿" disabled={inFlight || busy || Boolean(uncertain) || uploading || handoffBusy} onClick={() => void retryText(round)}><RotateCcw size={15} /></button>}
                 <button className="agent-text-button agent-answer-details" title="查看回答详情" aria-label={`查看第 ${roundIndex + 1} 轮详情`} aria-haspopup="dialog" aria-expanded={panel === 'details' && detailRoundId === round.id} onClick={event => openPanel('details', event.currentTarget, round.id)}><Info size={15} /></button>
               </div>
@@ -859,51 +933,6 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
         {pendingPromptExecution && <div className="agent-uncertain" aria-label="直接生成回执待确认"><strong>直接生成回执待确认</strong><p>本次冻结：{pendingPromptExecution.payload.imageCount} 张 · {pendingPromptExecution.payload.imageConfig.model || '供应商默认图片模型'} · {pendingPromptExecution.payload.params.size} · {pendingPromptExecution.payload.params.quality}。原请求 ID 与配方已保存；刷新仅检查原回执。</p><button type="button" aria-label="检查本次直接生成状态" disabled={busy} onClick={() => void checkPromptExecution(pendingPromptExecution)}>检查本次生成状态</button></div>}
         {config && !config.ready && <p className="agent-help">{config.issues.map(issue => issue.message).join('；')} <button className="agent-text-button" aria-label="打开 Agent 设置" onClick={onOpenSettings}>打开设置</button></p>}
         {draft.editId && <div className="agent-edit-notice">{draft.origin === 'regenerate' ? '重新生成' : '编辑重发'}会建立新分支，原记录保留。<button aria-label="取消分支编辑" disabled={draftLocked} onClick={() => updateDraft({ editId: null, origin: 'send' })}>取消分支编辑</button></div>}
-        <div className="agent-context-toolbar">
-          <label>发送范围<select aria-label="发送上下文范围" value={contextScope} disabled={draftLocked || inFlight} onChange={event => updateDraft({ contextScope: event.target.value as Draft['contextScope'] })}><option value="task">当前任务</option><option value="selected">选择历史内容</option><option value="branch">完整分支</option></select></label>
-          <span aria-label="发送图片范围">{imagePreview.size} {previewUncertain ? '个图片候选 · 实际发送数量待核对' : '个图片对象'} · {mainImageReference ? `主要图片：${imagePreview.get(referenceKey(mainImageReference))?.label || '当前任务图片'}` : imagePreview.size ? '待选择主要图片' : '无主要图片'}</span>
-        </div>
-        {contextScope === 'branch' && <p className="agent-context-warning" role="status">完整分支会带入更多历史内容和图片，响应可能更慢、费用更高。</p>}
-        {contextScope === 'task' && !taskContext && rounds.length > 0 && <p className="agent-context-warning" role="status" aria-label="上下文范围提示">旧会话尚无结构化任务，本轮会按兼容规则读取当前分支历史。</p>}
-        {contextScope === 'task' && taskContext?.completeness === 'history_required' && <p className="agent-context-warning" role="status" aria-label="上下文范围提示">当前任务仍依赖历史内容，请展开任务状态查看原因。</p>}
-        {contextScope === 'selected' && <p className="agent-context-warning" role="status" aria-label="上下文范围提示">已选择 {selectedHistory.filter(id => rounds.some(round => round.id === id)).length} 轮历史；当前任务资料和本轮附件仍会保留。</p>}
-        {previewUncertain && <p className="agent-context-warning" role="status" aria-label="图片候选范围说明">{replacingTaskTarget ? '新附件作为主要图片，旧目标与旧辅助图片仍可能作为任务证据。' : ''}图片清单包含当前分支 {scopedRounds.length} 轮历史中的已知候选；这不是实际发送数量，缺失图片和服务端证据选择仍需核对。</p>}
-        <details className="agent-task-context" open={contextScope === 'selected' ? true : undefined}>
-          <summary>任务状态 · {taskContext ? ({ complete: '完整', partial: '待补充', history_required: '需要历史' }[taskContext.completeness]) : current?.contextMode === 'legacy' || rounds.length ? '旧会话，尚无结构化任务' : '新任务'} · {selectedPrompt ? `Prompt v${promptVersionIndex}` : '尚未明确选择 Prompt'}</summary>
-          <div className="agent-task-context-body">
-            {!taskContext && <p className="agent-help">{rounds.length ? '旧记录仍保留；当前任务资料不足时会明确回退到历史。可从消息中选定 Prompt，或重置任务。' : '发送后建立当前任务；也可先明确选择输入框 Prompt 或主要图片。'}</p>}
-            {taskContext && <>
-              <p className="agent-help">任务版本 {taskContext.revision} · {taskTypeText[taskContext.taskType] || taskContext.taskType}</p>
-              {taskContext.latestUserAddition?.text && <p className="agent-task-addition">最近补充：{taskContext.latestUserAddition.text}</p>}
-              {taskContext.unresolvedItems.length > 0 && <p className="agent-context-warning">待确认：{taskContext.unresolvedItems.join('；')}</p>}
-              {taskContext.historyDependencies.length > 0 && <p className="agent-context-warning">回退历史的原因：{taskContext.historyDependencies.map(item => taskHistoryReasonText[item.reason] || item.reason).join('；')}</p>}
-              {selectedPrompt && <><p className="agent-help">当前 Prompt v{promptVersionIndex} · 来源：{selectedPrompt.source.kind === 'model' ? 'Agent 回答，由你明确选择' : selectedPrompt.source.kind === 'legacy' ? '旧记录' : '你的原文'}{promptSourceLocation ? ` · ${promptSourceLocation}` : ''}</p><pre className="agent-task-prompt">{selectedPrompt.text}</pre></>}
-              {selectedPrompt && <section className="agent-prompt-execution" aria-label="选定提示词操作">
-                <p>本次图片参数：{imageCount} 张 · {directModelLabel} · {directSizeUnavailable ? '尺寸待确认' : directParams.size} · {directParams.quality} · {directParams.output_format} · {directParams.background || 'auto'}{typeof directParams.output_compression === 'number' ? ` · 压缩 ${directParams.output_compression}` : ''}</p>
-                <p>配方参考图 {directImages.length} 张，按以下角色与顺序使用：</p>
-                {directImages.length ? <ol className="agent-direct-references">{directImages.map((reference, index) => {
-                  const asset = current?.images.find(image => image.id === reference.assetId), url = sameOriginImage(asset?.thumbnailUrl || asset?.url);
-                  return <li key={reference.assetId}>{url && <img src={url} alt={`配方参考 ${index + 1} · ${referenceRoleText[reference.role] || reference.role}`} />}<span>{index + 1}. {referenceRoleText[reference.role] || reference.role}{asset?.status !== 'available' ? ' · 不可用' : ''}</span></li>;
-                })}</ol> : <p>无配方参考图。</p>}
-                {draft.refs.length > 0 && <p className="agent-help">输入框中的 {draft.refs.length} 张附件会保留；直接生成只使用上面的任务配方参考图。</p>}
-                <p className="agent-help">点击“用此提示词生成”，表示确认选定全文和上列参考图角色作为当前完整配方，仅授权本次图片调用。本次不会自动加入聊天历史或额外约束。</p>
-                <div className="agent-task-actions">
-                  <button type="button" aria-label="继续优化选定提示词" disabled={draftLocked || inFlight || uploading || handoffBusy || !config?.ready} onClick={() => void continuePromptOptimization()}>继续优化</button>
-                  <button type="button" aria-label="用选定提示词生成" title={directUnavailable || '仅授权本次生成，保留持续生图开关与输入框草稿'} disabled={draftLocked || inFlight || uploading || handoffBusy || Boolean(directUnavailable)} onClick={() => void executeConfirmedPrompt()}>用此提示词生成</button>
-                </div>
-                {directUnavailable && <p className="agent-help" role="status">{directUnavailable}</p>}
-                <p className="agent-help">直接使用选定原文和本次图片参数，不进行额外文字规划；{config?.config.apiConfigMode === 'native' ? 'Native 仍会发送原生 Responses 图片请求。' : '本次会发送图片请求。'}</p>
-              </section>}
-              {taskContext.promptVersions.length > 0 && <div className="agent-task-versions" aria-label="Prompt 版本">{taskContext.promptVersions.map((version, index) => <button key={version.id} type="button" aria-label={`恢复 Prompt v${index + 1}`} aria-pressed={version.id === taskContext.selectedPromptVersionId} disabled={draftLocked || inFlight || version.id === taskContext.selectedPromptVersionId} onClick={() => void changeTaskContext([{ op: 'restore_prompt', id: version.id }])}>v{index + 1} · {version.kind === 'candidate' ? '候选' : version.kind === 'executed' ? '已执行' : version.kind === 'original' ? '原文' : '已选择'}</button>)}</div>}
-              {promptVersionIndex > 1 && <button type="button" aria-label="撤销当前 Prompt 选择" disabled={draftLocked || inFlight} onClick={() => void changeTaskContext([{ op: 'restore_prompt', id: taskContext.promptVersions[promptVersionIndex - 2].id }])}>撤销当前 Prompt 选择</button>}
-              {taskContext.constraints.length > 0 && <div className="agent-task-constraints" aria-label="当前任务约束">{taskContext.constraints.map(constraint => <p key={constraint.id}><span>{constraint.status === 'revoked' ? <s>{constraint.text}</s> : constraint.text}{constraint.status === 'proposed' && <small> · 建议，待确认</small>}</span>{constraint.status === 'proposed' && <button type="button" disabled={draftLocked || inFlight} aria-label={`确认约束 ${constraint.text}`} onClick={() => void changeTaskContext([{ op: 'update_constraint', id: constraint.id, text: constraint.text }])}>确认</button>}<button type="button" disabled={draftLocked || inFlight} aria-label={`${constraint.status === 'revoked' ? '恢复' : '撤销'}约束 ${constraint.text}`} onClick={() => void changeTaskContext([constraint.status === 'revoked' ? { op: 'update_constraint', id: constraint.id, text: constraint.text } : { op: 'revoke_constraint', id: constraint.id }])}>{constraint.status === 'revoked' ? '恢复' : '撤销'}</button></p>)}</div>}
-            </>}
-            {imagePreview.size > 0 && <div className="agent-task-image-list" aria-label="本次图片对象">{[...imagePreview.entries()].map(([key, image]) => <div key={key}>{image.url && taskImages.some(taskImage => referenceKey(taskImage.source) === key) && !draft.refs.some(choice => referenceKey(choice.reference) === key) && <img src={image.url} alt={image.label} />}<span>{image.label}{mainImageReference && key === referenceKey(mainImageReference) ? ' · 主要图片' : ''}{image.missing ? ' · 不可用' : ''}</span><button type="button" aria-label={`设为主要图片 ${image.label}`} disabled={draftLocked || inFlight || image.missing} onClick={() => void changeTaskContext([{ op: 'set_target', ref: image.reference }])}>设为主要图片</button></div>)}</div>}
-            {contextScope === 'selected' && <fieldset className="agent-history-selection"><legend>选择当前分支的历史内容</legend>{!rounds.length && <p>当前分支暂无历史。</p>}{rounds.map((round, index) => <label key={round.id}><input type="checkbox" aria-label={`带入第 ${index + 1} 轮历史`} checked={selectedHistory.includes(round.id)} disabled={draftLocked || inFlight} onChange={event => updateDraft({ historyRoundIds: event.target.checked ? [...selectedHistory, round.id] : selectedHistory.filter(id => id !== round.id) })} /><span>第 {index + 1} 轮 · {round.prompt}</span></label>)}<p className="agent-help">所选轮次包含提问和回答。图片也可在下方单独重新加入本轮附件。</p></fieldset>}
-            {rounds.length > 0 && <details className="agent-history-images"><summary>重新加入历史消息或图片</summary>{rounds.map((round, index) => <div key={round.id} className="agent-history-round"><button type="button" aria-label={`将第 ${index + 1} 轮提问设为 Prompt`} disabled={draftLocked || inFlight} onClick={() => void changeTaskContext([{ op: 'set_prompt', text: round.prompt, kind: 'selected', source: { kind: 'user', roundId: round.id, messageId: round.userMessageId } }])}>第 {index + 1} 轮提问设为 Prompt</button>{[...new Set([...round.inputImageIds, ...(round.taskImageIds || [])])].map(id => { const image = current?.images.find(value => value.id === id); if (!image) return <span key={id}>历史图片记录缺失</span>; const selected = draft.refs.some(choice => referenceKey(choice.reference) === referenceKey(image.source)); return <button key={id} type="button" aria-label={`重新加入第 ${index + 1} 轮图片 ${id}`} disabled={draftLocked || inFlight || uploading || image.status !== 'available' || selected || draft.refs.length >= inputLimit} onClick={() => updateDraft({ refs: [...draft.refs, { reference: image.source, url: sameOriginImage(image.thumbnailUrl || image.url), label: `第 ${index + 1} 轮历史参考图` }] })}>{selected ? '已加入' : image.status !== 'available' ? '图片不可用' : '加入历史参考图'}</button>; })}{round.outputTaskIds.map(id => { const job = current?.jobs.find(value => value.id === id); return job ? <button key={id} type="button" disabled={draftLocked || inFlight || uploading || !job.result_path || !['succeeded', 'accepted'].includes(job.status)} onClick={() => addResultReference(job)}>加入第 {index + 1} 轮结果图</button> : null; })}</div>)}</details>}
-            <div className="agent-task-actions"><button type="button" aria-label="将输入框原文设为 Prompt" disabled={draftLocked || inFlight || !draft.text.trim()} onClick={() => void changeTaskContext([{ op: 'set_prompt', text: draft.text, kind: 'selected' }])}>输入框原文设为 Prompt</button><button type="button" aria-label="更换任务主要图片" disabled={draftLocked || inFlight} onClick={() => { setTargetPicker(true); setPicker(true); }}>更换目标图片</button><button type="button" aria-label="重置当前任务" disabled={draftLocked || inFlight} onClick={() => void changeTaskContext([{ op: 'new_task' }])}>重置任务</button></div>
-          </div>
-        </details>
         <div className="agent-composer" onDragOver={event => { if (event.dataTransfer.types.includes('Files')) event.preventDefault(); }} onDrop={event => { if (!event.dataTransfer.files.length) return; event.preventDefault(); void addFiles(Array.from(event.dataTransfer.files)); }}>
           {draft.refs.length > 0 && <div className="agent-reference-strip">{draft.refs.map((choice, index) => <div key={referenceKey(choice.reference)} className={choice.missing ? 'missing' : ''}>{choice.url ? <img src={sameOriginImage(choice.url)} alt={choice.label} /> : <span>{choice.missing ? '图片缺失' : '已选择图片'}</span>}<button title="插入图片引用" aria-label={`插入图片 ${index + 1} 引用`} disabled={draftLocked} onClick={() => mention(`@图${index + 1}`)}>{index + 1}</button><button className="agent-remove-ref" title="移除参考图" aria-label={`移除参考图 ${index + 1}`} disabled={draftLocked} onClick={() => updateDraft({ refs: draft.refs.filter((_, i) => i !== index) })}><X size={12} /></button></div>)}</div>}
           <textarea ref={textarea} aria-label="Agent 消息" placeholder="输入想法、提示词或修改要求；输入 @ 引用图片" value={draft.text} disabled={draftLocked} aria-busy={busy} readOnly={draft.origin === 'regenerate'} rows={1} onChange={event => { updateDraft({ text: event.target.value }); setInlineMentions(event.target.value.slice(0, event.target.selectionStart).endsWith('@')); }} onKeyDown={event => { if (event.key === 'Escape' && inlineMentions && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) { event.preventDefault(); event.stopPropagation(); setInlineMentions(false); return; } if (shouldSubmitAgentOnKey({ ...event, isComposing: event.nativeEvent.isComposing, keyCode: event.nativeEvent.keyCode }, readAgentInputPreferences().enterSubmit)) { event.preventDefault(); void submit(); } }} onPaste={event => { const files = Array.from(event.clipboardData.files).filter(file => file.type.startsWith('image/')); if (files.length) { event.preventDefault(); void addFiles(files); } }} />
@@ -922,8 +951,49 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
       </div>
     </main>
     {active && panel && createPortal(<div className="agent-popover-layer" onMouseDown={event => { if (event.target === event.currentTarget) closePanel(); }}>
-      <div id="agent-chat-panel" className={`agent-chat-panel agent-panel-${panel}`} style={panelPosition} role="dialog" aria-modal="true" aria-label={panel === 'model' ? '模型与供应商' : panel === 'add' ? '添加图片或引用' : panel === 'options' ? '生图设置' : panel === 'mentions' ? '引用图片' : '回答详情'} ref={panelRef} tabIndex={-1} onKeyDown={handleModalKeyDown}>
-        <header><strong>{panel === 'model' ? '模型与供应商' : panel === 'add' ? '添加' : panel === 'options' ? '生图设置' : panel === 'mentions' ? '引用图片' : '回答详情'}</strong><button data-agent-panel-close aria-label="关闭 Agent 面板" onClick={closePanel}><X size={17} /></button></header>
+      <div id="agent-chat-panel" className={`agent-chat-panel agent-panel-${panel}`} style={panelPosition} role="dialog" aria-modal="true" aria-label={panel === 'model' ? '模型与供应商' : panel === 'add' ? '添加图片或引用' : panel === 'options' ? '生图设置' : panel === 'mentions' ? '引用图片' : panel === 'context' ? '上下文详情' : panel === 'recipe' ? '确认图片参考' : '回答详情'} ref={panelRef} tabIndex={-1} onKeyDown={handleModalKeyDown}>
+        <header><strong>{panel === 'model' ? '模型与供应商' : panel === 'add' ? '添加' : panel === 'options' ? '生图设置' : panel === 'mentions' ? '引用图片' : panel === 'context' ? '上下文详情' : panel === 'recipe' ? '确认图片参考' : '回答详情'}</strong><button data-agent-panel-close aria-label="关闭 Agent 面板" onClick={closePanel}><X size={17} /></button></header>
+        {panel === 'context' && <div className="agent-context-inspector">
+        <div className="agent-context-toolbar"><label>仅下次发送<select aria-label="发送上下文范围" value={contextScope} disabled={draftLocked || inFlight} onChange={event => updateDraft({ contextScope: event.target.value as Draft['contextScope'], contextOverrideFor: { taskId: taskContext?.taskId || null, branchRoundId: current?.conversation.activeRoundId || null } })}><option value="task">自动处理</option><option value="selected">指定历史内容</option><option value="branch">完整分支</option></select></label><button type="button" onClick={() => updateDraft({ contextScope: 'task', historyRoundIds: [], contextOverrideFor: null })}>恢复自动处理</button></div>
+        {contextScope === 'branch' && <p className="agent-help">仅下次发送携带完整分支，可能更慢、费用更高；之后恢复自动处理。</p>}
+        <details className="agent-task-context" open>
+          <summary>任务状态 · {taskContext ? ({ complete: '完整', partial: '待补充', history_required: '需要历史' }[taskContext.completeness]) : current?.contextMode === 'legacy' || rounds.length ? '旧会话，尚无结构化任务' : '新任务'} · {selectedPrompt ? `Prompt v${promptVersionIndex}` : '尚未明确选择 Prompt'}</summary>
+          <div className="agent-task-context-body">
+            {!taskContext && <p className="agent-help">{rounds.length ? '旧记录仍保留；当前任务资料不足时会明确回退到历史。可从消息中选定 Prompt，或重置任务。' : '系统会在正常对话中维护这些信息，无需手工整理。'}</p>}
+            {taskContext && <>
+              <p className="agent-help">任务版本 {taskContext.revision} · {taskTypeText[taskContext.taskType] || taskContext.taskType}</p>
+              {taskContext.latestUserAddition?.text && <p className="agent-task-addition">最近补充：{taskContext.latestUserAddition.text}</p>}
+              {taskContext.unresolvedItems.length > 0 && <p className="agent-context-warning">待确认：{taskContext.unresolvedItems.join('；')}</p>}
+              {taskContext.historyDependencies.length > 0 && <p className="agent-context-warning">回退历史的原因：{taskContext.historyDependencies.map(item => taskHistoryReasonText[item.reason] || item.reason).join('；')}</p>}
+              {selectedPrompt && <><p className="agent-help">当前 Prompt v{promptVersionIndex} · 来源：{selectedPrompt.source.kind === 'model' ? 'Agent 回答，由你明确选择' : selectedPrompt.source.kind === 'legacy' ? '旧记录' : '你的原文'}{promptSourceLocation ? ` · ${promptSourceLocation}` : ''}</p><pre className="agent-task-prompt">{selectedPrompt.text}</pre></>}
+              {taskContext.promptVersions.length > 0 && <div className="agent-task-versions" aria-label="Prompt 版本">{taskContext.promptVersions.map((version, index) => <button key={version.id} type="button" aria-label={`恢复 Prompt v${index + 1}`} aria-pressed={version.id === taskContext.selectedPromptVersionId} disabled={draftLocked || inFlight || version.id === taskContext.selectedPromptVersionId} onClick={() => void changeTaskContext([{ op: 'restore_prompt', id: version.id }])}>v{index + 1} · {version.kind === 'candidate' ? '候选' : version.kind === 'executed' ? '已执行' : version.kind === 'original' ? '原文' : '已选择'}</button>)}</div>}
+              {promptVersionIndex > 1 && <button type="button" aria-label="撤销当前 Prompt 选择" disabled={draftLocked || inFlight} onClick={() => void changeTaskContext([{ op: 'restore_prompt', id: taskContext.promptVersions[promptVersionIndex - 2].id }])}>撤销当前 Prompt 选择</button>}
+              {taskContext.constraints.length > 0 && <div className="agent-task-constraints" aria-label="当前任务约束">{taskContext.constraints.map(constraint => <p key={constraint.id}><span>{constraint.status === 'revoked' ? <s>{constraint.text}</s> : constraint.text}{constraint.status === 'proposed' && <small> · 建议，待确认</small>}</span>{constraint.status === 'proposed' && <button type="button" disabled={draftLocked || inFlight} aria-label={`确认约束 ${constraint.text}`} onClick={() => void changeTaskContext([{ op: 'update_constraint', id: constraint.id, text: constraint.text }])}>确认</button>}<button type="button" disabled={draftLocked || inFlight} aria-label={`${constraint.status === 'revoked' ? '恢复' : '撤销'}约束 ${constraint.text}`} onClick={() => void changeTaskContext([constraint.status === 'revoked' ? { op: 'update_constraint', id: constraint.id, text: constraint.text } : { op: 'revoke_constraint', id: constraint.id }])}>{constraint.status === 'revoked' ? '恢复' : '撤销'}</button></p>)}</div>}
+            </>}
+            {imagePreview.size > 0 && <div className="agent-task-image-list" aria-label="本次图片对象">{[...imagePreview.entries()].map(([key, image]) => <div key={key}>{image.url && taskImages.some(taskImage => referenceKey(taskImage.source) === key) && !draft.refs.some(choice => referenceKey(choice.reference) === key) && <img src={image.url} alt={image.label} />}<span>{image.label}{mainImageReference && key === referenceKey(mainImageReference) ? ' · 主要图片' : ''}{image.missing ? ' · 不可用' : ''}</span><button type="button" aria-label={`设为主要图片 ${image.label}`} disabled={draftLocked || inFlight || image.missing} onClick={() => void changeTaskContext([{ op: 'set_target', ref: image.reference }])}>设为主要图片</button></div>)}</div>}
+            {contextScope === 'selected' && <fieldset className="agent-history-selection"><legend>选择当前分支的历史内容</legend>{!rounds.length && <p>当前分支暂无历史。</p>}{rounds.map((round, index) => <label key={round.id}><input type="checkbox" aria-label={`带入第 ${index + 1} 轮历史`} checked={selectedHistory.includes(round.id)} disabled={draftLocked || inFlight} onChange={event => updateDraft({ historyRoundIds: event.target.checked ? [...selectedHistory, round.id] : selectedHistory.filter(id => id !== round.id) })} /><span>第 {index + 1} 轮 · {round.prompt}</span></label>)}<p className="agent-help">所选轮次包含提问和回答。图片也可在下方单独重新加入本轮附件。</p></fieldset>}
+            {rounds.length > 0 && <details className="agent-history-images"><summary>重新加入历史消息或图片</summary>{rounds.map((round, index) => <div key={round.id} className="agent-history-round"><button type="button" aria-label={`将第 ${index + 1} 轮提问设为 Prompt`} disabled={draftLocked || inFlight} onClick={() => void changeTaskContext([{ op: 'set_prompt', text: round.prompt, kind: 'selected', source: { kind: 'user', roundId: round.id, messageId: round.userMessageId } }])}>第 {index + 1} 轮提问设为 Prompt</button>{[...new Set([...round.inputImageIds, ...(round.taskImageIds || [])])].map(id => { const image = current?.images.find(value => value.id === id); if (!image) return <span key={id}>历史图片记录缺失</span>; const selected = draft.refs.some(choice => referenceKey(choice.reference) === referenceKey(image.source)); return <button key={id} type="button" aria-label={`重新加入第 ${index + 1} 轮图片 ${id}`} disabled={draftLocked || inFlight || uploading || image.status !== 'available' || selected || draft.refs.length >= inputLimit} onClick={() => updateDraft({ refs: [...draft.refs, { reference: image.source, url: sameOriginImage(image.thumbnailUrl || image.url), label: `第 ${index + 1} 轮历史参考图` }] })}>{selected ? '已加入' : image.status !== 'available' ? '图片不可用' : '加入历史参考图'}</button>; })}{round.outputTaskIds.map(id => { const job = current?.jobs.find(value => value.id === id); return job ? <button key={id} type="button" disabled={draftLocked || inFlight || uploading || !job.result_path || !['succeeded', 'accepted'].includes(job.status)} onClick={() => addResultReference(job)}>加入第 {index + 1} 轮结果图</button> : null; })}</div>)}</details>}
+            <div className="agent-task-actions"><button type="button" aria-label="将输入框原文设为 Prompt" disabled={draftLocked || inFlight || !draft.text.trim()} onClick={() => void changeTaskContext([{ op: 'set_prompt', text: draft.text, kind: 'selected' }])}>输入框原文设为 Prompt</button><button type="button" aria-label="更换任务主要图片" disabled={draftLocked || inFlight} onClick={() => { setTargetPicker(true); setPicker(true); }}>更换目标图片</button><button type="button" aria-label="重置当前任务" disabled={draftLocked || inFlight} onClick={() => void changeTaskContext([{ op: 'new_task' }])}>重置任务</button></div>
+          </div>
+        </details>
+        </div>}
+        {panel === 'recipe' && recipeChoice && <section className="agent-recipe-review" aria-label="确认本次参考图片">
+          <p>你刚添加的图片与这份提示词已有的参考图不同。请选择本次使用哪一组，输入框内容会保留。</p>
+          <pre className="agent-task-prompt">{recipeChoice.text}</pre>
+          <p>{imageCount} 张 · {imageModel || '供应商默认图片模型'} · {draft.params.size} · {draft.params.quality}</p>
+          <h4>新添加的图片</h4>
+          <div className="agent-recipe-image-choices">{draft.refs.map((reference, index) => <figure key={referenceKey(reference.reference)}>{reference.url && <img src={sameOriginImage(reference.url)} alt={`新附件 ${index + 1}`} />}<figcaption>新附件 {index + 1} · {index === 0 ? '主要图片' : '辅助参考'}</figcaption></figure>)}</div>
+          <button type="button" aria-label="使用新附件生成图片" disabled={draftLocked || inFlight || !draft.refs.length} onClick={() => { const choice = recipeChoice; closePanel(); void executeConfirmedPrompt(choice, true); }}>使用新附件生成</button>
+          <h4>已有的参考图</h4>
+          <div className="agent-recipe-image-choices">{taskImages.map((reference, index) => {
+            const asset = current?.images.find(image => image.id === reference.assetId), url = sameOriginImage(asset?.thumbnailUrl || asset?.url);
+            const role = referenceRoleText['role' in reference && typeof reference.role === 'string' ? reference.role : 'target'];
+            return <figure key={reference.assetId}>{url && <img src={url} alt={`已有参考 ${index + 1} · ${role}`} />}<figcaption>{index + 1}. {role}{asset?.status !== 'available' ? ' · 不可用' : ''}</figcaption></figure>;
+          })}</div>
+          {!taskImages.length && <p>无已有参考图。</p>}
+          <button type="button" aria-label="沿用提示词原参考图生成图片" disabled={draftLocked || inFlight} onClick={() => { const choice = recipeChoice; closePanel(); void executeConfirmedPrompt(choice); }}>沿用已有参考图生成</button>
+          <p className="agent-help">仅授权本次图片请求，持续生图模式保持原样。</p>
+        </section>}
         {panel === 'model' && <div className="agent-model-panel-content"><dl><dt>当前模型</dt><dd>{config?.config.textModel || '未设置模型'}</dd><dt>供应商</dt><dd>{currentProfile?.display_name || '未选择供应商'}</dd><dt>调用方式</dt><dd>{config?.config.apiConfigMode === 'hybrid' ? '混合工具模式' : config?.config.apiConfigMode === 'native' ? 'Responses 原生模式' : '跟随当前 API 配置'}</dd></dl>{config?.config.apiConfigMode === 'off' && <label className="agent-profile-select">本轮 API 配置<select aria-label="本轮 API 配置" disabled={draftLocked} value={activeProfileId} onChange={event => setActiveProfileId(event.target.value)}><option value="">选择配置</option>{config.profiles.map(profile => <option key={profile.id} value={profile.id}>{profile.display_name}</option>)}</select></label>}<button className="agent-panel-action" aria-label="修改 Agent 模型配置" onClick={openSettings}>修改模型配置</button></div>}
         {panel === 'add' && <div className="agent-add-actions"><button aria-label="上传图片文件" title="上传图片文件" disabled={draftLocked || uploading || draft.refs.length >= inputLimit} onClick={() => { closePanel(); fileInput.current?.click(); }}><Plus size={18} />上传图片</button><button aria-label="从 Library 或画廊选择图片" title="从 Library 或画廊选择图片" disabled={draftLocked || uploading || draft.refs.length >= inputLimit} onClick={() => { closePanel(); setPicker(true); }}><ImagePlus size={18} />从 Library / 画廊选择</button><button aria-label="引用已有图片" disabled={draftLocked} onClick={() => { panelRef.current?.querySelector<HTMLButtonElement>('[data-agent-panel-close]')?.focus({ preventScroll: true }); setPanel('mentions'); }}>＠ 引用已有图片</button><p className="agent-help">也可直接拖入或粘贴图片。</p></div>}
         {panel === 'mentions' && <div className="agent-mention-menu">{mentionChoices()}</div>}

@@ -80,6 +80,22 @@ export function AgentResponseDetails({ details, modelInfo, request, round, jobs 
         {Boolean(summary?.imageJobsMissing) && <div><dt>任务已移除</dt><dd>{summary!.imageJobsMissing}</dd></div>}
       </dl></section>}
       {returnedModels.length > 0 && <p className="agent-help">返回模型为接口报告的名称。</p>}
+      {round?.contextDiagnostics && <section aria-label="上下文回执"><h4>上下文回执</h4>
+        <dl>
+          <div><dt>请求范围</dt><dd>{({ task: '当前任务（自动）', selected: '指定历史', branch: '完整分支' } as Record<string, string>)[round.contextDiagnostics.contextScope || ''] || '未记录'}</dd></div>
+          <div><dt>请求附图次数</dt><dd>{reportedCount(round.contextDiagnostics.attachedImageOccurrences) ? round.contextDiagnostics.attachedImageOccurrences : '未记录'}</dd></div>
+          <div><dt>带入历史轮次</dt><dd>{reportedCount(round.contextDiagnostics.includedHistoryRoundCount) ? round.contextDiagnostics.includedHistoryRoundCount : '未记录'}</dd></div>
+          {round.contextDiagnostics.fallbackReason && <div><dt>扩大范围原因</dt><dd>{round.contextDiagnostics.fallbackReason}</dd></div>}
+        </dl>
+        {Boolean(round.contextDiagnostics.pixelBindings?.length) && <ol>{round.contextDiagnostics.pixelBindings!.map((binding, index) => <li key={`${binding.ref}:${index}`}>{binding.ref} · {binding.role}</li>)}</ol>}
+        {Boolean(round.contextDiagnostics.bindingsOmitted) && <p>其余 {round.contextDiagnostics.bindingsOmitted} 条绑定未展开。</p>}
+        <p className="agent-help">来自后端最近一次文字请求的组装回执，图片次数包括必要的重复绑定；连接失败时不代表上游已收齐。此处不使用输入框候选列表推算。</p>
+      </section>}
+      {round?.taskContext && <section aria-label="任务来源信息"><h4>任务来源</h4><dl>
+        <div><dt>任务身份</dt><dd>{round.taskContext.taskId}</dd></div>
+        <div><dt>任务版本</dt><dd>{round.taskContext.revision}</dd></div>
+        <div><dt>状态</dt><dd>{round.taskContext.completeness}</dd></div>
+      </dl>{round.taskContext.historyDependencies.length > 0 && <ul>{round.taskContext.historyDependencies.map((entry, index) => <li key={`${entry.roundId}:${index}`}>{entry.roundId} · {entry.reason}</li>)}</ul>}</section>}
       {(round || details && (hasUsage || extraUsage || steps.length > 0)) && <dl><TokenRows usage={details?.usage || missingUsage} fields={hasUsage ? tokenFields.slice(2) : tokenFields} showMissing /></dl>}
       {round?.failure && <dl><div><dt>请求诊断</dt><dd>{getAgentFailure(round.failure.kind).label} · {getAgentFailure(round.failure.kind).kind}</dd></div></dl>}
       {round && <section aria-label="阶段耗时"><h4>阶段耗时</h4>

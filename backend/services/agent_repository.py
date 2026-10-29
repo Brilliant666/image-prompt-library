@@ -883,7 +883,8 @@ class AgentRepository:
             requirements_history = [row['id'] for row in history if (row.get('editingTask') or {}).get('requirementsInHistory')
                                     or (row.get('editingTask') or {}).get('target') == task.get('target')]
         context = task_state.advance(inherited_context, task, prompt=body.prompt, branch_id=rid,
-                                     boundary=editing.task_boundary(body.prompt), requirements_history=requirements_history)
+                                     boundary=editing.task_boundary(body.prompt), requirements_history=requirements_history,
+                                     explicit_target=body.contextScope == 'selected')
         if task:
             task['taskId'] = context['taskId']
         if (not inherited_context and history and not editing.task_boundary(body.prompt)
@@ -1028,7 +1029,8 @@ class AgentRepository:
                                  select_asset=self._task_asset_selector(request['conversation_id'], rounds, request['round_id'], old,
                                                                         frozen_refs=refs),
                                  validate_source=self._task_source_validator(rounds, request['round_id']),
-                                 user_text=request['round']['prompt'], prompt_archive=prompt_archive)
+                                 user_text=request['round']['prompt'], prompt_archive=prompt_archive,
+                                 restore_prompt=self._task_prompt_restorer(conversation, rounds, request['round_id'], old))
         with connect(self.library) as conn:
             conn.execute('BEGIN IMMEDIATE')
             stored = conn.execute('SELECT * FROM agent_requests WHERE id=?', (request_id,)).fetchone()

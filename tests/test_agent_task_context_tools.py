@@ -305,3 +305,33 @@ def test_new_attachment_keeps_prior_composition_evidence_and_confirmed_constrain
     assert len(calls) == 1 and set(pixels(calls[0])) == {repo.data_url(first_image), repo.data_url(next_image)}
     wire_text = '\n'.join(part.get('text', '') for row in calls[0]['input'] for part in row.get('content', []))
     assert '旧图确立构图' in wire_text and '保持人物姿势' in wire_text
+
+
+def test_undo_archived_working_prompt_in_same_normal_answer(repo, monkeypatch):
+    first = start(repo, request_id='ancestor', prompt='Write a candidate image prompt')
+    original = '  ARCHIVED_WORKING\nkeep exact punctuation: ,.!  '
+    state = repo.update_task_context('ancestor', json.loads(state_call(repo, [
+        {'op': 'set_prompt', 'text': original, 'kind': 'candidate'}],
+        request_id='ancestor')['arguments']), {})
+    old_id = state['workingPromptVersionId']
+    for index in range(28):
+        request = repo.request('ancestor')
+        state = request['round']['taskContext']
+        repo.update_task_context('ancestor', {
+            'taskId': state['taskId'], 'taskRevision': state['revision'],
+            'branchRoundId': request['round_id'],
+            'operations': [{'op': 'set_prompt', 'text': f'Candidate {index}', 'kind': 'candidate'}]}, {})
+    assert old_id not in {p['id'] for p in state['promptVersions']}
+    repo.update('ancestor', state='completed', outcome='known')
+    start(repo, prompt='Undo the previous change and restore the first candidate', parent=first['round_id'])
+    undo = state_call(repo, [{'op': 'restore_working_prompt', 'id': old_id,
+        'sourceQuote': 'Undo the previous change and restore the first candidate'}])
+    calls = provider(monkeypatch, [reply(text_result('Restored the previous discussion version.'), undo)])
+    execution.run_request(repo.library, 'current')
+    current = repo.request('current')
+    final = current['round']['taskContext']
+    assert len(calls) == 1 and current['usage']['responseStepsStarted'] == 1
+    assert final['workingPromptVersionId'] == old_id
+    assert final['selectedPromptVersionId'] is None
+    assert next(p for p in final['promptVersions'] if p['id'] == old_id)['text'] == original
+    assert current['usage']['imageJobsCreated'] == 0

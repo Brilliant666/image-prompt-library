@@ -68,7 +68,7 @@ def tools_for(request, mask_url=None):
     if config.get("professionalPromptWorkflows", True):
         tools.append(skill_tool())
     if request['round'].get('taskContext'):
-        operation = {'op': {'type': 'string', 'enum': ['set_task_type', 'set_target', 'add_constraint', 'update_constraint', 'revoke_constraint', 'set_prompt', 'set_unresolved']},
+        operation = {'op': {'type': 'string', 'enum': ['set_task_type', 'set_target', 'add_constraint', 'update_constraint', 'revoke_constraint', 'set_prompt', 'restore_working_prompt', 'set_unresolved']},
             'text': {'type': ['string', 'null']}, 'id': {'type': ['string', 'null']},
             'ref': {'type': ['string', 'null']}, 'kind': {'type': ['string', 'null'], 'enum': ['candidate', None]},
             'taskType': {'type': ['string', 'null'], 'enum': ['chat', 'image_edit', 'image_generation', 'prompt', 'analysis', 'reverse', 'prompt_optimization', None]},
@@ -78,7 +78,10 @@ def tools_for(request, mask_url=None):
             'Record a candidate Prompt or reconcile current task constraints in the SAME normal answer. '
             'This does not generate, authorize, or confirm a Prompt. Use exact current task identity/revision. '
             'For a user constraint change/revocation, sourceQuote must quote the current user instruction verbatim; '
-            'otherwise constraints are only proposals. Include your normal visible answer in the same response.',
+            'otherwise constraints are only proposals. set_prompt records the working candidate without user acceptance. '
+            'Use restore_working_prompt for an explicitly requested undo/earlier version, with its supplied Prompt id and the entire '
+            'current user instruction verbatim as sourceQuote; it changes discussion context only, never selection or authorization. '
+            'Include your normal visible answer in the same response.',
             {'taskId': {'type': 'string'}, 'taskRevision': {'type': 'integer'}, 'branchRoundId': {'type': 'string'},
              'operations': {'type': 'array', 'minItems': 1, 'maxItems': 24, 'items': {'type': 'object',
                  'properties': operation, 'required': list(operation), 'additionalProperties': False}}},
@@ -104,7 +107,7 @@ def response_body(request, input_items, mask_url, secret, *, reused_skills=(), b
                         "Reverse-engineered prompts are inferred or derived, never the original prompt used to create an image. "
                         "Preserve the user's intent, exact requested text, composition and constraints; a local edit must not rewrite unrelated details. "
                         "Honor the requested language, length and target model without inventing supported API parameters. "
-                        "Present reusable prompts in clearly labeled Markdown blocks that preserve paragraphs and are easy to copy; keep explanation separate. "
+                        "Present reusable image prompts in Markdown fenced blocks labeled prompt, preserving paragraphs and exact text; keep explanation separate. "
                         "Do not overwrite original prompts, save Library assets or claim a save without an explicit user action and a supplied tool. "
                         "Image tool availability and attached pictures are not instructions to generate. Use the user's task and conversational intent, "
                         "and generate only if this request enables image generation; otherwise answer with text. Use one image per tool call, never collage unless requested. "
@@ -128,6 +131,12 @@ def response_body(request, input_items, mask_url, secret, *, reused_skills=(), b
                         "Use read_task_history for a specifically identified missing ancestor, or ask a brief clarification for ambiguous sources. "
                         "Use update_task_context with the normal answer to record useful candidate Prompts and exact user constraint changes; "
                         "never treat a model proposal as user confirmation. New current instructions supersede conflicting earlier user constraints. "
+                        "Continue from workingPromptVersionId for replies such as translate to English, shorten, or soften the lighting; "
+                        "the user need not select a Prompt or maintain task controls to keep discussing it. Working is not accepted or authorized. "
+                        "Record each useful working candidate with set_prompt in the SAME answer. For undo, use supplied Prompt version/source "
+                        "locators and restore_working_prompt; read a specified ancestor if the needed version is not present, never invent one. "
+                        "Automatically maintain an unambiguous attached image as the discussion object; ask one short natural question only "
+                        "when image identity is genuinely unclear. Never instruct users to repair task completeness or internal state. "
                         "Set finish_after_generation=true only when a single image tool call completes the entire user request; otherwise false. "
                         "An available_ref is still a valid reference but its pixels are not attached to this model call; never claim to have inspected those pixels. "
                         + ("Use $...$ and $$...$$ for Markdown math." if config["mathFormattingPrompt"] else ""),

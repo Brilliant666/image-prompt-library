@@ -9,6 +9,25 @@ from test_agent_image_selection import body, repo
 from test_agent_context_correctness import asset, capture_request, pixels
 
 
+def test_prompt_history_locators_do_not_duplicate_long_source_quotes_or_mutate_storage():
+    from backend.services.agent_context_scope import task_data
+    from backend.services.agent_task_state import new
+    state = new('Original user text', 'source-round')
+    state['promptVersions'].append({'id': 'previous-candidate', 'kind': 'candidate', 'text': 'Old candidate',
+        'source': {'kind': 'model', 'roundId': 'source-round', 'messageId': 'source-message',
+                   'userInstruction': {'quote': 'Long original instruction ' * 4000}}})
+    state['promptVersions'].append({'id': 'current-candidate', 'kind': 'candidate', 'text': 'Current candidate',
+                                   'source': {'kind': 'model', 'roundId': 'current-round'}})
+    state['workingPromptVersionId'] = 'current-candidate'
+    original = copy.deepcopy(state)
+    view = task_data(state, {})
+    old = next(p for p in view['promptHistory'] if p['id'] == 'previous-candidate')
+    assert old['source'] == {'kind': 'model', 'roundId': 'source-round', 'messageId': 'source-message'}
+    assert len(json.dumps(view['promptHistory'])) < 1000
+    assert state == original
+    assert state['promptVersions'][1]['source']['userInstruction']['quote']
+
+
 def turn(repo, request_id, prompt, *, parent=None, assets=(), scope="task", history=()):
     value = body(repo, request_id, images=False).model_dump()
     value.update(prompt=prompt, parentRoundId=parent,
@@ -153,3 +172,50 @@ def test_benchmark_reports_decoded_wire_coverage_and_actual_mock_calls():
             assert row["build"][temperature]["mock_model_calls"]["median"] == 0
             assert sample["elapsed_ms"]["min"] <= sample["elapsed_ms"]["median"] <= sample["elapsed_ms"]["max"]
             assert sample["sql_connections"]["median"] > 0
+
+
+def test_unselected_working_prompt_is_transmitted_beyond_recent_history_without_old_pixels(repo, monkeypatch):
+    from test_agent_task_state import state_arguments
+    older = asset(repo, 'red')
+    first = turn(repo, 'reverse', '反推这张图', assets=[older])
+    repo.update('reverse', state='running')
+    request = repo.request('reverse')
+    candidate = '  WORKING_CANDIDATE_EXACT\n  preserve whitespace  '
+    state = repo.update_task_context('reverse', state_arguments(request, [
+        {'op': 'set_task_type', 'taskType': 'prompt_optimization'},
+        {'op': 'set_prompt', 'text': candidate, 'kind': 'candidate'}]), {})
+    repo.update('reverse', state='completed', outcome='known')
+    parent = first
+    for index in range(4):
+        parent = turn(repo, f'continue-{index}', '继续优化这份提示词', parent=parent)
+    sent = capture_request(repo, monkeypatch, 'continue-3')
+    assert pixels(sent) == []
+    serialized = next(part['text'] for item in sent['input'] for part in item.get('content', [])
+                      if part.get('text', '').startswith('Current creative task'))
+    projected = json.loads(serialized.partition('): ')[2])
+    assert projected['workingPromptVersionId'] == state['workingPromptVersionId']
+    assert next(p for p in projected['promptVersions'] if p['id'] == projected['workingPromptVersionId'])['text'] == candidate
+    assert repo.request('continue-3')['round']['taskContext']['selectedPromptVersionId'] is None
+
+
+def test_new_reverse_task_one_upload_excludes_ended_pixels_without_controls(repo, monkeypatch):
+    old, current = asset(repo, 'red'), asset(repo, 'blue')
+    first = turn(repo, 'old-reverse', '\u53cd\u63a8\u8fd9\u5f20\u56fe', assets=[old])
+    turn(repo, 'new-reverse', '\u4e0e\u524d\u9762\u7684\u56fe\u65e0\u5173\uff0c\u53cd\u63a8\u8fd9\u5f20\u65b0\u56fe', parent=first, assets=[current])
+    request = repo.request('new-reverse')
+    assert request['round']['taskContext']['target']['assetId'] == current
+    assert request['round']['taskContext']['historyDependencies'] == []
+    assert request['round']['taskContext']['taskId'] != request['history'][0]['taskContext']['taskId']
+    sent = capture_request(repo, monkeypatch, 'new-reverse')
+    assert pixels(sent) == [repo.data_url(current)]
+    assert repo.data_url(old) not in json.dumps(sent)
+
+
+def test_automatic_current_target_explicit_old_round_keeps_both_pixels(repo, monkeypatch):
+    old, current = asset(repo, 'red'), asset(repo, 'blue')
+    first = turn(repo, 'old', '\u53cd\u63a8\u8fd9\u5f20\u56fe', assets=[old])
+    turn(repo, 'current', '\u4fee\u6539\u8fd9\u5f20\u65b0\u56fe\uff0c\u53c2\u8003\u7b2c 1 \u8f6e\u7684\u5149\u7ebf', parent=first, assets=[current])
+    request = repo.request('current')
+    assert request['round']['taskContext']['target']['assetId'] == current
+    sent = capture_request(repo, monkeypatch, 'current')
+    assert set(pixels(sent)) == {repo.data_url(old), repo.data_url(current)}

@@ -3,17 +3,25 @@
 The chat keeps its complete history. **Current task** is the default disposable
 view sent to the model, not a deletion, summary, or rewrite of that history.
 
-Use the composer task panel to inspect image objects, select an exact Prompt,
-restore a Prompt version, choose a target, or start a new task. Original user
-text, model candidates, the user-selected Prompt and the actually executed
-Prompt remain separate versions with source identities. Choosing a Prompt does
-not generate an image or change image authorization.
+Continue chatting normally: attach a reference, ask for a reverse Prompt, then
+request another language or a specific edit. The backend maintains the task and
+the model can reconcile its state while answering, without a separate
+classification or bookkeeping model request. A sole new reference can identify
+the analysis object without a manual "main image" action; it does not prove that
+older images or constraints are irrelevant.
+
+Original user text, the current working candidate, the explicitly user-selected
+Prompt and the actually executed Prompt remain separate versions with source
+identities. Continuing a discussion uses the working candidate without claiming
+that the user has confirmed it. The model cannot grant image authorization.
+On a recognized Prompt block, **Continue optimizing** discusses that exact block;
+**Generate image** selects it internally and authorizes only that operation.
 
 ## Context scope
 
 - **Current task:** selected images and roles, effective task data, recent
   clarification dialogue, exact unresolved evidence, and current tool results.
-- **Select history:** explicitly add authorized ancestor messages and images.
+- **Select history:** optionally add authorized ancestor messages and images.
   Necessary legacy evidence and current attachments still apply.
 - **Full branch:** retain the complete authorized branch; this may send more
   images and increase latency and cost. Sibling branches are never included.
@@ -24,10 +32,21 @@ previous evidence until it is reconciled. Explicitly starting a new task clears
 the old task selection without deleting its history. Exact references and mask
 targets remain validated, including actual pixels before an upstream request.
 
-The composer distinguishes known image objects from conservative **image
-candidates** when an incomplete task or compatibility fallback may enlarge the
-scope. After submission, the context receipt records the actual attached count,
-scope and fallback reason. A reference label is not a provider image cache.
+The normal composer shows attachments, text, image settings and image mode, not
+task completeness, versions or candidate counts. Genuine missing images,
+configuration failures and uncertain receipts remain actionable errors.
+
+Optional context controls live under the conversation's **More / Context
+details** entry. A manual history override is for the next accepted send, not a
+permanent setting for later tasks; return to automatic task scope there. Opening
+the inspector or answer details does not call a model or change the task. Closed
+inspectors do not build a branch-wide image candidate list on every keystroke.
+
+After submission, the round's optional answer details show the backend's latest
+request-composition receipt: attached occurrences, image bindings, scope and
+fallback reason. This is not a count inferred from composer candidates and does
+not prove that an upstream server received a failed transport's full body.
+A reference label is not a provider image cache.
 
 ## State and compatibility
 
@@ -35,13 +54,16 @@ Task changes use task ID, revision and branch checks. A late response cannot
 replace another branch's newer selection. Existing sessions are read without
 bulk migration or model calls. Legacy requirements and unprocessed additions
 retain exact source-message dependencies; overflow is never silently truncated
-and called complete. These tasks can therefore grow until the user resolves
-them or explicitly chooses a self-contained Prompt/new task.
+and called complete. These tasks can therefore grow until normal dialogue
+reconciles the necessary evidence or the user explicitly chooses a
+self-contained Prompt/new task; manual state maintenance is not a prerequisite.
 
-The model can record candidate Prompts and reconcile constraints in its normal
+The model can record working candidate Prompts and reconcile constraints in its normal
 answer using `update_task_context`. Changes to confirmed user constraints must
 cite the current user's exact instruction. Model suggestions do not confirm a
-Prompt or grant tools. A complete visible answer plus a successful state update
+Prompt or grant tools. Restoring an earlier working version through the normal
+tool requires an exact current user instruction and a valid historical source;
+it does not silently select a paid execution recipe. A complete visible answer plus a successful state update
 finishes without a separate bookkeeping model request.
 
 `read_task_history` reads at most six specified ancestor rounds from the frozen

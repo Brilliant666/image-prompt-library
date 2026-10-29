@@ -51,14 +51,24 @@ def new(text, branch_id, *, task_type='chat', target=None, auxiliaries=()):
             'promptVersions': [{'id': prompt_id, 'text': text, 'kind': 'original',
                                 'source': source('user', branch_id), 'confirmedBy': 'user'}] if text else [],
             'originalPromptVersionId': prompt_id if text else None, 'selectedPromptVersionId': None,
-            'executedPromptVersionId': None, 'constraints': [],
+            'workingPromptVersionId': None, 'executedPromptVersionId': None, 'constraints': [],
             'latestUserAddition': {'text': text, 'roundId': branch_id} if text else None,
             'unresolvedItems': [], 'completeness': 'complete', 'historyDependencies': []}
+
+
+def working_prompt_id(context):
+    """Continue an explicit stored candidate, without treating it as accepted."""
+    if 'workingPromptVersionId' in context:
+        return context.get('workingPromptVersionId')
+    # Compatibility uses an already recorded Prompt, never an arbitrary block.
+    return context.get('selectedPromptVersionId') or next(
+        (p['id'] for p in reversed(context.get('promptVersions', [])) if p['kind'] == 'candidate'), None)
 
 
 def trim_prompts(context, archive):
     """Keep a bounded active window; exact older versions stay in branch JSON."""
     protected = {context.get(field) for field in ('originalPromptVersionId', 'selectedPromptVersionId', 'executedPromptVersionId')}
+    protected.add(working_prompt_id(context))
     protected.add(context['promptVersions'][-1]['id'] if context['promptVersions'] else None)
     while len(context['promptVersions']) > MAX_PROMPT_VERSIONS:
         index = next(i for i, prompt in enumerate(context['promptVersions']) if prompt['id'] not in protected)
@@ -101,6 +111,7 @@ def advance(previous, editing_task, *, prompt, branch_id, boundary=False, requir
                                       'source': source('legacy', branch_id)} for text in editing_task.get('constraints', [])]
     else:
         value = copy.deepcopy(previous)
+        value['workingPromptVersionId'] = working_prompt_id(previous)
         value['revision'] += 1
         value['branchRoundId'] = branch_id
         if not value.get('startRoundId'):
@@ -122,7 +133,7 @@ def advance(previous, editing_task, *, prompt, branch_id, boundary=False, requir
         value['target'] = copy.deepcopy(target)
         if editing_task:
             value['auxiliaries'] = copy.deepcopy(editing_task.get('auxiliaries', []))
-        if editing_task:
+        if editing_task and (changed_target or previous['taskType'] == 'chat'):
             value['taskType'] = 'image_edit'
         if changed_target:
             # A new attachment identifies a new subject, but says nothing about
@@ -172,7 +183,7 @@ def apply(context, operations, *, actor, branch_id, select_asset, validate_sourc
     prompt_archive = prompt_archive if prompt_archive is not None else {}
     previous_revision = value['revision']
     allowed_model = {'set_task_type', 'set_target', 'set_auxiliaries', 'add_constraint', 'update_constraint',
-                     'revoke_constraint', 'set_prompt', 'set_unresolved', 'set_history_dependencies'}
+                     'revoke_constraint', 'set_prompt', 'restore_working_prompt', 'set_unresolved', 'set_history_dependencies'}
     for operation in operations:
         item = operation.model_dump(exclude_none=True) if hasattr(operation, 'model_dump') else operation
         op, text = item.get('op'), item.get('text')
@@ -235,9 +246,13 @@ def apply(context, operations, *, actor, branch_id, select_asset, validate_sourc
             prompt_id = identifier('prompt')
             value['promptVersions'].append({'id': prompt_id, 'text': text, 'kind': kind, 'source': provenance,
                                             'confirmedBy': 'user' if actor == 'user' and kind == 'selected' else None})
+            value['workingPromptVersionId'] = prompt_id
+            value.pop('workingPromptSource', None)
             if actor == 'user' and kind == 'selected':
                 value['selectedPromptVersionId'] = prompt_id
-        elif op in {'select_prompt', 'restore_prompt'}:
+        elif op in {'select_prompt', 'restore_prompt', 'restore_working_prompt'}:
+            if op == 'restore_working_prompt' and actor == 'model' and item.get('sourceQuote') != user_text:
+                invalid('恢复讨论版本必须逐字引用本轮完整用户要求。')
             found = next((p for p in value['promptVersions'] if p['id'] == item.get('id')), None)
             if not found and restore_prompt:
                 found = copy.deepcopy(restore_prompt(item.get('id')))
@@ -245,8 +260,13 @@ def apply(context, operations, *, actor, branch_id, select_asset, validate_sourc
                     value['promptVersions'].append(found)
             if not found:
                 invalid('Prompt 版本不存在。')
-            value['selectedPromptVersionId'] = found['id']
-            found['confirmedBy'] = 'user'
+            value['workingPromptVersionId'] = found['id']
+            if op == 'restore_working_prompt':
+                value['workingPromptSource'] = {**provenance, 'restoredFrom': found['id']}
+            else:
+                value['selectedPromptVersionId'] = found['id']
+                found['confirmedBy'] = 'user'
+                value.pop('workingPromptSource', None)
         elif op == 'set_unresolved':
             value['unresolvedItems'] = item.get('items', [])
         elif op == 'set_history_dependencies':

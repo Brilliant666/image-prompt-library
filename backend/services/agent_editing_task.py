@@ -67,7 +67,7 @@ def infer_task(repo, previous, *, conversation_id, parent_id, prompt, inputs, hi
     """
     if task_boundary(prompt):
         previous = None
-        if not inputs or not _EDIT.search(prompt):
+        if not inputs:
             return None
     available = references(history, inputs, len(history) + 1)
     selector_matches = [(m, m[1]) for m in _TAG.finditer(prompt)]
@@ -92,7 +92,11 @@ def infer_task(repo, previous, *, conversation_id, parent_id, prompt, inputs, hi
     replace, continuing_result = False, False
     if len(explicit) == 1 and (edit or previous):
         target, replace = explicit[0], True
-    elif inputs and (edit or explicit_auxiliary or _LIGHT.search(prompt)):
+    elif inputs and (len(inputs) == 1 or edit or explicit_auxiliary or _LIGHT.search(prompt)):
+        # A sole current attachment is a concrete discussion/analysis object,
+        # even for reverse prompting or ordinary visual questions. This binds
+        # identity, not intent or generation permission. Multiple unassigned
+        # images remain ambiguous; changed targets retain prior task evidence.
         # A new attachment explicitly assigned an auxiliary role is not a new
         # editing subject. Keep the selected subject when every new image is
         # auxiliary; otherwise use only the remaining unassigned candidates.

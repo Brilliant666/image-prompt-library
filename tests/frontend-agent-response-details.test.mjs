@@ -26,6 +26,26 @@ const render = (details, props = {}) => renderToStaticMarkup(React.createElement
 const missing = { inputTokens: null, outputTokens: null, totalTokens: null, cachedInputTokens: null, reasoningTokens: null };
 const details = () => ({ version: 1, steps: [], skills: [], usage: { ...missing, reportedSteps: 0, totalSteps: 1, complete: false } });
 
+test('context diagnostics come from the persisted backend receipt inside optional details', () => {
+  const html = render(undefined, { round: {
+    id: 'receipt', requestId: 'request-receipt', outputTaskIds: [], status: 'done',
+    contextDiagnostics: { contextScope: 'task', includedHistoryRoundCount: 2, attachedImageOccurrences: 1,
+      fallbackReason: 'required_history_evidence', pixelBindings: [{ ref: 'round-3-reference-1', role: 'editing_target' }] },
+    taskContext: { taskId: 'task-receipt', revision: 8, completeness: 'history_required',
+      historyDependencies: [{ roundId: 'old-round', reason: 'unreconciled_user_addition' }] },
+  } });
+  assert.doesNotMatch(html.split('<details')[0], /上下文回执|任务版本|required_history_evidence|task-receipt/);
+  assert.match(html, /请求附图次数<\/dt><dd>1/);
+  assert.match(html, /带入历史轮次<\/dt><dd>2/);
+  assert.match(html, /round-3-reference-1 · editing_target/);
+  assert.match(html, /required_history_evidence/);
+  assert.match(html, /任务版本<\/dt><dd>8/);
+  assert.match(html, /不代表上游已收齐/);
+  assert.doesNotMatch(html, /<details[^>]* open/);
+  const legacy = render(undefined, { round: { id: 'old', requestId: 'old', outputTaskIds: [], status: 'done' } });
+  assert.doesNotMatch(legacy, /上下文回执|任务来源|请求附图次数/);
+});
+
 test('legacy and missing metadata render no empty sections or invented zero counts', () => {
   assert.equal(render(undefined), '');
   assert.equal(render(details()), '');

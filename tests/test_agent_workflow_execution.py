@@ -158,9 +158,13 @@ def test_toggle_is_local_preserves_configuration_and_reenables_workflows(isolate
         assert not calls
         assert {k: v for k, v in disabled['config'].items() if k != 'professionalPromptWorkflows'} == {
             k: v for k, v in initial['config'].items() if k != 'professionalPromptWorkflows'}
-        off, _ = submit(client, isolated, '根据参考图反推中文提示词', rid='off', refs=[upload(client)])
+        reference = upload(client)
+        off, _ = submit(client, isolated, '根据参考图反推中文提示词', rid='off', refs=[reference])
         assert off['request']['state'] == 'completed' and used_sections(off) == set()
-        assert {tool.get('name') for tool in calls[-1][1]['tools']} == TASK_CONTEXT_TOOLS
+        assert off['taskContext']['target']['source'] == reference
+        assert off['editingTask']['target'] == off['taskContext']['target']
+        assert off['jobs'] == [] and off['request']['usage']['imageJobsCreated'] == 0
+        assert {tool.get('name') for tool in calls[-1][1]['tools']} == TASK_CONTEXT_TOOLS | {'select_image_references'}
         assert all(tool['type'] == 'function' for tool in calls[-1][1]['tools']) and pixels(calls[-1][1])
         assert 'image-prompt-reverse' not in calls[-1][1]['instructions']
         enabled = client.put('/api/agent/config', json={'expectedRevision': disabled['revision'], 'config': initial['config']})

@@ -63,6 +63,7 @@
 }
 
 .agent-markdown .agent-prompt-block pre code { font: inherit; white-space: inherit; }
+.agent-prompt-generation-summary { margin: 0; padding: 8px 12px; border-top: 1px solid var(--ag-border, var(--border)); font-size: 11px; line-height: 1.6; color: var(--ag-muted, var(--muted)); overflow-wrap: anywhere; }
 
 .agent-code-block-toolbar button:hover {
   color: var(--ag-text, var(--ink));

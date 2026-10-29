@@ -55,7 +55,9 @@ def running(repo, count=1):
 def test_progress_view_matches_public_snapshot_without_loading_historical_inputs(repo, monkeypatch):
     old_image = repo.store_asset(image_bytes('blue'), None)['id']
     parent = add_round(repo, 'old', 'Historical attachment', assets=[old_image])
-    add_round(repo, 'current', 'A plain question', parent=parent)
+    # Explicitly end the visual task: an ordinary follow-up intentionally
+    # retains its discussion image after automatic single-upload binding.
+    add_round(repo, 'current', 'New task: explain database indexes', parent=parent)
     repo.update('current', state='running', text='Partial 🙂')
     expected = progress.limited_view(repo.snapshot(request_id='current'))
     original_image = repo.image
@@ -329,3 +331,24 @@ def test_lost_terminal_publication_recovers_persisted_success_by_get(repo, monke
     restored = repo.snapshot(request_id=request_id)
     assert restored['request']['state'] == 'completed'
     assert restored['conversation']['messages'][-1]['content'] == 'Persisted success'
+
+
+def test_progress_view_preserves_automatic_visual_object_without_parsing_history(repo, monkeypatch):
+    image = repo.store_asset(image_bytes('blue'), None)['id']
+    parent = add_round(repo, 'visual', 'Reverse this image', assets=[image])
+    add_round(repo, 'follow-up', 'Make the lighting softer, keep everything else', parent=parent)
+    repo.update('follow-up', state='running', text='Partial response')
+    expected = progress.limited_view(repo.snapshot(request_id='follow-up'))
+    original_image = repo.image
+    resolved = []
+    def task_image(asset_id):
+        resolved.append(asset_id)
+        assert asset_id == image
+        return original_image(asset_id)
+    monkeypatch.setattr(repo, 'image', task_image)
+    monkeypatch.setattr(repo, 'data_url', lambda *args: pytest.fail('Encoded image pixels for progress'))
+    monkeypatch.setattr(repo, 'request', lambda *args: pytest.fail('Loaded frozen full history'))
+    monkeypatch.setattr(repo, '_rounds', lambda *args: pytest.fail('Parsed all historical rounds'))
+    monkeypatch.setattr(repo, 'snapshot', lambda *args, **kwargs: pytest.fail('Assembled full snapshot'))
+    assert repo.progress_view('follow-up') == expected
+    assert resolved and set(resolved) == {image}

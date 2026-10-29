@@ -16,15 +16,15 @@ from test_agent_workflow_execution import FOUNDATIONS, application, answer, pixe
 DEEP_CHAPTERS = {('gpt-image', 'editing'), ('image-prompt-reverse', 'analysis')}
 
 
-@pytest.mark.parametrize('prompt,has_target', [
-    ('修改这张图片的背景，保持主体不变，先给我提示词。', True),
-    ('Using this image, change the background and give me a prompt first.', True),
-    ('先反推这张图的提示词，再调整背景。', True),
-    ('使用图片反推工作流，修改这张图片的背景，先给我提示词。', True),
-    ('根据这张图生成提示词。', False),
-    ('这张图的光线有什么特点？', False),
+@pytest.mark.parametrize('prompt', [
+    '修改这张图片的背景，保持主体不变，先给我提示词。',
+    'Using this image, change the background and give me a prompt first.',
+    '先反推这张图的提示词，再调整背景。',
+    '使用图片反推工作流，修改这张图片的背景，先给我提示词。',
+    '根据这张图生成提示词。',
+    '这张图的光线有什么特点？',
 ])
-def test_library_reference_has_default_foundations_without_keyword_routing(isolated, monkeypatch, prompt, has_target):
+def test_library_reference_has_default_foundations_without_keyword_routing(isolated, monkeypatch, prompt):
     with application(isolated, monkeypatch) as (client, calls, replies):
         original = 'Original Library prompt.\n  Keep its exact text. '
         created = client.post('/api/items', json={'title': 'Synthetic workflow reference', 'prompts': [
@@ -36,13 +36,17 @@ def test_library_reference_has_default_foundations_without_keyword_routing(isola
         result, _ = submit(client, isolated, prompt, refs=[reference])
         assert result['request']['state'] == 'completed'
         assert used_sections(result) == FOUNDATIONS
-        assert bool(result['editingTask']) == has_target
-        if has_target:
-            assert result['editingTask']['target']['source'] == reference
+        target = result['taskContext']['target']
+        assert target['source'] == reference
+        assert result['editingTask']['target'] == target
+        repository = AgentRepository(isolated)
+        assert (isolated / repository.asset(target['assetId'])['path']).read_bytes() == image_bytes('blue')
+        assert result['taskContext']['selectedPromptVersionId'] is None
+        assert not result['editingTask']['needsTargetSelection']
         assert len(calls) == 1 and calls[0][0] == '/v1/responses' and result['jobs'] == []
         sent = calls[0][1]
         assert pixels(sent)[0].endswith(base64.b64encode(image_bytes('blue')).decode())
-        expected_tools = {'read_agent_skill', 'update_task_context', 'read_task_history'} | ({'select_image_references'} if has_target else set())
+        expected_tools = {'read_agent_skill', 'update_task_context', 'read_task_history', 'select_image_references'}
         assert sorted(tool.get('name') for tool in sent['tools']) == sorted(expected_tools)
         assert all(tool['type'] == 'function' for tool in sent['tools'])
         for name, section in FOUNDATIONS | DEEP_CHAPTERS:

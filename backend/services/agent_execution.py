@@ -562,6 +562,9 @@ def _execute_calls(repo, request_id, step, output, refs):
                 raise AgentError('reference_missing', '指定历史不在本轮冻结分支中。', 400)
             evidence = [{'roundId': r['id'], 'roundNumber': r['index'], 'user': r['prompt'],
                          'assistant': r.get('assistantContent', ''),
+                         'promptVersions': [{'id': p['id'], 'kind': p['kind'],
+                                             'source': {key: p['source'][key] for key in ('kind', 'roundId', 'messageId') if key in p['source']}}
+                                            for p in (r.get('taskContext') or {}).get('promptVersions', [])[-8:]],
                          'refs': [ref for ref, aid in refs.items() if aid and ref.startswith(f"round-{r['index']}-")]} for r in rows]
             if len(encoded(evidence).encode('utf-8')) > 200_000:
                 result = {'error': '所选历史正文过大，请用户选择更具体的来源或完整分支范围；原文未截断。'}

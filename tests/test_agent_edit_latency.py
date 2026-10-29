@@ -75,13 +75,18 @@ def test_inline_selection_corrects_old_subject_when_a_new_upload_is_the_intended
         new_ref = upload(client, 'blue')
         queued, _ = submit(client, isolated, '新图作为主图，原图只用它的光线，直接出图',
                            refs=[new_ref], images=True, rid='second', run=False)
-        # This conversational choice is not resolved by the lightweight local
-        # rules. The model can correct it in its actual generation call.
-        assert queued['editingTask']['target']['source'] == original_ref
+        # The single current upload is automatically the discussion object.
+        # Its old relationship is not discarded: the normal model call still
+        # receives the prior pixels and assigns their exact auxiliary role.
+        assert queued['editingTask']['target']['source'] == new_ref
+        assert queued['taskContext']['historyDependencies']
+        assert queued['taskContext']['unresolvedItems']
         replies.append(image_call({'targetRef': 'round-2-reference-1', 'auxiliaries': [
             {'ref': 'round-1-reference-1', 'role': 'lighting'}]}))
         before = len(calls)
         execution.run_request(isolated, 'second')
+        assert set(pixels(calls[before][1])) == {
+            repository.data_url(new_ref['uploadId']), repository.data_url(original_ref['uploadId'])}
         result = client.get('/api/agent/requests/second').json()
         assert result['request']['state'] == 'completed', result['request']
         assert result['editingTask']['target']['source'] == new_ref

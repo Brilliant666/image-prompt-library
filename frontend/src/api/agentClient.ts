@@ -88,6 +88,7 @@ export interface AgentRound {
   failure?: { kind: string; message: string; outcomeUnknown: boolean } | null;
   retryTaskIds?: string[];
   editingTask?: AgentEditingTask | null;
+  contextDiagnostics?: { contextScope?: string; includedHistoryRoundCount?: number; fallbackReason?: string | null; attachedImageOccurrences?: number; pixelBindings?: Array<{ assetId?: string; ref?: string; role?: string; aliases?: string[] }>; attachedRefs?: string[]; bindingsOmitted?: number };
   taskContext?: AgentTaskContext | null;
   kind?: 'prompt_execution';
   directRecipe?: AgentDirectRecipe;
@@ -115,7 +116,7 @@ export interface AgentTaskContext {
   target: { assetId: string; source: AgentReference } | null;
   auxiliaries: Array<{ assetId: string; source: AgentReference; role: AgentReferenceRole }>;
   promptVersions: AgentTaskPromptVersion[];
-  originalPromptVersionId: string | null; selectedPromptVersionId: string | null; executedPromptVersionId: string | null;
+  originalPromptVersionId: string | null; workingPromptVersionId?: string | null; selectedPromptVersionId: string | null; executedPromptVersionId: string | null;
   constraints: Array<{ id: string; text: string; status: 'active' | 'proposed' | 'revoked'; source: AgentTaskPromptSource }>;
   latestUserAddition: { text: string; roundId: string } | null;
   unresolvedItems: string[]; completeness: 'complete' | 'partial' | 'history_required';

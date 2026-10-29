@@ -69,7 +69,7 @@ class AgentEditingTaskPatch(AgentModel):
 class AgentTaskOperation(AgentModel):
     op: Literal['new_task', 'set_task_type', 'set_target', 'set_auxiliaries', 'add_constraint',
                 'update_constraint', 'revoke_constraint', 'set_prompt', 'select_prompt',
-                'restore_prompt', 'set_unresolved', 'set_history_dependencies']
+                'restore_prompt', 'restore_working_prompt', 'set_unresolved', 'set_history_dependencies']
     id: str | None = Field(default=None, max_length=100)
     text: str | None = Field(default=None, max_length=100_000)
     kind: Literal['candidate', 'selected'] | None = None

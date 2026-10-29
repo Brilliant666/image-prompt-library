@@ -11,6 +11,7 @@ export interface AgentDraft {
   origin: AgentRoundCreate['origin'];
   contextScope?: NonNullable<AgentRoundCreate['contextScope']>;
   historyRoundIds?: string[];
+  contextOverrideFor?: { taskId: string | null; branchRoundId: string | null } | null;
 }
 export const AGENT_DRAFT_KEY = 'ipl.agent.drafts.v1';
 export const AGENT_IMAGE_MODE_PREFIX = 'ipl.agent.image-mode.v1.';
@@ -32,7 +33,7 @@ export function saveAgentImageMode(storage: Pick<Storage, 'setItem' | 'removeIte
 }
 
 export function acknowledgeAgentDraft(draft: AgentDraft, clearInput: boolean): AgentDraft {
-  return { ...draft, ...(clearInput ? { text: '', refs: [] } : {}), origin: 'send', editId: null };
+  return { ...draft, ...(clearInput ? { text: '', refs: [] } : {}), origin: 'send', editId: null, ...(draft.contextScope ? { contextScope: 'task', historyRoundIds: [], contextOverrideFor: null } : {}) };
 }
 
 export function readAgentDrafts(storage: Pick<Storage, 'getItem'>, enabled: boolean): Record<string, AgentDraft> {
@@ -50,6 +51,7 @@ export function readAgentDrafts(storage: Pick<Storage, 'getItem'>, enabled: bool
       output[id] = { ...draft,
         ...('contextScope' in draft ? { contextScope: ['task', 'selected', 'branch'].includes(draft.contextScope) ? draft.contextScope : 'task' } : {}),
         ...('historyRoundIds' in draft ? { historyRoundIds: Array.isArray(draft.historyRoundIds) ? draft.historyRoundIds.filter((roundId: unknown) => typeof roundId === 'string') : [] } : {}),
+        ...('contextOverrideFor' in draft ? { contextOverrideFor: draft.contextOverrideFor && typeof draft.contextOverrideFor === 'object' && (draft.contextOverrideFor.taskId === null || typeof draft.contextOverrideFor.taskId === 'string') && (draft.contextOverrideFor.branchRoundId === null || typeof draft.contextOverrideFor.branchRoundId === 'string') ? draft.contextOverrideFor : null } : {}),
       };
     }
     return output;

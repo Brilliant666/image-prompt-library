@@ -1,17 +1,23 @@
 # Execute a confirmed Prompt in Agent
 
-1. Choose **Set as current Prompt** on the exact Prompt block you want to use,
-   or explicitly select text from your input or a historical message.
-2. Inspect the full selected text, current image settings, and reference images
-   with their roles and order in the task panel.
-3. Choose **Continue optimizing** for another text-only Agent answer, or
-   **Generate with this Prompt** to authorize this image operation only.
+1. Chat normally to reverse an image, create a Prompt or refine a working draft.
+   No task panel, context selector or manual main-image selection is required
+   for a single unambiguous reference and normal follow-up discussion.
+2. On the specific recognized Prompt block, choose **Continue optimizing** for
+   a text-only continuation or **Generate image** to use that exact block.
+   Each candidate has its own message/block source; arbitrary code and the
+   entire explanatory answer are not automatically execution recipes.
+3. Generation selects that block internally and freezes it with the current
+   visible image settings and established references. The click authorizes
+   only this image operation. A lightweight choice is required only for a real
+   reference conflict, ambiguity or missing prerequisite, not a task form.
 
 The generate action preserves exact whitespace and line breaks. It does not
 append hidden conversation text, inject an aspect-ratio sentence, select a last
 code block automatically, or turn on persistent image mode. Composer text and
-attachments remain in the draft. Draft attachments are separate from the task's
-explicit recipe references; the panel shows which images the recipe will use.
+attachments remain in the draft. A newly attached image that conflicts with a
+previous recipe cannot be silently ignored or substituted: resolve that choice
+before submission. Optional context details remain available for diagnosis.
 
 ## Existing generation paths
 
@@ -62,6 +68,24 @@ duplicate Native claims, stop/unknown states, original Prompt bytes, config
 changes, retry provenance, Library collection and reuse in Agent.
 
 `scripts/preview_agent.py` provides synthetic Prompt workflow scenarios for
-isolated browser acceptance. Its marker routing exists only in the mock provider,
-not in production intent handling. Real model quality, provider compatibility,
+isolated browser acceptance. Its deterministic natural-language and marker
+routing exists only in the mock provider, not in production intent handling.
+Real model quality, provider compatibility,
 latency, pricing and Prompt Cache are not established by offline tests.
+
+The conversational regression additionally runs upload -> reverse -> English ->
+softer light -> the clicked block's internal selection -> direct failure ->
+explicit retry -> Library -> continued chat, without manual target, context
+scope or completeness operations. It checks outgoing image bytes, exact Prompt
+whitespace, compression zero, candidate provenance and receipt replay. Its
+Responses count remains five while the image attempt and retry increase Images
+from zero to two. A separate natural-language generation case verifies that
+image mode off stays text-only and explicit image authorization keeps the
+ordinary Agent tool path available, without requiring the direct button.
+
+Actual offline browser acceptance also covers the no-panel path with three
+Prompt turns, direct success, Library collection and continued conversation.
+The mock's six Responses calls stay at six for the direct operation; Images
+increases from zero to one. Reload, optional answer diagnostics, exact block
+copy and a 390-pixel viewport are checked separately. Mock answers and local
+timings do not establish free-form understanding or real visual quality.

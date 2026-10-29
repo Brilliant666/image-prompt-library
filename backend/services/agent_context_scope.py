@@ -46,7 +46,11 @@ def choose_context(request, refs):
     if dependencies:
         reason = 'required_history_evidence'
     if task and task.get('unresolvedItems'):
-        rows = task_rows or history
+        # Explicit history scope remains an intentional user override. Preserve
+        # unresolved state and its exact required dependencies, but do not turn
+        # the override back into every image of this task.
+        if scope == 'task':
+            rows = task_rows or history
         reason = 'unresolved_task_evidence'
     # A numeric round address is a locator, not a natural-language classifier.
     # Keep every image of that exact authorized round if no slot is specified.
@@ -99,11 +103,20 @@ def task_data(task, refs):
     """Only current versions and bounded effective state, not a hidden transcript."""
     if not task:
         return None
-    ids = {task.get(key) for key in ('originalPromptVersionId', 'selectedPromptVersionId', 'executedPromptVersionId')}
+    from backend.services.agent_task_state import working_prompt_id
+    working = working_prompt_id(task)
+    ids = {task.get(key) for key in ('originalPromptVersionId', 'selectedPromptVersionId', 'executedPromptVersionId')} | {working}
     keys = ('schemaVersion', 'taskId', 'revision', 'branchRoundId', 'taskType', 'completeness',
             'latestUserAddition', 'unresolvedItems', 'historyDependencies')
     result = {key: task.get(key) for key in keys}
     result['promptVersions'] = [p for p in task.get('promptVersions', []) if p['id'] in ids]
+    result['workingPromptVersionId'] = working
+    if task.get('workingPromptSource'):
+        result['workingPromptSource'] = task['workingPromptSource']
+    # Source locators support undo without sending all previous candidate bodies.
+    result['promptHistory'] = [{'id': p['id'], 'kind': p['kind'],
+                                'source': {key: p['source'][key] for key in ('kind', 'roundId', 'messageId') if key in p['source']}}
+                               for p in task.get('promptVersions', [])[-8:]]
     result['constraints'] = [c for c in task.get('constraints', []) if c['status'] != 'revoked']
     def binding(image):
         return {'assetId': image['assetId'], 'ref': next((ref for ref, aid in refs.items() if aid == image['assetId']), None),

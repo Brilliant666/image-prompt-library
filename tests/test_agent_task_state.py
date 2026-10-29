@@ -338,3 +338,81 @@ def test_executed_prompt_window_is_bounded_and_duplicate_receipt_is_idempotent(r
     old_version = next(p for p in old['_taskPromptArchive'].values() if p['text'] == 'Exact execution 0')
     restored = patch_context(repo, [{'op': 'restore_prompt', 'id': old_version['id']}])['taskContext']
     assert next(p for p in restored['promptVersions'] if p['id'] == restored['selectedPromptVersionId'])['text'] == 'Exact execution 0'
+
+
+def test_reverse_single_upload_binds_object_without_manual_target_selection(repo):
+    image = upload(repo, 'red')
+    request = turn(repo, 'reverse', '反推这张图', [{'kind': 'upload', 'uploadId': image}])
+    state = request['round']['taskContext']
+    assert state['target']['assetId'] == image
+    assert state['unresolvedItems'] == []
+    assert state['selectedPromptVersionId'] is None
+    assert not request['round']['editingTask']['needsTargetSelection']
+
+
+def test_model_candidate_is_working_version_without_user_confirmation(repo):
+    first = turn(repo, 'first', '反推中文提示词')
+    result = repo.update_task_context('first', state_arguments(first, [
+        {'op': 'set_task_type', 'taskType': 'reverse'},
+        {'op': 'set_prompt', 'text': '  候选原文\n保留空白  ', 'kind': 'candidate'}]), {})
+    assert result['workingPromptVersionId'] == result['promptVersions'][-1]['id']
+    assert result['selectedPromptVersionId'] is None
+    assert result['promptVersions'][-1]['confirmedBy'] is None
+    done(repo, 'first')
+    second = turn(repo, 'second', '改成英文', parent=first['round_id'])
+    assert second['round']['taskContext']['workingPromptVersionId'] == result['workingPromptVersionId']
+    assert second['body']['authorization'] == first['body']['authorization']
+
+
+def test_natural_undo_restores_working_version_only_with_source_quote(repo):
+    first = turn(repo, 'first', '请生成一份候选提示词')
+    first_state = repo.update_task_context('first', state_arguments(first, [
+        {'op': 'set_prompt', 'text': '  First candidate\nexact original  ', 'kind': 'candidate'}]), {})
+    old_id = first_state['workingPromptVersionId']
+    done(repo, 'first')
+    second = turn(repo, 'second', '光线柔和一点，其他保持', parent=first['round_id'])
+    second_state = repo.update_task_context('second', state_arguments(second, [
+        {'op': 'set_prompt', 'text': 'Second candidate with softer lighting', 'kind': 'candidate'}]), {})
+    done(repo, 'second')
+    third = turn(repo, 'third', '撤销刚才的修改', parent=second['round_id'])
+    before = repo.request('third')['round']['taskContext']
+    for quote in (None, '撤销'):
+        operation = {'op': 'restore_working_prompt', 'id': old_id}
+        if quote is not None:
+            operation['sourceQuote'] = quote
+        with pytest.raises(AgentError):
+            repo.update_task_context('third', state_arguments(third, [operation]), {})
+        assert repo.request('third')['round']['taskContext'] == before
+    result = repo.update_task_context('third', state_arguments(third, [
+        {'op': 'restore_working_prompt', 'id': old_id, 'sourceQuote': '撤销刚才的修改'}]), {})
+    assert result['workingPromptVersionId'] == old_id
+    assert result['selectedPromptVersionId'] is None
+    restored = next(p for p in result['promptVersions'] if p['id'] == old_id)
+    assert restored['text'] == '  First candidate\nexact original  '
+    assert restored['confirmedBy'] is None
+    assert result['workingPromptSource']['restoredFrom'] == old_id
+    assert result['workingPromptSource']['quote'] == '撤销刚才的修改'
+    assert second_state['workingPromptVersionId'] != old_id
+
+
+def test_working_prompt_is_pinned_in_bounded_window_and_undo_rejects_sibling_version(repo):
+    first = turn(repo, 'first', 'Candidate task')
+    state = repo.update_task_context('first', state_arguments(first, [
+        {'op': 'set_prompt', 'text': 'Keep exact candidate', 'kind': 'candidate'}]), {})
+    working = state['workingPromptVersionId']
+    for index in range(28):
+        repo.record_task_execution('first', f'Execution {index}')
+    current = repo.request('first')['round']['taskContext']
+    assert len(current['promptVersions']) <= 24
+    assert next(p for p in current['promptVersions'] if p['id'] == working)['text'] == 'Keep exact candidate'
+    done(repo, 'first')
+    left = turn(repo, 'left', 'Left candidate', parent=first['round_id'])
+    left_state = repo.update_task_context('left', state_arguments(left, [
+        {'op': 'set_prompt', 'text': 'Private sibling candidate', 'kind': 'candidate'}]), {})
+    done(repo, 'left')
+    right = turn(repo, 'right', '撤销刚才的修改', parent=first['round_id'])
+    with pytest.raises(AgentError):
+        repo.update_task_context('right', state_arguments(right, [
+            {'op': 'restore_working_prompt', 'id': left_state['workingPromptVersionId'],
+             'sourceQuote': '撤销刚才的修改'}]), {})
+    assert repo.request('right')['round']['taskContext']['workingPromptVersionId'] == working

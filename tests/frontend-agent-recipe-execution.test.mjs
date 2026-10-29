@@ -29,9 +29,9 @@ function receipt(payload, source = snapshot(), mode = 'hybrid') {
 }
 
 function harness(t, options = {}) {
-  const slots = [], effects = [], timers = new Map(), listeners = new Map(), direct = [], receipts = [], submissions = [], watchers = [], updates = [], reads = [];
+  const slots = [], effects = [], timers = new Map(), listeners = new Map(), direct = [], receipts = [], submissions = [], selections = [], watchers = [], updates = [], reads = [];
   const storage = options.storage || new Map([['ipl.agent.active-conversation', 'current']]);
-  const drafts = { current: { text: 'Unsent draft\n  keep exact', refs: [{ reference: { kind: 'upload', uploadId: 'composer-only' }, label: 'composer.png', url: 'http://isolated.test/composer.png' }], params: { ...params }, origin: 'send', editId: null }, next: { text: 'Next conversation draft', refs: [], params: { size: 'auto', quality: 'auto', output_format: 'png' }, origin: 'send', editId: null } };
+  const drafts = { current: { text: 'Unsent draft\n  keep exact', refs: [{ reference: { kind: 'upload', uploadId: 'composer-only' }, label: 'composer.png', url: 'http://isolated.test/composer.png' }], params: { ...params }, origin: 'send', editId: null, ...options.draft }, next: { text: 'Next conversation draft', refs: [], params: { size: 'auto', quality: 'auto', output_format: 'png' }, origin: 'send', editId: null } };
   if (!storage.has('ipl.agent.drafts.v1')) storage.set('ipl.agent.drafts.v1', JSON.stringify(drafts));
   let config = { revision: 4, config: { apiConfigMode: 'hybrid', imageProfileId: 'image-config', imageModel: 'config-image', textProfileId: 'text', textModel: 'text-model', maxImageJobs: 10, maxToolRounds: 5, webSearch: true }, profiles: [{ id: 'image-gallery', display_name: 'Gallery Images', model: 'gallery-image', configured: true }], ready: true, imageReady: true, issues: [], imageIssues: [], capabilities: { maxInputImages: 4, webSearch: true }, ...options.config };
   const initial = options.snapshot || snapshot(), latest = new Map([['current', initial], ['next', snapshot('next', { taskContext: null, contextMode: 'legacy' })]]);
@@ -48,6 +48,21 @@ function harness(t, options = {}) {
     window: { innerWidth: 1200, innerHeight: 900, addEventListener: (key, fn) => { if (!listeners.has(key)) listeners.set(key, new Set()); listeners.get(key).add(fn); }, removeEventListener: (key, fn) => listeners.get(key)?.delete(fn) }, location: { origin: 'http://isolated.test' }, document: { activeElement: null, body: {}, getElementById: () => null }, crypto: { randomUUID: () => `direct-${++uuid}` }, setTimeout: fn => { timers.set(++timer, fn); return timer; }, clearTimeout: key => timers.delete(key), requestAnimationFrame: fn => { fn(); return 1; }, Image: class { naturalWidth = 64; naturalHeight = 64; async decode() {} } };
   const submission = evaluate(submissionJs, {}, globals);
   const api = {
+    updateTaskContext: async (id, body) => {
+      selections.push({ id, body });
+      if (options.selectPrompt) return options.selectPrompt(id, body);
+      const prior = latest.get(id), task = structuredClone(prior.taskContext);
+      for (const operation of body.operations) {
+        if (operation.op === 'set_prompt') {
+          const prompt = { id: 'button-selected', text: operation.text, kind: 'selected', source: operation.source, confirmedBy: 'user' };
+          task.promptVersions.push(prompt); task.selectedPromptVersionId = prompt.id;
+        }
+        if (operation.op === 'set_target') task.target = { assetId: operation.ref.uploadId, source: operation.ref };
+        if (operation.op === 'set_auxiliaries') task.auxiliaries = operation.auxiliaries.map(image => ({ assetId: image.ref.uploadId, source: image.ref, role: image.role }));
+      }
+      const value = { ...prior, revision: prior.revision + 1, taskContext: { ...task, revision: task.revision + 1 } };
+      latest.set(id, value); return value;
+    },
     conversation: async id => { reads.push(id); return latest.get(id); },
     updateConversation: async (id, body) => { const value = { ...latest.get(id), revision: 14, conversation: { ...latest.get(id).conversation, activeRoundId: body.activeRoundId } }; latest.set(id, value); return value; },
     executePrompt: (id, payload) => { const reply = deferred(); direct.push({ id, payload, ...reply }); return reply.promise; },
@@ -62,15 +77,25 @@ function harness(t, options = {}) {
   const flush = async () => { for (let i = 0; i < 30; i++) { if (dirty && !unmounted) render(); await Promise.resolve(); } };
   const unmount = () => { if (unmounted) return; unmounted = true; slots.forEach(slot => slot?.cleanup?.()); };
   render(); t.after(unmount);
-  return { direct, receipts, submissions, watchers, updates, reads, storage, submission, AgentApiError, latest, flush, unmount, node: (type, label) => nodes(tree).find(node => node.type === type && (!label || node.props['aria-label'] === label))?.props, nodes: () => nodes(tree), text: () => text(tree), update(next) { props = { ...props, ...next }; render(); }, setConfig(next) { config = { ...config, ...next }; listeners.get('ipl:agent-config-changed')?.forEach(fn => fn()); }, get late() { return late; }, get uuidCount() { return uuid; } };
+  const promptAction = (action, prompt = selectedText) => {
+    const answer = nodes(tree).find(node => node.type === 'markdown');
+    assert.ok(answer, 'a production Prompt-bearing answer must exist');
+    return answer.props[action](prompt);
+  };
+  const generate = async (prompt = selectedText) => {
+    promptAction('onGeneratePrompt', prompt); await flush();
+    const conflict = nodes(tree).find(node => node.props?.['aria-label'] === '沿用提示词原参考图生成图片');
+    if (conflict) { conflict.props.onClick(); await flush(); }
+  };
+  return { direct, receipts, submissions, selections, watchers, updates, reads, storage, submission, AgentApiError, latest, flush, unmount, generate, promptAction, node: (type, label) => nodes(tree).find(node => node.type === type && (!label || node.props['aria-label'] === label))?.props, nodes: () => nodes(tree), text: () => text(tree), update(next) { props = { ...props, ...next }; render(); }, storageEvent(key) { listeners.get('storage')?.forEach(fn => fn({ key })); }, setConfig(next) { config = { ...config, ...next }; listeners.get('ipl:agent-config-changed')?.forEach(fn => fn()); }, get late() { return late; }, get uuidCount() { return uuid; } };
 }
 
 test('production direct click freezes the selected Prompt identity, Gallery image settings and role order without a text POST', async t => {
   const h = harness(t); await h.flush();
-  assert.equal(h.node('button', '用选定提示词生成').disabled, false);
-  assert.match(h.text(), /本次图片参数：3 张 · gallery-image · 1536x1024 · high · webp · opaque · 压缩 0/);
-  assert.match(h.text(), /1\. 主要图片2\. 辅助 · 风格/);
-  const click = h.node('button', '用选定提示词生成').onClick; click(); click(); await h.flush();
+  assert.equal(h.node('markdown').promptSelectionDisabled, false);
+  assert.match(h.node('markdown').getGenerationSummary(selectedText), /本次图片参数：3 张 · gallery-image · 1536x1024 · high · webp · opaque · 压缩 0/);
+  assert.match(h.node('markdown').referenceSummary, /1\. 主要图片；2\. 辅助 · 风格/);
+  const click = h.generate; click(); click(); await h.flush();
   assert.equal(h.direct.length, 1); assert.equal(h.submissions.length, 0);
   const body = h.direct[0].payload;
   assert.deepEqual(body, { requestId: 'direct-1', expectedRevision: 12, branchRoundId: 'r1', taskId: 'task', taskRevision: 7, promptVersionId: 'selected', configRevision: 4, imageConfig: { profileId: 'image-gallery', model: 'gallery-image' }, params, imageCount: 3, confirmed: true });
@@ -88,7 +113,7 @@ test('production direct click freezes the selected Prompt identity, Gallery imag
 
 test('production optimization uses the chosen raw Prompt, normal text only and preserves the entire unsent draft', async t => {
   const h = harness(t); await h.flush();
-  h.node('button', '继续优化选定提示词').onClick(); await h.flush();
+  h.promptAction('onOptimizePrompt'); await h.flush();
   assert.equal(h.direct.length, 0); assert.equal(h.submissions.length, 1);
   const payload = h.submissions[0].payload;
   assert.ok(payload.prompt.endsWith(selectedText)); assert.doesNotMatch(payload.prompt, /Never automatically/);
@@ -103,7 +128,7 @@ test('production optimization uses the chosen raw Prompt, normal text only and p
 
 test('a lost direct acknowledgement retains its immutable identity and all later checks are GET-only', async t => {
   const h = harness(t); await h.flush();
-  h.node('button', '用选定提示词生成').onClick(); await h.flush(); const body = h.direct[0].payload;
+  h.generate(); await h.flush(); const body = h.direct[0].payload;
   h.direct[0].reject(new TypeError('network reset')); await h.flush();
   assert.match(h.text(), /结果尚未确认/); assert.equal(h.direct.length, 1);
   h.node('button', '检查本次直接生成状态').onClick(); await h.flush();
@@ -115,7 +140,7 @@ test('a lost direct acknowledgement retains its immutable identity and all later
 });
 
 test('refresh restores the frozen direct journal and reads one receipt without replaying a POST', async t => {
-  const first = harness(t); await first.flush(); first.node('button', '用选定提示词生成').onClick(); await first.flush();
+  const first = harness(t); await first.flush(); first.generate(); await first.flush();
   const body = first.direct[0].payload; first.direct[0].reject(Error('lost')); await first.flush(); first.unmount();
   const second = harness(t, { storage: first.storage }); await second.flush();
   assert.equal(second.direct.length, 0); assert.equal(second.receipts.length, 1); assert.equal(second.receipts[0].id, body.requestId);
@@ -125,7 +150,7 @@ test('refresh restores the frozen direct journal and reads one receipt without r
 });
 
 test('late direct acceptance after switching conversations clears only its journal and cannot replace the selected task', async t => {
-  const h = harness(t); await h.flush(); h.node('button', '用选定提示词生成').onClick(); await h.flush();
+  const h = harness(t); await h.flush(); h.generate(); await h.flush();
   h.update({ focusConversationId: 'next', focusToken: 1 }); await h.flush();
   h.direct[0].resolve(receipt(h.direct[0].payload)); await h.flush();
   assert.equal(h.node('textarea', 'Agent 消息').value, 'Next conversation draft'); assert.equal(h.node('section', '已确认配方生成记录'), undefined);
@@ -134,14 +159,14 @@ test('late direct acceptance after switching conversations clears only its journ
 });
 
 test('late accepted direct receipt after unmount never changes React state', async t => {
-  const h = harness(t); await h.flush(); h.node('button', '用选定提示词生成').onClick(); await h.flush(); h.unmount();
+  const h = harness(t); await h.flush(); h.generate(); await h.flush(); h.unmount();
   h.direct[0].resolve(receipt(h.direct[0].payload)); await h.flush();
   assert.equal(h.late, 0); assert.deepEqual(JSON.parse(h.storage.get('ipl.agent.pending-prompt-executions.v1')), []);
 });
 
 test('a receipt for a prior branch cannot replace a later selected branch in the same conversation', async t => {
   const value = snapshot(); value.conversation.rounds.push({ ...value.conversation.rounds[0], id: 'sibling', requestId: 'sibling-request', index: 1 });
-  const h = harness(t, { snapshot: value }); await h.flush(); h.node('button', '用选定提示词生成').onClick(); await h.flush();
+  const h = harness(t, { snapshot: value }); await h.flush(); h.generate(); await h.flush();
   const body = h.direct[0].payload; h.direct[0].reject(Error('lost')); await h.flush();
   h.node('button', '下一分支').onClick(); await h.flush();
   h.node('button', '检查本次直接生成状态').onClick(); await h.flush();
@@ -154,8 +179,8 @@ test('a receipt for a prior branch cannot replace a later selected branch in the
 
 test('another tab with the same durable pending identity can only read the first tab receipt', async t => {
   const first = harness(t); await first.flush(); const second = harness(t, { storage: first.storage }); await second.flush();
-  const staleSecondClick = second.node('button', '用选定提示词生成').onClick;
-  first.node('button', '用选定提示词生成').onClick(); await first.flush();
+  const staleSecondClick = second.generate;
+  first.generate(); await first.flush();
   staleSecondClick(); staleSecondClick(); await second.flush();
   assert.equal(first.direct.length, 1); assert.equal(second.direct.length, 0); assert.equal(second.receipts.length, 1);
   assert.equal(second.receipts[0].id, first.direct[0].payload.requestId); assert.equal(second.uuidCount, 0);
@@ -169,7 +194,7 @@ test('explicit direct execution preserves an already enabled sustained image mod
   h.node('button', '生图设置').onClick({ currentTarget: { getBoundingClientRect: () => ({ left: 20, top: 400, bottom: 430 }) } }); await h.flush();
   h.node('input', '本轮允许网络搜索').onChange({ target: { checked: true } }); await h.flush();
   h.node('button', '关闭 Agent 面板').onClick(); await h.flush();
-  h.node('button', '用选定提示词生成').onClick(); await h.flush();
+  h.generate(); await h.flush();
   const accepted = receipt(h.direct[0].payload); accepted.request.state = 'completed'; h.direct[0].resolve(accepted); await h.flush();
   assert.equal(h.node('button', '持续生图模式')['aria-pressed'], true); assert.equal(storage.get('ipl.agent.image-mode.v1.current'), 'true');
   assert.ok(h.node('button', '取消本轮搜索授权')); assert.equal(h.submissions.length, 0);
@@ -187,7 +212,7 @@ test('frozen direct journal identities cannot be overwritten or multiplied for t
 
 test('native direct execution keeps native settings and reports its Responses image protocol honestly', async t => {
   const h = harness(t, { config: { config: { apiConfigMode: 'native', imageModel: 'native-tool-model', maxImageJobs: 10, maxToolRounds: 5 } }, props: { galleryImageSettings: undefined } }); await h.flush();
-  h.node('button', '用选定提示词生成').onClick(); await h.flush();
+  h.generate(); await h.flush();
   assert.deepEqual(h.direct[0].payload.imageConfig, { profileId: null, model: 'native-tool-model' }); assert.equal(h.direct[0].payload.imageCount, 1);
   h.direct[0].resolve(receipt(h.direct[0].payload, snapshot(), 'native')); await h.flush();
   const card = text(h.node('section', '已确认配方生成记录').children);
@@ -195,23 +220,30 @@ test('native direct execution keeps native settings and reports its Responses im
   assert.equal(h.submissions.length, 0); assert.equal(h.node('button', '持续生图模式')['aria-pressed'], false);
 });
 
-test('unconfirmed candidates, incomplete task data, missing images and disabled modes cannot trigger direct execution', async t => {
-  for (const extra of [{ taskContext: { ...snapshot().taskContext, selectedPromptVersionId: null } }, { taskContext: { ...snapshot().taskContext, completeness: 'partial', unresolvedItems: ['待确认'] } }, { images: snapshot().images.map(row => ({ ...row, status: 'removed' })) }]) {
+test('candidate generation needs an explicit block click; incomplete task data, missing images and disabled modes still cannot trigger direct execution', async t => {
+  const candidate = harness(t, { snapshot: snapshot('current', { taskContext: { ...snapshot().taskContext, selectedPromptVersionId: null } }) }); await candidate.flush();
+  assert.equal(candidate.direct.length, 0); assert.equal(candidate.selections.length, 0); assert.equal(candidate.submissions.length, 0);
+  await candidate.generate();
+  assert.equal(candidate.selections.length, 1); assert.equal(candidate.direct.length, 1); assert.equal(candidate.submissions.length, 0);
+  assert.deepEqual(candidate.selections[0].body, { expectedRevision: 12, branchRoundId: 'r1', taskRevision: 7, operations: [{ op: 'set_prompt', text: selectedText, kind: 'selected', source: { kind: 'model', roundId: 'r1', messageId: 'a1' } }] });
+  assert.equal(candidate.direct[0].payload.expectedRevision, 13); assert.equal(candidate.direct[0].payload.taskRevision, 8); assert.equal(candidate.direct[0].payload.promptVersionId, 'button-selected');
+  assert.equal(Object.hasOwn(candidate.direct[0].payload, 'prompt'), false);
+  for (const extra of [{ taskContext: { ...snapshot().taskContext, completeness: 'partial', unresolvedItems: ['待确认'] } }, { images: snapshot().images.map(row => ({ ...row, status: 'removed' })) }]) {
     const h = harness(t, { snapshot: snapshot('current', extra) }); await h.flush();
-    const button = h.node('button', '用选定提示词生成'); assert.ok(!button || button.disabled);
-    button?.onClick(); await h.flush(); assert.equal(h.direct.length, 0); assert.equal(h.submissions.length, 0);
+    await h.generate(); assert.match(h.text(), /还无法确定要编辑哪张图片|参考图已丢失/);
+    assert.equal(h.direct.length, 0); assert.equal(h.submissions.length, 0); assert.equal(h.selections.length, 0);
   }
   const off = harness(t, { config: { config: { apiConfigMode: 'off', maxToolRounds: 5, maxImageJobs: 10 } } }); await off.flush();
-  assert.equal(off.node('button', '用选定提示词生成').disabled, true);
-  assert.match(off.text(), /Current API 尚无已验证的直接执行路径/); assert.doesNotMatch(off.text(), /请先.*开启生图模式/);
+  await off.generate(); assert.equal(off.direct.length, 0); assert.equal(off.submissions.length, 0); assert.equal(off.selections.length, 0);
+  assert.match(off.text(), /当前调用方式暂不支持直接生成/); assert.doesNotMatch(off.text(), /请先.*开启生图模式/);
 });
 
 test('history evidence dependencies do not block a user confirming the selected full Prompt and role-bound references as the complete recipe', async t => {
   const taskContext = { ...snapshot().taskContext, completeness: 'history_required', historyDependencies: [{ roundId: 'r1', reason: 'unreconciled_user_addition' }] };
   const h = harness(t, { snapshot: snapshot('current', { taskContext }) }); await h.flush();
-  assert.equal(h.node('button', '用选定提示词生成').disabled, false);
-  assert.match(h.text(), /作为当前完整配方/); assert.match(h.text(), /不会自动加入聊天历史或额外约束/);
-  h.node('button', '用选定提示词生成').onClick(); await h.flush();
+  assert.equal(h.node('markdown').promptSelectionDisabled, false);
+  assert.match(h.node('markdown').referenceSummary, /1\. 主要图片；2\. 辅助 · 风格/); assert.equal(h.node('markdown').sourceId, 'r1:a1:text:a1');
+  h.generate(); await h.flush();
   assert.equal(h.direct.length, 1); assert.equal(h.direct[0].payload.confirmed, true);
   assert.equal(h.direct[0].payload.promptVersionId, 'selected'); assert.equal(Object.hasOwn(h.direct[0].payload, 'constraints'), false);
   assert.deepEqual(taskContext.historyDependencies, [{ roundId: 'r1', reason: 'unreconciled_user_addition' }]);
@@ -221,27 +253,27 @@ test('required legacy evidence, changed-target ambiguity and masks remain blocke
   for (const reason of ['legacy_context_missing', 'legacy_requirements_in_history', 'target_changed_requires_prior_evidence']) {
     const taskContext = { ...snapshot().taskContext, completeness: 'history_required', historyDependencies: [{ roundId: 'r1', reason }] };
     const h = harness(t, { snapshot: snapshot('current', { taskContext }) }); await h.flush();
-    assert.equal(h.node('button', '用选定提示词生成').disabled, true); h.node('button', '用选定提示词生成').onClick(); await h.flush();
-    assert.equal(h.direct.length, 0); assert.match(h.text(), /仍需核对必要历史证据/);
+    await h.generate(); assert.equal(h.selections.length, 0);
+    assert.equal(h.direct.length, 0); assert.equal(h.submissions.length, 0); assert.match(h.text(), /还依赖之前的要求/);
   }
   const value = snapshot(); value.conversation.rounds[0].maskImageId = 'mask';
-  const masked = harness(t, { snapshot: value }); await masked.flush(); assert.equal(masked.node('button', '用选定提示词生成').disabled, true);
-  assert.match(masked.text(), /暂不支持带蒙版配方/);
+  const masked = harness(t, { snapshot: value }); await masked.flush(); await masked.generate();
+  assert.equal(masked.direct.length, 0); assert.equal(masked.submissions.length, 0); assert.equal(masked.selections.length, 0); assert.match(masked.text(), /带蒙版的编辑.*暂不支持/);
 });
 
 test('automatic size uses the selected Prompt and recipe target dimensions rather than unsent composer text or attachments', async t => {
   const value = snapshot(); value.taskContext.promptVersions[1].text = '  Selected scene, aspect ratio 16:9.\n';
   const h = harness(t, { snapshot: value, props: { galleryImageSettings: { provider: 'openai_compatible', profileId: 'image-gallery', model: 'gallery-image', params: { ...params, size: 'auto' }, count: 3, sizeMode: 'auto4k' } } }); await h.flush();
   const expected = compatible.resolveAuto4k(value.taskContext.promptVersions[1].text, { width: 1200, height: 800 }).size;
-  assert.match(h.text(), new RegExp(`本次图片参数：3 张 · gallery-image · ${expected}`));
-  h.node('button', '用选定提示词生成').onClick(); await h.flush();
+  assert.match(h.node('markdown').getGenerationSummary(value.taskContext.promptVersions[1].text), new RegExp(`本次图片参数：3 张 · gallery-image · ${expected}`));
+  h.generate(value.taskContext.promptVersions[1].text); await h.flush();
   assert.equal(h.direct[0].payload.params.size, expected); assert.equal(h.direct[0].payload.promptVersionId, 'selected');
 });
 
 test('journal failure stops before the direct POST and a known rejection releases its entry without clearing the draft', async t => {
-  const blocked = harness(t, { journalFails: true }); await blocked.flush(); blocked.node('button', '用选定提示词生成').onClick(); await blocked.flush();
+  const blocked = harness(t, { journalFails: true }); await blocked.flush(); await blocked.generate();
   assert.equal(blocked.direct.length, 0); assert.match(blocked.text(), /尚未发送/);
-  const h = harness(t); await h.flush(); h.node('button', '用选定提示词生成').onClick(); await h.flush();
+  const h = harness(t); await h.flush(); h.generate(); await h.flush();
   h.direct[0].reject(new h.AgentApiError(409, 'task_revision_conflict', '任务已改变')); await h.flush();
   assert.deepEqual(JSON.parse(h.storage.get('ipl.agent.pending-prompt-executions.v1')), []); assert.equal(h.direct.length, 1);
   assert.equal(h.node('textarea', 'Agent 消息').value, 'Unsent draft\n  keep exact');
@@ -254,4 +286,116 @@ test('production execution API uses its dedicated POST and read-only receipt pat
   await agentApi.executePrompt('chat / 1', payload); await agentApi.promptExecutionReceipt(payload.requestId, 'chat / 1');
   assert.equal(calls.length, 2); assert.equal(calls[0].url, '/api/agent/conversations/chat%20%2F%201/prompt-executions'); assert.equal(calls[0].init.method, 'POST'); assert.deepEqual(JSON.parse(calls[0].init.body), payload);
   assert.equal(calls[1].url, '/api/agent/prompt-executions/request%20%2F%201?conversation_id=chat%20%2F%201'); assert.equal(calls[1].init.body, undefined);
+});
+
+test('normal Prompt generation requires no task panel or main-image selection and performs no text planning', async t => {
+  const value = snapshot(); value.taskContext.selectedPromptVersionId = null;
+  value.taskContext.workingPromptVersionId = 'candidate-last';
+  const h = harness(t, { snapshot: value, draft: { refs: [] } }); await h.flush();
+  assert.equal(h.node('select', '发送上下文范围'), undefined);
+  assert.equal(h.node('section', '选定提示词操作'), undefined);
+  assert.doesNotMatch(h.text(), /任务版本|任务完整|待选择主要图片|图片候选/);
+  h.promptAction('onGeneratePrompt', selectedText); await h.flush();
+  assert.equal(h.node('section', '确认本次参考图片'), undefined);
+  assert.equal(h.selections.length, 1); assert.equal(h.direct.length, 1); assert.equal(h.submissions.length, 0);
+  assert.deepEqual(h.selections[0].body.operations, [{ op: 'set_prompt', text: selectedText, kind: 'selected', source: { kind: 'model', roundId: 'r1', messageId: 'a1' } }]);
+  assert.equal(h.direct[0].payload.promptVersionId, 'button-selected'); assert.equal(h.direct[0].payload.taskRevision, 8);
+  assert.equal(h.node('textarea', 'Agent 消息').value, 'Unsent draft\n  keep exact');
+  assert.equal(h.node('button', '持续生图模式')['aria-pressed'], false);
+});
+
+test('continuing a particular candidate uses that exact block instead of the selected or last candidate', async t => {
+  const h = harness(t, { draft: { refs: [] } }); await h.flush();
+  const second = 'Never automatically choose this last codeblock.';
+  h.promptAction('onOptimizePrompt', second); await h.flush();
+  assert.equal(h.submissions.length, 1); assert.equal(h.direct.length, 0); assert.equal(h.selections.length, 0);
+  assert.ok(h.submissions[0].payload.prompt.endsWith(second));
+  assert.ok(!h.submissions[0].payload.prompt.includes(selectedText));
+  assert.deepEqual(h.submissions[0].payload.authorization, { scope: 'this_request', allowImageGeneration: false, allowWebSearch: false, maxToolRounds: 5, maxImageJobs: 0 });
+  assert.equal(h.node('textarea', 'Agent 消息').value, 'Unsent draft\n  keep exact');
+});
+
+test('new attachments conflicting with a recipe require one explicit image choice before selection or any generation', async t => {
+  const value = snapshot(); value.images.push(image('composer-only'));
+  const h = harness(t, { snapshot: value }); await h.flush();
+  h.promptAction('onGeneratePrompt'); await h.flush();
+  assert.ok(h.node('section', '确认本次参考图片')); assert.equal(h.selections.length, 0); assert.equal(h.direct.length, 0); assert.equal(h.submissions.length, 0);
+  assert.ok(h.nodes().some(node => node.type === 'img' && node.props.alt === '新附件 1'));
+  assert.match(h.text(), /新附件 1 · 主要图片/);
+  assert.ok(h.nodes().some(node => node.type === 'img' && node.props.alt === '已有参考 1 · 主要图片'));
+  assert.ok(h.nodes().some(node => node.type === 'img' && node.props.alt === '已有参考 2 · 辅助 · 风格'));
+  h.node('button', '使用新附件生成图片').onClick(); await h.flush();
+  assert.equal(h.selections.length, 1); assert.equal(h.direct.length, 1); assert.equal(h.submissions.length, 0);
+  assert.deepEqual(h.selections[0].body.operations, [{ op: 'set_target', ref: { kind: 'upload', uploadId: 'composer-only' } }, { op: 'set_auxiliaries', auxiliaries: [] }]);
+  assert.equal(h.direct[0].payload.taskRevision, 8);
+  assert.equal(JSON.parse(h.storage.get('ipl.agent.drafts.v1')).current.refs[0].reference.uploadId, 'composer-only');
+});
+
+test('double click during internal selection performs one selection and one direct POST with the returned revision', async t => {
+  const selection = deferred(), value = snapshot(); value.taskContext.selectedPromptVersionId = null;
+  const h = harness(t, { snapshot: value, draft: { refs: [] }, selectPrompt: () => selection.promise }); await h.flush();
+  h.promptAction('onGeneratePrompt'); h.promptAction('onGeneratePrompt'); await h.flush();
+  assert.equal(h.selections.length, 1); assert.equal(h.direct.length, 0); assert.equal(h.submissions.length, 0);
+  const selected = snapshot(); selected.revision = 50; selected.taskContext.revision = 24;
+  selection.resolve(selected); await h.flush();
+  assert.equal(h.selections.length, 1); assert.equal(h.direct.length, 1);
+  assert.equal(h.direct[0].payload.expectedRevision, 50); assert.equal(h.direct[0].payload.taskRevision, 24); assert.equal(h.direct[0].payload.promptVersionId, 'selected');
+  assert.equal(h.uuidCount, 1);
+});
+
+test('a conflict choice cannot reuse a different task or branch loaded by another tab in the same conversation', async t => {
+  for (const choice of ['使用新附件生成图片', '沿用提示词原参考图生成图片']) {
+    const h = harness(t); await h.flush(); h.promptAction('onGeneratePrompt'); await h.flush();
+    assert.ok(h.node('section', '确认本次参考图片')); assert.equal(h.selections.length, 0); assert.equal(h.direct.length, 0);
+    const changed = snapshot(); changed.revision = 30;
+    changed.taskContext = { ...changed.taskContext, taskId: 'other-tab-task', revision: 19, branchRoundId: 'other-branch', target: { assetId: 'other-target', source: { kind: 'upload', uploadId: 'other-target' } } };
+    changed.images.push(image('other-target')); changed.conversation.activeRoundId = 'other-branch';
+    changed.conversation.rounds.push({ ...changed.conversation.rounds[0], id: 'other-branch', index: 2, taskContext: changed.taskContext });
+    h.latest.set('current', changed); h.storageEvent('ipl.agent.pending-submissions.v1'); await h.flush();
+    assert.ok(h.node('section', '确认本次参考图片'), 'the dialog remains open across a same-conversation background refresh');
+    h.node('button', choice).onClick(); await h.flush();
+    assert.equal(h.selections.length, 0); assert.equal(h.direct.length, 0); assert.equal(h.submissions.length, 0); assert.equal(h.uuidCount, 0);
+    assert.equal(h.node('section', '确认本次参考图片'), undefined); assert.match(h.text(), /图片或要求已更新/);
+    assert.equal(h.node('textarea', 'Agent 消息').value, 'Unsent draft\n  keep exact');
+    assert.equal(JSON.parse(h.storage.get('ipl.agent.drafts.v1')).current.refs[0].reference.uploadId, 'composer-only');
+    assert.equal(h.node('button', '持续生图模式')['aria-pressed'], false);
+  }
+});
+
+test('lost selection acknowledgement never starts a paid request and preserves the whole draft', async t => {
+  const value = snapshot(); value.taskContext.selectedPromptVersionId = null;
+  const h = harness(t, { snapshot: value, draft: { refs: [] }, selectPrompt: async () => { throw new TypeError('selection acknowledgement lost'); } }); await h.flush();
+  h.promptAction('onGeneratePrompt'); await h.flush();
+  assert.equal(h.selections.length, 1); assert.equal(h.direct.length, 0); assert.equal(h.submissions.length, 0); assert.equal(h.uuidCount, 0);
+  assert.equal(h.storage.get('ipl.agent.pending-prompt-executions.v1'), undefined);
+  assert.match(h.text(), /尚未提交图片生成/); assert.equal(h.node('textarea', 'Agent 消息').value, 'Unsent draft\n  keep exact');
+});
+
+test('a queued old conversation Prompt callback cannot open a conflict panel or select and generate in the new conversation', async t => {
+  const h = harness(t); await h.flush(); const old = h.node('markdown').onGeneratePrompt;
+  h.update({ focusConversationId: 'next', focusToken: 1 }); await h.flush(); old(selectedText); await h.flush();
+  assert.equal(h.node('section', '确认本次参考图片'), undefined); assert.equal(h.selections.length, 0); assert.equal(h.direct.length, 0); assert.equal(h.submissions.length, 0);
+  assert.equal(h.node('textarea', 'Agent 消息').value, 'Next conversation draft');
+});
+
+test('a historical Prompt with different source image bindings cannot silently use the current task pictures', async t => {
+  const value = snapshot(); const newerTask = { ...structuredClone(value.taskContext), taskId: 'later-task', branchRoundId: 'r2', target: { assetId: 'new-target', source: { kind: 'upload', uploadId: 'new-target' } } };
+  value.images.push(image('new-target')); value.conversation.rounds.push({ ...value.conversation.rounds[0], id: 'r2', index: 2, parentRoundId: 'r1', assistantMessageId: 'a2', inputImageIds: ['new-target'], taskContext: newerTask }); value.conversation.activeRoundId = 'r2'; value.taskContext = newerTask;
+  const h = harness(t, { snapshot: value, draft: { refs: [] } }); await h.flush();
+  h.node('markdown').onGeneratePrompt(selectedText); await h.flush();
+  assert.equal(h.selections.length, 0); assert.equal(h.direct.length, 0); assert.equal(h.submissions.length, 0);
+  assert.match(h.text(), /之前的图片任务，参考图与当前不同/);
+  assert.equal(h.node('textarea', 'Agent 消息').value, 'Unsent draft\n  keep exact');
+});
+
+test('real Prompt block buttons use exact raw text and stable source identity; ordinary code exposes no generation', async () => {
+  const optimized = [], generated = [], jsx = (type, props) => ({ type, props });
+  const { AgentCodeBlock } = evaluate(await compile('../frontend/src/components/agent/AgentCodeBlock.tsx'), { react: { useRef: value => ({ current: value }), useState: value => [value, () => {}], useEffect() {} }, 'react/jsx-runtime': { jsx, jsxs: jsx }, 'lucide-react': {}, '../../utils/clipboard': {}, './AgentCodeBlock.css': {} });
+  const tree = AgentCodeBlock({ children: 'rendered text is not the raw source', prompt: true, copyText: selectedText, sourceId: 'r1:a1:0', generationSummary: '3 张 · high', referenceSummary: '主要图片', onOptimizePrompt: value => optimized.push(value), onGeneratePrompt: value => generated.push(value) });
+  assert.equal(tree.props['data-prompt-source'], 'r1:a1:0'); assert.deepEqual(generated, []); assert.deepEqual(optimized, []);
+  nodes(tree).find(node => node.props?.['aria-label'] === '继续优化此提示词').props.onClick();
+  nodes(tree).find(node => node.props?.['aria-label'] === '使用此提示词生成图片').props.onClick();
+  assert.deepEqual(optimized, [selectedText]); assert.deepEqual(generated, [selectedText]); assert.match(text(tree), /3 张 · high · 主要图片/);
+  const code = AgentCodeBlock({ children: 'print(1)', copyText: 'print(1)', prompt: false, onGeneratePrompt: value => generated.push(value) });
+  assert.equal(nodes(code).find(node => node.props?.['aria-label'] === '使用此提示词生成图片'), undefined); assert.deepEqual(generated, [selectedText]);
 });

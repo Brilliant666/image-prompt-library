@@ -84,6 +84,19 @@ test('unlabelled fences need an explicit adjacent prompt heading and never inher
   assert.equal((output.match(/aria-label="复制文本"/g) || []).length, 2);
 });
 
+test('real Markdown reserves generation and optimization for explicit Prompt fences or adjacent Prompt titles while keeping plain-text copying', () => {
+  const generated = [], optimized = [];
+  const source = '普通日志。\n\n```text\nINFO request started\n```\n\n```plaintext\nA plain answer example.\n```\n\n```txt\nNot an image recipe.\n```\n\n```prompt\n  Exact image prompt.\n```\n\n### 英文提示词\n\n```text\nA soft-lit portrait.\n```\n\n### Final prompt\n\n```\nKeep the visible texture.\n```\n\n### Final prompt\n\n```python\nprint("still code")\n```';
+  const output = renderToStaticMarkup(React.createElement(AgentMarkdown, { text: source, sourceId: 'r1:a1', onGeneratePrompt: value => generated.push(value), onOptimizePrompt: value => optimized.push(value), getGenerationSummary: () => '1 张 · high' }));
+  assert.equal((output.match(/aria-label="使用此提示词生成图片"/g) || []).length, 3);
+  assert.equal((output.match(/aria-label="继续优化此提示词"/g) || []).length, 3);
+  assert.equal((output.match(/aria-label="复制提示词"/g) || []).length, 6);
+  assert.equal((output.match(/aria-label="复制文本"/g) || []).length, 1);
+  const firstAction = output.indexOf('aria-label="使用此提示词生成图片"');
+  assert.ok(firstAction > output.indexOf('Not an image recipe.'));
+  assert.match(output, /class="language-python"/); assert.deepEqual(generated, []); assert.deepEqual(optimized, []);
+});
+
 test('actual Markdown and copy callbacks preserve source spaces, line endings and streamed text without added newlines', async () => {
   const captured = [];
   const { AgentMarkdown: CaptureMarkdown } = instantiate(markdownJs, {

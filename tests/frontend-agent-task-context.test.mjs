@@ -39,12 +39,12 @@ function harness(t, options = {}) {
   const drafts = { current: { text: 'Keep my unsent draft', refs: [{ reference: { kind: 'upload', uploadId: 'draft-image' }, label: 'draft.png', url: 'http://isolated.test/draft.png' }], params: { size: 'auto', quality: 'auto', background: 'auto', output_format: 'png' }, origin: 'send', editId: null, ...options.draft }, next: { text: 'Other draft', refs: [], params: { size: 'auto', quality: 'auto', output_format: 'png' }, origin: 'send', editId: null } };
   storage.set('ipl.agent.drafts.v1', JSON.stringify(drafts));
   const initial = options.snapshot || snapshot(), latest = new Map([['current', initial], ['next', snapshot('next', { taskContext: null, contextMode: 'legacy' })]]);
-  let cursor = 0, dirty = false, tree, timerId = 0, unmounted = false, late = 0, props = {};
+  let cursor = 0, dirty = false, tree, timerId = 0, unmounted = false, late = 0, scopeReads = 0, insideMemo = false, props = {};
   const hooks = {
     useState(value) { const i = cursor++; if (!(i in slots)) slots[i] = typeof value === 'function' ? value() : value; return [slots[i], next => { if (unmounted) late++; slots[i] = typeof next === 'function' ? next(slots[i]) : next; dirty = true; }]; },
     useRef(value) { const i = cursor++; return slots[i] ||= { current: value }; },
     useEffect(effect, deps) { const i = cursor++, old = slots[i]; if (!old || deps.some((value, index) => !Object.is(value, old.deps[index]))) { slots[i] = { deps }; effects.push(() => { old?.cleanup?.(); slots[i].cleanup = effect(); }); } },
-    useMemo(fn, deps) { const i = cursor++, old = slots[i]; if (!old || deps.some((value, index) => !Object.is(value, old.deps[index]))) slots[i] = { value: fn(), deps }; return slots[i].value; },
+    useMemo(fn, deps) { const i = cursor++, old = slots[i]; if (!old || deps.some((value, index) => !Object.is(value, old.deps[index]))) { const before = insideMemo; insideMemo = true; try { slots[i] = { value: fn(), deps }; } finally { insideMemo = before; } } return slots[i].value; },
     useCallback(fn, deps) { return hooks.useMemo(() => fn, deps); },
   };
   const jsx = (type, props) => ({ type, props });
@@ -66,7 +66,7 @@ function harness(t, options = {}) {
   const runState = evaluate(runStateJs, baseDeps, globalMocks);
   const deps = { ...baseDeps, 'react-dom': { createPortal: value => value }, 'lucide-react': new Proxy({}, { get: (_, key) => key }),
     '../../hooks/useModalFocus': { useModalFocus: () => ({ containerRef: {}, handleModalKeyDown() {} }) }, './useAgentConversations': { useAgentConversations: () => ({ rows: [], upsert() {}, refresh() {}, remove() {} }) }, './useAgentScroll': { useAgentScroll: () => () => {} }, './useAgentRunState': runState,
-    '../../api/client': { api: {}, mediaUrl: path => `/media/${path}` }, '../../utils/playground/agentConversationState': conversationState, '../../utils/playground/agentImageReferences': imageReferences, '../../utils/compatibleRecipe': compatibleRecipe, '../../utils/agentGalleryBridge': bridge, '../../utils/agentInputPreferences': inputPreferences, '../../utils/clipboard': { copyTextToClipboard: async () => true },
+    '../../api/client': { api: {}, mediaUrl: path => `/media/${path}` }, '../../utils/playground/agentConversationState': conversationState, '../../utils/playground/agentImageReferences': { ...imageReferences, resolveAgentPromptImageReferences: (...args) => { if (insideMemo) scopeReads++; return imageReferences.resolveAgentPromptImageReferences(...args); } }, '../../utils/compatibleRecipe': compatibleRecipe, '../../utils/agentGalleryBridge': bridge, '../../utils/agentInputPreferences': inputPreferences, '../../utils/clipboard': { copyTextToClipboard: async () => true },
     './AgentMarkdown': { AgentMarkdown: 'markdown' }, './AgentReferencePicker': { AgentReferencePicker: 'picker' }, './AgentImageOptions': { __esModule: true, default: 'image-options' }, '../gallery/SizeDialog': { __esModule: true, default: 'size-dialog' }, './AgentWorkspace.css': {}, './AgentResponseDetails': { AgentResponseDetails: 'details' }, './AgentImageRetryButton': { __esModule: true, default: 'retry' },
   };
   const Component = evaluate(workspaceJs, deps, globalMocks).default;
@@ -75,16 +75,21 @@ function harness(t, options = {}) {
   render();
   t.after(() => { unmounted = true; slots.forEach(slot => slot?.cleanup?.()); });
   return { flush, submissions, mutations, reads, watchers, storage, latest, AgentApiError, nodes: () => nodes(tree), text: () => content(tree), node: (type, label) => nodes(tree).find(node => node.type === type && (!label || node.props?.['aria-label'] === label))?.props,
-    update(next) { props = { ...props, ...next }; render(); }, get late() { return late; } };
+    update(next) { props = { ...props, ...next }; render(); }, get late() { return late; }, get scopeReads() { return scopeReads; } };
+}
+
+async function inspect(h) {
+  h.node('button', '对话更多选项').onClick({ currentTarget: null });
+  await h.flush();
 }
 
 test('production scope controls default to task, preserve drafts and send only explicitly selected history', async t => {
-  const h = harness(t); await h.flush();
+  const h = harness(t); await h.flush(); await inspect(h);
   assert.equal(h.node('select', '发送上下文范围').value, 'task');
-  assert.match(content(h.node('p', '上下文范围提示').children), /仍依赖历史内容/);
+  assert.ok(h.node('div', '上下文详情'));
   h.node('select', '发送上下文范围').onChange({ target: { value: 'selected' } }); await h.flush();
   h.node('input', '带入第 1 轮历史').onChange({ target: { checked: true } }); await h.flush();
-  assert.match(content(h.node('p', '上下文范围提示').children), /已选择 1 轮历史/);
+  assert.equal(h.node('input', '带入第 1 轮历史').checked, true);
   h.node('button', '发送 Agent 消息').onClick(); await h.flush();
   assert.equal(h.submissions.length, 1);
   assert.deepEqual(h.submissions[0].body.historyRoundIds, ['r1']);
@@ -94,20 +99,20 @@ test('production scope controls default to task, preserve drafts and send only e
 });
 
 test('production full branch choice warns about cost and latency while legacy snapshots stay explicit', async t => {
-  const h = harness(t, { snapshot: snapshot('current', { taskContext: null, contextMode: 'legacy' }) }); await h.flush();
+  const h = harness(t, { snapshot: snapshot('current', { taskContext: null, contextMode: 'legacy' }) }); await h.flush(); await inspect(h);
   assert.match(h.text(), /旧会话，尚无结构化任务/);
-  assert.match(content(h.node('p', '上下文范围提示').children), /兼容规则读取当前分支历史/);
+  assert.match(h.text(), /旧记录仍保留/);
   h.node('select', '发送上下文范围').onChange({ target: { value: 'branch' } }); await h.flush();
-  assert.match(h.text(), /响应可能更慢、费用更高/);
+  assert.match(h.text(), /仅下次发送携带完整分支，可能更慢、费用更高/);
   h.node('button', '发送 Agent 消息').onClick(); await h.flush();
   assert.equal(h.submissions[0].body.contextScope, 'branch'); assert.equal(h.submissions[0].body.taskRevision, null);
 });
 
-test('explicit production Prompt callback keeps exact source; restoring and resetting never consume composer data', async t => {
-  const h = harness(t); await h.flush();
+test('explicit advanced Prompt selection, restoration and reset never consume composer data', async t => {
+  const h = harness(t); await h.flush(); await inspect(h);
   assert.match(h.text(), /用户仍引用上一轮图片/); assert.match(h.text(), /Agent 回答，由你明确选择/);
-  h.node('markdown').onSelectPrompt(pickedPrompt); await h.flush();
-  assert.deepEqual(h.mutations[0].body, { expectedRevision: 4, branchRoundId: 'r1', taskRevision: 2, operations: [{ op: 'set_prompt', text: pickedPrompt, kind: 'selected', source: { kind: 'model', roundId: 'r1', messageId: 'r1-assistant' } }] });
+  h.node('button', '将输入框原文设为 Prompt').onClick(); await h.flush();
+  assert.deepEqual(h.mutations[0].body, { expectedRevision: 4, branchRoundId: 'r1', taskRevision: 2, operations: [{ op: 'set_prompt', text: 'Keep my unsent draft', kind: 'selected' }] });
   h.mutations[0].resolve(snapshot('current', { revision: 5 })); await h.flush();
   h.node('button', '恢复 Prompt v1').onClick(); await h.flush();
   assert.deepEqual(h.mutations[1].body.operations, [{ op: 'restore_prompt', id: 'v1' }]);
@@ -122,7 +127,7 @@ test('explicit production Prompt callback keeps exact source; restoring and rese
 test('a derived root displays the selected Prompt source from its historical branch without changing the raw text', async t => {
   const original = snapshot(), derived = { ...round('new-root'), derivedFromRoundId: 'r1' };
   const value = { ...original, conversation: { ...original.conversation, activeRoundId: derived.id, rounds: [...original.conversation.rounds, derived] }, taskContext: { ...original.taskContext, branchRoundId: derived.id } };
-  const h = harness(t, { snapshot: value }); await h.flush();
+  const h = harness(t, { snapshot: value }); await h.flush(); await inspect(h);
   assert.match(h.text(), /来源：Agent 回答，由你明确选择 · 历史分支第 1 轮/);
   assert.doesNotMatch(h.text(), /第 0 轮/);
   assert.equal(h.nodes().find(node => node.type === 'pre' && node.props.className === 'agent-task-prompt').props.children, pickedPrompt);
@@ -131,7 +136,7 @@ test('a derived root displays the selected Prompt source from its historical bra
 
 test('a deleted Prompt source stays explicitly unlocatable rather than borrowing the current branch position', async t => {
   const original = snapshot(), derived = { ...round('new-root'), derivedFromRoundId: 'r1' };
-  const h = harness(t, { snapshot: { ...original, conversation: { ...original.conversation, activeRoundId: derived.id, rounds: [derived] }, taskContext: { ...original.taskContext, branchRoundId: derived.id } } }); await h.flush();
+  const h = harness(t, { snapshot: { ...original, conversation: { ...original.conversation, activeRoundId: derived.id, rounds: [derived] }, taskContext: { ...original.taskContext, branchRoundId: derived.id } } }); await h.flush(); await inspect(h);
   assert.match(h.text(), /来源：Agent 回答，由你明确选择 · 历史来源不可定位/);
   assert.doesNotMatch(h.text(), /第 0 轮|历史分支第 1 轮/);
   assert.equal(h.nodes().find(node => node.type === 'pre' && node.props.className === 'agent-task-prompt').props.children, pickedPrompt);
@@ -139,17 +144,17 @@ test('a deleted Prompt source stays explicitly unlocatable rather than borrowing
 });
 
 test('production task CAS conflict reads the latest state without replaying a mutation or replacing draft attachments', async t => {
-  const h = harness(t); await h.flush();
+  const h = harness(t); await h.flush(); await inspect(h);
   h.node('button', '重置当前任务').onClick(); await h.flush();
   const fresh = snapshot('current', { revision: 20, taskContext: { ...snapshot().taskContext, revision: 10, taskId: 'other-tab-task' } }); h.latest.set('current', fresh);
   h.mutations[0].reject(new h.AgentApiError(409, 'task_revision_conflict', 'changed')); await h.flush();
-  assert.equal(h.mutations.length, 1); assert.match(h.text(), /已在其他页面或后续轮次中改变/);
+  assert.equal(h.mutations.length, 1); assert.match(h.text(), /对话已在其他页面更新.*输入和图片已保留/);
   assert.match(h.text(), /任务版本 10/); assert.equal(h.node('textarea', 'Agent 消息').value, 'Keep my unsent draft');
   assert.equal(JSON.parse(h.storage.get('ipl.agent.drafts.v1')).current.refs[0].reference.uploadId, 'draft-image');
 });
 
 test('late production task receipt after conversation selection cannot overwrite the visible task or either draft', async t => {
-  const h = harness(t); await h.flush();
+  const h = harness(t); await h.flush(); await inspect(h);
   h.node('button', '重置当前任务').onClick(); await h.flush();
   h.update({ focusConversationId: 'next', focusToken: 1 }); await h.flush();
   h.mutations[0].resolve(snapshot('current', { revision: 99, taskContext: { ...snapshot().taskContext, revision: 99 } })); await h.flush();
@@ -158,7 +163,7 @@ test('late production task receipt after conversation selection cannot overwrite
 });
 
 test('a queued production task callback from the previous conversation cannot start a mutation after selection changes', async t => {
-  const h = harness(t); await h.flush();
+  const h = harness(t); await h.flush(); await inspect(h);
   const staleReset = h.node('button', '重置当前任务').onClick;
   h.update({ focusConversationId: 'next', focusToken: 1 }); await h.flush();
   staleReset(); await h.flush();
@@ -170,7 +175,7 @@ test('a queued production task callback from the previous conversation cannot st
 });
 
 test('production history image re-addition is explicit, deduplicated and preserves draft text', async t => {
-  const h = harness(t); await h.flush();
+  const h = harness(t); await h.flush(); await inspect(h);
   h.node('button', '重新加入第 1 轮图片 old-image').onClick(); await h.flush();
   assert.equal(h.node('button', '重新加入第 1 轮图片 old-image').disabled, true);
   assert.equal(JSON.parse(h.storage.get('ipl.agent.drafts.v1')).current.refs.length, 2);
@@ -178,7 +183,7 @@ test('production history image re-addition is explicit, deduplicated and preserv
 });
 
 test('production target picker binds the explicit target while retaining every existing draft attachment', async t => {
-  const h = harness(t); await h.flush();
+  const h = harness(t); await h.flush(); await inspect(h);
   h.node('button', '更换任务主要图片').onClick(); await h.flush();
   assert.equal(h.node('picker').remaining, 1);
   const reference = { kind: 'library', imageId: 'replacement' };
@@ -186,13 +191,13 @@ test('production target picker binds the explicit target while retaining every e
   assert.deepEqual(h.mutations[0].body.operations, [{ op: 'set_target', ref: reference }]);
   const value = snapshot('current', { revision: 5, taskContext: { ...snapshot().taskContext, revision: 3, targetExplicit: true, target: { assetId: 'replacement', source: reference } }, images: [...snapshot().images, { id: 'replacement', source: reference, status: 'available', url: '/replacement.png' }] });
   h.mutations[0].resolve(value); await h.flush();
-  assert.match(h.text(), /主要图片：当前任务主要图片/);
+  assert.match(content(h.node('div', '本次图片对象').children), /当前任务主要图片 · 主要图片/);
   assert.equal(JSON.parse(h.storage.get('ipl.agent.drafts.v1')).current.refs[0].reference.uploadId, 'draft-image');
   assert.equal(h.node('textarea', 'Agent 消息').value, 'Keep my unsent draft'); assert.equal(h.submissions.length, 0);
 });
 
 test('production selected scope rejects missing or out-of-branch history before creating a submission', async t => {
-  const h = harness(t, { draft: { contextScope: 'selected', historyRoundIds: ['other-branch'] } }); await h.flush();
+  const h = harness(t, { draft: { contextScope: 'selected', historyRoundIds: ['other-branch'] } }); await h.flush(); await inspect(h);
   h.node('button', '发送 Agent 消息').onClick(); await h.flush();
   assert.equal(h.submissions.length, 0); assert.match(h.text(), /请选择当前分支中需要带入的历史轮次/);
   assert.equal(h.node('textarea', 'Agent 消息').value, 'Keep my unsent draft');
@@ -202,11 +207,11 @@ test('production implicit target replacement lists old evidence and the new main
   const value = snapshot();
   value.taskContext = { ...value.taskContext, taskType: 'image_edit', target: { assetId: 'old-image', source: { kind: 'upload', uploadId: 'history' } }, auxiliaries: [{ assetId: 'old-aux', source: { kind: 'upload', uploadId: 'aux' }, role: 'style' }], completeness: 'complete', unresolvedItems: [], historyDependencies: [] };
   value.images.push({ id: 'old-aux', source: { kind: 'upload', uploadId: 'aux' }, status: 'available', url: '/aux.png' });
-  const h = harness(t, { snapshot: value }); await h.flush();
+  const h = harness(t, { snapshot: value }); await h.flush(); await inspect(h);
   const list = h.node('div', '本次图片对象'); assert.equal(list.children.length, 3);
   assert.match(content(list.children), /旧目标图片 · 任务证据候选/); assert.match(content(list.children), /旧辅助图片 · 任务证据候选/);
-  assert.match(content(h.node('span', '发送图片范围').children), /^3 个图片候选 · 实际发送数量待核对 · 主要图片：draft.png$/);
-  assert.match(content(h.node('p', '图片候选范围说明').children), /新附件作为主要图片，旧目标与旧辅助图片仍可能作为任务证据/);
+  assert.equal(h.node('span', '发送图片范围'), undefined);
+  assert.equal(h.node('p', '图片候选范围说明'), undefined);
   h.node('button', '发送 Agent 消息').onClick(); await h.flush();
   assert.deepEqual(h.submissions[0].body.refs, [{ kind: 'upload', uploadId: 'draft-image' }]);
   assert.equal(h.submissions[0].body.contextScope, 'task'); assert.equal(h.submissions[0].body.taskRevision, 2);
@@ -214,19 +219,19 @@ test('production implicit target replacement lists old evidence and the new main
 
 test('production legacy and unresolved scopes expose branch image candidates with a matching list count', async t => {
   for (const taskContext of [null, { ...snapshot().taskContext, target: null, auxiliaries: [], completeness: 'partial', unresolvedItems: ['Need target'], historyDependencies: [] }]) {
-    const h = harness(t, { snapshot: snapshot('current', { taskContext, contextMode: taskContext ? 'task' : 'legacy' }) }); await h.flush();
+    const h = harness(t, { snapshot: snapshot('current', { taskContext, contextMode: taskContext ? 'task' : 'legacy' }) }); await h.flush(); await inspect(h);
     const list = h.node('div', '本次图片对象'); assert.equal(list.children.length, 2);
-    assert.match(content(h.node('span', '发送图片范围').children), /^2 个图片候选 · 实际发送数量待核对/);
-    assert.match(content(h.node('p', '图片候选范围说明').children), /当前分支 1 轮历史中的已知候选/);
+    assert.equal(h.node('span', '发送图片范围'), undefined);
+    assert.equal(h.node('p', '图片候选范围说明'), undefined);
     assert.match(content(list.children), /第 1 轮参考图 · 历史候选/);
     assert.equal(h.submissions.length, 0);
   }
 });
 
 test('a complete new prompt task keeps an exact explicit-object preview and does not add old pictures', async t => {
-  const h = harness(t, { snapshot: snapshot('current', { taskContext: { ...snapshot().taskContext, completeness: 'complete', unresolvedItems: [], historyDependencies: [] } }) }); await h.flush();
+  const h = harness(t, { snapshot: snapshot('current', { taskContext: { ...snapshot().taskContext, completeness: 'complete', unresolvedItems: [], historyDependencies: [] } }) }); await h.flush(); await inspect(h);
   assert.equal(h.node('div', '本次图片对象').children.length, 1);
-  assert.match(content(h.node('span', '发送图片范围').children), /^1 个图片对象 · 主要图片：draft.png$/);
+  assert.equal(h.node('span', '发送图片范围'), undefined);
   assert.equal(h.node('p', '图片候选范围说明'), undefined);
   h.node('button', '发送 Agent 消息').onClick(); await h.flush();
   assert.deepEqual(h.submissions[0].body.refs, [{ kind: 'upload', uploadId: 'draft-image' }]);
@@ -279,7 +284,7 @@ const replace = (path, value) => ({ op: 'replace', path, value });
 test('new bounded progress updates the visible task and context mode without replacing either draft', async t => {
   const value = progressInitial(), accepted = progress.acceptAgentSnapshot(value, 'r1-request');
   assert.equal(accepted.kind, 'applied');
-  const h = harness(t, { snapshot: value }); await h.flush();
+  const h = harness(t, { snapshot: value }); await h.flush(); await inspect(h);
   const revised = { ...value.taskContext, revision: 3, selectedPromptVersionId: 'v1', completeness: 'complete', historyDependencies: [], unresolvedItems: [] };
   const changed = progress.applyAgentProgress(accepted.state, taskPatch(1, [replace(['revision'], 5), replace(['taskContext'], revised), replace(['round', 'taskContext'], revised)]), 'r1-request');
   assert.equal(changed.kind, 'applied');
@@ -304,7 +309,7 @@ test('older bounded views preserve full-snapshot task fields, while old snapshot
   const oldAccepted = progress.acceptAgentSnapshot(legacy, 'r1-request'); assert.equal(oldAccepted.kind, 'applied');
   const oldChanged = progress.applyAgentProgress(oldAccepted.state, taskPatch(1, [replace(['revision'], 5)]), 'r1-request');
   assert.equal(oldChanged.kind, 'applied'); assert.equal(Object.hasOwn(oldChanged.state.snapshot, 'taskContext'), false); assert.equal(Object.hasOwn(oldChanged.state.snapshot, 'contextMode'), false);
-  const h = harness(t, { snapshot: oldChanged.state.snapshot }); await h.flush();
+  const h = harness(t, { snapshot: oldChanged.state.snapshot }); await h.flush(); await inspect(h);
   assert.match(h.text(), /旧会话，尚无结构化任务/); assert.equal(h.node('select', '发送上下文范围').value, 'task');
 });
 
@@ -321,4 +326,32 @@ test('task assets survive preview replacement and invalid context modes require 
   assert.equal(invalid.kind, 'resync');
   const duplicate = progress.applyAgentProgress(changed.state, taskPatch(1, [replace(['taskContext'], null)]), 'r1-request');
   assert.equal(duplicate.kind, 'ignore'); assert.equal(changed.state.snapshot.taskContext.taskId, 'task-one');
+});
+
+test('default composer has no resident task controls, while optional inspection is read-only and lazy', async t => {
+  const h = harness(t); await h.flush();
+  assert.equal(h.scopeReads, 0);
+  assert.equal(h.node('select', '发送上下文范围'), undefined);
+  assert.equal(h.node('button', '重置当前任务'), undefined);
+  assert.equal(h.node('div', '本次图片对象'), undefined);
+  assert.equal(h.node('span', '发送图片范围'), undefined);
+  assert.doesNotMatch(h.text(), /任务状态|任务版本|Prompt v2|实际发送数量待核对|待选择主要图片/);
+  assert.equal(h.node('textarea', 'Agent 消息').value, 'Keep my unsent draft');
+  assert.ok(h.nodes().some(node => node.type === 'img' && node.props.src === 'http://isolated.test/draft.png'));
+  assert.equal(h.submissions.length, 0); assert.equal(h.mutations.length, 0);
+  await inspect(h);
+  assert.ok(h.scopeReads > 0);
+  assert.equal(h.node('select', '发送上下文范围').value, 'task');
+  assert.match(h.text(), /任务版本 2/);
+  assert.equal(h.submissions.length, 0); assert.equal(h.mutations.length, 0);
+  h.node('button', '关闭 Agent 面板').onClick(); await h.flush();
+  const closedReads = h.scopeReads;
+  h.node('textarea', 'Agent 消息').onChange({ target: { value: 'Keep my unsent draft' } }); await h.flush();
+  assert.equal(h.scopeReads, closedReads);
+  assert.equal(h.node('select', '发送上下文范围'), undefined);
+  assert.doesNotMatch(h.text(), /任务版本/);
+  h.node('button', '发送 Agent 消息').onClick(); await h.flush();
+  assert.equal(h.submissions.length, 1);
+  assert.equal(h.submissions[0].body.contextScope, 'task');
+  assert.deepEqual(h.submissions[0].body.refs, [{ kind: 'upload', uploadId: 'draft-image' }]);
 });

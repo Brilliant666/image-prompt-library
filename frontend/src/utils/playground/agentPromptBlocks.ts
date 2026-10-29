@@ -37,13 +37,17 @@ function sourceFenceText(source: string, node: Element): string | undefined {
   return result.join('');
 }
 
-export function agentPromptBlock(source: string, node?: Element): { prompt: boolean; copyText?: string } {
+export function agentPromptBlock(source: string, node?: Element): { prompt: boolean; actionablePrompt?: boolean; copyText?: string } {
   const code = node?.children.find(child => child.type === 'element' && child.tagName === 'code');
   if (!code || code.type !== 'element' || !node) return { prompt: false };
   const classes = code.properties.className;
   const language = (Array.isArray(classes) ? classes : []).find(value => typeof value === 'string' && value.startsWith('language-'));
   const name = typeof language === 'string' ? language.slice('language-'.length).toLowerCase() : '';
   // An explicit programming language always wins over a nearby prompt heading.
-  const prompt = name ? promptLanguages.has(name) : node.position?.start.offset !== undefined && adjacentPromptTitle(source, node.position.start.offset);
-  return prompt ? { prompt: true, copyText: sourceFenceText(source, node) } : { prompt: false };
+  const titled = node.position?.start.offset !== undefined && adjacentPromptTitle(source, node.position.start.offset);
+  const prompt = name ? promptLanguages.has(name) : titled;
+  // Keep established plain-text copy styling, but a generic text/log fence is
+  // not an instruction to turn that block into an executable image recipe.
+  const actionablePrompt = prompt && (name === 'prompt' || titled);
+  return prompt ? { prompt: true, actionablePrompt, copyText: sourceFenceText(source, node) } : { prompt: false };
 }
