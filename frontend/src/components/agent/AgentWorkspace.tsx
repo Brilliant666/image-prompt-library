@@ -11,12 +11,12 @@ import { useAgentConversations } from './useAgentConversations';
 import { useAgentScroll } from './useAgentScroll';
 import { useAgentRunState, type AgentSubmissionBoundary } from './useAgentRunState';
 import { api, mediaUrl } from '../../api/client';
-import { AgentApiError, agentApi, getAgentConfig, type AgentConfigResponse, type AgentImage, type AgentImageRetryReceipt, type AgentRound, type AgentRoundCreate, type AgentSnapshot, type AgentTaskContextOperation } from '../../api/agentClient';
+import { AgentApiError, agentApi, getAgentConfig, type AgentConfigResponse, type AgentImage, type AgentImageRetryReceipt, type AgentRound, type AgentRoundCreate, type AgentSnapshot, type AgentTaskContextOperation, type AgentPromptExecutionInput } from '../../api/agentClient';
 import type { GenerationJobRecord } from '../../types';
 import { getActiveAgentRounds, getAgentBranchLeafId, getAgentSiblingRounds } from '../../utils/playground/agentConversationState';
 import { agentPhaseLabels, getAgentAssistantBlocks, getAgentJobFailure, getAgentRoundStatus, getAgentRoundSummary, getAgentToolLabel, isAgentRequestActive } from '../../utils/playground/agentAssistantBlocks';
 import { insertMention, referenceKey, resolveAgentPromptImageReferences, type ReferenceChoice } from '../../utils/playground/agentImageReferences';
-import { AGENT_DRAFT_KEY, AGENT_IMAGE_MODE_PREFIX, acknowledgeAgentDraft, draftFromPendingAgentSubmission, readAgentDrafts, readAgentImageMode, readPendingAgentSubmissions, saveAgentImageMode, shouldSubmitAgentOnKey, type AgentDraft, type PendingAgentSubmission } from '../../utils/playground/agentSubmission';
+import { AGENT_DRAFT_KEY, AGENT_IMAGE_MODE_PREFIX, AGENT_PROMPT_EXECUTIONS_KEY, acknowledgeAgentDraft, clearPendingPromptExecution, draftFromPendingAgentSubmission, readAgentDrafts, readAgentImageMode, readPendingAgentSubmissions, readPendingPromptExecutions, saveAgentImageMode, savePendingPromptExecution, shouldSubmitAgentOnKey, type AgentDraft, type PendingAgentSubmission, type PendingPromptExecution } from '../../utils/playground/agentSubmission';
 import { resolveAuto4k } from '../../utils/compatibleRecipe';
 import { agentJobSource, sharedImageCount, type AgentGalleryCommand, type GalleryImageSettings } from '../../utils/agentGalleryBridge';
 import { readLocalPreferences } from '../../utils/localPreferences';
@@ -47,7 +47,8 @@ type AgentPanel = 'model' | 'add' | 'options' | 'mentions' | 'details';
 const emptyDraft = (): Draft => ({ text: '', refs: [], params: { size: 'auto', quality: 'auto', background: 'auto', output_format: 'png' }, editId: null, origin: 'send' });
 const statusText: Record<string, string> = { queued: '等待执行', running: '正在响应', waiting_for_jobs: '等待图片任务', stop_requested: '正在停止后续调用', completed: '已完成', stopped: '已停止后续调用', failed: '执行失败', interrupted: '执行已中断', unknown: '上游结果未知', succeeded: '已生成', accepted: '已收录', discarded: '已清理', cancelled: '已取消', pending: '等待执行' };
 const taskTypeText: Record<string, string> = { chat: '连续对话', image_edit: '图片编辑', image_generation: '图片生成', prompt: '提示词创作', analysis: '图片分析', reverse: '提示词反推', prompt_optimization: '提示词优化' };
-const taskHistoryReasonText: Record<string, string> = { legacy_requirements_in_history: '旧任务的要求仍保存在历史消息中', unreconciled_user_addition: '历史补充尚未完整整理到当前任务' };
+const taskHistoryReasonText: Record<string, string> = { legacy_context_missing: '旧会话缺少已确认的完整任务资料', legacy_requirements_in_history: '旧任务的完整要求仍保存在历史消息中', target_changed_requires_prior_evidence: '新增目标与旧图片、旧约束的关系尚待确认', unreconciled_user_addition: '历史补充尚未完整整理到当前任务' };
+const referenceRoleText: Record<string, string> = { target: '主要图片', lighting: '辅助 · 光线', style: '辅助 · 风格', subject: '辅助 · 主体', composition: '辅助 · 构图', other: '辅助 · 其他' };
 function safeStorageSet(key: string, value: string) { try { localStorage.setItem(key, value); } catch { /* UI preferences may be unavailable; submission journal is handled separately. */ } }
 function errorText(reason: unknown) { return reason instanceof Error ? reason.message : '请求未完成'; }
 function sameOriginImage(url?: string | null) { if (!url) return ''; try { const value = new URL(url, location.origin); return value.origin === location.origin ? value.href : ''; } catch { return ''; } }
@@ -86,6 +87,11 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
   const [handoffBusy, setHandoffBusy] = useState(false);
   const [sizeOpen, setSizeOpen] = useState(false);
   const [referenceGeometry, setReferenceGeometry] = useState<{url:string;size?:{width:number;height:number};status:'loading'|'ready'|'error'}>();
+  const [directGeometry, setDirectGeometry] = useState<{url:string;size?:{width:number;height:number};status:'loading'|'ready'|'error'}>();
+  const [promptExecutions, setPromptExecutions] = useState(() => readPendingPromptExecutions(localStorage));
+  const promptExecutionAlive = useRef(true);
+  const directPostLock = useRef(false);
+  const checkedPromptExecutions = useRef(new Set<string>());
   const [focusRoundId, setFocusRoundId] = useState<string>();
   const consumedHandoff = useRef<number | undefined>(undefined);
   const [search, setSearch] = useState('');
@@ -128,6 +134,8 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
   const imageMode = activeId ? (Object.hasOwn(imageModes, activeId) ? imageModes[activeId] : readAgentImageMode(localStorage, activeId)) : newImageMode;
   const imagesAllowed = imageMode;
   const uncertain = pending.find(entry => entry.conversationId === activeId);
+  const pendingPromptExecution = promptExecutions.find(entry => entry.conversationId === activeId);
+  const workspaceSnapshot = useRef(current); workspaceSnapshot.current = current;
   const storedDraft = drafts[draftKey] || emptyDraft();
   const sharedImages = config?.config.apiConfigMode === 'hybrid';
   const sharedUnavailable = sharedImages && galleryImageSettings ? galleryImageSettings.unavailable || (galleryImageSettings.provider !== 'openai_compatible' ? '画廊当前供应商不支持 Agent 的 Images API 调用，请选择 API 供应商。' : '') : undefined;
@@ -137,7 +145,7 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
   const scrollToLatest = useAgentScroll({ containerRef: scroll, contentRef: scrollContent, active, conversationId: activeId, ready: Boolean(current) && !conversationLoading && !conversationLoadError, revision: current?.revision, focusRoundId, onFocusResolved: () => setFocusRoundId(undefined) });
   const conversationUnavailable = Boolean(activeId && !current);
   const rounds = useMemo(() => current ? getActiveAgentRounds(current.conversation) : [], [current]);
-  const draftLocked = busy || Boolean(uncertain);
+  const draftLocked = busy || Boolean(uncertain || pendingPromptExecution);
   const inputLimit = config?.capabilities.maxInputImages ?? 4;
   const imageProfile = config?.profiles.find(profile => profile.id === (config.config.apiConfigMode === 'hybrid' ? draft.imageConfig?.profileId || config.config.imageProfileId : config.config.apiConfigMode === 'off' ? activeProfileId : config.config.textProfileId));
   const imageModel = draft.imageConfig ? draft.imageConfig.model || (config?.config.apiConfigMode === 'hybrid' ? imageProfile?.model : '') || '' : config?.config.imageModel || (config?.config.apiConfigMode === 'hybrid' ? imageProfile?.model : '') || '';
@@ -184,9 +192,42 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
     imagePreview.set(referenceKey(reference), { reference, label: choice?.label || '已引用的结果图', url: sameOriginImage(choice?.url || asset?.thumbnailUrl || asset?.url || (job?.result_path ? mediaUrl(job.result_path) : '')), missing: Boolean(choice?.missing || asset && asset.status !== 'available') });
   }
   const mainImageReference = taskContext?.targetExplicit ? taskContext.target?.source : draft.refs.length === 1 ? draft.refs[0].reference : taskContext?.target?.source;
+  const directImages = [taskContext?.target ? { ...taskContext.target, role: 'target' } : null, ...(taskContext?.auxiliaries || [])].filter((image): image is NonNullable<typeof image> => Boolean(image));
+  const directTarget = directImages[0] ? current?.images.find(image => image.id === directImages[0].assetId) : undefined;
+  const directTargetUrl = sameOriginImage(directTarget?.thumbnailUrl || directTarget?.url);
+  const directReferenceSize = directTarget?.width && directTarget.height ? { width: directTarget.width, height: directTarget.height } : directGeometry?.url === directTargetUrl ? directGeometry.size : undefined;
+  const directAutoSize = draft.sizeMode === 'auto4k' && selectedPrompt ? resolveAuto4k(selectedPrompt.text, directReferenceSize) : null;
+  const directSizeUnavailable = Boolean(directAutoSize && !('error' in directAutoSize) && directAutoSize.source !== 'prompt' && directImages.length && !directReferenceSize);
+  const directParams = directAutoSize && !('error' in directAutoSize) && !directSizeUnavailable ? { ...draft.params, size: directAutoSize.size } : draft.params;
+  const directHybrid = config?.config.apiConfigMode === 'hybrid';
+  const directProfileId = directHybrid ? draft.imageConfig?.profileId ?? config?.config.imageProfileId : null;
+  const directModel = draft.imageConfig ? draft.imageConfig.model : config?.config.imageModel || (directHybrid ? config?.profiles.find(profile => profile.id === directProfileId)?.model : '') || '';
+  const directModelLabel = directModel.trim() || (directHybrid ? config?.profiles.find(profile => profile.id === directProfileId)?.model : '') || '供应商默认图片模型';
+  const directHardHistory = taskContext?.historyDependencies.filter(item => item.reason !== 'unreconciled_user_addition').map(item => taskHistoryReasonText[item.reason] || item.reason) || [];
+  const directMask = current?.conversation.rounds.find(round => round.id === current.conversation.activeRoundId)?.maskImageId;
+  const directUnavailable = !selectedPrompt ? '请先明确选择提示词。' : !config ? '正在读取图片调用设置。' : config.config.apiConfigMode === 'off' ? 'Current API 尚无已验证的直接执行路径；可保留普通会话生图，或在设置中主动选择 Native / Hybrid。' : taskContext?.unresolvedItems.length || taskContext?.taskType === 'image_edit' && !taskContext.target ? '当前任务仍有待确认项或图片角色未明确，请先完成确认。' : directHardHistory.length ? `任务仍需核对必要历史证据：${directHardHistory.join('；')}。` : directMask ? '直接执行暂不支持带蒙版配方，请使用原编辑流程。' : directImages.length > 4 || new Set(directImages.map(image => image.assetId)).size !== directImages.length ? '配方图片角色重复或数量过多，请先明确选择。' : directImages.some(image => current?.images.find(asset => asset.id === image.assetId)?.status !== 'available') ? '配方参考图不可用，请先恢复或重新选择。' : incompatibleImageSelection || !imageReady ? '请先完善本次生图模型与供应商设置。' : imageCount > config.config.maxImageJobs ? '本次数量超出 Agent 已配置的图片安全上限。' : directAutoSize && 'error' in directAutoSize ? '选定提示词包含冲突比例，请设置明确尺寸。' : directSizeUnavailable ? directGeometry?.status === 'error' ? '无法读取主要图片尺寸，请重选图片或设置明确尺寸。' : '正在确认主要图片尺寸，暂不能直接生成。' : '';
   const requestNeedsAttention = Boolean(current?.request && (['failed', 'unknown', 'interrupted'].includes(current.request.state) || current.request.error || current.request.recoveryReason || current.request.upstreamMayContinue || current.request.canResume));
   const closePanel = useCallback(() => setPanel(null), []);
   useEffect(() => { if (activeId) setNewImageMode(false); }, [activeId]);
+  useEffect(() => { promptExecutionAlive.current = true; return () => { promptExecutionAlive.current = false; }; }, []);
+  useEffect(() => {
+    if (!active || draft.sizeMode !== 'auto4k' || !directTarget || directTarget.width && directTarget.height) return;
+    let disposed = false;
+    setDirectGeometry({ url: directTargetUrl, status: 'loading' });
+    if (!directTargetUrl) { setDirectGeometry({ url: directTargetUrl, status: 'error' }); return; }
+    const image = new Image(); image.src = directTargetUrl;
+    void image.decode().then(() => { if (!disposed) setDirectGeometry({ url: directTargetUrl, size: { width: image.naturalWidth, height: image.naturalHeight }, status: 'ready' }); }).catch(() => { if (!disposed) setDirectGeometry({ url: directTargetUrl, status: 'error' }); });
+    return () => { disposed = true; };
+  }, [active, draft.sizeMode, directTarget?.id, directTarget?.sha256, directTargetUrl]);
+  useEffect(() => {
+    const refresh = (event: StorageEvent) => {
+      if (event.key !== null && event.key !== AGENT_PROMPT_EXECUTIONS_KEY) return;
+      setPromptExecutions(readPendingPromptExecutions(localStorage));
+      if (activeIdRef.current) reloadConversation();
+    };
+    window.addEventListener('storage', refresh);
+    return () => window.removeEventListener('storage', refresh);
+  }, [reloadConversation]);
   useEffect(() => {
     const refresh = (event: StorageEvent) => {
       if (event.key === null) setImageModes({});
@@ -536,6 +577,87 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
     });
     if (value && activeIdRef.current === key) scrollToLatest();
   }
+  function refreshPromptExecutions() {
+    if (promptExecutionAlive.current) setPromptExecutions(readPendingPromptExecutions(localStorage));
+  }
+  function acceptPromptExecution(entry: PendingPromptExecution, value: AgentSnapshot, publish: boolean) {
+    if (value.conversation.id !== entry.conversationId || value.request?.id !== entry.payload.requestId) throw new Error('直接生成回执身份不匹配，原请求仍保留。');
+    clearPendingPromptExecution(localStorage, entry.payload.requestId);
+    refreshPromptExecutions();
+    if (!promptExecutionAlive.current) return;
+    onJobsChanged?.();
+    const live = workspaceSnapshot.current;
+    if (!publish || activeIdRef.current !== entry.conversationId || !live) return;
+    const sameBranch = [entry.payload.branchRoundId, value.request.roundId].includes(live.conversation.activeRoundId);
+    if (!sameBranch || live.taskContext?.taskId !== entry.payload.taskId || value.conversation.activeRoundId !== value.request.roundId) { reloadConversation(); return; }
+    applySnapshot(value);
+    setNotice('已提交确认的提示词配方；草稿、附件和持续生图开关保留。');
+  }
+  async function checkPromptExecution(entry: PendingPromptExecution) {
+    if (directPostLock.current || activeIdRef.current !== entry.conversationId) return;
+    directPostLock.current = true;
+    try {
+      await runCommand(async command => {
+        try { acceptPromptExecution(entry, await agentApi.promptExecutionReceipt(entry.payload.requestId, entry.conversationId), command.current()); }
+        catch (reason) { throw new Error(`${errorText(reason)}。原直接生成 ID 与配方保留；这里只检查回执，不会重新生成。`); }
+      });
+    } finally { directPostLock.current = false; }
+  }
+  async function executeConfirmedPrompt() {
+    if (activeIdRef.current !== activeId || !current || !config || !taskContext || !selectedPrompt || draftLocked || inFlight || uploading || handoffBusy || directPostLock.current) return;
+    const existing = readPendingPromptExecutions(localStorage).find(entry => entry.conversationId === current.conversation.id);
+    if (existing) { await checkPromptExecution(existing); return; }
+    if (directUnavailable) { setError(directUnavailable); return; }
+    const payload: AgentPromptExecutionInput = {
+      requestId: crypto.randomUUID(), expectedRevision: current.revision, branchRoundId: current.conversation.activeRoundId,
+      taskId: taskContext.taskId, taskRevision: taskContext.revision, promptVersionId: selectedPrompt.id, configRevision: config.revision,
+      imageConfig: { profileId: directProfileId, model: directModel }, params: structuredClone(directParams), imageCount, confirmed: true,
+    };
+    const entry: PendingPromptExecution = { conversationId: current.conversation.id, payload };
+    directPostLock.current = true;
+    try {
+      await runCommand(async command => {
+        let posted = false;
+        try {
+          savePendingPromptExecution(localStorage, entry);
+          checkedPromptExecutions.current.add(payload.requestId); refreshPromptExecutions();
+          posted = true;
+          const receipt = await agentApi.executePrompt(entry.conversationId, structuredClone(payload));
+          acceptPromptExecution(entry, receipt, command.current());
+        } catch (reason) {
+          if (!posted) throw new Error(`${errorText(reason)}。尚未发送，草稿和附件保留。`);
+          if (reason instanceof AgentApiError && [400, 401, 403, 404, 409, 422].includes(reason.status)) {
+            clearPendingPromptExecution(localStorage, payload.requestId); refreshPromptExecutions();
+            if (reason.status === 409 && command.current()) reloadConversation();
+            throw new Error(`${errorText(reason)}。请求已明确拒绝；草稿和附件保留，请核对后重新操作。`);
+          }
+          throw new Error('本次生成结果尚未确认。请检查原回执；原请求 ID 与冻结配方保留，不会自动重新生成。');
+        }
+      });
+    } finally { directPostLock.current = false; }
+  }
+  async function continuePromptOptimization() {
+    if (activeIdRef.current !== activeId || !current || !config || !taskContext || !selectedPrompt || draftLocked || inFlight || uploading || handoffBusy || directPostLock.current) return;
+    if (readPendingPromptExecutions(localStorage).some(entry => entry.conversationId === current.conversation.id)) { setError('此会话还有尚未确认的直接生成，请先检查原回执。'); return; }
+    const conversation = current, task = structuredClone(taskContext), prompt = selectedPrompt.text, frozenConfig = structuredClone(config);
+    const result = await submitPrepared(async command => {
+      if (!command.current() || activeIdRef.current !== conversation.conversation.id) return null;
+      const payload: AgentRoundCreate = {
+        requestId: crypto.randomUUID(), expectedRevision: conversation.revision, parentRoundId: conversation.conversation.activeRoundId,
+        origin: 'send', prompt: `请继续优化以下明确选定的提示词，保留已确认的约束；提供候选版本，等待我明确选择。\n\n${prompt}`,
+        refs: [], configRevision: frozenConfig.revision, activeProfileId: activeProfileId || null, params: emptyDraft().params,
+        contextScope: 'task', historyRoundIds: [], taskRevision: task.revision,
+        authorization: { scope: 'this_request', allowImageGeneration: false, allowWebSearch: false, maxToolRounds: frozenConfig.config.maxToolRounds, maxImageJobs: 0 },
+      };
+      return { entry: { conversationId: conversation.conversation.id, payload, preserveDraft: true } };
+    });
+    if (result && activeIdRef.current === conversation.conversation.id) scrollToLatest();
+  }
+  useEffect(() => {
+    if (!active || !current || conversationLoading || busy || directPostLock.current || !pendingPromptExecution || checkedPromptExecutions.current.has(pendingPromptExecution.payload.requestId)) return;
+    checkedPromptExecutions.current.add(pendingPromptExecution.payload.requestId);
+    void checkPromptExecution(pendingPromptExecution);
+  }, [active, current?.conversation.id, conversationLoading, busy, pendingPromptExecution?.payload.requestId]);
   async function addFiles(files: File[]) {
     if (uploading || busy || uncertain) return;
     if (files.length + draft.refs.length > inputLimit) { setError(`当前接口最多使用 ${inputLimit} 张参考图；没有截断或上传本次文件。`); return; }
@@ -550,7 +672,7 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
     } catch (reason) { setError(errorText(reason)); } finally { setUploading(false); }
   }
   async function submit() {
-    if (activeIdRef.current !== activeId || busy || handoffBusy || uploading || inFlight || uncertain || conversationUnavailable || !draft.text.trim() || !config) return;
+    if (activeIdRef.current !== activeId || busy || handoffBusy || uploading || inFlight || uncertain || pendingPromptExecution || conversationUnavailable || !draft.text.trim() || !config) return;
     if (imagesAllowed && incompatibleImageSelection) {setError('生图方式已改变，旧供应商选择不适用于当前方式。请在生图设置中重新选择生图模型；原草稿和附件保留。');return;}
     if (imagesAllowed && (!imageReady || imageCount > config.config.maxImageJobs)) { setError(sharedUnavailable || (!imageReady ? '请先完善生图设置，草稿与附件保留。' : `当前数量 ${imageCount} 超出 Agent 已配置的 ${config.config.maxImageJobs} 张安全上限，请调整数量或设置中的上限。`)); return; }
     if (draft.refs.some(ref => ref.missing)) { setError('存在缺失参考图，请明确替换或移除后再发送。'); return; }
@@ -695,6 +817,7 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
               <div className="agent-message-actions"><button title="复制原文" aria-label="复制原文" onClick={() => void copyTextToClipboard(round.prompt).then(ok => setNotice(ok ? '已复制原文' : '复制失败'))}><Copy size={15} /></button><button title="编辑重发" aria-label="编辑重发" disabled={inFlight || busy || Boolean(uncertain)} onClick={() => void prepareEdit(round, 'edit')}><Pencil size={15} /></button>{siblings.length > 1 && <span className="agent-branch-controls"><button aria-label="上一分支" disabled={branchIndex === 0 || busy} onClick={() => void selectBranch(siblings[branchIndex - 1].id)}><ChevronLeft size={15} /></button>{branchIndex + 1} / {siblings.length}<button aria-label="下一分支" disabled={branchIndex === siblings.length - 1 || busy} onClick={() => void selectBranch(siblings[branchIndex + 1].id)}><ChevronRight size={15} /></button></span>}</div>
             </div>
             <div className="agent-assistant-message" aria-label={`Agent，第 ${roundIndex + 1} 轮`}>
+              {round.kind === 'prompt_execution' && round.directRecipe && <section className="agent-confirmed-recipe-card" aria-label="已确认配方生成记录"><strong>按已确认配方生成，未经过额外文字规划</strong><p>{round.directRecipe.mode === 'native' ? '使用原生 Responses 图片协议，本次仍有图片请求。' : '通过已选 Images 图片接口生成。'}</p><p>{round.directRecipe.imageCount} 张 · {String(round.directRecipe.params.model || '供应商默认图片模型')} · {String(round.directRecipe.params.size || 'auto')} · {String(round.directRecipe.params.quality || 'auto')} · {String(round.directRecipe.params.output_format || 'png')}</p><p>Prompt 来源：{round.directRecipe.promptSource.kind === 'model' ? 'Agent 回答，由你明确选择' : '你明确选择的原文'} · 配方参考图 {round.directRecipe.references.length} 张</p>{round.directRecipe.references.length > 0 && <ol>{round.directRecipe.references.map(reference => <li key={reference.assetId}>{reference.order + 1}. {referenceRoleText[reference.role] || reference.role}</li>)}</ol>}</section>}
               {blocks.map(block => {
                 if (block.type === 'text') return <AgentMarkdown key={block.key} text={block.content} promptSelectionDisabled={draftLocked || inFlight} onSelectPrompt={text => void changeTaskContext([{ op: 'set_prompt', text, kind: 'selected', source: { kind: 'model', roundId: round.id, ...(assistant?.id ? { messageId: assistant.id } : {}) } }])} />;
                 if (block.type === 'image-task') return renderResult(block.task);
@@ -727,6 +850,7 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
         {notice && <p role="status" className="agent-notice">{notice}<button aria-label="关闭提示" onClick={() => setNotice('')}><X size={13} /></button></p>}
         {error && <p role="alert" className="agent-error">{error}<button aria-label="关闭错误" onClick={() => setError('')}><X size={13} /></button></p>}
         {uncertain && <div className="agent-uncertain"><strong>上次提交结果尚未确认</strong><p>冻结的内容与请求 ID 已保留，重载不会自动重新收费提交。</p><button aria-label="检查原请求状态" disabled={busy} onClick={() => void reconcile(uncertain)}>检查原请求状态</button><button aria-label="用同一请求恢复" disabled={busy} onClick={() => void reconcile(uncertain, true)}>用同一请求恢复</button></div>}
+        {pendingPromptExecution && <div className="agent-uncertain" aria-label="直接生成回执待确认"><strong>直接生成回执待确认</strong><p>本次冻结：{pendingPromptExecution.payload.imageCount} 张 · {pendingPromptExecution.payload.imageConfig.model || '供应商默认图片模型'} · {pendingPromptExecution.payload.params.size} · {pendingPromptExecution.payload.params.quality}。原请求 ID 与配方已保存；刷新仅检查原回执。</p><button type="button" aria-label="检查本次直接生成状态" disabled={busy} onClick={() => void checkPromptExecution(pendingPromptExecution)}>检查本次生成状态</button></div>}
         {config && !config.ready && <p className="agent-help">{config.issues.map(issue => issue.message).join('；')} <button className="agent-text-button" aria-label="打开 Agent 设置" onClick={onOpenSettings}>打开设置</button></p>}
         {draft.editId && <div className="agent-edit-notice">{draft.origin === 'regenerate' ? '重新生成' : '编辑重发'}会建立新分支，原记录保留。<button aria-label="取消分支编辑" disabled={draftLocked} onClick={() => updateDraft({ editId: null, origin: 'send' })}>取消分支编辑</button></div>}
         <div className="agent-context-toolbar">
@@ -748,6 +872,22 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
               {taskContext.unresolvedItems.length > 0 && <p className="agent-context-warning">待确认：{taskContext.unresolvedItems.join('；')}</p>}
               {taskContext.historyDependencies.length > 0 && <p className="agent-context-warning">回退历史的原因：{taskContext.historyDependencies.map(item => taskHistoryReasonText[item.reason] || item.reason).join('；')}</p>}
               {selectedPrompt && <><p className="agent-help">当前 Prompt v{promptVersionIndex} · 来源：{selectedPrompt.source.kind === 'model' ? 'Agent 回答，由你明确选择' : selectedPrompt.source.kind === 'legacy' ? '旧记录' : '你的原文'}{selectedPrompt.source.roundId ? ` · 第 ${rounds.findIndex(round => round.id === selectedPrompt.source.roundId) + 1} 轮` : ''}</p><pre className="agent-task-prompt">{selectedPrompt.text}</pre></>}
+              {selectedPrompt && <section className="agent-prompt-execution" aria-label="选定提示词操作">
+                <p>本次图片参数：{imageCount} 张 · {directModelLabel} · {directSizeUnavailable ? '尺寸待确认' : directParams.size} · {directParams.quality} · {directParams.output_format} · {directParams.background || 'auto'}{typeof directParams.output_compression === 'number' ? ` · 压缩 ${directParams.output_compression}` : ''}</p>
+                <p>配方参考图 {directImages.length} 张，按以下角色与顺序使用：</p>
+                {directImages.length ? <ol className="agent-direct-references">{directImages.map((reference, index) => {
+                  const asset = current?.images.find(image => image.id === reference.assetId), url = sameOriginImage(asset?.thumbnailUrl || asset?.url);
+                  return <li key={reference.assetId}>{url && <img src={url} alt={`配方参考 ${index + 1} · ${referenceRoleText[reference.role] || reference.role}`} />}<span>{index + 1}. {referenceRoleText[reference.role] || reference.role}{asset?.status !== 'available' ? ' · 不可用' : ''}</span></li>;
+                })}</ol> : <p>无配方参考图。</p>}
+                {draft.refs.length > 0 && <p className="agent-help">输入框中的 {draft.refs.length} 张附件会保留；直接生成只使用上面的任务配方参考图。</p>}
+                <p className="agent-help">点击“用此提示词生成”，表示确认选定全文和上列参考图角色作为当前完整配方，仅授权本次图片调用。本次不会自动加入聊天历史或额外约束。</p>
+                <div className="agent-task-actions">
+                  <button type="button" aria-label="继续优化选定提示词" disabled={draftLocked || inFlight || uploading || handoffBusy || !config?.ready} onClick={() => void continuePromptOptimization()}>继续优化</button>
+                  <button type="button" aria-label="用选定提示词生成" title={directUnavailable || '仅授权本次生成，保留持续生图开关与输入框草稿'} disabled={draftLocked || inFlight || uploading || handoffBusy || Boolean(directUnavailable)} onClick={() => void executeConfirmedPrompt()}>用此提示词生成</button>
+                </div>
+                {directUnavailable && <p className="agent-help" role="status">{directUnavailable}</p>}
+                <p className="agent-help">直接使用选定原文和本次图片参数，不进行额外文字规划；{config?.config.apiConfigMode === 'native' ? 'Native 仍会发送原生 Responses 图片请求。' : '本次会发送图片请求。'}</p>
+              </section>}
               {taskContext.promptVersions.length > 0 && <div className="agent-task-versions" aria-label="Prompt 版本">{taskContext.promptVersions.map((version, index) => <button key={version.id} type="button" aria-label={`恢复 Prompt v${index + 1}`} aria-pressed={version.id === taskContext.selectedPromptVersionId} disabled={draftLocked || inFlight || version.id === taskContext.selectedPromptVersionId} onClick={() => void changeTaskContext([{ op: 'restore_prompt', id: version.id }])}>v{index + 1} · {version.kind === 'candidate' ? '候选' : version.kind === 'executed' ? '已执行' : version.kind === 'original' ? '原文' : '已选择'}</button>)}</div>}
               {promptVersionIndex > 1 && <button type="button" aria-label="撤销当前 Prompt 选择" disabled={draftLocked || inFlight} onClick={() => void changeTaskContext([{ op: 'restore_prompt', id: taskContext.promptVersions[promptVersionIndex - 2].id }])}>撤销当前 Prompt 选择</button>}
               {taskContext.constraints.length > 0 && <div className="agent-task-constraints" aria-label="当前任务约束">{taskContext.constraints.map(constraint => <p key={constraint.id}><span>{constraint.status === 'revoked' ? <s>{constraint.text}</s> : constraint.text}{constraint.status === 'proposed' && <small> · 建议，待确认</small>}</span>{constraint.status === 'proposed' && <button type="button" disabled={draftLocked || inFlight} aria-label={`确认约束 ${constraint.text}`} onClick={() => void changeTaskContext([{ op: 'update_constraint', id: constraint.id, text: constraint.text }])}>确认</button>}<button type="button" disabled={draftLocked || inFlight} aria-label={`${constraint.status === 'revoked' ? '恢复' : '撤销'}约束 ${constraint.text}`} onClick={() => void changeTaskContext([constraint.status === 'revoked' ? { op: 'update_constraint', id: constraint.id, text: constraint.text } : { op: 'revoke_constraint', id: constraint.id }])}>{constraint.status === 'revoked' ? '恢复' : '撤销'}</button></p>)}</div>}

@@ -89,6 +89,21 @@ export interface AgentRound {
   retryTaskIds?: string[];
   editingTask?: AgentEditingTask | null;
   taskContext?: AgentTaskContext | null;
+  kind?: 'prompt_execution';
+  directRecipe?: AgentDirectRecipe;
+}
+export interface AgentPromptExecutionInput {
+  requestId: string; expectedRevision: number; branchRoundId: string | null;
+  taskId: string; taskRevision: number; promptVersionId: string; configRevision: number;
+  imageConfig: { profileId?: string | null; model: string }; params: AgentImageParams;
+  imageCount: 1 | 3 | 5 | 10; confirmed: true;
+}
+export interface AgentDirectRecipe {
+  version: 1; requestId: string; sourceBranchRoundId: string | null;
+  taskId: string; taskRevision: number; promptVersionId: string; prompt: string; promptSource: AgentTaskPromptSource;
+  references: Array<{ assetId: string; source: AgentReference; role: 'target' | AgentReferenceRole; order: number; path: string; sha256: string }>;
+  params: Record<string, unknown>; imageCount: 1 | 3 | 5 | 10; mode: 'native' | 'hybrid'; fingerprint: string;
+  confirmation?: { completeRecipe: true; confirmedBy: 'user'; promptVersionId: string; referenceAssetIds: string[] };
 }
 export type AgentContextScope = 'task' | 'selected' | 'branch';
 export interface AgentTaskPromptSource { kind: 'user' | 'model' | 'legacy'; roundId: string | null; messageId?: string }
@@ -285,6 +300,8 @@ export function watchAgentRequest(id: string, onSnapshot: (value: AgentSnapshot)
 }
 
 export const agentApi = {
+  executePrompt: (id: string, payload: AgentPromptExecutionInput) => request<AgentSnapshot>(`/conversations/${encodeURIComponent(id)}/prompt-executions`, { method: 'POST', body: JSON.stringify(payload) }),
+  promptExecutionReceipt: (id: string, conversationId: string, signal?: AbortSignal) => request<AgentSnapshot>(`/prompt-executions/${encodeURIComponent(id)}?conversation_id=${encodeURIComponent(conversationId)}`, { signal }),
   updateTaskContext: (id: string, payload: { expectedRevision: number; branchRoundId: string | null; taskRevision: number | null; operations: AgentTaskContextOperation[] }) => request<AgentSnapshot>(`/conversations/${encodeURIComponent(id)}/task-context`, { method: 'PATCH', body: JSON.stringify(payload) }),
   updateEditingTask: (id: string, payload: { expectedRevision: number; branchRoundId: string | null; task: AgentEditingTaskInput | null }) => request<AgentSnapshot>(`/conversations/${encodeURIComponent(id)}/editing-task`, { method: 'PATCH', body: JSON.stringify(payload) }),
   retryImage: (jobId: string, payload: AgentImageRetryInput) => request<AgentImageRetryReceipt>(`/${encodeURIComponent(jobId)}/retry-current`, { method: 'POST', body: JSON.stringify(payload) }, '/api/generation-jobs'),

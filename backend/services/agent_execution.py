@@ -677,6 +677,13 @@ def run_request(library, request_id):
     from backend.services.generation_queue import _provider_slots
     repo = AgentRepository(library)
     try:
+        direct_request = repo.request(request_id)
+        if direct_request['round'].get('kind') == 'prompt_execution':
+            if direct_request['state'] not in ACTIVE_STATES:
+                return
+            from backend.services.agent_recipe_execution import run_execution
+            run_execution(repo, request_id)
+            return
         while True:
             request = check_active(repo, request_id)
             repo.verified_profile(request)
@@ -771,10 +778,14 @@ def run_compatible_agent_job(library, job_id):
     from backend.services.openai_compatible import OpenAICompatibleConfig, OpenAICompatibleProvider
     repo = AgentRepository(library)
     job = repo.jobs.get_job(job_id)
-    request_id = job.metadata["agent"]["requestId"]
+    link = job.metadata['agent']
+    request_id = link['requestId']
     try:
         request = check_active(repo, request_id)
         profile = repo.verified_profile(request, image=True)
+        if link.get('executionKind') == 'prompt_execution':
+            from backend.services.agent_recipe_execution import verify_job_recipe
+            verify_job_recipe(repo, request, job)
         class FrozenConfig:
             def validate_path(self, library_path):
                 OpenAICompatibleConfig(library_path=library_path).validate_path(library_path)
@@ -787,7 +798,20 @@ def run_compatible_agent_job(library, job_id):
         with _lock:
             _clients[key] = client
         try:
-            return OpenAICompatibleProvider(config=FrozenConfig(), http_client=client).run_job(library, job_id)
+            provider_class = OpenAICompatibleProvider
+            if link.get('executionKind') == 'prompt_execution':
+                class RecipeProvider(OpenAICompatibleProvider):
+                    def _input_images(self, selected_job, library_path):
+                        images = super()._input_images(selected_job, library_path)
+                        verify_job_recipe(repo, check_active(repo, request_id), selected_job,
+                                          input_bytes=[image[1] for image in images])
+                        return images
+                provider_class = RecipeProvider
+            provider_client = client
+            if link.get('executionKind') == 'prompt_execution':
+                from backend.services.agent_recipe_execution import RecipeDispatchClient
+                provider_client = RecipeDispatchClient(client, library, job)
+            return provider_class(config=FrozenConfig(), http_client=provider_client).run_job(library, job_id)
         finally:
             client.close()
             with _lock:
@@ -814,13 +838,25 @@ class NativeAgentImageProvider:
             profile = repo.verified_profile(request)
             if job.status != "queued":
                 raise AgentError("resume_not_safe", "原生图片任务不会重复提交。")
-            repo.jobs.mark_running(job_id)
+            if link.get('executionKind') == 'prompt_execution':
+                from backend.services.agent_recipe_execution import verify_job_recipe
+                verify_job_recipe(repo, request, job)
+            repo.jobs.mark_running(job_id, **({'queued_only': True} if link.get('executionKind') == 'prompt_execution' else {}))
             claimed = True
             content = [{"type": "input_text", "text": job.prompt_text}]
+            recipe_bytes = [] if link.get('executionKind') == 'prompt_execution' else None
             from backend.services.generation_jobs import resolve_generation_input_image_path
             for spec in job.parameters.get("input_images", []):
                 path, mime = resolve_generation_input_image_path(repo.library, spec["result_path"])
-                content.append({"type": "input_image", "image_url": encode_verified_image(path.read_bytes(), mime)})
+                if recipe_bytes is not None:
+                    from backend.services.agent_recipe_execution import native_recipe_binding
+                    reference = request['round']['directRecipe']['references'][len(recipe_bytes)]
+                    data = path.read_bytes()
+                    recipe_bytes.append(data)
+                    content.append(native_recipe_binding(reference))
+                    content.append({"type": "input_image", "image_url": encode_verified_image(data, mime)})
+                else:
+                    content.append({"type": "input_image", "image_url": encode_verified_image(path.read_bytes(), mime)})
             image_tool = {"type": "image_generation", "action": "auto",
                           **native_image_parameters(request["body"]["params"])}
             if request["frozen"]["imageModel"]:
@@ -828,6 +864,8 @@ class NativeAgentImageProvider:
             body = {"model": request["frozen"]["textModel"], "stream": False, "input": [{"role": "user", "content": content}],
                     "tools": [image_tool], "tool_choice": {"type": "image_generation"}, "max_tool_calls": 1}
             check_active(repo, request_id)
+            if link.get('executionKind') == 'prompt_execution':
+                verify_job_recipe(repo, request, job, input_bytes=recipe_bytes)
             repo.record_response_details(request_id, link.get("step", 1), native_job_id=job_id)
             client = create_api_client(profile, timeout=httpx.Timeout(profile["timeout"], connect=min(10, profile["timeout"])))
             with _lock:
@@ -835,6 +873,9 @@ class NativeAgentImageProvider:
             payload = None
             repo.jobs.record_execution(job_id, phase='generating', preparationMs=timing.elapsed(preparation_started))
             provider_started = timing.monotonic()
+            if link.get('executionKind') == 'prompt_execution':
+                from backend.services.agent_recipe_execution import record_recipe_dispatch
+                record_recipe_dispatch(library, job)
             # No image is staged until a successful final response is validated.
             with response_stream(client, "POST", profile["base_url"].rstrip("/") + "/responses", is_complete=lambda: payload is not None,
                                  headers={"Authorization": "Bearer " + profile["api_key"]}, json=body) as response:

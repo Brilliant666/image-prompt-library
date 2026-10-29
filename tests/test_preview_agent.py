@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import socket
 import subprocess
 import sys
@@ -11,7 +12,7 @@ from fastapi.testclient import TestClient
 import httpx
 import pytest
 
-from scripts.preview_agent import main, preview_session
+from scripts.preview_agent import main, preview_session, PROMPT_MARKERS, prompt_candidate
 
 
 @pytest.fixture
@@ -124,6 +125,90 @@ def test_text_and_skill_are_executed_and_saved_through_real_routes(preview, scen
     replay = client.post("/api/agent/conversations/preview/rounds", json=body)
     assert replay.status_code == 200
     assert provider.counts["responses"] == steps
+
+
+@pytest.mark.parametrize("marker,skill,section,task_type", [
+    (PROMPT_MARKERS["reverse"], "image-prompt-reverse", "analysis", "reverse"),
+    (PROMPT_MARKERS["optimize"], "gpt-image", "composition", "prompt_optimization"),
+])
+def test_prompt_candidate_follows_real_skill_and_records_state_in_the_same_answer(preview, marker, skill, section, task_type):
+    client, provider, seeds, library = preview
+    prompt = "[preview:prompt] " + marker + " 保留参考图的构图"
+    submit(client, "prompt", prompt, refs=[{"kind": "upload", "uploadId": seeds["images"][0]["uploadId"]}])
+    result = wait_request(client, "prompt")
+    assert result["request"]["state"] == "completed", result
+    from backend.services.agent_repository import AgentRepository
+    from backend.services.agent_skills import read_agent_skill
+    row = AgentRepository(library).request("prompt")["round"]
+    exact, _ = prompt_candidate(prompt)
+    assert re.search(r"```prompt\n(.*?)\n```", row["assistantContent"], re.S).group(1) == exact
+    calls = {item["call_id"]: item for item in row["responseOutput"] if item["type"] == "function_call"}
+    receipt = next(item for item in row["responseOutput"] if item["type"] == "function_call_output"
+                   and calls[item["call_id"]]["name"] == "read_agent_skill")
+    assert json.loads(receipt["output"]) == read_agent_skill(skill, section)
+    state = row["taskContext"]
+    candidates = [version for version in state["promptVersions"] if version["kind"] == "candidate"]
+    assert len(candidates) == 1 and candidates[0]["text"] == exact
+    assert candidates[0]["source"]["kind"] == "model" and candidates[0]["confirmedBy"] is None
+    assert state["taskType"] == task_type and state["selectedPromptVersionId"] is None
+    assert state["promptVersions"][0]["text"] == prompt
+    assert provider.counts["responses"] == 2 and provider.counts["images"] == 0
+    assert [calls[item["call_id"]]["name"] for item in row["responseOutput"]
+            if item["type"] == "function_call_output"] == ["read_agent_skill", "update_task_context"]
+
+
+def test_prompt_preview_respects_disabled_professional_workflows(preview):
+    client, provider, _, library = preview
+    config = client.get("/api/agent/config").json()
+    assert client.put("/api/agent/config", json={"expectedRevision": config["revision"],
+        "config": {**config["config"], "professionalPromptWorkflows": False}}).status_code == 200
+    submit(client, "plain-prompt", "[preview:prompt] 普通候选")
+    result = wait_request(client, "plain-prompt")
+    assert result["request"]["state"] == "completed"
+    from backend.services.agent_repository import AgentRepository
+    row = AgentRepository(library).request("plain-prompt")["round"]
+    assert "专业工作流已关闭" in row["assistantContent"]
+    assert provider.counts["responses"] == 1 and provider.counts["images"] == 0
+
+
+def test_continue_selected_prompt_inherits_preview_without_auto_selecting_the_new_candidate(preview):
+    client, provider, _, library = preview
+    prompt = "[preview:prompt] " + PROMPT_MARKERS["reverse"] + " " + PROMPT_MARKERS["failure_once"]
+    submit(client, "first-candidate", prompt)
+    first = wait_request(client, "first-candidate")
+    from backend.services.agent_repository import AgentRepository
+    repo = AgentRepository(library)
+    first_row = repo.request("first-candidate")["round"]
+    exact, _ = prompt_candidate(prompt)
+    selected = client.patch("/api/agent/conversations/preview/task-context", json={
+        "expectedRevision": first["revision"], "branchRoundId": first_row["id"],
+        "taskRevision": first["taskContext"]["revision"], "operations": [{"op": "set_prompt", "kind": "selected",
+            "text": exact, "source": {"kind": "model", "roundId": first_row["id"], "messageId": first_row["assistantMessageId"]}}]})
+    assert selected.status_code == 200, selected.text
+    old_selection = selected.json()["taskContext"]["selectedPromptVersionId"]
+    # This is the ordinary text produced by the real Continue optimization button.
+    continuation = "请继续优化以下明确选定的提示词，保留已确认的约束；提供候选版本，等待我明确选择。\n\n" + exact
+    submit(client, "continue-candidate", continuation, parent=first_row["id"])
+    result = wait_request(client, "continue-candidate")
+    assert result["request"]["state"] == "completed"
+    current = repo.request("continue-candidate")["round"]
+    expected, _ = prompt_candidate(continuation)
+    assert "A natural still-life photograph" in expected and "preview-fail-once-recipe" in expected
+    assert expected in current["assistantContent"]
+    assert current["taskContext"]["selectedPromptVersionId"] == old_selection
+    assert current["taskContext"]["promptVersions"][-1]["kind"] == "candidate"
+    assert provider.counts["responses"] == 4 and provider.counts["images"] == 0
+
+
+def test_prompt_preview_still_returns_text_when_image_generation_is_enabled(preview):
+    client, provider, _, library = preview
+    submit(client, "prompt-not-image", "[preview:prompt] 反推中文候选", images=True)
+    result = wait_request(client, "prompt-not-image")
+    assert result["request"]["state"] == "completed"
+    from backend.services.agent_repository import AgentRepository
+    row = AgentRepository(library).request("prompt-not-image")["round"]
+    assert "```prompt" in row["assistantContent"] and row["outputTaskIds"] == []
+    assert provider.counts["responses"] == 2 and provider.counts["images"] == 0
 
 
 def test_generated_image_edit_branch_and_library_accept_use_real_persistence(preview):

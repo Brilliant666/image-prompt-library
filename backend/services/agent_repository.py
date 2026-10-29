@@ -945,6 +945,16 @@ class AgentRepository:
             value["steps"] = [dict(r) for r in conn.execute("SELECT * FROM agent_steps WHERE request_id=? ORDER BY step", (request_id,))]
         return value
 
+    def create_prompt_execution(self, cid, body):
+        from backend.services.agent_recipe_execution import create_execution
+        return create_execution(self, cid, body)
+
+    def prompt_execution_receipt(self, request_id, cid):
+        request = self.request(request_id)
+        if request['conversation_id'] != cid or request['round'].get('kind') != 'prompt_execution':
+            raise AgentError('not_found', '提示词执行回执不存在。', 404)
+        return self.snapshot(cid, request_id)
+
     def select_request_references(self, request_id, arguments, refs):
         request = self.request(request_id)
         task = editing.select_references(self, request, arguments, refs)

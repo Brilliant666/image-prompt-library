@@ -138,3 +138,17 @@ class AgentRoundCreate(AgentModel):
 
 class AgentResume(AgentModel):
     resumeId: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+class AgentPromptExecutionCreate(AgentModel):
+    requestId: str = Field(min_length=1, max_length=100, pattern=r'^[A-Za-z0-9_-]+$')
+    expectedRevision: int = Field(ge=0)
+    branchRoundId: str | None = None
+    taskId: str = Field(min_length=1, max_length=100)
+    taskRevision: int = Field(ge=0)
+    promptVersionId: str = Field(min_length=1, max_length=100)
+    configRevision: int = Field(ge=0)
+    imageConfig: AgentImageConfig | None = None
+    params: AgentParams
+    imageCount: Literal[1, 3, 5, 10] = 1
+    confirmed: Literal[True]

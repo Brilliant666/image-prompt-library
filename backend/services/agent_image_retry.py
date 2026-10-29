@@ -288,6 +288,12 @@ class AgentImageRetryRepository:
                 'sourceJobId': job.id, 'rootSourceJobId': root_id,
                 'profileId': profile_id, 'profileDigest': profile_digest(profile), 'referenceHashes': reference_hashes,
                 **({'textModel': text_model} if native else {}), **({'maskReference': mask} if mask else {})}
+            source_round = json.loads(conn.execute('SELECT data FROM agent_rounds WHERE id=?', (source['roundId'],)).fetchone()[0])
+            recipe = source_round.get('directRecipe')
+            if recipe:
+                lineage['confirmedRecipe'] = {'recipeFingerprint': recipe['fingerprint'], 'taskId': recipe['taskId'],
+                    'taskRevision': recipe['taskRevision'], 'promptVersionId': recipe['promptVersionId'],
+                    'promptSource': recipe['promptSource'], 'sourceRoundId': source['roundId']}
             metadata = {'agentRetry': lineage, 'retry_of_generation_job_id': job.id, 'retry_reason': 'agent_current_config',
                         **({'reference_image_copies': copies} if copies else {})}
             metadata = sanitize_generation_parameters(metadata, redact_image_data=True)
@@ -333,6 +339,10 @@ def run_agent_image_retry(library, job_id):
                 OpenAICompatibleConfig(library_path=path).validate_path(path)
             def read(self, profile_id=None):
                 return dict(profile)
+        if link.get('confirmedRecipe'):
+            from backend.services.agent_recipe_execution import RecipeDispatchClient
+            with create_api_client(profile, timeout=profile['timeout']) as client:
+                return OpenAICompatibleProvider(config=FrozenConfig(), http_client=RecipeDispatchClient(client, library, job)).run_job(library, job_id)
         return OpenAICompatibleProvider(config=FrozenConfig()).run_job(library, job_id)
     except Exception as exc:
         # Only pre-dispatch queued failures belong to this wrapper. Never undo
@@ -378,8 +388,14 @@ def _run_native_retry(library, job, profile):
         mask = link.get('maskReference')
         if mask:
             inputs.sort(key=lambda spec: spec['result_path'] != mask['targetPath'])
-        for spec in inputs:
+        confirmed_recipe = None
+        if link.get('confirmedRecipe'):
+            confirmed_recipe = AgentRepository(library).request(link['sourceRequestId'])['round']['directRecipe']
+        for index, spec in enumerate(inputs):
             path, mime = resolve_generation_input_image_path(library, spec['result_path'], allowed_roots={'generation-references'})
+            if confirmed_recipe:
+                from backend.services.agent_recipe_execution import native_recipe_binding
+                content.append(native_recipe_binding(confirmed_recipe['references'][index]))
             content.append({'type': 'input_image', 'image_url': encode_verified_image(path.read_bytes(), mime)})
         image_tool = {'type': 'image_generation', 'action': 'auto', **native_image_parameters(job.parameters)}
         if job.model:
@@ -394,6 +410,15 @@ def _run_native_retry(library, job, profile):
         payload = None
         with create_api_client(profile, timeout=httpx.Timeout(profile['timeout'], connect=min(10, profile['timeout']))) as client:
             provider_started = timing.monotonic()
+            if link.get('confirmedRecipe'):
+                from backend.services.agent_recipe_execution import record_recipe_dispatch
+                recipe = AgentRepository(library).request(link['sourceRequestId'])['round']['directRecipe']
+                actual = [base64.b64decode(item['image_url'].split(',', 1)[1]) for item in content if item['type'] == 'input_image']
+                if (content[0]['text'] != recipe['prompt'] or recipe['fingerprint'] != link['confirmedRecipe']['recipeFingerprint']
+                        or len(actual) != len(recipe['references']) or any(hashlib.sha256(data).hexdigest() != reference['sha256']
+                        for data, reference in zip(actual, recipe['references']))):
+                    raise AgentError('reference_missing', '原配方图片已改变；未调用图片接口。', 400)
+                record_recipe_dispatch(library, job)
             with response_stream(client, 'POST', profile['base_url'].rstrip('/') + '/responses', is_complete=lambda: payload is not None,
                                  headers={'Authorization': 'Bearer ' + profile['api_key']}, json=body) as response:
                 if not response.is_success:

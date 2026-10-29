@@ -5,7 +5,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Query, Request, Upload
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
-from backend.agent_schemas import AgentConfigSave, AgentConversationCreate, AgentConversationPatch, AgentEditingTaskPatch, AgentTaskContextPatch, AgentResume, AgentRoundCreate
+from backend.agent_schemas import AgentConfigSave, AgentConversationCreate, AgentConversationPatch, AgentEditingTaskPatch, AgentTaskContextPatch, AgentPromptExecutionCreate, AgentResume, AgentRoundCreate
 from backend.services.agent_execution import schedule_request, stop_request
 from backend.services.agent_repository import ACTIVE_STATES, AgentError, AgentRepository, encoded
 from backend.services.agent_progress import ProgressLimit, ProgressSession
@@ -71,6 +71,19 @@ def create_round(conversation_id: str, payload: AgentRoundCreate, request: Reque
     if created:
         schedule_request(request.app.state.library_path, payload.requestId)
     return JSONResponse(result, status_code=202 if created else 200)
+
+
+@router.post('/conversations/{conversation_id}/prompt-executions')
+def create_prompt_execution(conversation_id: str, payload: AgentPromptExecutionCreate, request: Request):
+    result, created = repo(request).create_prompt_execution(conversation_id, payload)
+    if created:
+        schedule_request(request.app.state.library_path, payload.requestId)
+    return JSONResponse(result, status_code=202 if created else 200)
+
+
+@router.get('/prompt-executions/{request_id}')
+def get_prompt_execution(request_id: str, request: Request, conversation_id: str = Query(..., min_length=1, max_length=100)):
+    return repo(request).prompt_execution_receipt(request_id, conversation_id)
 
 
 @router.delete("/conversations/{conversation_id}/rounds/{round_id}")

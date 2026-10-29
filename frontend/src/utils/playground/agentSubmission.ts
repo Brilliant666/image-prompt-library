@@ -1,4 +1,4 @@
-import type { AgentRoundCreate } from '../../api/agentClient';
+import type { AgentPromptExecutionInput, AgentRoundCreate } from '../../api/agentClient';
 import type { ReferenceChoice } from './agentImageReferences';
 
 export interface AgentDraft {
@@ -97,6 +97,33 @@ export function savePendingAgentSubmission(storage: Pick<Storage, 'getItem' | 's
 
 export function clearPendingAgentSubmission(storage: Pick<Storage, 'getItem' | 'setItem'>, requestId: string) {
   storage.setItem(JOURNAL, JSON.stringify(readPendingAgentSubmissions(storage).filter(item => item.payload.requestId !== requestId)));
+}
+
+export interface PendingPromptExecution { conversationId: string; payload: AgentPromptExecutionInput }
+export const AGENT_PROMPT_EXECUTIONS_KEY = 'ipl.agent.pending-prompt-executions.v1';
+export function readPendingPromptExecutions(storage: Pick<Storage, 'getItem'>): PendingPromptExecution[] {
+  try {
+    const value: unknown = JSON.parse(storage.getItem(AGENT_PROMPT_EXECUTIONS_KEY) || '[]');
+    return Array.isArray(value) ? value.filter((entry): entry is PendingPromptExecution => {
+      if (!entry || typeof entry !== 'object') return false;
+      const { conversationId, payload } = entry as PendingPromptExecution;
+      return typeof conversationId === 'string' && Boolean(conversationId) && Boolean(payload && typeof payload === 'object'
+        && ['requestId', 'taskId', 'promptVersionId'].every(key => typeof payload[key as keyof AgentPromptExecutionInput] === 'string' && payload[key as keyof AgentPromptExecutionInput])
+        && Number.isSafeInteger(payload.expectedRevision) && Number.isSafeInteger(payload.taskRevision) && Number.isSafeInteger(payload.configRevision)
+        && payload.params && typeof payload.params.size === 'string' && typeof payload.params.quality === 'string'
+        && payload.imageConfig && typeof payload.imageConfig.model === 'string' && [1, 3, 5, 10].includes(payload.imageCount) && payload.confirmed === true);
+    }) : [];
+  } catch { return []; }
+}
+export function savePendingPromptExecution(storage: Pick<Storage, 'getItem' | 'setItem'>, entry: PendingPromptExecution) {
+  const records = readPendingPromptExecutions(storage);
+  const same = records.find(record => record.payload.requestId === entry.payload.requestId);
+  if (same && JSON.stringify(same) !== JSON.stringify(entry)) throw new Error('同一直接生成请求的冻结配方不能改变。');
+  if (records.some(record => record.conversationId === entry.conversationId && record.payload.requestId !== entry.payload.requestId)) throw new Error('此会话还有尚未确认的直接生成，请先检查原回执。');
+  storage.setItem(AGENT_PROMPT_EXECUTIONS_KEY, JSON.stringify([...records.filter(record => record.payload.requestId !== entry.payload.requestId), structuredClone(entry)]));
+}
+export function clearPendingPromptExecution(storage: Pick<Storage, 'getItem' | 'setItem'>, requestId: string) {
+  storage.setItem(AGENT_PROMPT_EXECUTIONS_KEY, JSON.stringify(readPendingPromptExecutions(storage).filter(record => record.payload.requestId !== requestId)));
 }
 
 export function getAgentResumeId(storage: Pick<Storage, 'getItem' | 'setItem'>, requestId: string, createId: () => string): string {

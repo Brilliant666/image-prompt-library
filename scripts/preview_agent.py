@@ -33,7 +33,26 @@ if str(ROOT) not in sys.path:
 CONFIG_SUFFIXES = ("AUTH_PATH", "GROK_AUTH_PATH", "CONFIG_PATH", "OPENAI_COMPATIBLE_CONFIG_PATH",
                    "CAPTURE_CLIENTS_PATH", "CAPTURE_ORGANIZER_CONFIG_PATH")
 PROVIDER_URL = "http://preview.invalid/v1"
-SCENARIOS = ("text", "image", "batch", "partial", "native", "slow", "unknown", "skill", "edit")
+SCENARIOS = ("text", "image", "batch", "partial", "native", "slow", "unknown", "skill", "edit", "prompt")
+PROMPT_MARKERS = {"reverse": "[preview:reverse-zh]", "optimize": "[preview:optimize-en]",
+                  "failure_once": "[preview:fail-once]"}
+REVERSE_PROMPT = ("  蓝色长方体与橙色球体组成的合成几何静物照片，暖白背景，自然侧光。\n"
+                  "保留原有形状、构图和柔和阴影，画面中不添加文字。  ")
+OPTIMIZED_PROMPT = ("  A natural still-life photograph of a blue rectangular block and an orange sphere.\n\n"
+                    "Preserve the original geometry and framing, with a warm ivory background, "
+                    "soft side lighting, and gentle shadows. No lettering.  ")
+
+
+def prompt_candidate(prompt):
+    """Explicit preview-only controls; never used by production task selection."""
+    english = (PROMPT_MARKERS["optimize"] in prompt or PROMPT_MARKERS["reverse"] not in prompt
+               and bool(re.search(r"英文|继续优化|\benglish\b", prompt, re.I)))
+    text = OPTIMIZED_PROMPT if english else REVERSE_PROMPT
+    if PROMPT_MARKERS["failure_once"] in prompt:
+        text += "\npreview-fail-once-recipe"
+    elif marker := re.search(r"\bpreview-fail-once-[a-zA-Z0-9_-]+", prompt):
+        text += "\n" + marker[0]
+    return text, ("gpt-image", "composition") if english else ("image-prompt-reverse", "analysis")
 
 
 def synthetic_png(number=0):
@@ -92,9 +111,32 @@ class PreviewProvider:
                 continue
             parts = item.get("content", [])
             text = next((part.get("text", "") for part in parts if part.get("type") == "input_text"), "")
-            if text and not text.startswith(("<ref ", "<available_ref ", "The mask applies to ", "Current editing task")):
+            if text and not text.startswith(("<ref ", "<available_ref ", "The mask applies to ", "Current editing task", "Current creative task")):
                 current, start = text, index
         return current, items[start + 1:], json.dumps(items, ensure_ascii=False)
+
+    @staticmethod
+    def task_context(body):
+        for item in reversed(body.get("input", [])):
+            for part in item.get("content", []):
+                text = part.get("text", "")
+                if text.startswith("Current creative task "):
+                    return json.loads(text.split(": ", 1)[1])
+        return None
+
+    @staticmethod
+    def skill_completed(items, skill, section):
+        calls = {}
+        for item in items:
+            if item.get("type") == "function_call" and item.get("name") == "read_agent_skill":
+                calls[item.get("call_id")] = json.loads(item.get("arguments", "{}"))
+            elif item.get("type") == "function_call_output" and item.get("call_id") in calls:
+                arguments = calls[item["call_id"]]
+                value = json.loads(item.get("output", "{}"))
+                if (arguments.get("skill") == value.get("skill") == skill
+                        and arguments.get("section") == value.get("section") == section and value.get("revision")):
+                    return True
+        return False
 
     @staticmethod
     def metadata(body):
@@ -131,7 +173,8 @@ class PreviewProvider:
         body = json.loads(raw)
         prompt, followups, all_input = self.current_turn(body)
         match = re.search(r"\[preview:([a-z]+)\]", prompt)
-        scenario = match[1] if match and match[1] in SCENARIOS else "text"
+        scenario = (match[1] if match and match[1] in SCENARIOS else "text") if match else (
+            "prompt" if "[preview:prompt]" in all_input else "text")
         names = {tool.get("name") for tool in body.get("tools", [])}
         native = any(tool.get("type") == "image_generation" for tool in body.get("tools", []))
         replied = any(item.get("type") == "function_call_output" for item in followups)
@@ -147,7 +190,28 @@ class PreviewProvider:
         output = []
         message = {"id": f"preview-message-{number}", "type": "message", "role": "assistant",
                    "content": [{"type": "output_text", "text": "这是离线合成预览。文字、工具回执和图片经过真实保存链路。"}]}
-        if scenario == "skill" and "read_agent_skill" in names and not replied:
+        candidate, prompt_skill = prompt_candidate(prompt) if scenario == "prompt" else (None, None)
+        if (scenario == "prompt" and "read_agent_skill" in names
+                and not self.skill_completed(followups, *prompt_skill)):
+            output = [{"id": f"preview-skill-{number}", "call_id": f"preview-skill-{number}", "type": "function_call",
+                       "name": "read_agent_skill", "arguments": json.dumps({"skill": prompt_skill[0], "section": prompt_skill[1]})}]
+        elif scenario == "prompt":
+            english = prompt_skill[0] == "gpt-image"
+            receipt = (f"已通过真实 read_agent_skill 回执读取 {prompt_skill[0]} / {prompt_skill[1]}。\n\n"
+                       if self.skill_completed(followups, *prompt_skill) else "专业工作流已关闭；以下为普通离线候选。\n\n")
+            message["content"][0]["text"] = receipt + ("英文优化候选：" if english else "依据参考图推导的中文候选，并非图片的原始 Prompt：") + f"\n\n```prompt\n{candidate}\n```\n\n可明确选择此代码块，再决定继续优化或直接生成。"
+            output = [message]
+            task = self.task_context(body)
+            if "update_task_context" in names and task:
+                def operation(op, **values):
+                    return {"op": op, "text": None, "id": None, "ref": None, "kind": None,
+                            "taskType": None, "items": None, "sourceQuote": None, **values}
+                output.append({"id": f"preview-context-{number}", "call_id": f"preview-context-{number}",
+                    "type": "function_call", "name": "update_task_context", "arguments": json.dumps({
+                        "taskId": task["taskId"], "taskRevision": task["revision"], "branchRoundId": task["branchRoundId"],
+                        "operations": [operation("set_task_type", taskType="prompt_optimization" if english else "reverse"),
+                                       operation("set_prompt", text=candidate, kind="candidate")]}, ensure_ascii=False)})
+        elif scenario == "skill" and "read_agent_skill" in names and not replied:
             output = [{"id": f"preview-skill-{number}", "call_id": f"preview-skill-{number}", "type": "function_call",
                        "name": "read_agent_skill", "arguments": json.dumps({"skill": "gpt-image", "section": "editing"})}]
         elif (native and (scenario in {"image", "edit", "native", "unknown"} or body.get("tool_choice"))):
@@ -280,7 +344,8 @@ def preview_session(root, *, frontend_dist=None, delay=0.12, slow_delay=0.5):
         async def diagnostics(request):
             if not request.client or request.client.host not in {"127.0.0.1", "::1"}:
                 raise HTTPException(403, "Preview diagnostics are loopback-only")
-            return {"preview": True, **provider.diagnostics(), "seeds": seeds, "scenarios": list(SCENARIOS)}
+            return {"preview": True, **provider.diagnostics(), "seeds": seeds, "scenarios": list(SCENARIOS),
+                    "promptMarkers": dict(PROMPT_MARKERS)}
         diagnostics.__annotations__["request"] = Request
         app.router.routes.insert(0, APIRoute("/__preview__/diagnostics", diagnostics, methods=["GET"]))
         try:
