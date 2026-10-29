@@ -216,8 +216,11 @@ def test_http_edit_role_context_reaches_responses_and_existing_images_queue(isol
         repository = AgentRepository(isolated)
         assert pixels(sent) == [repository.data_url(task['auxiliaries'][0]['assetId']), repository.data_url(task['target']['assetId'])]
         task_text = next(part['text'] for item in sent['input'] for part in item.get('content', [])
-                         if part.get('text', '').startswith('Current editing task'))
-        assert json.loads(task_text.split(': ', 1)[1])['targetRef'] == 'round-2-reference-1'
+                         if part.get('text', '').startswith('Current creative task'))
+        task_data = json.loads(task_text.split(': ', 1)[1])
+        assert task_data['target']['ref'] == 'round-2-reference-1'
+        assert task_data['auxiliaries'][0]['role'] == 'lighting'
+        assert task_data['auxiliaries'][0]['ref'] == 'round-1-reference-1'
         assert second['request']['state'] == 'completed'
         job = second['jobs'][0]
         assert job['status'] == 'succeeded' and job['mode'] == 'image_edit'

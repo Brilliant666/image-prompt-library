@@ -88,7 +88,35 @@ export interface AgentRound {
   failure?: { kind: string; message: string; outcomeUnknown: boolean } | null;
   retryTaskIds?: string[];
   editingTask?: AgentEditingTask | null;
+  taskContext?: AgentTaskContext | null;
 }
+export type AgentContextScope = 'task' | 'selected' | 'branch';
+export interface AgentTaskPromptSource { kind: 'user' | 'model' | 'legacy'; roundId: string | null; messageId?: string }
+export interface AgentTaskPromptVersion { id: string; text: string; kind: 'original' | 'candidate' | 'selected' | 'executed'; source: AgentTaskPromptSource; confirmedBy?: 'user' | null }
+export interface AgentTaskContext {
+  schemaVersion: 1; taskId: string; revision: number; branchRoundId: string | null;
+  taskType: 'chat' | 'image_edit' | 'image_generation' | 'prompt' | 'analysis' | 'reverse' | 'prompt_optimization';
+  startRoundId?: string | null; sourceRoundIds?: string[]; targetExplicit?: boolean;
+  target: { assetId: string; source: AgentReference } | null;
+  auxiliaries: Array<{ assetId: string; source: AgentReference; role: AgentReferenceRole }>;
+  promptVersions: AgentTaskPromptVersion[];
+  originalPromptVersionId: string | null; selectedPromptVersionId: string | null; executedPromptVersionId: string | null;
+  constraints: Array<{ id: string; text: string; status: 'active' | 'proposed' | 'revoked'; source: AgentTaskPromptSource }>;
+  latestUserAddition: { text: string; roundId: string } | null;
+  unresolvedItems: string[]; completeness: 'complete' | 'partial' | 'history_required';
+  historyDependencies: Array<{ roundId: string; reason: string }>;
+}
+export type AgentTaskContextOperation =
+  | { op: 'new_task'; text?: string; taskType?: AgentTaskContext['taskType'] }
+  | { op: 'set_task_type'; taskType: AgentTaskContext['taskType'] }
+  | { op: 'set_target'; ref: AgentReference | null }
+  | { op: 'set_auxiliaries'; auxiliaries: Array<{ ref: AgentReference; role: AgentReferenceRole }> }
+  | { op: 'add_constraint'; text: string }
+  | { op: 'update_constraint'; id: string; text: string }
+  | { op: 'revoke_constraint'; id: string }
+  | { op: 'set_prompt'; text: string; kind: 'candidate' | 'selected'; source?: { kind: 'user' | 'model'; roundId: string; messageId?: string } }
+  | { op: 'select_prompt' | 'restore_prompt'; id: string }
+  | { op: 'set_unresolved'; items: string[] };
 export type AgentReferenceRole = 'lighting' | 'style' | 'subject' | 'composition' | 'other';
 export interface AgentEditingTaskInput {
   target: AgentReference | null;
@@ -133,6 +161,9 @@ export interface AgentRoundCreate {
   configRevision: number; activeProfileId?: string | null; params: AgentImageParams;
   imageCount?: 1 | 3 | 5 | 10;
   imageConfig?: { profileId?: string | null; model: string };
+  contextScope?: AgentContextScope;
+  historyRoundIds?: string[];
+  taskRevision?: number | null;
   authorization: { scope: 'this_request'; allowImageGeneration: boolean; allowWebSearch: boolean; maxToolRounds: number; maxImageJobs: number };
 }
 export interface AgentToolCall {
@@ -156,6 +187,8 @@ export interface AgentSnapshot {
   schemaVersion: 1; revision: number; conversation: AgentConversation; request: AgentRequest | null;
   jobs: GenerationJobRecord[]; images: AgentImage[];
   editingTask?: AgentEditingTask | null;
+  taskContext?: AgentTaskContext | null;
+  contextMode?: 'task' | 'legacy';
 }
 
 export class AgentApiError extends Error {
@@ -252,6 +285,7 @@ export function watchAgentRequest(id: string, onSnapshot: (value: AgentSnapshot)
 }
 
 export const agentApi = {
+  updateTaskContext: (id: string, payload: { expectedRevision: number; branchRoundId: string | null; taskRevision: number | null; operations: AgentTaskContextOperation[] }) => request<AgentSnapshot>(`/conversations/${encodeURIComponent(id)}/task-context`, { method: 'PATCH', body: JSON.stringify(payload) }),
   updateEditingTask: (id: string, payload: { expectedRevision: number; branchRoundId: string | null; task: AgentEditingTaskInput | null }) => request<AgentSnapshot>(`/conversations/${encodeURIComponent(id)}/editing-task`, { method: 'PATCH', body: JSON.stringify(payload) }),
   retryImage: (jobId: string, payload: AgentImageRetryInput) => request<AgentImageRetryReceipt>(`/${encodeURIComponent(jobId)}/retry-current`, { method: 'POST', body: JSON.stringify(payload) }, '/api/generation-jobs'),
   imageRetryReceipt: (retryId: string, conversationId: string) => request<AgentImageRetryReceipt>(`/retry-submissions/${encodeURIComponent(retryId)}?conversation_id=${encodeURIComponent(conversationId)}`, {}, '/api/generation-jobs'),

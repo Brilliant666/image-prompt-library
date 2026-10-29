@@ -543,6 +543,34 @@ def _execute_calls(repo, request_id, step, output, refs):
                 result = {'error': '图片选择参数不是有效 JSON；请使用提供的引用标识。'}
             else:
                 result = {'editingTask': repo.select_request_references(request_id, arguments, refs)}
+        elif name == 'update_task_context':
+            try:
+                arguments = json.loads(call.get('arguments', '{}'))
+                result = {'taskContext': repo.update_task_context(request_id, arguments, refs)}
+            except AgentError as exc:
+                result = {'error': exc.message, 'code': exc.code}
+            except (ValueError, TypeError):
+                result = {'error': '任务状态参数无效；最后有效状态保持不变。'}
+        elif name == 'read_task_history':
+            arguments = json.loads(call.get('arguments', '{}'))
+            numbers = arguments.get('roundNumbers') if isinstance(arguments, dict) else None
+            if (not isinstance(arguments, dict) or set(arguments) != {'roundNumbers'} or not isinstance(numbers, list) or not 1 <= len(numbers) <= 6
+                    or any(type(number) is not int or number < 1 for number in numbers)):
+                raise AgentError('invalid_task_context', '历史读取仅接受指定的分支轮次。', 400)
+            rows = [r for r in request['history'] if r['index'] in numbers]
+            if {r['index'] for r in rows} != set(numbers):
+                raise AgentError('reference_missing', '指定历史不在本轮冻结分支中。', 400)
+            evidence = [{'roundId': r['id'], 'roundNumber': r['index'], 'user': r['prompt'],
+                         'assistant': r.get('assistantContent', ''),
+                         'refs': [ref for ref, aid in refs.items() if aid and ref.startswith(f"round-{r['index']}-")]} for r in rows]
+            if len(encoded(evidence).encode('utf-8')) > 200_000:
+                result = {'error': '所选历史正文过大，请用户选择更具体的来源或完整分支范围；原文未截断。'}
+            else:
+                with connect(repo.library) as conn:
+                    row = json.loads(conn.execute('SELECT data FROM agent_rounds WHERE id=?', (request['round_id'],)).fetchone()[0])
+                    row['contextEvidenceRoundIds'] = list(dict.fromkeys([*row.get('contextEvidenceRoundIds', []), *(r['id'] for r in rows)]))
+                    repo._save_round(conn, row)
+                result = {'history': evidence, 'pixelsAttachedOnNextStep': True}
         elif name in {"generate_image", "generate_image_batch"}:
             if not request["body"]["authorization"]["allowImageGeneration"]:
                 raise AgentError("authorization_denied", "本轮未授权生成图片。")
@@ -578,6 +606,7 @@ def _execute_calls(repo, request_id, step, output, refs):
             for image in images:
                 job = create_image_job(repo, request_id, step, call_id, image["id"] if name == "generate_image_batch" else "single", image["prompt"], refs, native=native)
                 jobs.append((image, job))
+                repo.record_task_execution(request_id, image['prompt'])
             if native:
                 # Queue-integrated native batch provider is identified explicitly.
                 for _, job in jobs:
@@ -659,7 +688,10 @@ def run_request(library, request_id):
                 if any(c.get("call_id") not in paired for c in calls):
                     execute_calls(repo, request_id, pending["step"], output, refs_for_request(repo, request))
                     request = check_active(repo, request_id)
-                if not calls or generation_finishes_request(repo, request, calls):
+                state_answer_complete = (calls and all(c.get('name') == 'update_task_context' for c in calls)
+                    and bool(output_text(output).strip()) and all('error' not in json.loads(o.get('output', '{}'))
+                        for o in request['round']['responseOutput'] if o.get('type') == 'function_call_output' and o.get('call_id') in {c.get('call_id') for c in calls}))
+                if not calls or state_answer_complete or generation_finishes_request(repo, request, calls):
                     current_jobs = [repo.jobs.get_job(jid) for jid in request['round']['outputTaskIds']]
                     if any(job.status not in {"succeeded", "accepted"} for job in current_jobs):
                         raise AgentError("image_job_failed", timing.image_failure_message(current_jobs))

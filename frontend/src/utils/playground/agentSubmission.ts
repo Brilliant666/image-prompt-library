@@ -9,6 +9,8 @@ export interface AgentDraft {
   sizeMode?: 'auto4k';
   editId: string | null;
   origin: AgentRoundCreate['origin'];
+  contextScope?: NonNullable<AgentRoundCreate['contextScope']>;
+  historyRoundIds?: string[];
 }
 export const AGENT_DRAFT_KEY = 'ipl.agent.drafts.v1';
 export const AGENT_IMAGE_MODE_PREFIX = 'ipl.agent.image-mode.v1.';
@@ -43,7 +45,12 @@ export function readAgentDrafts(storage: Pick<Storage, 'getItem'>, enabled: bool
       if (!draft || typeof draft !== 'object' || typeof draft.text !== 'string' || !Array.isArray(draft.refs) || !draft.params || typeof draft.params !== 'object' || typeof draft.params.size !== 'string' || typeof draft.params.quality !== 'string') continue;
       if (!draft.refs.every((ref: ReferenceChoice) => ref && typeof ref === 'object' && typeof ref.label === 'string' && typeof ref.url === 'string' && ref.reference && (ref.reference.kind === 'library' && typeof ref.reference.imageId === 'string' || ref.reference.kind === 'job' && typeof ref.reference.jobId === 'string' || ref.reference.kind === 'upload' && typeof ref.reference.uploadId === 'string'))) continue;
       if (!['send', 'edit', 'regenerate'].includes(draft.origin) || (draft.editId !== null && typeof draft.editId !== 'string')) continue;
-      output[id] = draft;
+      // Older drafts have no context choice. Invalid stored scopes must never
+      // silently widen a new request to the complete branch.
+      output[id] = { ...draft,
+        ...('contextScope' in draft ? { contextScope: ['task', 'selected', 'branch'].includes(draft.contextScope) ? draft.contextScope : 'task' } : {}),
+        ...('historyRoundIds' in draft ? { historyRoundIds: Array.isArray(draft.historyRoundIds) ? draft.historyRoundIds.filter((roundId: unknown) => typeof roundId === 'string') : [] } : {}),
+      };
     }
     return output;
   } catch { return {}; }
@@ -66,6 +73,8 @@ export function draftFromPendingAgentSubmission(entry: PendingAgentSubmission, p
     ...(payload.imageConfig ? { imageConfig: structuredClone(payload.imageConfig) } : {}),
     editId: payload.derivedFromRoundId || null,
     origin: payload.origin,
+    ...(payload.contextScope ? { contextScope: payload.contextScope } : {}),
+    ...(payload.historyRoundIds ? { historyRoundIds: [...payload.historyRoundIds] } : {}),
   };
 }
 

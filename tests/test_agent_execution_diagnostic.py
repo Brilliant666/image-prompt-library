@@ -49,14 +49,19 @@ def test_image_and_skill_bytes_prefixes_are_measured_without_dropping_history(ba
     first, second = baseline["rows"]
     for row in (first, second):
         n = row["rounds"]
-        assert row["image_occurrences"] == n
-        assert row["attached_image_bytes"] == n * first["attached_image_bytes"]
+        # Continuous editing now carries the task's current target, while all
+        # n historical results and their original files remain persisted below.
+        assert row["image_occurrences"] == 1
+        assert row["attached_image_bytes"] == first["attached_image_bytes"]
         assert row["frozen_original_files"] == row["agent_asset_rows"] == n + 1
         assert row["duplicate_physical_image_files"] == row["missing_agent_asset_files"] == 0
         assert row["unreferenced_agent_files"] == 0
         followup = row["tool_followup"]
-        assert followup["image_occurrences"] == n + 1
-        assert followup["equal_leading_input_items"] == row["input_items"]
+        assert followup["image_occurrences"] == 2  # current target + this step's prerequisite result
+        # Recording the exact executed Prompt changes current task data at the
+        # current user item; its prior text and pixel prefix is unchanged.
+        assert followup["equal_leading_input_items"] == row['input_items'] - 1
+        assert followup["equal_leading_items_without_current_task_state"] == row["input_items"]
         # Foundations stay fixed; a consumed image-job allowance changes the
         # dynamic authorization metadata at the end of instructions.
         assert not followup["instructions_equal"]

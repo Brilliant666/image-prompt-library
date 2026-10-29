@@ -22,6 +22,7 @@ def answer(text='Synthetic analysis.\n\n```text\nDerived prompt.\n  Exact spacin
 
 
 FOUNDATIONS = {('image-prompt-reverse', 'overview'), ('gpt-image', 'overview')}
+TASK_CONTEXT_TOOLS = {'update_task_context', 'read_task_history'}
 
 
 def skill_call(section='composition', identity='read-skill', skill='gpt-image'):
@@ -110,7 +111,9 @@ def test_text_and_visual_workflows_cross_real_api_and_worker(isolated, monkeypat
         assert used_sections(result) == FOUNDATIONS
         assert len(calls) == 1 and calls[0][0] == '/v1/responses'
         sent = calls[0][1]
-        assert all(tool.get('name') in {'read_agent_skill', 'select_image_references'} for tool in sent['tools'])
+        expected_tools = TASK_CONTEXT_TOOLS | {'read_agent_skill'} | ({'select_image_references'} if result['editingTask'] else set())
+        assert {tool.get('name') for tool in sent['tools']} == expected_tools
+        assert all(tool['type'] == 'function' for tool in sent['tools'])
         for skill, section in FOUNDATIONS:
             assert read_agent_skill(skill, section)['content'] in sent['instructions']
         assert bool(pixels(sent)) == with_image
@@ -157,7 +160,8 @@ def test_toggle_is_local_preserves_configuration_and_reenables_workflows(isolate
             k: v for k, v in initial['config'].items() if k != 'professionalPromptWorkflows'}
         off, _ = submit(client, isolated, '根据参考图反推中文提示词', rid='off', refs=[upload(client)])
         assert off['request']['state'] == 'completed' and used_sections(off) == set()
-        assert calls[-1][1]['tools'] == [] and pixels(calls[-1][1])
+        assert {tool.get('name') for tool in calls[-1][1]['tools']} == TASK_CONTEXT_TOOLS
+        assert all(tool['type'] == 'function' for tool in calls[-1][1]['tools']) and pixels(calls[-1][1])
         assert 'image-prompt-reverse' not in calls[-1][1]['instructions']
         enabled = client.put('/api/agent/config', json={'expectedRevision': disabled['revision'], 'config': initial['config']})
         assert enabled.status_code == 200 and len(calls) == 1
@@ -293,7 +297,9 @@ def test_disabling_workflows_omits_outgoing_skill_guidance_but_keeps_stored_hist
         text = read_agent_skill('gpt-image', 'composition')['content']
         sent = calls[-1][1]
         assert second['request']['state'] == 'completed' and len(calls) == count + 1
-        assert text not in sent['instructions'] and sent['tools'] == [] and used_sections(second) == set()
+        assert text not in sent['instructions'] and used_sections(second) == set()
+        assert {tool.get('name') for tool in sent['tools']} == TASK_CONTEXT_TOOLS
+        assert all(tool['type'] == 'function' for tool in sent['tools'])
         assert not any(item.get('type') in {'function_call', 'function_call_output'} for item in sent['input'])
         stored = AgentRepository(isolated).request('first')['round']['responseOutput']
         assert any(json.loads(item['output']).get('content') == text for item in stored if item.get('type') == 'function_call_output')

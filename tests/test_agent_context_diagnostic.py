@@ -97,7 +97,9 @@ def test_real_context_and_snapshot_grow_without_claiming_provider_cache(small_ba
                 assert cost["min_ms"] <= cost["median_ms"] <= cost["max_ms"]
             assert row["build_input_only"]["median_ms"] >= 0
         comparison, = scenario["prefix_comparisons"]
-        assert comparison["equal_leading_input_items"] == first["input_items"]
+        # Current task metadata belongs to the current message; its identity
+        # changes across turns rather than pretending to be a cache hit.
+        assert comparison["equal_leading_input_items"] == 0
         assert comparison["instructions_equal"] and comparison["tools_equal"]
 
 
@@ -114,9 +116,10 @@ def test_image_payload_counts_actual_repeated_bytes(small_baseline):
     probes = {p["intent"]: p for p in third["reference_scope_probes"]}
     assert probes["new_image_with_implicit_history"]["image_occurrences"] == 3
     # The explicitly selected ancestor and the newly attached current image
-    # retain their distinct roles; a greeting needs only the current attachment.
+    # retain their distinct roles. A greeting alone cannot erase an existing
+    # unreconciled task: only an explicit scope/task action can do that.
     assert probes["exact_reference_only"]["image_occurrences"] == 2
-    assert probes["greeting"]["image_occurrences"] == 1
+    assert probes["greeting"]["image_occurrences"] == 3
 
 
 def test_tool_followups_preserve_history_and_measure_skill_repetition(small_baseline):

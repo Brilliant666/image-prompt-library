@@ -7,6 +7,8 @@ export interface AgentProgressView {
   conversation: Omit<AgentConversation, 'rounds' | 'messages'>;
   request: NonNullable<AgentSnapshot['request']>;
   editingTask: AgentSnapshot['editingTask'];
+  taskContext?: AgentSnapshot['taskContext'];
+  contextMode?: AgentSnapshot['contextMode'];
   round: AgentRound;
   messages: AgentMessage[];
   images: AgentSnapshot['images'];
@@ -28,6 +30,8 @@ function viewValid(value: unknown, owner: Identity): value is AgentProgressView 
   if (!record(value) || !integer(value.revision) || !record(value.conversation) || !record(value.request) || !record(value.round)) return false;
   if (value.conversation.id !== owner.conversationId || value.request.id !== owner.requestId || value.request.conversationId !== owner.conversationId || value.request.roundId !== owner.roundId || value.round.id !== owner.roundId || value.round.requestId !== owner.requestId) return false;
   if (!Array.isArray(value.messages) || !Array.isArray(value.images) || !Array.isArray(value.jobs)) return false;
+  if (Object.hasOwn(value, 'contextMode') && value.contextMode !== 'task' && value.contextMode !== 'legacy') return false;
+  if (Object.hasOwn(value, 'taskContext') && value.taskContext !== null && (!record(value.taskContext) || value.taskContext.schemaVersion !== 1 || typeof value.taskContext.taskId !== 'string' || !integer(value.taskContext.revision))) return false;
   if (!value.messages.every(message => record(message) && typeof message.id === 'string' && message.roundId === owner.roundId && typeof message.content === 'string')) return false;
   return [value.messages, value.images, value.jobs].every(rows => rows.every(row => record(row) && typeof row.id === 'string') && new Set(rows.map(row => row.id)).size === rows.length);
 }
@@ -42,13 +46,23 @@ function mergeView(snapshot: AgentSnapshot, view: AgentProgressView, previous: A
   const protectedImages = new Set(expiredPreviews.size ? snapshot.conversation.rounds.flatMap(round => [
     ...(round.inputImageIds || []), ...(round.taskImageIds || []), round.maskImageId, round.maskTargetImageId,
     round.editingTask?.target?.assetId, ...(round.editingTask?.auxiliaries.map(image => image.assetId) || []),
+    round.taskContext?.target?.assetId, ...(round.taskContext?.auxiliaries.map(image => image.assetId) || []),
   ]) : []);
   if (view.editingTask?.target) protectedImages.add(view.editingTask.target.assetId);
   for (const auxiliary of view.editingTask?.auxiliaries || []) protectedImages.add(auxiliary.assetId);
+  for (const task of [snapshot.taskContext, view.taskContext]) {
+    if (task?.target) protectedImages.add(task.target.assetId);
+    for (const auxiliary of task?.auxiliaries || []) protectedImages.add(auxiliary.assetId);
+  }
   const retainedImages = expiredPreviews.size ? snapshot.images.filter(image => !expiredPreviews.has(image.id) || protectedImages.has(image.id)) : snapshot.images;
   return { ...snapshot, revision: view.revision, conversation: { ...snapshot.conversation, ...view.conversation,
     rounds: mergeRows(snapshot.conversation.rounds, [view.round]), messages: mergeRows(snapshot.conversation.messages, view.messages) },
-  request: view.request, editingTask: view.editingTask, images: mergeRows(retainedImages, view.images), jobs: mergeRows(snapshot.jobs, view.jobs) };
+  request: view.request, editingTask: view.editingTask,
+  // New streams carry the active task explicitly. An older bounded view may
+  // omit these fields; omission must not erase a task from its full snapshot.
+  ...(Object.hasOwn(view, 'taskContext') ? { taskContext: view.taskContext } : {}),
+  ...(Object.hasOwn(view, 'contextMode') ? { contextMode: view.contextMode } : {}),
+  images: mergeRows(retainedImages, view.images), jobs: mergeRows(snapshot.jobs, view.jobs) };
 }
 function patchValue(root: unknown, operation: Operation): unknown {
   if (!record(operation) || !Array.isArray(operation.path) || operation.path.length > 20 || !['replace', 'append'].includes(operation.op)) throw Error('Invalid patch');

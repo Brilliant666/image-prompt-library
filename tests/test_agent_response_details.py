@@ -85,7 +85,8 @@ def test_metadata_is_data_and_does_not_change_body_or_authorization(repo, monkey
     assert "does not verify the provider's internal routing" in sent["instructions"]
     assert sent["reasoning"] == {"effort": "low"}  # no newly required summary API option
     assert sent["input"][0]["content"][0]["text"] == repo.request("request")["round"]["prompt"]
-    assert [tool["name"] for tool in sent["tools"]] == ["read_agent_skill"]
+    assert sorted(tool['name'] for tool in sent['tools']) == sorted({'read_agent_skill', 'update_task_context', 'read_task_history'})
+    assert all(tool['type'] == 'function' for tool in sent['tools'])
     assert output == payload["output"] and response_id == payload["id"]
     assert repo.request("request")["round"]["assistantContent"] == payload["output"][0]["content"][0]["text"]
     assert details(repo)["usage"] == {"inputTokens": 10, "outputTokens": 5, "totalTokens": 15,
@@ -222,7 +223,9 @@ def test_untrusted_usage_and_summary_shapes_are_whitelisted(repo):
 
 
 def test_skill_tool_is_read_only_and_records_attribution_without_granting_images(repo):
-    assert [tool["name"] for tool in tools_for(repo.request("request"))] == ["read_agent_skill"]
+    tools = tools_for(repo.request('request'))
+    assert sorted(tool['name'] for tool in tools) == sorted({'read_agent_skill', 'update_task_context', 'read_task_history'})
+    assert all(tool['type'] == 'function' for tool in tools)
     call = {"type": "function_call", "call_id": "read-one", "name": "read_agent_skill",
             "arguments": json.dumps({"skill": "gpt-image", "section": "editing"})}
     before = repo.request("request")["usage"]

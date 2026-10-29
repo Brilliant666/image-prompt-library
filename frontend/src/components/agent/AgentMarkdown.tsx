@@ -8,13 +8,13 @@ import { agentPromptBlock } from '../../utils/playground/agentPromptBlocks';
 
 // Rendering works for saved answers too. mathFormattingPrompt only controls
 // instructions sent to the model, not whether an existing formula is readable.
-export function AgentMarkdown({ text }: { text: string }) {
+export function AgentMarkdown({ text, onSelectPrompt, promptSelectionDisabled = false }: { text: string; onSelectPrompt?: (text: string) => void; promptSelectionDisabled?: boolean }) {
   return <div className="agent-markdown"><ReactMarkdown
     remarkPlugins={[remarkGfm, remarkMath]}
     rehypePlugins={[[rehypeKatex, { trust: false, strict: 'ignore', maxExpand: 1000, maxSize: 20 }]]}
     skipHtml
     components={{
-      pre: ({ children, node }) => <AgentCodeBlock {...agentPromptBlock(text, node)}>{children}</AgentCodeBlock>,
+      pre: ({ children, node }) => <AgentCodeBlock {...agentPromptBlock(text, node)} onSelectPrompt={onSelectPrompt} promptSelectionDisabled={promptSelectionDisabled}>{children}</AgentCodeBlock>,
       a: ({ children, href }) => <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,
       // Model text cannot cause arbitrary remote image requests. Image results
       // use server-issued handles elsewhere in the workspace.
