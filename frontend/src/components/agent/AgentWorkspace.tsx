@@ -11,7 +11,7 @@ import { useAgentConversations } from './useAgentConversations';
 import { useAgentScroll } from './useAgentScroll';
 import { useAgentRunState, type AgentSubmissionBoundary } from './useAgentRunState';
 import { api, mediaUrl } from '../../api/client';
-import { AgentApiError, agentApi, getAgentConfig, type AgentConfigResponse, type AgentImage, type AgentImageRetryReceipt, type AgentRound, type AgentRoundCreate, type AgentSnapshot } from '../../api/agentClient';
+import { AgentApiError, agentApi, getAgentConfig, type AgentConfigResponse, type AgentImage, type AgentImageRetryReceipt, type AgentRound, type AgentRoundCreate, type AgentSnapshot, type AgentTaskContextOperation } from '../../api/agentClient';
 import type { GenerationJobRecord } from '../../types';
 import { getActiveAgentRounds, getAgentBranchLeafId, getAgentSiblingRounds } from '../../utils/playground/agentConversationState';
 import { agentPhaseLabels, getAgentAssistantBlocks, getAgentJobFailure, getAgentRoundStatus, getAgentRoundSummary, getAgentToolLabel, isAgentRequestActive } from '../../utils/playground/agentAssistantBlocks';
@@ -46,6 +46,8 @@ type Draft = AgentDraft;
 type AgentPanel = 'model' | 'add' | 'options' | 'mentions' | 'details';
 const emptyDraft = (): Draft => ({ text: '', refs: [], params: { size: 'auto', quality: 'auto', background: 'auto', output_format: 'png' }, editId: null, origin: 'send' });
 const statusText: Record<string, string> = { queued: '等待执行', running: '正在响应', waiting_for_jobs: '等待图片任务', stop_requested: '正在停止后续调用', completed: '已完成', stopped: '已停止后续调用', failed: '执行失败', interrupted: '执行已中断', unknown: '上游结果未知', succeeded: '已生成', accepted: '已收录', discarded: '已清理', cancelled: '已取消', pending: '等待执行' };
+const taskTypeText: Record<string, string> = { chat: '连续对话', image_edit: '图片编辑', image_generation: '图片生成', prompt: '提示词创作', analysis: '图片分析', reverse: '提示词反推', prompt_optimization: '提示词优化' };
+const taskHistoryReasonText: Record<string, string> = { legacy_requirements_in_history: '旧任务的要求仍保存在历史消息中', unreconciled_user_addition: '历史补充尚未完整整理到当前任务' };
 function safeStorageSet(key: string, value: string) { try { localStorage.setItem(key, value); } catch { /* UI preferences may be unavailable; submission journal is handled separately. */ } }
 function errorText(reason: unknown) { return reason instanceof Error ? reason.message : '请求未完成'; }
 function sameOriginImage(url?: string | null) { if (!url) return ''; try { const value = new URL(url, location.origin); return value.origin === location.origin ? value.href : ''; } catch { return ''; } }
@@ -90,6 +92,7 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
   const { rows: conversations, nextCursor, loading: searching, error: searchError, stale: searchStale, refresh: refreshList, upsert: upsertConversation, remove: removeConversation } = useAgentConversations(active, search);
   const [collapsed, setCollapsed] = useState(() => window.innerWidth < 760);
   const [picker, setPicker] = useState(false);
+  const [targetPicker, setTargetPicker] = useState(false);
   const [panel, setPanel] = useState<AgentPanel | null>(null);
   const [inlineMentions, setInlineMentions] = useState(false);
   const [detailRoundId, setDetailRoundId] = useState<string | null>(null);
@@ -143,6 +146,44 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
   const currentProfile = config?.profiles.find(profile => profile.id === (config.config.apiConfigMode === 'off' ? activeProfileId : config.config.textProfileId));
   const detailRound = current?.conversation.rounds.find(round => round.id === detailRoundId);
   const detailRequest = current?.request?.id === detailRound?.requestId ? current?.request : null;
+  const taskContext = current?.taskContext;
+  const contextScope = draft.contextScope || 'task';
+  const selectedHistory = draft.historyRoundIds || [];
+  const selectedPrompt = taskContext?.promptVersions.find(version => version.id === taskContext.selectedPromptVersionId);
+  const promptVersionIndex = selectedPrompt ? taskContext!.promptVersions.indexOf(selectedPrompt) + 1 : 0;
+  const replacingTaskTarget = !taskContext?.targetExplicit && draft.refs.length === 1 && taskContext?.target && referenceKey(draft.refs[0].reference) !== referenceKey(taskContext.target.source);
+  const taskImages = [taskContext?.target, ...(taskContext?.auxiliaries || [])].filter((value): value is NonNullable<typeof value> => Boolean(value));
+  const previewRefs = resolveAgentPromptImageReferences(draft.text, rounds, new Set((current?.jobs || []).filter(job => job.result_path && ['succeeded', 'accepted'].includes(job.status)).map(job => job.id)), draft.refs.map(choice => choice.reference)).refs;
+  const taskHistoryHasImages = taskContext?.taskType === 'chat' && rounds.some(round => round.taskContext?.taskId === taskContext.taskId && (round.inputImageIds.length || round.taskImageIds?.length || round.outputTaskIds.length || round.retryTaskIds?.length));
+  const unassignedDraftImages = taskContext?.targetExplicit && draft.refs.some(choice => !taskImages.some(image => referenceKey(image.source) === referenceKey(choice.reference)));
+  const promptHasStoredImages = taskContext && ['prompt', 'prompt_optimization'].includes(taskContext.taskType) && taskImages.length > 0;
+  // This list is a local preview, not a second implementation of the server's
+  // context planner. Incomplete/legacy evidence and numeric history references
+  // can carry additional pixels; expose conservative branch candidates rather
+  // than promising a count that only the actual provider projection can know.
+  const previewNeedsHistory = Boolean(rounds.length && (!taskContext || taskContext.completeness !== 'complete' || replacingTaskTarget || unassignedDraftImages || taskHistoryHasImages || /第\s*\d+\s*轮/.test(draft.text)));
+  const previewUncertain = contextScope === 'branch' || previewNeedsHistory || Boolean(promptHasStoredImages);
+  const scopedRounds = contextScope === 'branch' || previewNeedsHistory ? rounds : contextScope === 'selected' ? rounds.filter(round => selectedHistory.includes(round.id)) : [];
+  const imagePreview = new Map<string, { reference: ReferenceChoice['reference']; label: string; url: string; missing: boolean }>();
+  for (const image of taskImages) {
+    const asset = current?.images.find(value => value.id === image.assetId || referenceKey(value.source) === referenceKey(image.source));
+    imagePreview.set(referenceKey(image.source), { reference: image.source, label: image === taskContext?.target ? replacingTaskTarget ? '旧目标图片 · 任务证据候选' : '当前任务主要图片' : replacingTaskTarget ? '旧辅助图片 · 任务证据候选' : '当前任务辅助图片', url: sameOriginImage(asset?.thumbnailUrl || asset?.url), missing: asset?.status !== 'available' });
+  }
+  for (const round of scopedRounds) for (const id of [...round.inputImageIds, ...(round.taskImageIds || [])]) {
+    const asset = current?.images.find(image => image.id === id);
+    if (asset && !imagePreview.has(referenceKey(asset.source))) imagePreview.set(referenceKey(asset.source), { reference: asset.source, label: `第 ${round.index} 轮参考图${previewUncertain ? ' · 历史候选' : ''}`, url: sameOriginImage(asset.thumbnailUrl || asset.url), missing: asset.status !== 'available' });
+  }
+  for (const round of scopedRounds) for (const id of [...round.outputTaskIds, ...(round.retryTaskIds || [])]) {
+    const job = current?.jobs.find(value => value.id === id);
+    if (job?.result_path && ['succeeded', 'accepted'].includes(job.status)) imagePreview.set(`job:${id}`, { reference: { kind: 'job', jobId: id }, label: `第 ${round.index} 轮结果图`, url: sameOriginImage(mediaUrl(job.result_path)), missing: false });
+  }
+  for (const reference of previewRefs) {
+    const choice = draft.refs.find(value => referenceKey(value.reference) === referenceKey(reference));
+    const asset = current?.images.find(value => referenceKey(value.source) === referenceKey(reference));
+    const job = reference.kind === 'job' ? current?.jobs.find(value => value.id === reference.jobId) : undefined;
+    imagePreview.set(referenceKey(reference), { reference, label: choice?.label || '已引用的结果图', url: sameOriginImage(choice?.url || asset?.thumbnailUrl || asset?.url || (job?.result_path ? mediaUrl(job.result_path) : '')), missing: Boolean(choice?.missing || asset && asset.status !== 'available') });
+  }
+  const mainImageReference = taskContext?.targetExplicit ? taskContext.target?.source : draft.refs.length === 1 ? draft.refs[0].reference : taskContext?.target?.source;
   const requestNeedsAttention = Boolean(current?.request && (['failed', 'unknown', 'interrupted'].includes(current.request.state) || current.request.error || current.request.recoveryReason || current.request.upstreamMayContinue || current.request.canResume));
   const closePanel = useCallback(() => setPanel(null), []);
   useEffect(() => { if (activeId) setNewImageMode(false); }, [activeId]);
@@ -423,6 +464,42 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
       if (command.current()) { applySnapshot(value); updateDraft({ editId: null, origin: 'send' }); }
     });
   }
+  async function changeTaskContext(operations: AgentTaskContextOperation[]) {
+    if (activeIdRef.current !== activeId || draftLocked || inFlight || uploading || handoffBusy || conversationUnavailable) return;
+    const expected = current;
+    await runCommand(async command => {
+      let value = expected;
+      if (!value) {
+        const originalRevision = draftRevisions.current[draftKey] || 0;
+        value = await command.createConversation();
+        if (!value) return;
+        const destination = value.conversation.id;
+        if (newImageMode) rememberImageMode(destination, true);
+        setNewImageMode(false);
+        draftRevisions.current[destination] = originalRevision;
+        setDrafts(old => {
+          const next = { ...old, [destination]: old[draftKey] || draft };
+          if ((draftRevisions.current[draftKey] || 0) === originalRevision) delete next.new;
+          return next;
+        });
+      }
+      if (!command.current()) return;
+      try {
+        const updated = await agentApi.updateTaskContext(value.conversation.id, {
+          expectedRevision: value.revision, branchRoundId: value.conversation.activeRoundId || null,
+          taskRevision: value.taskContext?.revision ?? null, operations,
+        });
+        if (command.current()) { applySnapshot(updated); setNotice('当前任务已更新；输入框草稿和附件保留，尚未发送。'); }
+      } catch (reason) {
+        if (reason instanceof AgentApiError && reason.status === 409 && command.current()) {
+          const latest = await agentApi.conversation(value.conversation.id);
+          if (command.current()) applySnapshot(latest);
+          throw new Error('任务已在其他页面或后续轮次中改变，已读取最新状态。草稿和附件保留，请确认后重新操作。');
+        }
+        throw reason;
+      }
+    });
+  }
   async function prepareEdit(round: AgentRound, origin: 'edit' | 'regenerate') {
     if (!current || inFlight || uncertain) return;
     const key = draftKey, revision = draftRevisions.current[draftKey] || 0;
@@ -480,6 +557,7 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
     const derived = draft.editId ? current?.conversation.rounds.find(round => round.id === draft.editId) : null;
     if (draft.editId && !derived) { setError('原分支已不存在，请重新选择。'); return; }
     const branch = derived ? rounds.slice(0, rounds.findIndex(round => round.id === derived.id)) : rounds;
+    if (contextScope === 'selected' && (!selectedHistory.length || selectedHistory.some(id => !branch.some(round => round.id === id)))) { setError('请选择当前分支中需要带入的历史轮次；草稿和附件保留。'); return; }
     const resolved = resolveAgentPromptImageReferences(draft.text, branch, new Set((current?.jobs || []).filter(job => job.result_path && ['succeeded', 'accepted'].includes(job.status)).map(job => job.id)), draft.refs.map(choice => choice.reference));
     if (resolved.missing.length) { setError(`引用不存在或图片尚未完成：${resolved.missing.join('、')}`); return; }
     if (resolved.refs.length > inputLimit) { setError(`包括 @ 引用在内最多 ${inputLimit} 张图片。`); return; }
@@ -514,6 +592,8 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
         requestId: crypto.randomUUID(), expectedRevision: value.revision, parentRoundId: derived ? derived.parentRoundId : value.conversation.activeRoundId,
         origin: draft.origin, derivedFromRoundId: derived?.id, prompt: draft.text, refs: resolved.refs,
         configRevision: config.revision, activeProfileId: activeProfileId || null, params: resolvedParams, imageCount,
+        contextScope, historyRoundIds: contextScope === 'selected' ? [...selectedHistory] : [],
+        taskRevision: (derived ? branch.at(-1)?.taskContext : value.taskContext)?.revision ?? null,
         ...(imagesAllowed && draft.imageConfig ? {imageConfig:structuredClone(draft.imageConfig)} : {}),
         authorization: { scope: 'this_request', allowImageGeneration: imagesAllowed, allowWebSearch: Boolean(allowWebSearch && config.config.webSearch && config.capabilities.webSearch), maxImageJobs: imagesAllowed ? config.config.maxImageJobs : 0, maxToolRounds: config.config.maxToolRounds },
       };
@@ -616,7 +696,7 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
             </div>
             <div className="agent-assistant-message" aria-label={`Agent，第 ${roundIndex + 1} 轮`}>
               {blocks.map(block => {
-                if (block.type === 'text') return <AgentMarkdown key={block.key} text={block.content} />;
+                if (block.type === 'text') return <AgentMarkdown key={block.key} text={block.content} promptSelectionDisabled={draftLocked || inFlight} onSelectPrompt={text => void changeTaskContext([{ op: 'set_prompt', text, kind: 'selected', source: { kind: 'model', roundId: round.id, ...(assistant?.id ? { messageId: assistant.id } : {}) } }])} />;
                 if (block.type === 'image-task') return renderResult(block.task);
                 if (block.type === 'deleted-image-task') return <p key={block.key} className="agent-missing-image">原图片任务已不可用，保留引用位置。</p>;
                 const label = agentPhaseLabels[block.state || ''] || statusText[block.state || ''] || (block.state === 'in_progress' ? '进行中' : '工具调用');
@@ -629,6 +709,7 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
               {Boolean(round.retryTaskIds?.length) && <section className="agent-retry-results" aria-label="本轮图片的重试结果"><h4>重试结果</h4>{round.retryTaskIds!.map(id => { const job = current!.jobs.find(row => row.id === id); return job ? renderResult(job) : <p key={id} className="agent-missing-image">重试任务记录不可用。</p>; })}</section>}
               <div className="agent-answer-actions">
                 {assistant?.content && <button className="agent-text-button" aria-label="复制回答" title="复制回答" onClick={() => void copyTextToClipboard(assistant.content).then(ok => setNotice(ok ? '已复制回答' : '复制失败'))}><Copy size={15} /></button>}
+                {assistant?.content && <button className="agent-text-button" aria-label={`将第 ${roundIndex + 1} 轮回答原文设为 Prompt`} disabled={draftLocked || inFlight} onClick={() => void changeTaskContext([{ op: 'set_prompt', text: assistant.content, kind: 'selected', source: { kind: 'model', roundId: round.id, messageId: assistant.id } }])}>使用回答原文</button>}
                 {!round.outputTaskIds.length && !round.retryTaskIds?.length && <button className="agent-text-button" aria-label="重试回答" title="重试回答，保留当前草稿" disabled={inFlight || busy || Boolean(uncertain) || uploading || handoffBusy} onClick={() => void retryText(round)}><RotateCcw size={15} /></button>}
                 <button className="agent-text-button agent-answer-details" title="查看回答详情" aria-label={`查看第 ${roundIndex + 1} 轮详情`} aria-haspopup="dialog" aria-expanded={panel === 'details' && detailRoundId === round.id} onClick={event => openPanel('details', event.currentTarget, round.id)}><Info size={15} /></button>
               </div>
@@ -648,6 +729,35 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
         {uncertain && <div className="agent-uncertain"><strong>上次提交结果尚未确认</strong><p>冻结的内容与请求 ID 已保留，重载不会自动重新收费提交。</p><button aria-label="检查原请求状态" disabled={busy} onClick={() => void reconcile(uncertain)}>检查原请求状态</button><button aria-label="用同一请求恢复" disabled={busy} onClick={() => void reconcile(uncertain, true)}>用同一请求恢复</button></div>}
         {config && !config.ready && <p className="agent-help">{config.issues.map(issue => issue.message).join('；')} <button className="agent-text-button" aria-label="打开 Agent 设置" onClick={onOpenSettings}>打开设置</button></p>}
         {draft.editId && <div className="agent-edit-notice">{draft.origin === 'regenerate' ? '重新生成' : '编辑重发'}会建立新分支，原记录保留。<button aria-label="取消分支编辑" disabled={draftLocked} onClick={() => updateDraft({ editId: null, origin: 'send' })}>取消分支编辑</button></div>}
+        <div className="agent-context-toolbar">
+          <label>发送范围<select aria-label="发送上下文范围" value={contextScope} disabled={draftLocked || inFlight} onChange={event => updateDraft({ contextScope: event.target.value as Draft['contextScope'] })}><option value="task">当前任务</option><option value="selected">选择历史内容</option><option value="branch">完整分支</option></select></label>
+          <span aria-label="发送图片范围">{imagePreview.size} {previewUncertain ? '个图片候选 · 实际发送数量待核对' : '个图片对象'} · {mainImageReference ? `主要图片：${imagePreview.get(referenceKey(mainImageReference))?.label || '当前任务图片'}` : imagePreview.size ? '待选择主要图片' : '无主要图片'}</span>
+        </div>
+        {contextScope === 'branch' && <p className="agent-context-warning" role="status">完整分支会带入更多历史内容和图片，响应可能更慢、费用更高。</p>}
+        {contextScope === 'task' && !taskContext && rounds.length > 0 && <p className="agent-context-warning" role="status" aria-label="上下文范围提示">旧会话尚无结构化任务，本轮会按兼容规则读取当前分支历史。</p>}
+        {contextScope === 'task' && taskContext?.completeness === 'history_required' && <p className="agent-context-warning" role="status" aria-label="上下文范围提示">当前任务仍依赖历史内容，请展开任务状态查看原因。</p>}
+        {contextScope === 'selected' && <p className="agent-context-warning" role="status" aria-label="上下文范围提示">已选择 {selectedHistory.filter(id => rounds.some(round => round.id === id)).length} 轮历史；当前任务资料和本轮附件仍会保留。</p>}
+        {previewUncertain && <p className="agent-context-warning" role="status" aria-label="图片候选范围说明">{replacingTaskTarget ? '新附件作为主要图片，旧目标与旧辅助图片仍可能作为任务证据。' : ''}图片清单包含当前分支 {scopedRounds.length} 轮历史中的已知候选；这不是实际发送数量，缺失图片和服务端证据选择仍需核对。</p>}
+        <details className="agent-task-context" open={contextScope === 'selected' ? true : undefined}>
+          <summary>任务状态 · {taskContext ? ({ complete: '完整', partial: '待补充', history_required: '需要历史' }[taskContext.completeness]) : current?.contextMode === 'legacy' || rounds.length ? '旧会话，尚无结构化任务' : '新任务'} · {selectedPrompt ? `Prompt v${promptVersionIndex}` : '尚未明确选择 Prompt'}</summary>
+          <div className="agent-task-context-body">
+            {!taskContext && <p className="agent-help">{rounds.length ? '旧记录仍保留；当前任务资料不足时会明确回退到历史。可从消息中选定 Prompt，或重置任务。' : '发送后建立当前任务；也可先明确选择输入框 Prompt 或主要图片。'}</p>}
+            {taskContext && <>
+              <p className="agent-help">任务版本 {taskContext.revision} · {taskTypeText[taskContext.taskType] || taskContext.taskType}</p>
+              {taskContext.latestUserAddition?.text && <p className="agent-task-addition">最近补充：{taskContext.latestUserAddition.text}</p>}
+              {taskContext.unresolvedItems.length > 0 && <p className="agent-context-warning">待确认：{taskContext.unresolvedItems.join('；')}</p>}
+              {taskContext.historyDependencies.length > 0 && <p className="agent-context-warning">回退历史的原因：{taskContext.historyDependencies.map(item => taskHistoryReasonText[item.reason] || item.reason).join('；')}</p>}
+              {selectedPrompt && <><p className="agent-help">当前 Prompt v{promptVersionIndex} · 来源：{selectedPrompt.source.kind === 'model' ? 'Agent 回答，由你明确选择' : selectedPrompt.source.kind === 'legacy' ? '旧记录' : '你的原文'}{selectedPrompt.source.roundId ? ` · 第 ${rounds.findIndex(round => round.id === selectedPrompt.source.roundId) + 1} 轮` : ''}</p><pre className="agent-task-prompt">{selectedPrompt.text}</pre></>}
+              {taskContext.promptVersions.length > 0 && <div className="agent-task-versions" aria-label="Prompt 版本">{taskContext.promptVersions.map((version, index) => <button key={version.id} type="button" aria-label={`恢复 Prompt v${index + 1}`} aria-pressed={version.id === taskContext.selectedPromptVersionId} disabled={draftLocked || inFlight || version.id === taskContext.selectedPromptVersionId} onClick={() => void changeTaskContext([{ op: 'restore_prompt', id: version.id }])}>v{index + 1} · {version.kind === 'candidate' ? '候选' : version.kind === 'executed' ? '已执行' : version.kind === 'original' ? '原文' : '已选择'}</button>)}</div>}
+              {promptVersionIndex > 1 && <button type="button" aria-label="撤销当前 Prompt 选择" disabled={draftLocked || inFlight} onClick={() => void changeTaskContext([{ op: 'restore_prompt', id: taskContext.promptVersions[promptVersionIndex - 2].id }])}>撤销当前 Prompt 选择</button>}
+              {taskContext.constraints.length > 0 && <div className="agent-task-constraints" aria-label="当前任务约束">{taskContext.constraints.map(constraint => <p key={constraint.id}><span>{constraint.status === 'revoked' ? <s>{constraint.text}</s> : constraint.text}{constraint.status === 'proposed' && <small> · 建议，待确认</small>}</span>{constraint.status === 'proposed' && <button type="button" disabled={draftLocked || inFlight} aria-label={`确认约束 ${constraint.text}`} onClick={() => void changeTaskContext([{ op: 'update_constraint', id: constraint.id, text: constraint.text }])}>确认</button>}<button type="button" disabled={draftLocked || inFlight} aria-label={`${constraint.status === 'revoked' ? '恢复' : '撤销'}约束 ${constraint.text}`} onClick={() => void changeTaskContext([constraint.status === 'revoked' ? { op: 'update_constraint', id: constraint.id, text: constraint.text } : { op: 'revoke_constraint', id: constraint.id }])}>{constraint.status === 'revoked' ? '恢复' : '撤销'}</button></p>)}</div>}
+            </>}
+            {imagePreview.size > 0 && <div className="agent-task-image-list" aria-label="本次图片对象">{[...imagePreview.entries()].map(([key, image]) => <div key={key}>{image.url && taskImages.some(taskImage => referenceKey(taskImage.source) === key) && !draft.refs.some(choice => referenceKey(choice.reference) === key) && <img src={image.url} alt={image.label} />}<span>{image.label}{mainImageReference && key === referenceKey(mainImageReference) ? ' · 主要图片' : ''}{image.missing ? ' · 不可用' : ''}</span><button type="button" aria-label={`设为主要图片 ${image.label}`} disabled={draftLocked || inFlight || image.missing} onClick={() => void changeTaskContext([{ op: 'set_target', ref: image.reference }])}>设为主要图片</button></div>)}</div>}
+            {contextScope === 'selected' && <fieldset className="agent-history-selection"><legend>选择当前分支的历史内容</legend>{!rounds.length && <p>当前分支暂无历史。</p>}{rounds.map((round, index) => <label key={round.id}><input type="checkbox" aria-label={`带入第 ${index + 1} 轮历史`} checked={selectedHistory.includes(round.id)} disabled={draftLocked || inFlight} onChange={event => updateDraft({ historyRoundIds: event.target.checked ? [...selectedHistory, round.id] : selectedHistory.filter(id => id !== round.id) })} /><span>第 {index + 1} 轮 · {round.prompt}</span></label>)}<p className="agent-help">所选轮次包含提问和回答。图片也可在下方单独重新加入本轮附件。</p></fieldset>}
+            {rounds.length > 0 && <details className="agent-history-images"><summary>重新加入历史消息或图片</summary>{rounds.map((round, index) => <div key={round.id} className="agent-history-round"><button type="button" aria-label={`将第 ${index + 1} 轮提问设为 Prompt`} disabled={draftLocked || inFlight} onClick={() => void changeTaskContext([{ op: 'set_prompt', text: round.prompt, kind: 'selected', source: { kind: 'user', roundId: round.id, messageId: round.userMessageId } }])}>第 {index + 1} 轮提问设为 Prompt</button>{[...new Set([...round.inputImageIds, ...(round.taskImageIds || [])])].map(id => { const image = current?.images.find(value => value.id === id); if (!image) return <span key={id}>历史图片记录缺失</span>; const selected = draft.refs.some(choice => referenceKey(choice.reference) === referenceKey(image.source)); return <button key={id} type="button" aria-label={`重新加入第 ${index + 1} 轮图片 ${id}`} disabled={draftLocked || inFlight || uploading || image.status !== 'available' || selected || draft.refs.length >= inputLimit} onClick={() => updateDraft({ refs: [...draft.refs, { reference: image.source, url: sameOriginImage(image.thumbnailUrl || image.url), label: `第 ${index + 1} 轮历史参考图` }] })}>{selected ? '已加入' : image.status !== 'available' ? '图片不可用' : '加入历史参考图'}</button>; })}{round.outputTaskIds.map(id => { const job = current?.jobs.find(value => value.id === id); return job ? <button key={id} type="button" disabled={draftLocked || inFlight || uploading || !job.result_path || !['succeeded', 'accepted'].includes(job.status)} onClick={() => addResultReference(job)}>加入第 {index + 1} 轮结果图</button> : null; })}</div>)}</details>}
+            <div className="agent-task-actions"><button type="button" aria-label="将输入框原文设为 Prompt" disabled={draftLocked || inFlight || !draft.text.trim()} onClick={() => void changeTaskContext([{ op: 'set_prompt', text: draft.text, kind: 'selected' }])}>输入框原文设为 Prompt</button><button type="button" aria-label="更换任务主要图片" disabled={draftLocked || inFlight} onClick={() => { setTargetPicker(true); setPicker(true); }}>更换目标图片</button><button type="button" aria-label="重置当前任务" disabled={draftLocked || inFlight} onClick={() => void changeTaskContext([{ op: 'new_task' }])}>重置任务</button></div>
+          </div>
+        </details>
         <div className="agent-composer" onDragOver={event => { if (event.dataTransfer.types.includes('Files')) event.preventDefault(); }} onDrop={event => { if (!event.dataTransfer.files.length) return; event.preventDefault(); void addFiles(Array.from(event.dataTransfer.files)); }}>
           {draft.refs.length > 0 && <div className="agent-reference-strip">{draft.refs.map((choice, index) => <div key={referenceKey(choice.reference)} className={choice.missing ? 'missing' : ''}>{choice.url ? <img src={sameOriginImage(choice.url)} alt={choice.label} /> : <span>{choice.missing ? '图片缺失' : '已选择图片'}</span>}<button title="插入图片引用" aria-label={`插入图片 ${index + 1} 引用`} disabled={draftLocked} onClick={() => mention(`@图${index + 1}`)}>{index + 1}</button><button className="agent-remove-ref" title="移除参考图" aria-label={`移除参考图 ${index + 1}`} disabled={draftLocked} onClick={() => updateDraft({ refs: draft.refs.filter((_, i) => i !== index) })}><X size={12} /></button></div>)}</div>}
           <textarea ref={textarea} aria-label="Agent 消息" placeholder="输入想法、提示词或修改要求；输入 @ 引用图片" value={draft.text} disabled={draftLocked} aria-busy={busy} readOnly={draft.origin === 'regenerate'} rows={1} onChange={event => { updateDraft({ text: event.target.value }); setInlineMentions(event.target.value.slice(0, event.target.selectionStart).endsWith('@')); }} onKeyDown={event => { if (event.key === 'Escape' && inlineMentions && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) { event.preventDefault(); event.stopPropagation(); setInlineMentions(false); return; } if (shouldSubmitAgentOnKey({ ...event, isComposing: event.nativeEvent.isComposing, keyCode: event.nativeEvent.keyCode }, readAgentInputPreferences().enterSubmit)) { event.preventDefault(); void submit(); } }} onPaste={event => { const files = Array.from(event.clipboardData.files).filter(file => file.type.startsWith('image/')); if (files.length) { event.preventDefault(); void addFiles(files); } }} />
@@ -684,6 +794,6 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
       </div>
     </div>, document.body)}
     {active && sizeOpen && <SizeDialog recipe={{...draft.params,model:imageModel,background:draft.params.background || 'auto',output_compression:draft.params.output_compression ?? undefined,moderation:draft.params.moderation === 'low' || draft.params.moderation === 'auto' ? draft.params.moderation : undefined,size_mode:draft.sizeMode}} prompt={draft.text} referenceSize={measuredReferenceSize} referenceStatus={sizeReferenceStatus} onClose={() => setSizeOpen(false)} onApply={selection => updateImageSettings({params:{...draft.params,size:selection.size},sizeMode:selection.size_mode})} />}
-    {picker && <AgentReferencePicker remaining={Math.max(0, inputLimit - draft.refs.length)} onClose={() => setPicker(false)} onSelect={choices => updateDraft({ refs: [...draft.refs, ...choices.filter(choice => !draft.refs.some(existing => referenceKey(existing.reference) === referenceKey(choice.reference)))] })} />}
+    {picker && <AgentReferencePicker remaining={targetPicker ? 1 : Math.max(0, inputLimit - draft.refs.length)} onClose={() => { setPicker(false); setTargetPicker(false); }} onSelect={choices => { if (targetPicker && choices[0]) void changeTaskContext([{ op: 'set_target', ref: choices[0].reference }]); else updateDraft({ refs: [...draft.refs, ...choices.filter(choice => !draft.refs.some(existing => referenceKey(existing.reference) === referenceKey(choice.reference)))] }); }} />}
   </section>;
 }

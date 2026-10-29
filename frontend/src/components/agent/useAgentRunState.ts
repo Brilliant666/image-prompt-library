@@ -8,10 +8,10 @@ const ACTIVE_KEY = 'ipl.agent.active-conversation';
 const errorText = (reason: unknown) => reason instanceof Error ? reason.message : '请求未完成';
 const rejected = (reason: unknown) => reason instanceof AgentApiError && [400, 401, 403, 404, 409, 422].includes(reason.status);
 const sendContext = (value: AgentSnapshot) => JSON.stringify([
-  value.conversation.activeRoundId, value.editingTask ?? null,
+  value.conversation.activeRoundId, value.editingTask ?? null, value.taskContext ?? null, value.contextMode ?? null,
   value.conversation.rounds.map(round => [round.id, round.parentRoundId, round.prompt, round.inputImageIds,
     round.taskImageIds || [], round.outputTaskIds, round.retryTaskIds || [], round.maskImageId ?? null,
-    round.maskTargetImageId ?? null, round.editingTask ?? null]),
+    round.maskTargetImageId ?? null, round.editingTask ?? null, round.taskContext ?? null]),
 ]);
 export interface AgentSubmissionBoundary { conversationId: string; draft: number; authorization: { images: number; search: number } }
 export interface AgentRunCommand {

@@ -53,12 +53,30 @@ def test_default_one_preserves_legacy_request_identity(repo):
     repo.create_round('conversation', value)
     legacy = value.model_dump(exclude_none=True)
     legacy.pop('imageCount')
+    legacy.pop('contextScope')
+    legacy.pop('historyRoundIds')
     digest = {key: data for key, data in legacy.items() if key != 'expectedRevision'}
     digest['conversationId'] = 'conversation'
     with connect(repo.library) as conn:
         conn.execute('UPDATE agent_requests SET body=?,fingerprint=? WHERE id=?', (encoded(legacy), fingerprint(digest), 'request'))
     receipt, created = repo.create_round('conversation', value.model_copy(update={'imageCount': 1}))
     assert not created and receipt['request']['imageCount'] == 1
+
+
+@pytest.mark.parametrize('scope', ['task', 'branch'])
+def test_default_and_explicit_one_share_identity_with_context_scope(repo, scope):
+    raw = {**body(repo).model_dump(exclude={'imageCount'}), 'contextScope': scope, 'historyRoundIds': []}
+    omitted = AgentRoundCreate.model_validate(raw)
+    assert 'imageCount' not in omitted.model_fields_set
+    first, created = repo.create_round('conversation', omitted)
+    assert created and first['request']['imageCount'] == 1
+    assert repo.request('request')['body']['contextScope'] == scope
+    explicit = AgentRoundCreate.model_validate({**raw, 'imageCount': 1})
+    receipt, created = repo.create_round('conversation', explicit)
+    assert not created and receipt['request']['imageCount'] == 1
+    with pytest.raises(AgentError) as failure:
+        repo.create_round('conversation', explicit.model_copy(update={'contextScope': 'branch' if scope == 'task' else 'task'}))
+    assert failure.value.code == 'request_id_conflict'
 
 
 def test_saved_count_never_grants_generation_when_mode_is_off(repo):

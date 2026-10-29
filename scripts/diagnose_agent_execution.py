@@ -96,10 +96,16 @@ class SyntheticProvider:
 
 def prefix_comparison(previous, current, previous_round, current_round):
     shared = common_input_prefix(previous["input"], current["input"])
+    def without_task_state(items):
+        return [{**item, 'content': [part for part in item['content'] if not (
+            part.get('type') == 'input_text' and part.get('text', '').startswith('Current creative task ('))]}
+            if isinstance(item.get('content'), list) else item for item in items]
+    stable_input = common_input_prefix(without_task_state(previous['input']), without_task_state(current['input']))
     return {"from_round": previous_round, "to_round": current_round,
             "instructions_equal": previous["instructions"] == current["instructions"],
             "tools_equal": previous["tools"] == current["tools"],
             "previous_input_items": len(previous["input"]), "equal_leading_input_items": shared,
+            "equal_leading_items_without_current_task_state": stable_input,
             "equal_leading_input_json_bytes": len(encoded(previous["input"][:shared]).encode()),
             "first_different_input_index": shared if shared < len(previous["input"]) else None}
 

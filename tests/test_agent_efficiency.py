@@ -32,7 +32,8 @@ def test_skill_body_is_in_first_post_even_without_tool_read(repo, monkeypatch, p
     sections = default_skill_sections()
     assert sections and len(calls) == 1
     assert all(s["content"] in calls[0]["instructions"] for s in sections)
-    assert [t["name"] for t in calls[0]["tools"]] == ["read_agent_skill"]
+    assert [t["name"] for t in calls[0]["tools"]] == ["read_agent_skill", "update_task_context", "read_task_history"]
+    assert all(t["type"] == "function" for t in calls[0]["tools"])
     stored = repo.request("task")["round"]["responseDetails"]["skills"]
     assert {(s["skill"], s["section"]) for s in stored} == {(s["skill"], s["section"]) for s in sections}
     assert all("content" not in s for s in stored)

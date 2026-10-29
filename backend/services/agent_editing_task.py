@@ -29,7 +29,11 @@ def current_task(conversation, rounds, branch_id):
     drafts = json.loads(conversation['editing_tasks'])
     key = branch_key(branch_id)
     if key in drafts:
-        return copy.deepcopy(drafts[key])
+        saved = drafts[key]
+        from backend.services.agent_task_state import ENVELOPE
+        if isinstance(saved, dict) and saved.get('_kind') == ENVELOPE:
+            return copy.deepcopy(saved.get('editingTask'))
+        return copy.deepcopy(saved)
     return copy.deepcopy(next((r.get('editingTask') for r in rounds if r['id'] == branch_id), None))
 
 
@@ -124,6 +128,7 @@ def infer_task(repo, previous, *, conversation_id, parent_id, prompt, inputs, hi
                  'auxiliaries': [a for a in auxiliary if a['assetId'] != target], 'requirements': '',
                  'constraints': [], 'workflow': 'auto', 'needsTargetSelection': target is None,
                  'candidates': [asset_selection(repo, aid) for aid in candidates[:4]]}
+        value['continuesTask'] = bool(same_task)
         if same_task:
             value.update({key: copy.deepcopy(previous.get(key, default)) for key, default in (
                 ('requirements', ''), ('constraints', []), ('workflow', 'auto'))})

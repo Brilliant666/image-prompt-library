@@ -212,8 +212,11 @@ def test_text_authorization_cannot_be_bypassed_by_tool_output(isolated):
         assert result["request"]["state"] == "failed", result
         assert not result["jobs"]
         assert len(requests) == 1
-        assert [tool.get("name") for tool in requests[0][1]["tools"]] == ["read_agent_skill"]
+        assert {tool.get("name") for tool in requests[0][1]["tools"]} == {
+            "read_agent_skill", "update_task_context", "read_task_history"}
         assert all(tool["type"] == "function" for tool in requests[0][1]["tools"])
+        assert not any(tool['type'] in {'image_generation', 'web_search'} or tool.get('name', '').startswith('generate_image')
+                       for tool in requests[0][1]['tools'])
 
 
 def test_branch_path_and_original_prompt_survive_reload(isolated):
@@ -309,8 +312,33 @@ def test_regeneration_reuses_frozen_job_reference_and_zero_compression(isolated)
         second = wait_request(client, "regenerate")
         assert second["request"]["state"] == "completed", second
         assert second["request"]["params"]["output_compression"] == 0
+        assert first['request']['params'] == second['request']['params']
         assert second["conversation"]["rounds"][0]["inputImageIds"] == second["conversation"]["rounds"][1]["inputImageIds"]
-        assert requests[0][1]["input"] == requests[1][1]["input"]
+        prefix = 'Current creative task (user-level data; original, selected and executed Prompts are distinct): '
+        normalized_inputs, identities = [], []
+        for sent, snapshot in ((requests[0][1], first), (requests[1][1], second)):
+            frozen_round = next(row for row in snapshot['conversation']['rounds'] if row['id'] == snapshot['request']['roundId'])
+            copied = json.loads(json.dumps(sent['input']))
+            contexts = [part for item in copied for part in item.get('content', []) if part.get('text', '').startswith(prefix)]
+            assert len(contexts) == 1
+            context = json.loads(contexts[0]['text'][len(prefix):])
+            assert context['branchRoundId'] == frozen_round['id']
+            assert context['taskId'] == frozen_round['taskContext']['taskId']
+            assert context['revision'] == frozen_round['taskContext']['revision']
+            assert context['latestUserAddition'] == {'text': body['prompt'], 'roundId': frozen_round['id']}
+            identities.append((context['taskId'], context['revision'], context['branchRoundId']))
+            # Branch identity must differ; every actual user character, Prompt
+            # version, reference binding and frozen pixel remains identical.
+            context.pop('revision')
+            context.pop('branchRoundId')
+            context['latestUserAddition'].pop('roundId')
+            contexts[0]['text'] = prefix + json.dumps(context, sort_keys=True)
+            normalized_inputs.append(copied)
+            sent_pixels = [part['image_url'] for item in sent['input'] for part in item.get('content', []) if part.get('type') == 'input_image']
+            assert len(sent_pixels) == 1
+            assert base64.b64decode(sent_pixels[0].split(',', 1)[1]) == image_bytes()
+        assert identities[0] != identities[1]
+        assert normalized_inputs[0] == normalized_inputs[1]
 
 
 def test_stop_preserves_partial_preview_and_never_replays(isolated):

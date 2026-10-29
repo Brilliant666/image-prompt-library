@@ -66,6 +66,29 @@ class AgentEditingTaskPatch(AgentModel):
     task: AgentEditingTask | None
 
 
+class AgentTaskOperation(AgentModel):
+    op: Literal['new_task', 'set_task_type', 'set_target', 'set_auxiliaries', 'add_constraint',
+                'update_constraint', 'revoke_constraint', 'set_prompt', 'select_prompt',
+                'restore_prompt', 'set_unresolved', 'set_history_dependencies']
+    id: str | None = Field(default=None, max_length=100)
+    text: str | None = Field(default=None, max_length=100_000)
+    kind: Literal['candidate', 'selected'] | None = None
+    taskType: Literal['chat', 'image_edit', 'image_generation', 'prompt', 'analysis', 'reverse', 'prompt_optimization'] | None = None
+    ref: AgentRef | None = None
+    auxiliaries: list[AgentEditingAuxiliary] | None = Field(default=None, max_length=3)
+    items: list[Annotated[str, Field(max_length=1000)]] | None = Field(default=None, max_length=24)
+    source: dict | None = None
+    sourceQuote: str | None = Field(default=None, min_length=1, max_length=100_000)
+    dependencies: list[dict] | None = Field(default=None, max_length=128)
+
+
+class AgentTaskContextPatch(AgentModel):
+    expectedRevision: int = Field(ge=0)
+    branchRoundId: str | None = None
+    taskRevision: int | None = Field(default=None, ge=0)
+    operations: list[AgentTaskOperation] = Field(min_length=1, max_length=24)
+
+
 class AgentMask(AgentModel):
     targetRefIndex: int = Field(ge=0)
     uploadId: str
@@ -108,6 +131,9 @@ class AgentRoundCreate(AgentModel):
     imageCount: Literal[1, 3, 5, 10] = 1
     params: AgentParams = Field(default_factory=AgentParams)
     authorization: AgentAuthorization
+    contextScope: Literal['task', 'branch', 'selected'] = 'task'
+    historyRoundIds: list[Annotated[str, Field(max_length=100)]] = Field(default_factory=list, max_length=128)
+    taskRevision: int | None = Field(default=None, ge=0)
 
 
 class AgentResume(AgentModel):

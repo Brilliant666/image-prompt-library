@@ -23,6 +23,7 @@ from backend.services.image_store import _atomic_write_bytes
 from backend.services.openai_compatible import OpenAICompatibleConfig, OpenAICompatibleError, normalize_image_parameters
 from backend.services import agent_execution_timing as timing
 from backend.services import agent_editing_task as editing
+from backend.services import agent_task_state as task_state
 from backend.services.api_network import NETWORK_DEFAULTS, network_identity
 
 ACTIVE_STATES = {"queued", "running", "waiting_for_jobs", "stop_requested"}
@@ -206,9 +207,12 @@ class AgentRepository:
 
     def create_conversation(self, payload):
         now = milliseconds()
+        context = task_state.new('', None)
+        context['revision'] = 0
+        drafts = {editing.branch_key(None): task_state.envelope(None, context)}
         with connect(self.library) as conn:
-            conn.execute("INSERT OR IGNORE INTO agent_conversations(id,title,created_at,updated_at) VALUES(?,?,?,?)",
-                         (payload.id, payload.title, now, now))
+            conn.execute("INSERT OR IGNORE INTO agent_conversations(id,title,created_at,updated_at,editing_tasks) VALUES(?,?,?,?,?)",
+                         (payload.id, payload.title, now, now, encoded(drafts)))
         return self.snapshot(payload.id)
 
     def list_conversations(self, limit=50, cursor=None, q=None):
@@ -297,10 +301,140 @@ class AgentRepository:
             if conn.execute("SELECT 1 FROM agent_requests WHERE conversation_id=? AND state IN ('queued','running','waiting_for_jobs','stop_requested')", (cid,)).fetchone():
                 raise AgentError('request_active', '请等待本轮完成后再修改编辑任务。')
             drafts = json.loads(current['editing_tasks'])
-            drafts[editing.branch_key(payload.branchRoundId)] = value
+            context = task_state.current(current, rounds, payload.branchRoundId)
+            # Existing editing controls remain compatible, while new state
+            # cannot retain a stale target or erase branch-local provenance.
+            if context is not None:
+                context = task_state.advance(context, value, prompt=payload.task.requirements if payload.task else '',
+                                             branch_id=payload.branchRoundId, boundary=payload.task is None, explicit_target=True)
+                if payload.task:
+                    context['constraints'] = [{'id': task_state.identifier('constraint'), 'text': text, 'status': 'active',
+                                                'source': task_state.source('user', payload.branchRoundId)}
+                                               for text in payload.task.constraints]
+                archive = self._task_prompt_archive(current, payload.branchRoundId)
+                if context['taskId'] != (task_state.current(current, rounds, payload.branchRoundId) or {}).get('taskId'):
+                    archive = {}
+                drafts[editing.branch_key(payload.branchRoundId)] = task_state.envelope(value, context, archive)
+            else:
+                drafts[editing.branch_key(payload.branchRoundId)] = value
             conn.execute('UPDATE agent_conversations SET editing_tasks=? WHERE id=?', (encoded(drafts), cid))
             self._touch(conn, cid)
         return self.snapshot(cid)
+
+    def _task_asset_selector(self, cid, rounds, branch_id, context=None, *, frozen_refs=None):
+        """Validate branch ownership and frozen bytes before a state mutation."""
+        branch_history = self.path(rounds, branch_id)
+        allowed_round_ids = {row['id'] for row in branch_history}
+        known_assets = self._legacy_frozen_assets(branch_history)
+        for image in ([context['target']] if context and context.get('target') else []) + (context.get('auxiliaries', []) if context else []):
+            known_assets[encoded(image['source'])] = image['assetId']
+
+        def selected(ref):
+            if isinstance(ref, str):
+                if frozen_refs is None or ref not in frozen_refs:
+                    raise AgentError('reference_missing', '图片不在本轮冻结引用中。', 400)
+                asset_id = frozen_refs[ref]
+                asset = self.asset(asset_id)
+                self._check_frozen_asset(asset, asset['source'])
+                return editing.asset_selection(self, asset_id)
+            from backend.agent_schemas import AgentRef
+            from pydantic import ValidationError
+            try:
+                parsed = AgentRef.model_validate(ref)
+            except ValidationError:
+                raise AgentError('invalid_reference', '图片引用无效。', 400) from None
+            source_key = encoded(parsed.model_dump(exclude_none=True))
+            known = known_assets.get(source_key)
+            asset_id = self._check_frozen_asset(self.asset(known), source_key) if known else self.resolve_ref(parsed)
+            if frozen_refs is not None and asset_id not in frozen_refs.values():
+                raise AgentError('invalid_reference', '模型只能选择本轮冻结引用。', 400)
+            if parsed.kind == 'upload':
+                with connect(self.library) as conn:
+                    owners = conn.execute("""SELECT id FROM agent_rounds WHERE deleted=0 AND (
+                        EXISTS(SELECT 1 FROM json_each(data,'$.inputImageIds') WHERE value=?) OR
+                        EXISTS(SELECT 1 FROM json_each(data,'$.taskImageIds') WHERE value=?))""", (asset_id, asset_id)).fetchall()
+                if owners and not any(owner['id'] in allowed_round_ids for owner in owners):
+                    raise AgentError('invalid_reference', '此上传图片不属于当前分支。', 400)
+            return editing.asset_selection(self, asset_id)
+        return selected
+
+    def _task_source_validator(self, rounds, branch_id):
+        allowed = {row['id']: row for row in self.path(rounds, branch_id)}
+
+        def validate(provenance, text):
+            if (not isinstance(provenance, dict) or set(provenance) - {'kind', 'roundId', 'messageId'}
+                    or not isinstance(provenance.get('kind'), str) or provenance['kind'] not in {'user', 'model'}
+                    or not isinstance(provenance.get('roundId'), str)
+                    or provenance['roundId'] not in allowed):
+                raise AgentError('invalid_task_source', 'Prompt 来源不属于当前分支。', 400)
+            row = allowed[provenance['roundId']]
+            kind = provenance['kind']
+            message_id = row['userMessageId'] if kind == 'user' else row['assistantMessageId']
+            if provenance.get('messageId') and provenance['messageId'] != message_id:
+                raise AgentError('invalid_task_source', 'Prompt 来源消息不匹配。', 400)
+            original = row['prompt'] if kind == 'user' else row.get('assistantContent', '')
+            if text is not None and text not in original:
+                raise AgentError('invalid_task_source', '所选 Prompt 必须保留来源消息原文。', 400)
+            return {**provenance, 'messageId': message_id}
+        return validate
+
+    @staticmethod
+    def _task_prompt_archive(conversation, branch_id):
+        draft = json.loads(conversation['editing_tasks']).get(editing.branch_key(branch_id))
+        return dict(draft.get('_taskPromptArchive', {})) if isinstance(draft, dict) else {}
+
+    def _task_prompt_restorer(self, conversation, rounds, branch_id, context):
+        task_id = (context or {}).get('taskId')
+        versions = {}
+        for row in self.path(rounds, branch_id):
+            if (row.get('taskContext') or {}).get('taskId') == task_id:
+                versions.update({p['id']: p for p in row['taskContext']['promptVersions']})
+                versions.update(row.get('_taskPromptArchive', {}))
+            draft = json.loads(conversation['editing_tasks']).get(editing.branch_key(row['id']))
+            if isinstance(draft, dict) and (draft.get('taskContext') or {}).get('taskId') == task_id:
+                versions.update(draft.get('_taskPromptArchive', {}))
+        versions.update(self._task_prompt_archive(conversation, branch_id))
+        return versions.get
+
+    def patch_task_context(self, cid, payload):
+        with connect(self.library) as conn:
+            conversation = self._conversation(conn, cid)
+            rounds = self._rounds(conn, cid)
+        if payload.branchRoundId and not any(row['id'] == payload.branchRoundId for row in rounds):
+            raise AgentError('not_found', '任务分支不存在。', 404)
+        if conversation['revision'] != payload.expectedRevision:
+            raise AgentError('revision_conflict', '对话已改变，请重新加载。')
+        old = task_state.current(conversation, rounds, payload.branchRoundId)
+        self._check_task_revision(old, payload.taskRevision)
+        prompt_archive = self._task_prompt_archive(conversation, payload.branchRoundId)
+        value = task_state.apply(old, payload.operations, actor='user', branch_id=payload.branchRoundId,
+                                 select_asset=self._task_asset_selector(cid, rounds, payload.branchRoundId, old),
+                                 validate_source=self._task_source_validator(rounds, payload.branchRoundId),
+                                 prompt_archive=prompt_archive,
+                                 restore_prompt=self._task_prompt_restorer(conversation, rounds, payload.branchRoundId, old))
+        if old and value['taskId'] != old['taskId']:
+            prompt_archive = {}
+        old_edit = editing.current_task(conversation, rounds, payload.branchRoundId)
+        edit = task_state.project_editing(value, old_edit)
+        with connect(self.library) as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            current = self._conversation(conn, cid)
+            if current['revision'] != payload.expectedRevision:
+                raise AgentError('revision_conflict', '对话已改变，请重新加载。')
+            self._check_task_revision(task_state.current(current, self._rounds(conn, cid), payload.branchRoundId),
+                                      payload.taskRevision)
+            if conn.execute("SELECT 1 FROM agent_requests WHERE conversation_id=? AND state IN ('queued','running','waiting_for_jobs','stop_requested')", (cid,)).fetchone():
+                raise AgentError('request_active', '请等待本轮完成后再修改当前任务。')
+            drafts = json.loads(current['editing_tasks'])
+            drafts[editing.branch_key(payload.branchRoundId)] = task_state.envelope(edit, value, prompt_archive)
+            conn.execute('UPDATE agent_conversations SET editing_tasks=? WHERE id=?', (encoded(drafts), cid))
+            self._touch(conn, cid)
+        return self.snapshot(cid)
+
+    @staticmethod
+    def _check_task_revision(context, revision):
+        if revision is not None and (context or {}).get('revision', 0) != revision:
+            raise AgentError('task_revision_conflict', '当前任务已改变，请重新读取任务状态。')
 
     def delete(self, cid, round_id=None):
         with connect(self.library) as conn:
@@ -618,6 +752,10 @@ class AgentRepository:
         preparation_started = timing.monotonic()
         serialized = body.model_dump(exclude_none=True)
         digest_body = {k: v for k, v in serialized.items() if k != "expectedRevision"}
+        # Preserve idempotency for bodies saved before task context existed.
+        for field, default in (('contextScope', 'task'), ('historyRoundIds', [])):
+            if digest_body.get(field) == default:
+                digest_body.pop(field, None)
         if body.imageCount == 1:
             # The compatible default must preserve receipts created before the
             # explicit count field existed; omitted and explicit one are equal.
@@ -654,6 +792,11 @@ class AgentRepository:
                 original_request = self.request(original["requestId"])
                 reuse_inputs = original_request["body"].get("refs", []) == serialized["refs"]
         history = self.path(rounds, body.parentRoundId)
+        branch_ids = {row['id'] for row in history}
+        if len(set(body.historyRoundIds)) != len(body.historyRoundIds) or any(rid not in branch_ids for rid in body.historyRoundIds):
+            raise AgentError('invalid_context_scope', '所选历史轮次必须属于当前分支。', 400)
+        if body.contextScope != 'selected' and body.historyRoundIds:
+            raise AgentError('invalid_context_scope', '只有指定历史范围时才能选择历史轮次。', 400)
         legacy_outputs = self._legacy_frozen_assets(history)
         ancestral_outputs = None
 
@@ -712,10 +855,17 @@ class AgentRepository:
             if index < 0 or index >= len(history) or slot < 0 or slot >= len(history[index]["frozenOutputImages"]) or not history[index]["frozenOutputImages"][slot]:
                 raise AgentError("reference_missing", "引用的历史图片不在当前分支或已删除。", 400)
         inherited_task = editing.current_task(conversation, rounds, body.parentRoundId)
+        inherited_context = task_state.current(conversation, rounds, body.parentRoundId)
         if body.origin != 'send' and body.derivedFromRoundId:
             inherited_task = editing.current_task(conversation, rounds, body.derivedFromRoundId)
-        task = editing.infer_task(self, inherited_task, conversation_id=cid, parent_id=body.parentRoundId,
-                                  prompt=body.prompt, inputs=inputs, history=history, config=frozen)
+            inherited_context = task_state.current(conversation, rounds, body.derivedFromRoundId)
+        self._check_task_revision(inherited_context, body.taskRevision)
+        pending_selection = bool(inherited_context and inherited_context.get('pendingUserTask') and inherited_task)
+        if pending_selection or inherited_context and inherited_context.get('targetExplicit') and inputs and not editing.task_boundary(body.prompt):
+            task = inherited_task
+        else:
+            task = editing.infer_task(self, inherited_task, conversation_id=cid, parent_id=body.parentRoundId,
+                                      prompt=body.prompt, inputs=inputs, history=history, config=frozen)
         historical_assets = {aid for row in history for aid in [*editing.all_input_ids(row), *row.get('frozenOutputImages', [])] if aid}
         task_inputs = [aid for aid in editing.required_asset_ids(task) if aid not in inputs and aid not in historical_assets]
         for aid in task_inputs:
@@ -728,13 +878,39 @@ class AgentRepository:
         now, rid = milliseconds(), "round_" + uuid4().hex
         if task:
             task['branchRoundId'] = rid
+        requirements_history = []
+        if task and task.get('requirementsInHistory'):
+            requirements_history = [row['id'] for row in history if (row.get('editingTask') or {}).get('requirementsInHistory')
+                                    or (row.get('editingTask') or {}).get('target') == task.get('target')]
+        context = task_state.advance(inherited_context, task, prompt=body.prompt, branch_id=rid,
+                                     boundary=editing.task_boundary(body.prompt), requirements_history=requirements_history)
+        if task:
+            task['taskId'] = context['taskId']
+        if (not inherited_context and history and not editing.task_boundary(body.prompt)
+                and not (inputs and task and not task.get('continuesTask'))):
+            for historical in history:
+                task_state.dependency(context, historical['id'], 'legacy_context_missing')
+            task_state.refresh(context)
+        if body.contextScope == 'selected':
+            # A user-selected history scope supersedes implicit carryover of
+            # ordinary chat additions. Proven overflow/legacy evidence remains
+            # required; compact context must never pretend it was reconciled.
+            selected_rounds = set(body.historyRoundIds)
+            context['historyDependencies'] = [item for item in context['historyDependencies']
+                if item['reason'] != 'unreconciled_user_addition' or item['roundId'] in selected_rounds]
+            task_state.refresh(context)
+        if inherited_context and inherited_context.get('targetExplicit') and inputs and task and task.get('target'):
+            if any(aid not in editing.required_asset_ids(task) for aid in inputs):
+                context['unresolvedItems'] = [*context['unresolvedItems'], '新增附件尚未指定角色；当前明确选择的编辑对象保持不变。']
+                task_state.refresh(context)
         round_data = {"id": rid, "index": len(history) + 1, "parentRoundId": body.parentRoundId,
                       "userMessageId": "user_" + uuid4().hex, "assistantMessageId": "assistant_" + uuid4().hex,
                       "prompt": body.prompt, "inputImageIds": inputs, "maskTargetImageId": inputs[body.mask.targetRefIndex] if body.mask else None,
                       "maskImageId": mask_id, "outputTaskIds": [], "responseOutput": [], "status": "running", "error": None,
                       "createdAt": now, "finishedAt": None, "requestId": body.requestId, "derivedFromRoundId": body.derivedFromRoundId,
                       "assistantContent": "", "execution": timing.empty_execution(timing.elapsed(preparation_started)),
-                      "editingTask": task, "taskImageIds": task_inputs, "imageCount": body.imageCount}
+                      "editingTask": task, "taskImageIds": task_inputs, "imageCount": body.imageCount,
+                      "taskContext": context, "contextScope": body.contextScope, "historyRoundIds": body.historyRoundIds}
         with connect(self.library) as conn:
             conn.execute("BEGIN IMMEDIATE")
             replay = conn.execute("SELECT fingerprint FROM agent_requests WHERE id=?", (body.requestId,)).fetchone()
@@ -745,6 +921,9 @@ class AgentRepository:
                 current = self._conversation(conn, cid)
                 if current["revision"] != body.expectedRevision:
                     raise AgentError("revision_conflict", "对话已改变，请重新加载。")
+                current_context = task_state.current(current, self._rounds(conn, cid), body.derivedFromRoundId
+                                                     if body.origin != 'send' and body.derivedFromRoundId else body.parentRoundId)
+                self._check_task_revision(current_context, body.taskRevision)
                 if conn.execute("SELECT 1 FROM agent_requests WHERE conversation_id=? AND state IN ('queued','running','waiting_for_jobs','stop_requested')", (cid,)).fetchone():
                     raise AgentError("request_active", "当前对话已有进行中的请求。")
                 conn.execute("INSERT INTO agent_rounds(id,conversation_id,parent_round_id,request_id,data) VALUES(?,?,?,?,?)", (rid, cid, body.parentRoundId, body.requestId, encoded(round_data)))
@@ -774,12 +953,114 @@ class AgentRepository:
             stored = conn.execute('SELECT * FROM agent_requests WHERE id=?', (request_id,)).fetchone()
             if stored['stop_requested'] or stored['state'] not in ACTIVE_STATES:
                 raise AgentError('stopped', '本轮已结束，不能继续修改图片选择。')
+            conversation = self._conversation(conn, stored['conversation_id'])
+            if conversation['active_round_id'] != stored['round_id']:
+                raise AgentError('task_branch_conflict', '当前分支已改变，迟到的选择不会覆盖新分支。')
             current = json.loads(conn.execute('SELECT data FROM agent_rounds WHERE id=? AND deleted=0',
                                              (stored['round_id'],)).fetchone()[0])
+            old_context = request['round'].get('taskContext')
+            self._check_task_revision(current.get('taskContext'), (old_context or {}).get('revision'))
+            if current.get('editingTask') != request['round'].get('editingTask'):
+                raise AgentError('task_revision_conflict', '当前图片选择已改变，迟到的选择不会覆盖。')
             current['editingTask'] = task
+            if current.get('taskContext'):
+                context = current['taskContext']
+                context['target'] = task.get('target') if task else None
+                context['auxiliaries'] = task.get('auxiliaries', []) if task else []
+                context['taskType'] = 'image_edit' if task else 'chat'
+                context['revision'] += 1
+                context['unresolvedItems'] = [item for item in context['unresolvedItems'] if item != '请选择本次编辑对象。']
+                task_state.refresh(context)
             self._save_round(conn, current)
             self._touch(conn, stored['conversation_id'])
         return editing.context_data(task, refs)
+
+    def update_task_context(self, request_id, arguments, refs):
+        """Apply a normal same-response state tool under task and branch CAS."""
+        from backend.agent_schemas import AgentTaskOperation
+        from pydantic import ValidationError
+        if not isinstance(arguments, dict) or set(arguments) != {'taskId', 'taskRevision', 'branchRoundId', 'operations'}:
+            raise AgentError('invalid_task_context', '任务状态工具参数无效。', 400)
+        request = self.request(request_id)
+        old = request['round'].get('taskContext')
+        if (not old or old['taskId'] != arguments['taskId'] or arguments['branchRoundId'] != request['round_id']
+                or type(arguments['taskRevision']) is not int):
+            raise AgentError('task_revision_conflict', '任务标识或分支已改变。')
+        self._check_task_revision(old, arguments['taskRevision'])
+        try:
+            if not isinstance(arguments['operations'], list) or not 1 <= len(arguments['operations']) <= 24:
+                raise ValueError()
+            # String refs are frozen conversational labels. Convert them only
+            # after validating the exact label against the supplied branch map.
+            operations = []
+            for item in arguments['operations']:
+                operation = dict(item)
+                def source_ref(ref):
+                    if not isinstance(ref, str):
+                        return ref
+                    if ref not in refs:
+                        raise AgentError('reference_missing', '图片不在本轮冻结引用中。', 400)
+                    return json.loads(self.asset(refs[ref])['source'])
+                if operation.get('ref'):
+                    operation['ref'] = source_ref(operation['ref'])
+                if operation.get('auxiliaries'):
+                    operation['auxiliaries'] = [{**aux, 'ref': source_ref(aux['ref'])} for aux in operation['auxiliaries']]
+                operations.append(AgentTaskOperation.model_validate(operation))
+        except AgentError:
+            raise
+        except (ValidationError, ValueError, TypeError, KeyError):
+            raise AgentError('invalid_task_context', '任务状态工具操作无效。', 400) from None
+        with connect(self.library) as conn:
+            conversation = self._conversation(conn, request['conversation_id'])
+            rounds = self._rounds(conn, request['conversation_id'])
+        prompt_archive = dict(request['round'].get('_taskPromptArchive', {}))
+        value = task_state.apply(old, operations, actor='model', branch_id=request['round_id'],
+                                 select_asset=self._task_asset_selector(request['conversation_id'], rounds, request['round_id'], old,
+                                                                        frozen_refs=refs),
+                                 validate_source=self._task_source_validator(rounds, request['round_id']),
+                                 user_text=request['round']['prompt'], prompt_archive=prompt_archive)
+        with connect(self.library) as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            stored = conn.execute('SELECT * FROM agent_requests WHERE id=?', (request_id,)).fetchone()
+            conversation = self._conversation(conn, stored['conversation_id'])
+            if stored['stop_requested'] or stored['state'] not in ACTIVE_STATES:
+                raise AgentError('stopped', '本轮已结束，不能继续修改任务状态。')
+            if conversation['active_round_id'] != request['round_id']:
+                raise AgentError('task_branch_conflict', '当前分支已改变，迟到的状态不会覆盖新分支。')
+            current_row = conn.execute('SELECT data FROM agent_rounds WHERE id=? AND deleted=0', (stored['round_id'],)).fetchone()
+            if not current_row:
+                raise AgentError('not_found', '当前轮次不存在。', 404)
+            current = json.loads(current_row[0])
+            self._check_task_revision(current.get('taskContext'), arguments['taskRevision'])
+            if (current.get('taskContext') or {}).get('taskId') != arguments['taskId']:
+                raise AgentError('task_revision_conflict', '当前任务已改变。')
+            current['taskContext'] = value
+            if prompt_archive:
+                current['_taskPromptArchive'] = prompt_archive
+            current['editingTask'] = task_state.project_editing(value, current.get('editingTask'))
+            self._save_round(conn, current)
+            self._touch(conn, stored['conversation_id'])
+        return value
+
+    def record_task_execution(self, request_id, prompt):
+        """Receipt only: this neither generates pixels nor confirms a draft."""
+        with connect(self.library) as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            request = conn.execute('SELECT * FROM agent_requests WHERE id=?', (request_id,)).fetchone()
+            current = json.loads(conn.execute('SELECT data FROM agent_rounds WHERE id=?', (request['round_id'],)).fetchone()[0])
+            if not current.get('taskContext'):
+                return None
+            prompt_archive = dict(current.get('_taskPromptArchive', {}))
+            updated = task_state.record_execution(current['taskContext'], prompt, round_id=request['round_id'],
+                                                  prompt_archive=prompt_archive)
+            if updated == current['taskContext']:
+                return updated
+            current['taskContext'] = updated
+            if prompt_archive:
+                current['_taskPromptArchive'] = prompt_archive
+            self._save_round(conn, current)
+            self._touch(conn, request['conversation_id'])
+            return current['taskContext']
 
     def update(self, request_id, *, state=None, output=None, text=None, response_id=None, error=None, outcome=None, returned_model=None):
         with connect(self.library) as conn:
@@ -928,8 +1209,10 @@ class AgentRepository:
     def _public_snapshot(self, conversation, rounds, request, historical_requests, completed_text, task):
         """Shared public projection for complete history and one observed round."""
         cid = conversation['id']
+        context = task_state.current(conversation, rounds, conversation['active_round_id'])
         jobs, assets, messages = {}, {}, []
         for r in rounds:
+            r.pop('_taskPromptArchive', None)  # Exact old drafts remain restorable without bloating public context.
             for aid in editing.all_input_ids(r) + ([r["maskImageId"]] if r["maskImageId"] else []):
                 assets[aid] = self.image(aid)
             for jid in editing.all_output_ids(r):
@@ -986,10 +1269,13 @@ class AgentRepository:
         from backend.schemas import GenerationJobRecord
         for aid in editing.required_asset_ids(task):
             assets[aid] = self.image(aid)
+        for aid in editing.required_asset_ids(context):
+            assets[aid] = self.image(aid)
         return {"schemaVersion": 1, "revision": conversation["revision"],
                 "conversation": {"id": cid, "title": conversation["title"], "activeRoundId": conversation["active_round_id"],
                                  "createdAt": conversation["created_at"], "updatedAt": conversation["updated_at"], "rounds": rounds, "messages": messages},
-                "request": request_view, "editingTask": task,
+                "request": request_view, "editingTask": task, "taskContext": context,
+                "contextMode": 'task' if context else 'legacy',
                 "jobs": [_sanitize_generation_job_record(GenerationJobRecord(**j)).model_dump() for j in jobs.values()], "images": list(assets.values())}
 
     def progress_view(self, request_id):

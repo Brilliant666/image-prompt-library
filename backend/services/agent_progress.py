@@ -33,10 +33,13 @@ def limited_view(snapshot):
     if round_data.get('maskImageId'):
         image_ids.add(round_data['maskImageId'])
     image_ids.update(editing.required_asset_ids(snapshot.get('editingTask')))
+    task = snapshot.get('taskContext') or {}
+    image_ids.update(image['assetId'] for image in ([task['target']] if task.get('target') else []) + task.get('auxiliaries', []))
     image_ids.update((job.get('metadata') or {}).get('agent', {}).get('partialImageId') for job in jobs)
     return {'revision': snapshot['revision'],
             'conversation': {key: value for key, value in snapshot['conversation'].items() if key not in {'rounds', 'messages'}},
             'request': request, 'editingTask': snapshot.get('editingTask'), 'round': round_data,
+            **({key: snapshot[key] for key in ('taskContext', 'contextMode') if key in snapshot}),
             'messages': [message for message in snapshot['conversation']['messages'] if message['roundId'] == request['roundId']],
             'images': sorted((image for image in snapshot['images'] if image['id'] in image_ids), key=lambda image: image['id']),
             'jobs': jobs}

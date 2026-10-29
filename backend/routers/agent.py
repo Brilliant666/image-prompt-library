@@ -5,7 +5,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Query, Request, Upload
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
-from backend.agent_schemas import AgentConfigSave, AgentConversationCreate, AgentConversationPatch, AgentEditingTaskPatch, AgentResume, AgentRoundCreate
+from backend.agent_schemas import AgentConfigSave, AgentConversationCreate, AgentConversationPatch, AgentEditingTaskPatch, AgentTaskContextPatch, AgentResume, AgentRoundCreate
 from backend.services.agent_execution import schedule_request, stop_request
 from backend.services.agent_repository import ACTIVE_STATES, AgentError, AgentRepository, encoded
 from backend.services.agent_progress import ProgressLimit, ProgressSession
@@ -53,6 +53,11 @@ def patch_conversation(conversation_id: str, payload: AgentConversationPatch, re
 @router.patch('/conversations/{conversation_id}/editing-task')
 def patch_editing_task(conversation_id: str, payload: AgentEditingTaskPatch, request: Request):
     return repo(request).patch_editing_task(conversation_id, payload)
+
+
+@router.patch('/conversations/{conversation_id}/task-context')
+def patch_task_context(conversation_id: str, payload: AgentTaskContextPatch, request: Request):
+    return repo(request).patch_task_context(conversation_id, payload)
 
 
 @router.delete("/conversations/{conversation_id}")

@@ -4,7 +4,7 @@ import { Check, Copy } from 'lucide-react';
 import { copyTextToClipboard } from '../../utils/clipboard';
 import './AgentCodeBlock.css';
 
-export function AgentCodeBlock({ children, prompt = false, copyText }: { children: ReactNode; prompt?: boolean; copyText?: string }) {
+export function AgentCodeBlock({ children, prompt = false, copyText, onSelectPrompt, promptSelectionDisabled = false }: { children: ReactNode; prompt?: boolean; copyText?: string; onSelectPrompt?: (text: string) => void; promptSelectionDisabled?: boolean }) {
   const content = useRef<HTMLPreElement>(null);
   const mounted = useRef(true);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -35,6 +35,7 @@ export function AgentCodeBlock({ children, prompt = false, copyText }: { childre
   return <div className={`agent-code-block${prompt ? ' agent-prompt-block' : ''}`}>
     <div className="agent-code-block-toolbar">
       {prompt && <strong className="agent-prompt-block-title">提示词 <span>· 纯文本</span></strong>}
+      {prompt && onSelectPrompt && <button type="button" aria-label="设为当前任务 Prompt" disabled={promptSelectionDisabled || !copyText} onClick={() => { if (copyText) onSelectPrompt(copyText); }}>设为当前 Prompt</button>}
       <button type="button" aria-label={label} onClick={() => void copy()} disabled={prompt && copyText === ''}>
         {status === 'copied' ? <Check size={13} /> : <Copy size={13} />}
         <span aria-live="polite">{status === 'copied' ? '已复制' : status === 'failed' ? '复制失败，请手动选择' : label}</span>

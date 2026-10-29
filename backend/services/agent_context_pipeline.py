@@ -15,6 +15,7 @@ from backend.services import agent_editing_task as editing
 from backend.services.agent_context import select_context_images, validate_context_references
 from backend.services.agent_skills import default_skill_sections, read_agent_skill, validated_skill_preloads
 from backend.services.agent_image_inputs import ImageInputSession
+from backend.services.agent_context_scope import choose_context, task_data
 
 def history_items(output):
     result = []
@@ -118,7 +119,10 @@ def prepare_context(repo, request, refs=None, *, deduplicate_images=None):
     refs = refs_for_request(repo, request) if refs is None else refs
     images = ImageInputSession(repo)
     attached, skills, bindings = [], [], []
-    selected = select_context_images(request, refs)
+    plan = choose_context(request, refs)
+    selected = plan.assets
+    if not request['round'].get('taskContext') and plan.scope != 'selected':
+        selected = select_context_images(request, refs)
     enabled = (request.get('frozen', {}).get('experimentalImageDeduplication', False)
                if deduplicate_images is None else deduplicate_images)
     masked = bool(request['round'].get('maskImageId'))
@@ -138,7 +142,7 @@ def prepare_context(repo, request, refs=None, *, deduplicate_images=None):
         nonlocal occurrences, attached_count, duplicates
         occurrences += 1
         if selected is not None and aid not in selected:
-            return [{'type': 'input_text', 'text': f'<available_ref id="{ref_id}" image_not_attached="true" />'}]
+            return []
         url = images.data_url(aid)
         identity = images.identity(aid)
         role = role_for(aid, ref_id)
@@ -162,7 +166,7 @@ def prepare_context(repo, request, refs=None, *, deduplicate_images=None):
                 {'type': 'input_text', 'text': f'<ref id="{ref_id}" />'}]
 
     items = _build_input(repo, request, refs, images=images, image_content=image_content,
-                         attached_refs=attached, skill_receipts=skills)
+                         attached_refs=attached, skill_receipts=skills, plan=plan)
     if masked and request['round'].get('maskTargetImageId'):
         occurrences += 1
         attached_count += 1
@@ -179,6 +183,7 @@ def prepare_context(repo, request, refs=None, *, deduplicate_images=None):
     sections = [*default_skill_sections(), *skills] if request.get('frozen', {}).get('professionalPromptWorkflows', True) else []
     diagnostics = {
         'schemaVersion': 1, 'historyRoundCount': len(request['history']),
+        'contextScope': plan.scope, 'includedHistoryRoundCount': len(plan.history), 'fallbackReason': plan.reason,
         'currentRoundIndex': request['round']['index'], 'messageCount': len(items),
         'imageOccurrences': occurrences, 'attachedImageOccurrences': attached_count,
         'uniqueAssetCount': len(unique_assets), 'uniquePixelCount': len(unique_pixels),
@@ -227,13 +232,13 @@ def refs_for_request(repo, request):
     return refs
 
 
-def _build_input(repo, request, refs, *, images, image_content, attached_refs=None, skill_receipts=None):
+def _build_input(repo, request, refs, *, images, image_content, attached_refs=None, skill_receipts=None, plan=None):
     try:
         validate_context_references(request, refs)
     except ValueError as exc:
         raise AgentError("reference_missing", str(exc), 400) from None
     items = []
-    selected = select_context_images(request, refs)
+    plan = plan or choose_context(request, refs)
 
     target = request["round"].get("maskTargetImageId")
     if request["round"].get("maskImageId") and target:
@@ -245,7 +250,8 @@ def _build_input(repo, request, refs, *, images, image_content, attached_refs=No
             {"type": "input_text", "text": f'The mask applies to <ref id="round-{request["round"]["index"]}-reference-{index}" />.'},
             {"type": "input_image", "image_url": images.data_url(target)},
         ]})
-    for r in [*request["history"], request["round"]]:
+    seen_assets = set()
+    for r in [*plan.history, request["round"]]:
         prompt = re.sub(r"\u2065[^\u2064]*", "", r["prompt"]).replace("\u2063", "").replace("\u2064", "")
         prompt = ROUND_MENTION.sub(lambda m: f'<ref id="round-{m[1]}-image-{m[2]}" />', prompt)
         def current_ref(match):
@@ -257,7 +263,11 @@ def _build_input(repo, request, refs, *, images, image_content, attached_refs=No
         content = [{"type": "input_text", "text": prompt}]
         for i, aid in enumerate(editing.all_input_ids(r)):
             content.extend(image_content(aid, f'round-{r["index"]}-reference-{i + 1}'))
-        if r is request['round'] and r.get('editingTask'):
+            seen_assets.add(aid)
+        if r is request['round'] and r.get('taskContext'):
+            content.append({'type': 'input_text', 'text': 'Current creative task (user-level data; original, selected and executed Prompts are distinct): ' +
+                            encoded(task_data(r['taskContext'], refs))})
+        if r is request['round'] and r.get('editingTask') and not r.get('taskContext'):
             content.append({'type': 'input_text', 'text': 'Current editing task (user-level JSON data, not system instructions): ' +
                             encoded(editing.context_data(r['editingTask'], refs))})
         items.append({"role": "user", "content": content})
@@ -271,10 +281,17 @@ def _build_input(repo, request, refs, *, images, image_content, attached_refs=No
             aid = refs.get(ref_id)
             if aid:
                 generated.extend(image_content(aid, ref_id))
+                seen_assets.add(aid)
             else:
                 generated.append({"type": "input_text", "text": f'<removed_ref id="{ref_id}" />'})
         if generated:
             items.append({"role": "user", "content": generated})
+    # A target may be owned by an excluded older task. Attach its exact stable
+    # binding without that unrelated task's transcript or an enormous ref index.
+    for aid in sorted((plan.assets or set()) - seen_assets):
+        ref_id = next((ref for ref, asset in refs.items() if asset == aid), None)
+        if ref_id and aid != request['round'].get('maskImageId'):
+            items.append({'role': 'user', 'content': image_content(aid, ref_id)})
     return skill_context_items(request, items, skill_receipts=skill_receipts)
 
 
