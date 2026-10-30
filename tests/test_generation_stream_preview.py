@@ -9,6 +9,7 @@ from backend.db import connect
 from backend.schemas import GenerationJobCreate
 from backend.services.generation_jobs import (
     GenerationJobConflict,
+    GenerationImageValidationError,
     GenerationJobRepository,
     resolve_generation_input_image_path,
 )
@@ -103,8 +104,12 @@ def test_terminal_cleanup_ignores_metadata_paths_outside_reserved_preview_direct
 
 def test_preview_validation_rejects_invalid_payload_and_does_not_change_job(tmp_path, monkeypatch):
     repo, job = running_job(tmp_path)
-    with pytest.raises(GenerationJobConflict, match="invalid"):
+    before = repo.get_job(job.id)
+    with pytest.raises(GenerationImageValidationError) as failure:
         repo.stage_stream_preview(job.id, b"not-image", {})
+    assert isinstance(failure.value, GenerationJobConflict)
+    assert failure.value.code == "image_decode_failed" and failure.value.status == 400
+    assert repo.get_job(job.id) == before
     with pytest.raises(GenerationJobConflict, match="index"):
         repo.stage_stream_preview(job.id, image_bytes(), {"partial_image_index": -1})
     monkeypatch.setattr("backend.services.generation_jobs.STREAM_PREVIEW_MAX_BYTES", 10)
