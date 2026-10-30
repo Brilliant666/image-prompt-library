@@ -1,9 +1,20 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import os
 import re
-from pathlib import Path
+import sqlite3
+import stat
+import tempfile
+from contextlib import closing
+from dataclasses import dataclass
+from io import BytesIO
+from pathlib import Path, PureWindowsPath
 
+from PIL import Image, UnidentifiedImageError
+
+from backend.config import resolve_library_storage_path
 from backend.db import connect, init_db
 from backend.repositories import ItemRepository, StoredImageInput, new_id, now
 from backend.schemas import (
@@ -15,10 +26,42 @@ from backend.schemas import (
     ItemCreate,
     PromptIn,
 )
-from backend.services.image_store import store_image
+from backend.services.image_store import MAX_IMAGE_PIXELS, StoredImage, _atomic_write_bytes, store_image
 from backend.services.text_normalize import to_traditional
 
 IMPORT_STAGING_ROOT = "import-staging"
+MAX_IMPORT_IMAGE_BYTES = 30 * 1024 * 1024
+_IMAGE_EXTENSIONS = {"PNG": ".png", "JPEG": ".jpg", "WEBP": ".webp", "GIF": ".gif"}
+
+
+@dataclass(frozen=True)
+class _PreparedMedia:
+    media: ImportDraftMedia
+    source_identity: tuple
+    stored: StoredImage
+
+
+def _file_identity(info):
+    return info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
+def _image_extension(data: bytes) -> str:
+    try:
+        with Image.open(BytesIO(data)) as image:
+            extension = _IMAGE_EXTENSIONS.get(image.format or "")
+            if extension is None:
+                raise ImportDraftConflict("Import image format is unsupported; use PNG, JPEG, WebP or GIF")
+            if image.width * image.height > MAX_IMAGE_PIXELS:
+                raise ImportDraftConflict("Import image exceeds the supported pixel limit")
+            image.verify()
+        with Image.open(BytesIO(data)) as image:
+            image.load()
+        return extension
+    except ImportDraftConflict:
+        raise
+    except (UnidentifiedImageError, OSError, ValueError, SyntaxError, EOFError,
+            Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        raise ImportDraftConflict("Import image is damaged or cannot be decoded; replace the staged image and retry") from exc
 
 
 def _json_default(value):
@@ -114,33 +157,114 @@ class ImportDraftRepository:
     def _staged_file(self, staged_path: str | None) -> Path | None:
         if not staged_path:
             return None
-        relative = Path(staged_path)
-        if relative.is_absolute() or relative.drive or ".." in relative.parts or relative.parts[:1] != (IMPORT_STAGING_ROOT,):
-            raise ImportDraftConflict("Import draft media must be staged inside the library import folder")
-        staging_root = (self.library_path / IMPORT_STAGING_ROOT).resolve()
-        candidate = (self.library_path / relative).resolve()
+        # Check both path syntaxes, including drive-relative paths and UNC on
+        # POSIX. Staging is not a formal media root or an arbitrary local path.
+        windows = PureWindowsPath(staged_path)
+        relative = Path(staged_path.replace("\\", "/"))
+        message = "Import draft media must be staged inside the library import folder without links"
+        if (relative.is_absolute() or windows.drive or windows.root or ".." in relative.parts
+                or relative.parts[:1] != (IMPORT_STAGING_ROOT,) or len(relative.parts) < 2
+                or any(":" in part for part in relative.parts)):
+            raise ImportDraftConflict(message)
         try:
-            candidate.relative_to(staging_root)
-        except ValueError:
-            raise ImportDraftConflict("Import draft media must be staged inside the library import folder") from None
-        return candidate if candidate.is_file() else None
+            library = self.library_path.resolve(strict=True)
+            expected_root = library / IMPORT_STAGING_ROOT
+            candidate = library
+            for index, part in enumerate(relative.parts):
+                candidate = candidate / part
+                info = candidate.lstat()
+                if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+                    raise ImportDraftConflict(message)
+                if index < len(relative.parts) - 1 and not stat.S_ISDIR(info.st_mode):
+                    raise ImportDraftConflict(message)
+            if not stat.S_ISREG(info.st_mode):
+                raise ImportDraftConflict("Import staged image must be a regular file")
+            # A redirected staging root must never redefine the allowed root.
+            staging_root = (library / IMPORT_STAGING_ROOT).resolve(strict=True)
+            resolved = candidate.resolve(strict=True)
+            if staging_root != expected_root or not resolved.is_relative_to(expected_root):
+                raise ImportDraftConflict(message)
+            return candidate
+        except FileNotFoundError:
+            raise ImportDraftConflict("Import staged image is missing; replace it and retry") from None
+        except (OSError, RuntimeError, ValueError):
+            raise ImportDraftConflict(message) from None
+
+    def _read_staged_image(self, media: ImportDraftMedia) -> tuple[bytes, tuple]:
+        path = self._staged_file(media.staged_path)
+        if path is None:
+            raise ImportDraftConflict("Import staged image is missing")
+        before = _file_identity(path.lstat())
+        if before[3] > MAX_IMPORT_IMAGE_BYTES:
+            raise ImportDraftConflict("Import image exceeds the 30 MB file limit")
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(path, flags)
+            with os.fdopen(fd, "rb") as source:
+                if _file_identity(os.fstat(source.fileno())) != before:
+                    raise ImportDraftConflict("Import staged image changed; retry the import")
+                data = source.read(MAX_IMPORT_IMAGE_BYTES + 1)
+                if len(data) > MAX_IMPORT_IMAGE_BYTES:
+                    raise ImportDraftConflict("Import image exceeds the 30 MB file limit")
+                if _file_identity(os.fstat(source.fileno())) != before:
+                    raise ImportDraftConflict("Import staged image changed; retry the import")
+            # Recheck directory and final-file identity after opening/reading.
+            if _file_identity(self._staged_file(media.staged_path).lstat()) != before:
+                raise ImportDraftConflict("Import staged image changed; retry the import")
+        except OSError:
+            raise ImportDraftConflict("Import staged image could not be read safely; retry the import") from None
+        if media.file_sha256 and hashlib.sha256(data).hexdigest() != media.file_sha256.lower():
+            raise ImportDraftConflict("Import staged image content does not match its recorded identity")
+        return data, before
+
+    def _prepare_media(self, draft: ImportDraftRecord, directory: Path) -> list[_PreparedMedia]:
+        prepared = []
+        for media in draft.media:
+            # Remote URLs and original_path are descriptive only. Acceptance
+            # never downloads them or opens an arbitrary original source path.
+            if not media.staged_path:
+                continue
+            if media.role not in {"result_image", "reference_image"}:
+                raise ImportDraftConflict("Import image role is invalid")
+            data, identity = self._read_staged_image(media)
+            extension = _image_extension(data)
+            try:
+                stored = store_image(directory, data, "image" + extension)
+            except (OSError, ValueError):
+                raise ImportDraftConflict("Import image preparation failed; staged files were retained for retry") from None
+            prepared.append(_PreparedMedia(media, identity, stored))
+        return prepared
+
+    def _publish_media(self, directory: Path, prepared: _PreparedMedia) -> StoredImageInput:
+        stored = prepared.stored
+        for relative in (stored.original_path, stored.thumb_path, stored.preview_path):
+            destination = resolve_library_storage_path(self.library_path, relative)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write_bytes(destination, (directory / relative).read_bytes())
+        return StoredImageInput(
+            original_path=stored.original_path, thumb_path=stored.thumb_path,
+            preview_path=stored.preview_path, remote_url=prepared.media.url,
+            width=stored.width, height=stored.height, file_sha256=stored.file_sha256,
+            role=prepared.media.role,
+        )
+
+    def _accepted_result(self, draft: ImportDraftRecord) -> ImportDraftAcceptResult:
+        if not draft.accepted_item_id:
+            raise ImportDraftConflict("The accepted import no longer has a saved item; it will not be recreated")
+        try:
+            item = self.items.get_item(draft.accepted_item_id)
+        except KeyError:
+            raise ImportDraftConflict("The item saved by this import was deleted; it will not be recreated") from None
+        return ImportDraftAcceptResult(draft=draft, item=item)
 
     def accept_draft(self, draft_id: str) -> ImportDraftAcceptResult:
         draft = self.get_draft(draft_id)
         if draft.status == "accepted":
-            raise ImportDraftConflict("Import draft has already been accepted")
+            return self._accepted_result(draft)
         if draft.status == "duplicate" or draft.duplicate_of_item_id:
             raise ImportDraftConflict("Import draft is marked as duplicate and cannot be accepted")
-        duplicate_of = self._find_duplicate(draft)
-        if duplicate_of:
-            timestamp = now()
-            with connect(self.library_path) as conn:
-                conn.execute(
-                    "UPDATE import_drafts SET status='duplicate', duplicate_of_item_id=?, updated_at=? WHERE id=?",
-                    (duplicate_of, timestamp, draft_id),
-                )
-                conn.commit()
-            raise ImportDraftConflict("Import draft is marked as duplicate and cannot be accepted")
+        if draft.status != "staged":
+            raise ImportDraftConflict("Import draft is no longer available for acceptance")
         payload = ItemCreate(
             title=draft.title,
             model=draft.model,
@@ -151,37 +275,56 @@ class ImportDraftRepository:
             tags=draft.suggested_tags,
             prompts=draft.prompts,
         )
-        # Only files staged by repository ingest are read. A draft's original_path
-        # describes the source and never becomes a library path. Validate every
-        # media entry before creating the item, so a rejection leaves nothing behind.
-        staged_media = [(media, self._staged_file(media.staged_path)) for media in draft.media]
-        item = self.items.create_item(payload, imported=True)
-        for media, staged_file in staged_media:
-            if staged_file is None:
-                continue
-            stored = store_image(self.library_path, staged_file.read_bytes(), staged_file.name)
-            image_input = StoredImageInput(
-                original_path=stored.original_path,
-                thumb_path=stored.thumb_path,
-                preview_path=stored.preview_path,
-                remote_url=media.url,
-                width=stored.width,
-                height=stored.height,
-                file_sha256=stored.file_sha256,
-                role=media.role,
-            )
-            self.items.add_image(item.id, image_input)
-        timestamp = now()
-        with connect(self.library_path) as conn:
-            conn.execute(
-                "UPDATE import_drafts SET status='accepted', accepted_item_id=?, accepted_at=?, updated_at=? WHERE id=?",
-                (item.id, timestamp, timestamp, draft_id),
-            )
-            conn.commit()
-        return ImportDraftAcceptResult(draft=self.get_draft(draft_id), item=self.items.get_item(item.id))
+        expected = draft.model_dump(mode="json")
+        try:
+            # Decode and prepare every image before exposing any formal row or
+            # holding SQLite's writer lock. Originals keep their exact bytes.
+            with tempfile.TemporaryDirectory(prefix="image-prompt-import-") as temporary:
+                directory = Path(temporary)
+                prepared = self._prepare_media(draft, directory)
+                with closing(connect(self.library_path)) as conn, conn:
+                    conn.execute("BEGIN IMMEDIATE")
+                    row = conn.execute("SELECT * FROM import_drafts WHERE id=?", (draft_id,)).fetchone()
+                    if row is None:
+                        raise KeyError(draft_id)
+                    latest = self._record_from_row(row)
+                    if latest.status == "accepted":
+                        # A concurrent request won. Its receipt, not duplicate
+                        # detection, owns the completed item for this draft ID.
+                        return self._accepted_result(latest)
+                    if latest.model_dump(mode="json") != expected:
+                        raise ImportDraftConflict("Import draft changed; review it and retry")
+                    duplicate_of = self._find_duplicate(latest, conn=conn)
+                    if duplicate_of:
+                        conn.execute("UPDATE import_drafts SET status='duplicate', duplicate_of_item_id=?, updated_at=? WHERE id=?",
+                                     (duplicate_of, now(), draft_id))
+                        conn.commit()
+                        raise ImportDraftConflict("Import draft is marked as duplicate and cannot be accepted")
+                    for media in prepared:
+                        if _file_identity(self._staged_file(media.media.staged_path).lstat()) != media.source_identity:
+                            raise ImportDraftConflict("Import staged image changed; retry the import")
+                    item_id = self.items.create_item_in_transaction(conn, payload, imported=True)
+                    for media in prepared:
+                        image_input = self._publish_media(directory, media)
+                        self.items.add_image_in_transaction(conn, item_id, image_input)
+                    timestamp = now()
+                    conn.execute("UPDATE import_drafts SET status='accepted', accepted_item_id=?, accepted_at=?, updated_at=? WHERE id=?",
+                                 (item_id, timestamp, timestamp, draft_id))
+                    conn.commit()
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            if isinstance(exc, ImportDraftConflict):
+                raise
+            # Formal content-addressed files may already be shared with another
+            # writer. Keep them on rollback; never unlink by a 'created' list.
+            # The draft and original staged sources remain available for retry.
+            raise ImportDraftConflict("Import could not be committed; the draft and staged files were retained. Retry the import") from None
+        return self._accepted_result(self.get_draft(draft_id))
 
-    def _find_duplicate(self, payload: ImportDraftCreate) -> str | None:
-        with connect(self.library_path) as conn:
+    def _find_duplicate(self, payload: ImportDraftCreate, *, conn=None) -> str | None:
+        if conn is None:
+            with closing(connect(self.library_path)) as owned:
+                return self._find_duplicate(payload, conn=owned)
+        else:
             if payload.source_url:
                 row = conn.execute(
                     "SELECT id FROM items WHERE source_url=? AND archived=0 AND deleted_at IS NULL ORDER BY created_at LIMIT 1",
