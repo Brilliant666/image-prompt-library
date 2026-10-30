@@ -4,6 +4,33 @@ The Agent is an API-based assistant for visual analysis, prompt writing, reverse
 
 ## Using the workflows
 
+Agent references accept PNG, JPEG and WebP, up to 30 MiB and 16,000,000 pixels
+per image. These are separate limits: a small JPEG file may still exceed the
+pixel limit. Upload errors distinguish size, resolution, unsupported format and
+decode failures without changing the original file. Successful attachments and
+the current text remain available if a later file in the selection fails.
+
+Uploads are decoded and checked before an asset is stored. Byte size, pixel
+count and the image decoder's safety limit can return HTTP 413 with different
+messages; unsupported format returns 415 and corrupt or incomplete image data
+returns 400. This is local attachment validation, not a supplier moderation
+decision. Passing it does not guarantee that the entire later model request
+fits an upstream gateway's request-size limit.
+
+On a successful final image, **Copy image** copies the actual result into the
+clipboard. **Copy generation Prompt** is a separate explicit result-card action; Prompt
+blocks still copy exact text. Where needed, the clipboard representation is
+converted to PNG in memory at its full visible dimensions, including orientation
+and transparency. This does not replace the stored original or guarantee its
+metadata/encoded bytes; **Download original** remains the original-file action.
+Unsupported browsers and denied clipboard permission report failure instead of
+silently copying text.
+
+Image progress is shown once alongside the actual result group, using created
+jobs rather than the authorization limit. Successful results do not retain a
+technical batch-tool banner. Partial failures, unknown outcomes and stopped
+requests remain visible, with the full tool trace in answer details.
+
 In **Settings → Agent**, **Enable professional image-prompt workflows** is on by default, including when opening an older configuration. Both bundled skills share this switch. Saving it does not call a model or change the chosen API profiles, models or image parameters.
 
 | Request | Expected workflow |
@@ -60,13 +87,21 @@ On a text answer, **Retry** immediately requests another answer in a sibling bra
 
 Each round reports its own durable image jobs. A completed text-model tool call is not an image-generation success. All failed jobs show that no image was produced; mixed batches retain and identify their successful images. Details distinguish submitted jobs, successful images, failures and the authorized maximum. Saved Library images remain part of the successful count.
 
-Progress distinguishes local preparation, waiting for the text model, receiving output, waiting for image tasks, generating and saving results. Safe diagnostic categories identify quota, model/interface compatibility, moderation, rate limits, service failures, uncertain connections and unavailable references. Unknown provider errors are not classified by guessing from prose. No category automatically retries a paid request or switches providers. Persisted diagnostics omit upstream error prose, addresses and arbitrary JSON; request identities are hashed and endpoint names contain only a recognized API route.
+Progress distinguishes local preparation, waiting for the text model, receiving output, waiting for image tasks, generating and saving results. Safe diagnostic categories identify quota, model/interface compatibility, moderation, rate limits, service failures, uncertain connections and unavailable references. Unknown provider errors are not classified by guessing from prose. No category automatically retries a paid request or switches providers. Persisted diagnostics retain only selected public fields and a bounded, sanitized plain-text supplier explanation, not the complete error response. Known secrets, authorization values, URL queries, image payloads and echoed request content are removed; request identities are hashed and endpoint names contain only a recognized API route.
+
+An upstream **HTTP 413** is shown as a request-size rejection, including when
+the response is HTML or otherwise lacks usable JSON. It does not mean that the
+image failed content moderation. A confirmed local connection-configuration
+failure can say the request was not submitted; a timeout or disconnect without
+a terminal receipt remains uncertain. Provider-supplied fields cannot assert
+that a local preflight occurred. These distinctions do not trigger automatic
+retry, route changes or a switch to another provider.
 
 Advanced details contain measured monotonic durations. Headers and first-event milestones start at the same HTTP request and must not be added together. Tool execution includes image queue/call time. Direct Native Responses can combine text and image execution, so its separately observed image-tool interval is not a separate pure-provider latency measurement. Missing historical or post-restart measurements show as unrecorded. Browser send-to-terminal observation includes backend work and transport, and is only available in the page that observed it. Optional timing-storage failures emit a safe warning and cannot overturn a paid-request receipt or trigger another request.
 
 Missing usage values remain unknown; an explicitly reported zero stays zero. These measurements do not estimate actual tokens, money, provider capacity or cache eligibility.
 
-- Ambiguous image instructions retain images from the current conversation branch. A new attachment does not make earlier images irrelevant. Exact reference-only requests can narrow historical pixels; missing or deleted explicit references fail rather than silently substitute an image.
+- Ambiguous image instructions retain their source wording and locators on the current branch. An unresolved flag does not attach all historical images. Required visual evidence and selected/read source rounds include their inherited target and auxiliaries; a model must read omitted evidence or clarify its source before judging it. A new attachment alone does not make earlier images irrelevant. Missing or deleted required references fail rather than silently substitute an image.
 - Native results require a valid completed Responses receipt and a complete image. Failed or incomplete responses containing images are not successful tasks. Previously confirmed sibling tasks remain saved.
 - A verified terminal SSE receipt is not undone by connection teardown. A disconnect without a valid terminal remains uncertain and does not automatically replay a paid POST.
 - Identified duplicate deltas and terminal events are ignored; different legitimate events containing the same text remain distinct. Final message output can replace previews without duplicating text.
@@ -192,6 +227,19 @@ or latency reduction; supplier-side timing still needs separate measurement.
 
 ## Validation scope
 
+Image generation uses one main progress message. Pending result frames do not
+offer result menus or editing actions. Failed and unknown results keep a padded
+message card with their explanation and details; an unknown result cannot be
+blindly retried. Successful cards retain image copying and Prompt reuse.
+
+Failures may include a short, sanitized supplier explanation alongside public
+error codes, parameter names and moderation categories. Explanations are plain
+text, not instructions or HTML, and never establish that a guessed refusal
+reason is true. If the supplier gave no explanation, the UI says so. Old errors
+whose detailed message was not retained cannot be reconstructed. Local network
+configuration failures are distinguished from unknown upstream outcomes; viewing
+or copying a diagnostic does not submit another request.
+
 Regression suites verify actual request image bytes, JSON/SSE terminal states, duplicate events, frozen configuration, authorization and HTTP-to-worker-to-Gallery/Library behavior with mock providers. Frontend tests exercise production callbacks, configuration events and clipboard behavior. Isolated browser acceptance checks the actual settings, uploads, prompt blocks, Native/Hybrid results and asset picker against the real local backend with a synthetic provider. Scripted responses verify wiring and preservation, not model intelligence or visual quality.
 
-Real supplier compatibility, output quality, paid generation, system IME and supplier-side cache behavior require separate acceptance. No live provider call, production-library migration or deployment is part of these diagnostics.
+Real supplier compatibility, output quality, paid generation, system IME and supplier-side latency/cache behavior require separate acceptance. Clipboard callback tests verify application logic but cannot prove a native operating-system copy/paste transfer; use the [offline preview's manual receiver](AGENT_PREVIEW.md#manual-image-clipboard-acceptance) for that separate browser-specific check. No live provider call, production-library migration or deployment is part of these diagnostics.

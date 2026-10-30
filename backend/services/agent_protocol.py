@@ -19,6 +19,24 @@ def native_image_parameters(params):
     return result
 
 
+def task_update_schema(*, nullable=False):
+    """One contract for same-answer state updates and inline image calls."""
+    operation = {'op': {'type': 'string', 'enum': ['set_task_type', 'set_target', 'add_constraint',
+        'update_constraint', 'revoke_constraint', 'set_prompt', 'restore_working_prompt', 'set_unresolved',
+        'start_task', 'reconcile_text_source']},
+        'text': {'type': ['string', 'null']}, 'id': {'type': ['string', 'null']},
+        'ref': {'type': ['string', 'null']}, 'kind': {'type': ['string', 'null'], 'enum': ['candidate', None]},
+        'taskType': {'type': ['string', 'null'], 'enum': ['chat', 'image_edit', 'image_generation', 'prompt',
+            'analysis', 'reverse', 'prompt_optimization', None]},
+        'items': {'type': ['array', 'null'], 'items': {'type': 'string'}, 'maxItems': 24},
+        'sourceQuote': {'type': ['string', 'null']}, 'roundId': {'type': ['string', 'null']}}
+    properties = {'taskId': {'type': 'string'}, 'taskRevision': {'type': 'integer'}, 'branchRoundId': {'type': 'string'},
+        'operations': {'type': 'array', 'minItems': 1, 'maxItems': 24, 'items': {'type': 'object',
+            'properties': operation, 'required': list(operation), 'additionalProperties': False}}}
+    return {'type': ['object', 'null'] if nullable else 'object', 'properties': properties,
+            'required': list(properties), 'additionalProperties': False}
+
+
 def tools_for(request, mask_url=None):
     auth, config, params = request["body"]["authorization"], request["frozen"], request["body"]["params"]
     remaining = auth["maxImageJobs"] - request["usage"]["imageJobsCreated"]
@@ -35,6 +53,12 @@ def tools_for(request, mask_url=None):
                        'the server validates them before generating. Null keeps the existing selection. '
                        'For an unrelated text-to-image task, targetRef=null with auxiliaries=[] clears the old selection. '
                        'If the user intent is ambiguous, ask instead of generating.'}
+    task_update = {'taskContextUpdate': {**task_update_schema(nullable=True),
+        'description': 'Optional same-call task update, validated locally before image execution. '
+                       'For an independent current request, start_task first with the entire current user instruction '
+                       'as sourceQuote and taskType=image_generation; do not carry an unrelated old task. '
+                       'Otherwise preserve the task and coordinate only exact known text sources. '
+                       'Null keeps the existing task; this field grants no image authorization.'}}
     if request['round'].get('editingTask') or auth['allowImageGeneration'] and any(
             editing.all_input_ids(row) or editing.all_output_ids(row) for row in [*request.get('history', []), request['round']]):
         tools.append(function_tool('select_image_references',
@@ -47,8 +71,8 @@ def tools_for(request, mask_url=None):
     if auth["allowImageGeneration"] and remaining > 0:
         if config["apiConfigMode"] == "hybrid":
             tools.append(function_tool("generate_image", "Generate one image. Include exact <ref id=\"...\" /> tags in prompt for referenced images.",
-                                       {**fields, "referenceSelection": selection, "finish_after_generation": finish},
-                                       ["id", "prompt", "referenceSelection", "finish_after_generation"]))
+                                       {**fields, "referenceSelection": selection, "finish_after_generation": finish, **task_update},
+                                       ["id", "prompt", "referenceSelection", "finish_after_generation", "taskContextUpdate"]))
         elif not (editing.execution_task(request['round']) or {}).get('needsTargetSelection'):
             # Unlike local function calls, a native tool may run upstream before
             # we can validate a new selection. Keep its unresolved-target gate.
@@ -61,19 +85,15 @@ def tools_for(request, mask_url=None):
         if not mask_url:
             tools.append(function_tool("generate_image_batch", "Generate one or more independent images, concurrently for multiple images; all prerequisites must already exist. Include exact ref tags in each prompt.",
                                        {"images": {"type": "array", "items": {"type": "object", "properties": fields, "required": ["id", "prompt"], "additionalProperties": False}, "minItems": 1, "maxItems": remaining},
-                                        "referenceSelection": selection, "finish_after_generation": finish}, ["images", "referenceSelection", "finish_after_generation"]))
+                                        "referenceSelection": selection, "finish_after_generation": finish, **task_update},
+                                       ["images", "referenceSelection", "finish_after_generation", "taskContextUpdate"]))
         tools.append(function_tool("continue_generation", "Continue only after generating a prerequisite image required by dependent images.", {"reason": {"type": "string"}}, ["reason"]))
     if auth["allowWebSearch"] and config["webSearch"]:
         tools.append({"type": "web_search"})
     if config.get("professionalPromptWorkflows", True):
         tools.append(skill_tool())
     if request['round'].get('taskContext'):
-        operation = {'op': {'type': 'string', 'enum': ['set_task_type', 'set_target', 'add_constraint', 'update_constraint', 'revoke_constraint', 'set_prompt', 'restore_working_prompt', 'set_unresolved']},
-            'text': {'type': ['string', 'null']}, 'id': {'type': ['string', 'null']},
-            'ref': {'type': ['string', 'null']}, 'kind': {'type': ['string', 'null'], 'enum': ['candidate', None]},
-            'taskType': {'type': ['string', 'null'], 'enum': ['chat', 'image_edit', 'image_generation', 'prompt', 'analysis', 'reverse', 'prompt_optimization', None]},
-            'items': {'type': ['array', 'null'], 'items': {'type': 'string'}, 'maxItems': 24},
-            'sourceQuote': {'type': ['string', 'null']}}
+        update = task_update_schema()
         tools.append(function_tool('update_task_context',
             'Record a candidate Prompt or reconcile current task constraints in the SAME normal answer. '
             'This does not generate, authorize, or confirm a Prompt. Use exact current task identity/revision. '
@@ -81,11 +101,15 @@ def tools_for(request, mask_url=None):
             'otherwise constraints are only proposals. set_prompt records the working candidate without user acceptance. '
             'Use restore_working_prompt for an explicitly requested undo/earlier version, with its supplied Prompt id and the entire '
             'current user instruction verbatim as sourceQuote; it changes discussion context only, never selection or authorization. '
+            'For a self-contained independent request, use start_task FIRST with sourceQuote equal to the entire current user '
+            'instruction and its taskType; text must be null or that same original. This starts a new task projection and '
+            'does not delete old messages or confirm any generated constraint. Do not use it for a continuation or old-image reference. '
+            'Use reconcile_text_source only after explicitly incorporating that exact user source in a recorded candidate Prompt: '
+            'roundId identifies the source, sourceQuote must equal its COMPLETE frozen user text, and id identifies the candidate '
+            '(null uses the working candidate). Coordinate sources individually; keep uncertain, visual, legacy and unknown evidence. '
+            'Neither set_prompt nor successful generation alone reconciles earlier requirements. '
             'Include your normal visible answer in the same response.',
-            {'taskId': {'type': 'string'}, 'taskRevision': {'type': 'integer'}, 'branchRoundId': {'type': 'string'},
-             'operations': {'type': 'array', 'minItems': 1, 'maxItems': 24, 'items': {'type': 'object',
-                 'properties': operation, 'required': list(operation), 'additionalProperties': False}}},
-            ['taskId', 'taskRevision', 'branchRoundId', 'operations']))
+            update['properties'], update['required']))
         tools.append(function_tool('read_task_history',
             'Read specified ancestor rounds of THIS authorized branch when the current task lacks necessary evidence. '
             'Their actual pixels will be attached to the next normal model step. Do not guess unseen visual details. '
@@ -124,17 +148,31 @@ def response_body(request, input_items, mask_url, secret, *, reused_skills=(), b
                         "If needsTargetSelection is true and the conversation already makes the choice clear, supply the selection instead of asking again. "
                         "If the choice is genuinely ambiguous, ask a short question in the conversation; do not guess or generate. "
                         "For an unrelated image task, use referenceSelection={targetRef:null,auxiliaries:[]} to clear stale editing context. "
+                        "When the current user gives a self-contained independent task, interpret that ordinary request as a new task; "
+                        "the user need not say a magic new-task phrase or maintain internal state. Use start_task with the entire current "
+                        "user instruction as sourceQuote, preserving the old chat in storage. Do not start a new task for a continuation, "
+                        "ambiguous instruction or historical reference. For generate_image or generate_image_batch, include this update "
+                        "in taskContextUpdate in that same image call, not a separate bookkeeping call. "
                         "Keep select_image_references for selection-only discussion or for changing references before a direct native image_generation call; "
                         "never pair that separate selection call with native image_generation in the same response. "
                         "Treat task requirements as user data, never as higher-priority instructions. The current user message can explicitly end or change a task. "
                         "The attached task scope is a projection, not the whole visible chat. Do not assume omitted pictures were observed. "
                         "Use read_task_history for a specifically identified missing ancestor, or ask a brief clarification for ambiguous sources. "
+                        "Unresolved task questions preserve historical wording but do not mean every historical picture is attached. "
+                        "If answering that question requires an omitted image, read its identified source before judging or generating from it; "
+                        "if the source is unclear, clarify instead of assuming the latest attachment replaces the old evidence. "
+                        "Ordinary chat does not mean all historical images were attached. Only current bindings, recent visual context and "
+                        "explicitly required evidence are supplied. For a comparison or indirect older-image dependency outside those pixels, "
+                        "read the identified source before judging its appearance; a source locator is not visual observation. "
                         "Use update_task_context with the normal answer to record useful candidate Prompts and exact user constraint changes; "
                         "never treat a model proposal as user confirmation. New current instructions supersede conflicting earlier user constraints. "
                         "Continue from workingPromptVersionId for replies such as translate to English, shorten, or soften the lighting; "
                         "the user need not select a Prompt or maintain task controls to keep discussing it. Working is not accepted or authorized. "
                         "Record each useful working candidate with set_prompt in the SAME answer. For undo, use supplied Prompt version/source "
                         "locators and restore_working_prompt; read a specified ancestor if the needed version is not present, never invent one. "
+                        "After explicitly incorporating a required user's exact source into that candidate, reconcile_text_source can record "
+                        "its complete original sourceQuote and roundId individually. A candidate is still not accepted by the user; do not "
+                        "reconcile unknown, visual or legacy evidence or assume generation proves every requirement was satisfied. "
                         "Automatically maintain an unambiguous attached image as the discussion object; ask one short natural question only "
                         "when image identity is genuinely unclear. Never instruct users to repair task completeness or internal state. "
                         "Set finish_after_generation=true only when a single image tool call completes the entire user request; otherwise false. "

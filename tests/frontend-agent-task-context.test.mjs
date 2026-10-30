@@ -66,7 +66,7 @@ function harness(t, options = {}) {
   const runState = evaluate(runStateJs, baseDeps, globalMocks);
   const deps = { ...baseDeps, 'react-dom': { createPortal: value => value }, 'lucide-react': new Proxy({}, { get: (_, key) => key }),
     '../../hooks/useModalFocus': { useModalFocus: () => ({ containerRef: {}, handleModalKeyDown() {} }) }, './useAgentConversations': { useAgentConversations: () => ({ rows: [], upsert() {}, refresh() {}, remove() {} }) }, './useAgentScroll': { useAgentScroll: () => () => {} }, './useAgentRunState': runState,
-    '../../api/client': { api: {}, mediaUrl: path => `/media/${path}` }, '../../utils/playground/agentConversationState': conversationState, '../../utils/playground/agentImageReferences': { ...imageReferences, resolveAgentPromptImageReferences: (...args) => { if (insideMemo) scopeReads++; return imageReferences.resolveAgentPromptImageReferences(...args); } }, '../../utils/compatibleRecipe': compatibleRecipe, '../../utils/agentGalleryBridge': bridge, '../../utils/agentInputPreferences': inputPreferences, '../../utils/clipboard': { copyTextToClipboard: async () => true },
+    '../../api/client': { api: {}, mediaUrl: path => `/media/${path}` }, '../../utils/playground/agentConversationState': conversationState, '../../utils/playground/agentImageReferences': { ...imageReferences, resolveAgentPromptImageReferences: (...args) => { if (insideMemo) scopeReads++; return imageReferences.resolveAgentPromptImageReferences(...args); } }, '../../utils/compatibleRecipe': compatibleRecipe, '../../utils/agentGalleryBridge': bridge, '../../utils/agentInputPreferences': inputPreferences, '../../utils/clipboard': { copyTextToClipboard: async () => true }, '../../utils/imageClipboard': { copyFinalImageToClipboard: async () => { throw Error('Unexpected image copy in this harness'); } },
     './AgentMarkdown': { AgentMarkdown: 'markdown' }, './AgentReferencePicker': { AgentReferencePicker: 'picker' }, './AgentImageOptions': { __esModule: true, default: 'image-options' }, '../gallery/SizeDialog': { __esModule: true, default: 'size-dialog' }, './AgentWorkspace.css': {}, './AgentResponseDetails': { AgentResponseDetails: 'details' }, './AgentImageRetryButton': { __esModule: true, default: 'retry' },
   };
   const Component = evaluate(workspaceJs, deps, globalMocks).default;
@@ -105,7 +105,7 @@ test('production full branch choice warns about cost and latency while legacy sn
   h.node('select', '发送上下文范围').onChange({ target: { value: 'branch' } }); await h.flush();
   assert.match(h.text(), /仅下次发送携带完整分支，可能更慢、费用更高/);
   h.node('button', '发送 Agent 消息').onClick(); await h.flush();
-  assert.equal(h.submissions[0].body.contextScope, 'branch'); assert.equal(h.submissions[0].body.taskRevision, null);
+  assert.equal(h.submissions[0].body.contextScope, 'branch'); assert.equal(h.submissions[0].body.taskRevision, 0);
 });
 
 test('explicit advanced Prompt selection, restoration and reset never consume composer data', async t => {

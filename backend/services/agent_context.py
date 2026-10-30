@@ -5,7 +5,7 @@ stored originals, or the branch's reference allowlist. ``None`` means that the
 caller must preserve its existing all-images behavior.
 """
 import re
-from backend.services.agent_editing_task import required_asset_ids
+from backend.services.agent_editing_task import required_asset_ids, execution_task
 
 
 _ROUND_MENTION = re.compile(r"@(?:第)?(\d+)轮图(\d+)")
@@ -43,7 +43,14 @@ def _reference_scope(request, refs):
     if "\u2065" in re.sub(r"\u2065[^\u2064]*\u2064", "", prompt):
         return None
     prompt = re.sub(r"\u2065[^\u2064]*\u2064", "", prompt).replace("\u2063", "").replace("\u2064", "")
-    selected = set(inputs) | set(current.get('taskImageIds', []))
+    # Frozen implicit bindings remain an audit trail, not a mandate to attach
+    # an old subject after a validated same-response task boundary.
+    context = current.get('taskContext')
+    implicit = set(current.get('taskImageIds', []))
+    if context:
+        required = set(required_asset_ids(execution_task(current)))
+        implicit = required if context.get('taskType') == 'image_edit' else implicit & required
+    selected = set(inputs) | set(implicit)
     explicit = False
     invalid = False
 

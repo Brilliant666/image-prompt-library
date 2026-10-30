@@ -20,11 +20,22 @@ def image_call(selection, *, batch=False, prompt='Synthetic edit preserving the 
 
 
 @pytest.mark.parametrize('mode,batch', [('hybrid', False), ('hybrid', True), ('native', True)])
-def test_inline_selection_resolves_subject_and_roles_without_extra_model_step(isolated, monkeypatch, mode, batch):
+@pytest.mark.parametrize('record_candidate', [False, True])
+def test_inline_selection_resolves_subject_and_roles_without_extra_model_step(isolated, monkeypatch, mode, batch, record_candidate):
     with application(isolated, monkeypatch, mode=mode) as (client, calls, replies):
         refs = [upload(client, color) for color in ('red', 'blue')]
-        replies.append(answer('Which picture should be edited?'))
-        first, _ = submit(client, isolated, '帮她修改衣服，保留姿势', refs=refs, images=True, rid='first')
+        first, _ = submit(client, isolated, '帮她修改衣服，保留姿势', refs=refs, images=True, rid='first', run=False)
+        response = answer('Which picture should be edited?')
+        if record_candidate:
+            state = first['taskContext']
+            response['output'].append({'id': 'record-working-prompt', 'call_id': 'record-working-prompt',
+                'type': 'function_call', 'name': 'update_task_context', 'arguments': encoded({
+                    'taskId': state['taskId'], 'taskRevision': state['revision'],
+                    'branchRoundId': first['request']['roundId'], 'operations': [
+                        {'op': 'set_prompt', 'kind': 'candidate', 'text': 'Keep the pose and edit the chosen geometric subject.'}]})})
+        replies.append(response)
+        execution.run_request(isolated, 'first')
+        first = client.get('/api/agent/requests/first').json()
         original = AgentRepository(isolated).request('first')['round']
         assert original['editingTask']['needsTargetSelection'] and not first['jobs']
         replies.append(image_call({'targetRef': 'round-1-reference-2', 'auxiliaries': [
@@ -49,6 +60,13 @@ def test_inline_selection_resolves_subject_and_roles_without_extra_model_step(is
         assert 'referenceSelection' in tool['parameters']['properties']
         assert repository.data_url(task['target']['assetId']) in pixels(sent)
         assert repository.data_url(task['auxiliaries'][0]['assetId']) in pixels(sent)
+        assert {image['source']['uploadId'] for image in original['editingTask']['candidates']} == {
+            ref['uploadId'] for ref in refs}
+        if record_candidate:
+            assert first['taskContext']['workingPromptVersionId']
+            assert first['taskContext']['selectedPromptVersionId'] is None
+            assert repository.request('first')['usage']['responseStepsStarted'] == 1
+        assert result['editingTask']['candidates'] == []
         new_calls = calls[before:]
         assert [path for path, _ in new_calls] == (
             ['/v1/responses', '/v1/responses'] if mode == 'native' else ['/v1/responses', '/v1/images/edits'])
@@ -64,6 +82,29 @@ def test_inline_selection_resolves_subject_and_roles_without_extra_model_step(is
         assert len(calls) == before + 2
         assert len(client.get('/api/agent/requests/second').json()['jobs']) == 1
         assert client.get('/api/items').json()['items'] == []
+
+
+@pytest.mark.parametrize('boundary', ['new_task', 'set_target'])
+def test_task_projection_clears_pending_candidates_after_new_task_or_explicit_target(repo, boundary):
+    from backend.agent_schemas import AgentTaskContextPatch
+    references = [{'kind': 'upload', 'uploadId': store_image(repo, color)} for color in ('red', 'blue')]
+    first = turn(repo, 'first', '帮她修改衣服，保留姿势', references)
+    done(repo, 'first')
+    original = repo.request('first')['round']
+    assert len(original['editingTask']['candidates']) == 2
+    snapshot = repo.snapshot('conversation')
+    operation = ({'op': 'new_task', 'taskType': 'image_edit', 'text': 'A separate unbound image task.'}
+                 if boundary == 'new_task' else {'op': 'set_target', 'ref': references[1]})
+    result = repo.patch_task_context('conversation', AgentTaskContextPatch.model_validate({
+        'expectedRevision': snapshot['revision'], 'branchRoundId': first['round']['id'],
+        'taskRevision': snapshot['taskContext']['revision'], 'operations': [operation]}))
+    assert result['editingTask']['candidates'] == []
+    if boundary == 'new_task':
+        assert result['taskContext']['taskId'] != original['taskContext']['taskId']
+        assert result['editingTask']['target'] is None
+    else:
+        assert result['editingTask']['target']['source'] == references[1]
+    assert repo.request('first')['round'] == original
 
 
 def test_inline_selection_corrects_old_subject_when_a_new_upload_is_the_intended_target(isolated, monkeypatch):

@@ -42,6 +42,13 @@ class GenerationJobConflict(ValueError):
     pass
 
 
+class GenerationImageValidationError(GenerationJobConflict):
+    """Safe content-validation detail shared by Agent and Gallery boundaries."""
+    def __init__(self, code: str, message: str, status: int = 400):
+        super().__init__(message)
+        self.code, self.status = code, status
+
+
 def result_generation_model(job: GenerationJobRecord) -> str | None:
     """Keep the compatible service's reported model separate from the request."""
     if job.provider != "openai_compatible":
@@ -104,17 +111,33 @@ def _verify_image_file(path: Path) -> str:
     return _verify_image_source(path)
 
 
-def _validate_storeable_image_bytes(data: bytes) -> None:
+def _validate_storeable_image_bytes(data: bytes, *, allowed_formats=None) -> tuple[str, int, int]:
     try:
         with Image.open(BytesIO(data)) as image:
+            image_format = image.format
             width, height = image.size
             if width * height > MAX_IMAGE_PIXELS:
-                raise GenerationJobConflict(f"Generation image is too large: {width}x{height}")
+                raise GenerationImageValidationError('image_pixel_limit_exceeded',
+                    f'图片为 {width} × {height}，共 {width * height:,} 像素，当前上限为 {MAX_IMAGE_PIXELS:,} 像素；原文件未修改。', 413)
+            if allowed_formats is not None and image_format not in allowed_formats:
+                raise GenerationImageValidationError('image_format_unsupported',
+                    '此图片格式不受支持，请使用 PNG、JPEG 或 WebP 图片；原文件未修改。', 415)
             image.verify()
+        # Some formats only validate headers in verify(). Decode the bounded
+        # raster before persisting anything, without re-encoding the original.
+        with Image.open(BytesIO(data)) as image:
+            image.load()
+        return image_format, width, height
     except GenerationJobConflict:
         raise
-    except (UnidentifiedImageError, OSError, ValueError) as exc:
-        raise GenerationJobConflict("Generation image is invalid") from exc
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning, MemoryError) as exc:
+        # Pillow can reject before returning a usable Image object. Do not
+        # extract guessed dimensions or private metadata from exception text.
+        raise GenerationImageValidationError('image_safety_limit_exceeded',
+            f'图片触发安全解码限制，当前像素上限为 {MAX_IMAGE_PIXELS:,}；请使用较小的图片。原文件未修改。', 413) from exc
+    except (UnidentifiedImageError, OSError, ValueError, SyntaxError, EOFError) as exc:
+        raise GenerationImageValidationError('image_decode_failed',
+            '图片文件已损坏或无法解码，请重新导出后添加；原文件未修改。') from exc
 
 
 def _ensure_resolved_child(path: Path, parent: Path) -> None:

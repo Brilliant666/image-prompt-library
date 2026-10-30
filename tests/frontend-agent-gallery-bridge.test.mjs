@@ -66,7 +66,7 @@ function harness(t, name, props = {}, options = {}) {
     '../../utils/recipeInputs': references, '../../utils/generationPreferences': preferences,
     '../../utils/profileSettings': profileSettings, '../../utils/promptTemplateVariables': templates,
     '../../utils/galleryDraft': { readGalleryDraft: async () => options.draft, saveGalleryDraft: async () => {} },
-    '../../utils/clipboard': { copyTextToClipboard: async () => true },
+    '../../utils/clipboard': { copyTextToClipboard: async () => true }, '../../utils/imageClipboard': { copyFinalImageToClipboard: async () => { throw Error('Unexpected image copy in this harness'); } },
     '../../utils/galleryCardMeta': { galleryImageDimensions: () => undefined, galleryTaskElapsed: () => undefined },
     '../../utils/playground/virtualGrid': { getIndexesInRect: () => [] },
     '../../utils/playground/useVirtualGrid': { useVirtualGrid: (_, count) => ({ startIndex: 0, endIndex: count, paddingTop: 0, paddingBottom: 0, metricsRef: {} }) },

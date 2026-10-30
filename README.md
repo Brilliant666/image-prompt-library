@@ -62,6 +62,10 @@ History initially loads 48 results and defaults to **All states**. Narrow it to 
 
 Agent keeps conversations, message branches and image references on the local server. Edit or regenerate a message to create a branch while retaining the earlier one. Search saved conversations, reuse generated images as references, and return from an output to its source conversation.
 
+- **Continue naturally in chat.** The current task, working Prompt versions and image roles are maintained behind the conversation; no separate task form is required. Required older images are recovered from their specific sources instead of attaching every historical image merely because an old question is unresolved. Original text, images and branches remain saved.
+- **Generate from a chosen Prompt block.** Use its exact text and the confirmed references with the visible image settings. Hybrid goes straight to the Images queue without another text-model planning request; Native uses its image tool. Image retry reuses the actual execution Prompt and frozen references. Unknown outcomes require checking the existing receipt and are never automatically replayed. See [confirmed Prompts and retry boundaries](docs/AGENT_CONFIRMED_RECIPES.md).
+- **Copy the image or its Prompt explicitly.** Successful image cards offer separate image-copy and generation-Prompt actions. Clipboard conversion does not replace the original file; download it when you need the original bytes and metadata.
+- **Understand failures before trying again.** Details distinguish upload limits, HTTP 413 request-size rejection, provider errors and uncertain outcomes. Available provider codes and a short sanitized explanation are shown without inventing a missing reason. Agent references accept PNG, JPEG and WebP, up to **30 MiB and 16,000,000 pixels per image**; unsupported or undecodable files have separate errors.
 - Choose a compatible API profile and full **text model ID**. Hybrid mode uses Responses for text/tools and the selected Images profile for image jobs; Native mode accepts Responses image-tool results. Provider support must match the selected route.
 - **Continuous image mode is off by default.** Authorize images for one turn, or explicitly enable image mode to allow them on subsequent sends in the current conversation. Each request still freezes its image and model-step limits. Web search requires its own configuration and per-turn authorization.
 - By default, **Enter sends** and **Shift+Enter inserts a new line**. Input-method composition does not submit. Accepted submissions clear text/references while keeping image settings; Gallery and Agent input preferences can be adjusted independently.
@@ -69,6 +73,8 @@ Agent keeps conversations, message branches and image references on the local se
 - Built-in `image-prompt-reverse` and `gpt-image` guidance helps with image analysis, prompt refinement and edits. These are fixed, attributed text sections adapted from pinned sources, loaded when relevant; they do not install or automatically update the original skill repositories, run their scripts or authorize generation. See [Agent skills and licenses](docs/agent-skills/README.md).
 
 Responses stream progress to the browser, with read-only polling as a fallback. Refreshing or reconnecting does not resubmit a paid request. **Stop** prevents new calls; an upstream request already sent may still finish or be billed. See [workspace behavior and compatibility limits](docs/PLAYGROUND.md).
+
+The [offline preview](docs/AGENT_PREVIEW.md) uses synthetic images and a mock provider. It verifies application behavior, not real-model quality, provider latency or Prompt Cache gains. Actual operating-system image copy/paste still needs browser-specific manual acceptance; a mocked clipboard test is not that acceptance.
 
 ## Quick start
 

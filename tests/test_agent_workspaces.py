@@ -327,8 +327,24 @@ def test_regeneration_reuses_frozen_job_reference_and_zero_compression(isolated)
             assert context['revision'] == frozen_round['taskContext']['revision']
             assert context['latestUserAddition'] == {'text': body['prompt'], 'roundId': frozen_round['id']}
             identities.append((context['taskId'], context['revision'], context['branchRoundId']))
-            # Branch identity must differ; every actual user character, Prompt
-            # version, reference binding and frozen pixel remains identical.
+            # Regeneration starts before the replaced answer. Its original
+            # Prompt is bound to the new submission, not to the old answer's
+            # version ID. Validate every field before normalizing identities.
+            original_id = frozen_round['taskContext']['originalPromptVersionId']
+            assert context['promptVersions'] == [{'id': original_id, 'text': body['prompt'],
+                'kind': 'original', 'source': {'kind': 'user', 'roundId': frozen_round['id']},
+                'confirmedBy': 'user'}]
+            assert context['promptHistory'] == [{'id': original_id, 'kind': 'original',
+                'source': {'kind': 'user', 'roundId': frozen_round['id']}}]
+            assert context['workingPromptVersionId'] is None
+            assert frozen_round['taskContext']['selectedPromptVersionId'] is None
+            assert frozen_round['taskContext']['executedPromptVersionId'] is None
+            assert all(item.get('role') == 'user' for item in copied)
+            for version in [*context['promptVersions'], *context['promptHistory']]:
+                version['id'] = '<this-submission-original>'
+                version['source']['roundId'] = '<this-submission>'
+            # Every actual user character, reference binding and frozen pixel
+            # remains identical, with no old assistant content in either POST.
             context.pop('revision')
             context.pop('branchRoundId')
             context['latestUserAddition'].pop('roundId')
@@ -339,6 +355,13 @@ def test_regeneration_reuses_frozen_job_reference_and_zero_compression(isolated)
             assert base64.b64decode(sent_pixels[0].split(',', 1)[1]) == image_bytes()
         assert identities[0] != identities[1]
         assert normalized_inputs[0] == normalized_inputs[1]
+        repo = AgentRepository(isolated)
+        assert repo.request('regenerate')['history'] == []
+        old_round = next(row for row in second['conversation']['rounds'] if row['id'] == first['request']['roundId'])
+        assert old_round['taskContext'] == first['conversation']['rounds'][0]['taskContext']
+        assert len(requests) == 2
+        replay = client.post('/api/agent/conversations/conv/rounds', json=again)
+        assert replay.status_code == 200 and len(requests) == 2
 
 
 def test_stop_preserves_partial_preview_and_never_replays(isolated):

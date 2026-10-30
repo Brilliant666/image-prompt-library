@@ -1,7 +1,8 @@
-"""Small allowlisted diagnostics; provider prose is never a UI contract."""
+"""Bounded diagnostics with explicitly sanitized supplier explanations."""
 from __future__ import annotations
 
 import hashlib
+import html
 import logging
 import math
 import re
@@ -28,7 +29,7 @@ _CODES = frozenset({
     'model_not_found', 'unsupported_model', 'unsupported_endpoint', 'moderation_blocked',
     'content_policy_violation', 'safety_violation', 'rate_limit_exceeded', 'server_error',
     'invalid_api_key', 'authentication_error', 'permission_error', 'image_generation_user_error',
-    'service_error', 'api_error', 'invalid_request_error', 'unrecognized',
+    'service_error', 'api_error', 'invalid_request_error', 'network_configuration', 'unrecognized',
 })
 _CATEGORIES = frozenset({
     'authentication', 'permission_or_group', 'route_or_model', 'rate_limit', 'upstream_error',
@@ -49,19 +50,70 @@ _MESSAGES = {
     'network': '连接超时或中断，结果尚不确定；请先核对原请求，不要重复提交。',
     'reference_missing': '参考图片缺失或已不可用，请重新选择原图片。',
     'authentication': '供应商认证或权限不满足，请检查配置。',
+    'configuration': '本地连接或请求配置未通过校验，请检查配置后再提交。',
+    'request_too_large': '请求内容超过接口或网关允许的大小，请减少本次发送内容后再提交。',
     'unknown': '本次图片请求未完成，原因未明确，请查看诊断信息。',
 }
+_CONFIGURATION_REASONS = {
+    'direct_route_unavailable': '当前无法确认 Windows 直连出口，尚未提交请求。',
+    'direct_dns_failed': '无法解析 API 地址，当前无法确认直连出口，尚未提交请求。',
+    'direct_fake_ip': 'API 地址解析为代理 Fake-IP，当前无法确认直连出口，尚未提交请求。',
+    'direct_invalid_url': 'API 地址无效，当前无法确认直连出口，尚未提交请求。',
+    'direct_route_timeout': '直连出口检查超时，尚未提交请求。',
+}
+
+
+def network_configuration_diagnostics(message):
+    """Map only known local errors; never infer a direct-route failure from prose."""
+    from backend.services.api_direct_route import _NO_ROUTE, _DNS_FAILED, _FAKE_IP, _INVALID_URL
+    reason = {_NO_ROUTE: 'direct_route_unavailable', _DNS_FAILED: 'direct_dns_failed',
+              _FAKE_IP: 'direct_fake_ip', _INVALID_URL: 'direct_invalid_url',
+              'Direct route selection timed out before connecting. Check the network connection mode.': 'direct_route_timeout'}.get(message)
+    return safe_diagnostics({'category': 'local_validation', 'error': {'code': 'network_configuration'},
+                             **({'configuration_reason': reason} if reason else {})})
 
 
 def duration_ms(value):
     return round(float(value), 3) if type(value) in (int, float) and math.isfinite(value) and 0 <= value <= 86_400_000 else None
 
 
-def safe_diagnostics(raw):
+def sanitize_summary(value, secrets=()):
+    """Short plain text only; never persist an error body or echoed inputs.
+
+    The ingress supplies the actual key and sent text. Legacy raw messages are
+    deliberately not promoted when reading old records without those secrets.
+    """
+    if not isinstance(value, str) or len(value) > 8192:
+        return None
+    value = html.unescape(value)
+    for secret in sorted({s for s in secrets if isinstance(s, str) and s}, key=len, reverse=True):
+        value = value.replace(secret, '[redacted]')
+    value = re.sub(r'(?is)<(?:script|style)\b[^>]*>.*?</(?:script|style)>', '[redacted]', value)
+    value = re.sub(r'<[^>]*>', '', value)
+    value = re.sub(r'(?i)data:[^\s]+', '[redacted]', value)
+    value = re.sub(r'(?i)(?:https?|wss?)://[^\s"<>]+', '[redacted]', value)
+    value = re.sub(r'(?i)(?:authorization|cookie)\s*[:=][^\r\n]*', '[redacted]', value)
+    value = re.sub(r'''(?ix)(?:bearer\s+[^\s,;]+|(?:api[_-]?key|authorization|cookie|(?:client[_-]?)?secret|password|(?:access[_-]?|refresh[_-]?|session[_-]?)?token)["']?\s*[:=]\s*["']?[^\s,;"'}]+|sk-[A-Za-z0-9_-]+|eyJ[A-Za-z0-9_.-]+)''', '[redacted]', value)
+    # Quoted/labelled input echoes and embedded JSON are not an explanation.
+    value = re.sub(r'(?i)\b(?:private|confidential)\b[^.;\r\n]*', '[redacted]', value)
+    value = re.sub(r'(?i)(?:\b(?:original |user |input |output )?(?:prompt|payload|request body)\s*[:=]|提示词\s*[:：])[^\r\n]*', '[redacted]', value)
+    value = re.sub(r'\{.*\}', '[redacted]', value, flags=re.S)
+    value = re.sub(r'[A-Za-z0-9+/=_-]{96,}', '[redacted]', value)
+    value = ' '.join(''.join(c for c in value if c.isprintable() or c.isspace()).split()).strip()
+    if not value.replace('[redacted]', '').strip(' ;,.'):
+        return None
+    return (value[:480] + ('…' if len(value) > 480 else '')) if value else None
+
+
+def safe_diagnostics(raw, *, secrets=(), allow_message=False):
     if not isinstance(raw, dict):
         return {}
     category = raw.get('category')
+    if allow_message and category == 'local_validation':
+        category = 'unknown'
     result = {'category': category if isinstance(category, str) and category in _CATEGORIES else 'unknown'}
+    if not allow_message and isinstance(raw.get('configuration_reason'), str) and raw['configuration_reason'] in _CONFIGURATION_REASONS:
+        result['configuration_reason'] = raw['configuration_reason']
     status = raw.get('http_status')
     if type(status) is int and 100 <= status <= 599:
         result['http_status'] = status
@@ -87,16 +139,27 @@ def safe_diagnostics(raw):
         except ValueError:
             pass
     error = raw.get('error')
+    if isinstance(error, str) and allow_message:
+        error = {'message': error}
     if isinstance(error, dict):
         safe = {key: error[key] if isinstance(error.get(key), str) and error[key] in _CODES else 'unrecognized'
                 for key in ('type', 'code') if key in error}
-        if error.get('param') in ('model', 'size', 'quality', 'prompt', 'image', 'background', 'output_format'):
+        if allow_message:
+            safe = {key: 'unrecognized' if value == 'network_configuration' else value for key, value in safe.items()}
+        if error.get('param') in ('model', 'size', 'quality', 'prompt', 'image', 'background', 'output_format',
+                                'output_compression', 'moderation', 'n', 'stream', 'partial_images', 'response_format'):
             safe['param'] = error['param']
         moderation = error.get('moderation_details')
         if isinstance(moderation, dict):
             safe['moderation_details'] = {'moderation_stage': moderation.get('moderation_stage') if moderation.get('moderation_stage') in ('input', 'output') else 'unknown'}
             if isinstance(moderation.get('categories'), list):
                 safe['moderation_details']['categories'] = sorted({v for v in moderation['categories'] if isinstance(v, str) and v in _MODERATION})
+            elif isinstance(moderation.get('categories'), dict):
+                safe['moderation_details']['categories'] = sorted(v for v, flagged in moderation['categories'].items() if v in _MODERATION and flagged is True)
+        # A provider-supplied "summary" is not proof of prior sanitization.
+        summary = sanitize_summary(error.get('message' if allow_message else 'summary'), secrets)
+        if summary:
+            safe['summary'] = summary
         result['error'] = safe
     return result
 
@@ -110,6 +173,11 @@ def classify_failure(raw=None, *, code=None):
     kind = 'unknown'
     if codes & {'reference_missing', 'frozen_reference_invalid', 'reference_unavailable'} or category == 'reference_missing':
         kind = 'reference_missing'
+    elif 'network_configuration' in codes or category == 'local_validation':
+        kind = 'configuration'
+        uncertain = False
+    elif status == 413:
+        kind = 'request_too_large'
     elif codes & {'moderation_blocked', 'content_policy_violation', 'safety_violation'}:
         kind = 'moderation'
     elif codes & {'insufficient_quota', 'insufficient_balance', 'billing_hard_limit_reached'}:
@@ -124,4 +192,24 @@ def classify_failure(raw=None, *, code=None):
         kind = 'network'
     elif category == 'upstream_error' or (status is not None and status >= 500):
         kind = 'service'
-    return {'kind': kind, 'message': _MESSAGES[kind], 'outcomeUnknown': uncertain}
+    message = (_CONFIGURATION_REASONS.get(data.get('configuration_reason'), '本地连接配置未通过校验，尚未提交请求。')
+               if 'network_configuration' in codes else _MESSAGES[kind])
+    structured = ['HTTP 413：请求内容超过接口或网关允许的大小。'] if kind == 'request_too_large' else []
+    for key, label in (('code', '代码'), ('param', '参数')):
+        if error.get(key) and error[key] != 'unrecognized':
+            structured.append(f'{label}：{error[key]}')
+    moderation = error.get('moderation_details', {})
+    if moderation.get('moderation_stage') in ('input', 'output'):
+        structured.append('审核阶段：' + moderation['moderation_stage'])
+    if moderation.get('categories'):
+        structured.append('审核类别：' + ', '.join(moderation['categories']))
+    summary = error.get('summary')
+    reason_provided = bool(kind == 'request_too_large' or summary or moderation.get('categories') or moderation.get('moderation_stage') in ('input', 'output') or error.get('param'))
+    if summary:
+        structured.append('供应商说明：' + summary)
+    elif kind == 'configuration':
+        structured.append(message)
+    elif not reason_provided:
+        structured.append('供应商未提供更具体原因。')
+    return {'kind': kind, 'message': message, 'outcomeUnknown': uncertain,
+            'detail': '；'.join(structured), 'reasonProvided': reason_provided}

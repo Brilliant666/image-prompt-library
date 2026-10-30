@@ -194,7 +194,7 @@ function harness(t, options = {}) {
     useMemo(fn, deps) { const i = cursor++, old = slots[i]; if (!old || deps.some((v, n) => !Object.is(v, old.deps[n]))) slots[i] = { value: fn(), deps }; return slots[i].value; },
     useCallback(fn, deps) { return hooks.useMemo(() => fn, deps); },
   };
-  const jsx = (type, props) => ({ type, props });
+  const jsx = (type, props) => typeof type === 'function' && ['ImageResultProgress', 'RequestFailureCard'].includes(type.name) ? type(props) : ({ type, props });
   const globalMocks = {
     performance: { now: () => options.now?.() ?? 100 },
     fetch: (url, init) => { referenceReads.push([url, init]); return options.fetch?.(url, init) ?? Promise.resolve(new Response(new Blob(['synthetic-image'], { type: 'image/png' }))); },
@@ -255,13 +255,14 @@ function harness(t, options = {}) {
     './AgentImageOptions': { __esModule: true, default: 'image-options' }, '../gallery/SizeDialog': { __esModule: true, default: 'size-dialog' },
     '../../utils/localPreferences': { readLocalPreferences: () => ({ persistInputOnRestart: true }) },
     '../../utils/agentInputPreferences': inputPreferences,
-    '../../utils/clipboard': {}, './AgentReferencePicker': { AgentReferencePicker: 'reference-picker' },
+    '../../utils/clipboard': {}, '../../utils/imageClipboard': { copyFinalImageToClipboard: async () => { throw Error('Unexpected image copy in this harness'); } }, './AgentReferencePicker': { AgentReferencePicker: 'reference-picker' },
   };
   const Component = instantiate(workspaceJs, deps, globalMocks).default;
   let active = true;
   let props = { ...options.props };
   const render = () => {
     dirty = false; cursor = 0; tree = Component({ active, onJobsChanged: () => jobsChanged.push(true), onOpenSettings() { settingsOpens.push({ rootInert: root.inert, portalPresent: nodes(tree).some(node => node.props?.id === 'agent-chat-panel') }); }, onProfileChange: value => profileChanges.push(value), onGalleryImageSettingsChange(value) { sharedChanges.push(structuredClone(value)); props = { ...props, galleryImageSettings: structuredClone(value) }; dirty = true; }, ...props });
+    options.onRender?.(tree);
     if (options.scrollNodes) {
       const region = nodes(tree).find(node => node.props?.['aria-label'] === '对话消息');
       const content = nodes(tree).find(node => node.props?.className === 'agent-content-column' && node.props.ref);
@@ -278,10 +279,71 @@ function harness(t, options = {}) {
   render(); t.after(unmount);
   return { stops, resumes, jobsChanged, calls, find, open, close, root, profileChanges, panelFocusCalls, settingsOpens, sharedChanges, flush, unmount, submissions, creations, requestReads, watchers, snapshot, storage, AgentApiError, inputPreferences, jobReads, conversationReads, conversationUpdates, imageDecodes, taskUpdates, uploads, referenceReads, scrollObservers, window: globalMocks.window,
     updateProps(next) { props = { ...props, ...next }; render(); }, queueJobRead() { const reply = deferred(); jobReplies.push(reply); return reply; },
-    resultCard() { const card = nodes(tree).find(node => typeof node.type === 'function' && node.type.name === 'ResultCard'); assert.ok(card, 'actual result card should be rendered'); const savedCursor = cursor; cursor = slots.length; const content = card.type(card.props); cursor = savedCursor; return nodes(content); },
+    resultCard(index = 0) { const card = nodes(tree).filter(node => typeof node.type === 'function' && node.type.name === 'ResultCard')[index]; assert.ok(card, 'actual result card should be rendered'); const savedCursor = cursor; cursor = slots.length; const content = card.type(card.props); cursor = savedCursor; return nodes(content); },
     setConfig(value) { config = { ...config, ...value }; }, dispatch(name) { globalMocks.window.dispatchEvent({ type: name }); }, show() { active = true; render(); }, get late() { return late; }, get pendingTimers() { return timers.size; }, get configReads() { return configReads; }, hide() { active = false; render(); } };
 }
 const row = id => ({ id, title: `Title ${id}`, updatedAt: 10, roundCount: 2 });
+
+test('editing round eight validates that source branch instead of parent seven or current seventeen', async t => {
+  const data = displaySnapshot('completed');
+  data.revision=692;
+  const rounds=Array.from({length:17},(_,i)=>({...data.conversation.rounds[0],id:`r${i+1}`,index:i+1,
+    parentRoundId:i?`r${i}`:null,requestId:`req${i+1}`,prompt:`Question ${i+1}`,
+    taskContext:{taskId:'task',revision:i===6?19:i===7?22:47,branchRoundId:`r${i+1}`,target:null,auxiliaries:[],constraints:[],promptVersions:[]},
+    branchTaskRevision:i===7?23:(i===6?19:47)}));
+  data.conversation={...data.conversation,activeRoundId:'r17',rounds,messages:[]};
+  data.taskContext=rounds[16].taskContext;data.request={...data.request,roundId:'r17'};
+  const h=harness(t,{snapshot:data});await h.flush();
+  h.find('button',p=>p['aria-label']==='编辑重发')[7].onClick();await h.flush();
+  h.requestReads[0].resolve({...data,images:[],request:{...data.request,roundId:'r8'}});await h.flush();
+  h.find('textarea')[0].onChange({target:{value:'Revised eighth question',selectionStart:22}});await h.flush();
+  h.find('button',p=>p['aria-label']==='发送 Agent 消息')[0].onClick();await h.flush();
+  assert.equal(h.submissions.length,1);
+  assert.equal(h.submissions[0].payload.parentRoundId,'r7');
+  assert.equal(h.submissions[0].payload.derivedFromRoundId,'r8');
+  assert.equal(h.submissions[0].payload.taskRevision,23);
+  assert.equal(h.submissions[0].payload.expectedRevision,692);
+});
+
+test('an edited draft retained after another tab selects a sibling resolves mentions from its original ancestors', async t => {
+  const data=displaySnapshot('completed');const first=data.conversation.rounds[0];
+  const rounds=[{...first,id:'root',index:1,parentRoundId:null},
+    {...first,id:'a2',index:2,parentRoundId:'root',outputTaskIds:['a-image']},
+    {...first,id:'a3',index:3,parentRoundId:'a2',branchTaskRevision:31},
+    {...first,id:'b2',index:2,parentRoundId:'root',outputTaskIds:['b-image']},
+    {...first,id:'b3',index:3,parentRoundId:'b2',branchTaskRevision:47}];
+  data.conversation={...data.conversation,rounds,activeRoundId:'b3',messages:[]};
+  data.request={...data.request,roundId:'b3'};
+  data.jobs=[{id:'a-image',status:'succeeded',result_path:'/a.png'},{id:'b-image',status:'succeeded',result_path:'/b.png'}];
+  const h=harness(t,{snapshot:data,draft:{text:'Edit @第2轮图1',editId:'a3',origin:'edit',refs:[]}});await h.flush();
+  h.find('button',p=>p['aria-label']==='发送 Agent 消息')[0].onClick();await h.flush();
+  assert.equal(h.submissions.length,1);
+  assert.equal(h.submissions[0].payload.parentRoundId,'a2');
+  assert.equal(h.submissions[0].payload.taskRevision,31);
+  assert.deepEqual(h.submissions[0].payload.refs,[{kind:'job',jobId:'a-image'}]);
+});
+
+test('a partial upload failure keeps the successful new attachment, prior attachments and exact draft', async t => {
+  const first={name:'valid-but-unlabelled.bin',type:'application/octet-stream',size:100};
+  const second={name:'too-many-pixels.jpg',type:'image/jpeg',size:200};
+  const h=harness(t,{draft:{text:'  Preserve my draft\n'},upload:async file=>{
+    if(file===second)throw Error('图片分辨率超过 1600 万像素；原文件未修改。');
+    return {uploadId:'new-success',image:{url:'http://isolated.test/new.png'}};
+  }});await h.flush();
+  h.find('input',p=>p.type==='file')[0].onChange({target:{files:[first,second],value:'selected'}});await h.flush();
+  assert.equal(h.uploads.length,2,'content, rather than a client MIME guess, is validated by the server');
+  assert.equal(h.find('textarea')[0].value,'  Preserve my draft\n');
+  assert.deepEqual(savedDraft(h).refs.map(r=>r.reference.uploadId),['u1','new-success']);
+  assert.match(JSON.stringify(h.find('p',p=>p.className?.includes('agent-error'))),/1600/);
+  assert.equal(h.submissions.length,0);
+});
+
+test('Agent byte-size preflight states MiB and leaves all existing composer content untouched', async t => {
+  const h=harness(t);await h.flush();const before=structuredClone(savedDraft(h));
+  h.find('input',p=>p.type==='file')[0].onChange({target:{files:[{name:'large.png',size:30*1024*1024+1,type:'image/png'}],value:'selected'}});await h.flush();
+  assert.equal(h.uploads.length,0);assert.deepEqual(savedDraft(h),before);
+  assert.match(JSON.stringify(h.find('p',p=>p.className?.includes('agent-error'))),/30 MiB/);
+});
 const result = (ids, nextCursor = null) => ({ conversations: ids.map(row), nextCursor });
 
 test('actual workspace bottom button follows delayed result geometry without sending or changing draft and references', async t => {
@@ -478,6 +540,53 @@ function keyEvent(extra = {}) {
   const event = { key: 'Enter', ctrlKey: false, metaKey: false, shiftKey: false, nativeEvent: { isComposing: false, keyCode: 13 }, prevented: false, preventDefault() { this.prevented = true; }, ...extra };
   return event;
 }
+
+test('normal Enter journals before POST without flashing previous-submission recovery in any render', async t => {
+  const recoveryRenders = [];
+  const h = harness(t, { onRender: tree => recoveryRenders.push(nodes(tree).some(node => node.props?.className === 'agent-uncertain')) }); await h.flush();
+  const enter = keyEvent(); h.find('textarea')[0].onKeyDown(enter); await h.flush();
+  assert.equal(enter.prevented, true); assert.equal(h.submissions.length, 1);
+  const entry = JSON.parse(h.storage.get('ipl.agent.pending-submissions.v1'))[0];
+  assert.equal(entry.payload.requestId, h.submissions[0].payload.requestId, 'write the immutable safety journal before waiting for the receipt');
+  assert.equal(h.find('textarea')[0].disabled, true);
+  assert.equal(h.find('button', p => p['aria-label'] === '检查原请求状态').length, 0);
+  assert.equal(recoveryRenders.includes(true), false, 'no transient render may describe this live POST as an earlier uncertain send');
+  h.submissions[0].resolve(h.snapshot); await h.flush();
+  assert.equal(recoveryRenders.includes(true), false);
+  assert.deepEqual(JSON.parse(h.storage.get('ipl.agent.pending-submissions.v1')), []);
+});
+
+test('a different uncertain request remains visible during a live POST and recovery targets its own request ID', async t => {
+  const h = harness(t); await h.flush();
+  h.find('textarea')[0].onKeyDown(keyEvent()); await h.flush();
+  const local = JSON.parse(h.storage.get('ipl.agent.pending-submissions.v1'))[0];
+  const other = { conversationId: 'current', preserveDraft: true, payload: { ...local.payload, requestId: 'other-tab-request', prompt: 'Other frozen request' } };
+  h.storage.set('ipl.agent.pending-submissions.v1', JSON.stringify([local, other]));
+  h.window.dispatchEvent({ type: 'storage', key: 'ipl.agent.pending-submissions.v1' }); await h.flush();
+  assert.equal(h.find('button', p => p['aria-label'] === '检查原请求状态').length, 1, 'busy must not hide another pending identity');
+  assert.equal(h.find('button', p => p['aria-label'] === '检查原请求状态')[0].disabled, true);
+  h.submissions[0].resolve(h.snapshot); await h.flush();
+  assert.deepEqual(JSON.parse(h.storage.get('ipl.agent.pending-submissions.v1')), [other]);
+  h.find('button', p => p['aria-label'] === '检查原请求状态')[0].onClick(); await h.flush();
+  assert.equal(h.requestReads[0].id, 'other-tab-request'); assert.equal(h.submissions.length, 1);
+  assert.equal(h.find('button', p => p['aria-label'] === '检查原请求状态').length, 1, 'a recovery GET keeps the real uncertainty visible');
+});
+
+test('a lost Enter receipt reveals recovery and a refreshed component retains same-ID restore', async t => {
+  const first = harness(t); await first.flush(); first.find('textarea')[0].onKeyDown(keyEvent()); await first.flush();
+  const original = JSON.parse(first.storage.get('ipl.agent.pending-submissions.v1'))[0];
+  first.submissions[0].reject(Error('connection lost')); await first.flush();
+  assert.equal(first.find('button', p => p['aria-label'] === '检查原请求状态').length, 1);
+  assert.equal(first.find('textarea')[0].disabled, true); first.unmount();
+  const restored = harness(t, { storage: first.storage }); await restored.flush();
+  assert.equal(restored.submissions.length, 0); assert.equal(restored.requestReads.length, 0);
+  restored.find('button', p => p['aria-label'] === '用同一请求恢复')[0].onClick(); await restored.flush();
+  assert.equal(restored.requestReads[0].id, original.payload.requestId);
+  restored.requestReads[0].reject(new restored.AgentApiError(404, 'Not found')); await restored.flush();
+  assert.equal(restored.submissions.length, 1); assert.deepEqual(restored.submissions[0].payload, original.payload);
+  restored.submissions[0].resolve(restored.snapshot); await restored.flush();
+  assert.deepEqual(JSON.parse(restored.storage.get('ipl.agent.pending-submissions.v1')), []);
+});
 
 test('Agent defaults are independent of Gallery and the actual composer sends on Enter but protects Shift and IME', async t => {
   const h = harness(t); await h.flush();
@@ -858,6 +967,42 @@ function displaySnapshot(state, extra = {}) {
     conversation: { id: 'current', title: 'History', activeRoundId: 'r1', rounds: [{ id: 'r1', parentRoundId: null, index: 1, prompt: 'A short message', status: state === 'completed' ? 'done' : 'error', inputImageIds: [], outputTaskIds: [], requestId: 'request-current', assistantMessageId: 'a1', modelInfo: { requestedModel: 'historical-model', providerName: 'Historical provider', returnedModels: ['returned-alias'] } }], messages: [{ id: 'a1', role: 'assistant', roundId: 'r1', content: 'Answer text' }] },
   };
 }
+const imageProgress = h => h.find('p', p => p.className?.startsWith('agent-image-progress '));
+
+test('request rejected before an image job exists uses the real spacious failure card and keeps drafts', async t => {
+  for (const [kind, label, detail] of [
+    ['moderation', '供应商审核拒绝', '代码：moderation_blocked；供应商未提供更具体原因。'],
+    ['request_too_large', '请求内容过大', 'HTTP 413：请求内容超过接口或网关允许的大小。'],
+  ]) {
+    const data = displaySnapshot('failed'), round = data.conversation.rounds[0];
+    data.conversation.messages = [];
+    round.failure = { kind, detail, outcomeUnknown: false }; round.error = 'RAW_PRIVATE_ERROR';
+    const h = harness(t, { snapshot: data }); await h.flush(); const before = savedDraft(h);
+    const cards = h.find('article', p => p['aria-label'] === '请求失败');
+    assert.equal(cards.length, 1); assert.match(cards[0].className, /agent-result-card-terminal/);
+    assert.equal(h.find('strong', p => p.children === label).length, 1);
+    assert.equal(h.find('p', p => p.children === detail).length, 1);
+    assert.equal(h.find('p', p => p.className === 'agent-round-outcome').length, 0);
+    assert.equal(imageProgress(h).length, 0);
+    assert.equal(h.find('button', p => p['aria-label'] === '重试回答').length, 1);
+    assert.equal(h.find('button', p => p['aria-label'] === '复制生图提示词').length, 0, 'a text planning rejection has no executed image Prompt');
+    await h.open('查看失败详情'); assert.equal(h.find('response-details')[0].round.failure.kind, kind);
+    await h.close(); assert.deepEqual(savedDraft(h), before);
+    assert.equal(h.submissions.length, 0); assert.equal(h.taskUpdates.length, 0);
+    h.unmount();
+  }
+});
+
+test('uncertain or stopped requests keep recovery warnings instead of a definite rejection card', async t => {
+  for (const extra of [{ state: 'unknown' }, { upstreamMayContinue: true }, { stopRequested: true }, { state: 'stopped' }]) {
+    const data = displaySnapshot('failed', extra);
+    data.conversation.rounds[0].failure = { kind: 'moderation', outcomeUnknown: false };
+    const h = harness(t, { snapshot: data }); await h.flush();
+    assert.equal(h.find('article', p => p['aria-label'] === '请求失败').length, 0);
+    assert.equal(h.find('textarea')[0].value, 'Keep my draft'); assert.equal(h.submissions.length, 0);
+    h.unmount();
+  }
+});
 
 test('completed response has compact actions and moves historic provenance and request counts into details', async t => {
   const h = harness(t, { snapshot: displaySnapshot('completed') }); await h.flush();
@@ -893,9 +1038,10 @@ test('actual streamed tool output uses readable captions and renders later struc
   }], messages: [{ ...base.conversation.messages[0], content: 'Preparing image.\n\nImage complete, more' }] } };
   h.watchers[0].next(updated); await h.flush();
   assert.deepEqual(h.find('markdown').map(p => p.text), ['Preparing image.', 'Image complete, more']);
-  const tool = JSON.stringify(h.find('div', p => p.className === 'agent-tool-status'));
-  assert.match(tool, /批量生成图片/);
-  assert.doesNotMatch(tool, /generate_image_batch/);
+  assert.equal(h.find('div', p => p.className === 'agent-tool-status').length, 0);
+  assert.equal(imageProgress(h).length, 1);
+  assert.match(JSON.stringify(imageProgress(h)), /正在准备图片请求/);
+  assert.doesNotMatch(JSON.stringify(imageProgress(h)), /generate_image_batch|批量生成/);
   assert.equal(h.find('textarea')[0].value, 'Keep my draft');
 });
 
@@ -910,9 +1056,10 @@ test('historical image tool uses its own failed job rather than completed model 
   data.jobs = [{ id: 'old-failed', status: 'failed', result_path: null, error: 'legacy upstream error', metadata: { agent: { agentToolCallId: 'same-call' } } }];
   const h = harness(t, { snapshot: data }); await h.flush();
   const caption = JSON.stringify(h.find('div', p => p.className === 'agent-tool-status'));
-  assert.match(caption, /生成图片/);
+  assert.equal(h.find('div', p => p.className === 'agent-tool-status').length, 0);
   assert.equal(h.find('small', p => p.children === '本次未生成图片').length, 0, 'one image tool does not repeat the round outcome');
-  assert.match(JSON.stringify(h.find('p', p => p.className === 'agent-round-outcome')), /本次未生成图片/);
+  assert.equal(imageProgress(h).length, 0, 'the failed result card already explains the outcome');
+  assert.match(JSON.stringify(h.resultCard()), /图片生成失败|agent-result-message/);
   assert.doesNotMatch(caption, /已完成/);
   assert.equal(h.find('textarea')[0].value, 'Keep my draft');
   assert.equal(h.submissions.length, 0);
@@ -948,7 +1095,9 @@ test('failed images receive current shared settings and retain distinct retry re
   retry.onReceipt({ retryId: 'retry', sourceJobId: 'failed', job: updated.jobs[1] }); await h.flush();
   assert.equal(h.conversationReads.length, readsBeforeReceipt + 1, 'an accepted image retry refreshes once');
   assert.equal(h.find('section', p => p['aria-label'] === '本轮图片的重试结果').length, 1);
-  assert.match(JSON.stringify(h.find('p', p => p.className === 'agent-round-outcome')), /本次未生成图片/);
+  assert.equal(imageProgress(h).length, 0, 'the original failed card explains its error and the successful retry needs no outcome bar');
+  assert.match(JSON.stringify(h.resultCard(0)), /图片生成失败|agent-result-message/);
+  assert.ok(h.resultCard(1).some(node => node.type === 'img' && node.props.src === '/retry.png'), 'the distinct successful retry retains its actual result');
   assert.deepEqual(savedDraft(h), before); assert.equal(h.submissions.length, 0);
 });
 
@@ -1059,7 +1208,8 @@ test('actual result cards classify safe image failures once without exposing old
     const card = visibleText(h.resultCard()[0]);
     assert.match(card, new RegExp(label)); assert.doesNotMatch(card, /RAW_SECRET_JSON|文件尺寸未知/);
     assert.equal(h.find('div', p => p.className === 'agent-request-attention').length, 0);
-    assert.match(JSON.stringify(h.find('p', p => p.className === 'agent-round-outcome')), /本次未生成图片/);
+    assert.equal(imageProgress(h).length, 0, 'a classified terminal card must not be repeated above the card');
+    assert.ok(h.resultCard().some(node => node.props?.['aria-label'] === '查看生成详情'));
     assert.equal(h.submissions.length, 0); h.unmount();
   }
 });
@@ -1069,18 +1219,18 @@ test('actual workspace reports mixed results and unknown receipts without losing
   round.outputTaskIds = ['ok', 'fail']; round.responseOutput = [{ type: 'function_call', call_id: 'batch', name: 'generate_image_batch', status: 'completed' }];
   data.jobs = [{ id: 'ok', status: 'accepted', result_path: '/ok.png', metadata: { agent: { agentToolCallId: 'batch' } } }, { id: 'fail', status: 'failed', metadata: { agent: { agentToolCallId: 'batch' } } }];
   const h = harness(t, { snapshot: data }); await h.flush();
-  assert.match(JSON.stringify(h.find('p', p => p.className === 'agent-round-outcome')), /图片部分成功，已保留 1 张结果/);
+  assert.equal(imageProgress(h).length, 1); assert.match(JSON.stringify(imageProgress(h)), /部分图片生成成功.*已完成 1 \/ 2 张.*失败 1 张/);
   assert.equal(h.find('small', p => p.children === '图片部分成功').length, 0);
   h.unmount();
   data.jobs.pop();
   const unknown = harness(t, { snapshot: data }); await unknown.flush();
-  assert.match(JSON.stringify(unknown.find('p', p => p.className === 'agent-round-outcome')), /结果未知/);
+  assert.equal(imageProgress(unknown).length, 1); assert.match(JSON.stringify(imageProgress(unknown)), /结果未知/);
   assert.equal(unknown.find('small', p => p.children === '结果未知').length, 0);
   assert.equal(unknown.find('textarea')[0].value, 'Keep my draft'); assert.equal(unknown.submissions.length, 0);
   unknown.unmount();
   data.jobs.push({ id: 'fail', status: 'unknown', metadata: { agent: { agentToolCallId: 'batch' } } });
   const uncertainJob = harness(t, { snapshot: data }); await uncertainJob.flush();
-  assert.match(JSON.stringify(uncertainJob.find('p', p => p.className === 'agent-round-outcome')), /结果未知/);
+  assert.equal(imageProgress(uncertainJob).length, 1); assert.match(JSON.stringify(imageProgress(uncertainJob)), /结果未知/);
   assert.equal(uncertainJob.submissions.length, 0);
 });
 
@@ -1099,16 +1249,51 @@ test('production progress snapshots expose measured phases without fabricating a
   assert.equal(h.submissions.length, 0);
 });
 
-test('different image tools retain individual outcomes while one round reports the combined partial result', async t => {
+test('different image calls retain individual result cards while one result area reports the combined partial outcome', async t => {
   const data = displaySnapshot('completed'), round = data.conversation.rounds[0];
   round.outputTaskIds = ['success', 'failure'];
   round.responseOutput = ['first', 'second'].map(call_id => ({ type: 'function_call', name: 'generate_image', call_id, status: 'completed' }));
   data.jobs = [{ id: 'success', status: 'succeeded', result_path: '/success.png', metadata: { agent: { agentToolCallId: 'first' } } }, { id: 'failure', status: 'failed', metadata: { agent: { agentToolCallId: 'second' } } }];
   const h = harness(t, { snapshot: data }); await h.flush();
-  assert.equal(h.find('small', p => p.children === '图片全部成功').length, 1);
-  assert.equal(h.find('small', p => p.children === '本次未生成图片').length, 1);
-  assert.match(JSON.stringify(h.find('p', p => p.className === 'agent-round-outcome')), /图片部分成功，已保留 1 张结果/);
+  assert.equal(h.find('div', p => p.className === 'agent-tool-status').length, 0);
+  assert.match(JSON.stringify(h.resultCard(0)), /已生成/);
+  assert.match(JSON.stringify(h.resultCard(1)), /图片请求未完成/);
+  assert.equal(imageProgress(h).length, 1);
+  assert.match(JSON.stringify(imageProgress(h)), /部分图片生成成功.*已完成 1 \/ 2 张.*失败 1 张/);
   assert.equal(h.submissions.length, 0);
+});
+
+test('actual result area counts running jobs once and removes successful image tool bars without hiding non-image tools', async t => {
+  const data = displaySnapshot('waiting_for_jobs'), round = data.conversation.rounds[0]; round.status = 'running';
+  round.outputTaskIds = ['ok', 'pending'];
+  round.responseOutput = [{ type: 'function_call', call_id: 'skill', name: 'read_agent_skill', status: 'completed' },
+    { type: 'function_call_output', call_id: 'skill', output: '{}' },
+    { type: 'function_call', call_id: 'batch', name: 'generate_image_batch', status: 'completed' }];
+  data.jobs = [{ id: 'ok', status: 'succeeded', result_path: '/ok.png', metadata: { agent: { agentBatchCallId: 'batch' } } }, { id: 'pending', status: 'running', metadata: { agent: { agentBatchCallId: 'batch' } } }];
+  data.request.authorization.maxImageJobs = 10;
+  const h = harness(t, { snapshot: data }); await h.flush(); const draft = savedDraft(h);
+  assert.equal(imageProgress(h).length, 1); assert.match(JSON.stringify(imageProgress(h)), /正在生成 2 张 · 已完成 1 张/);
+  assert.doesNotMatch(JSON.stringify(imageProgress(h)), /10|%|批量生成/);
+  assert.equal(h.find('p', p => p.className === 'agent-round-outcome').length, 0);
+  assert.equal(h.find('div', p => p.className === 'agent-tool-status').length, 1);
+  assert.match(JSON.stringify(h.find('div', p => p.className === 'agent-tool-status')), /读取创作技能/);
+  const complete = { ...structuredClone(h.snapshot), ...structuredClone(data) }; complete.revision = 20; complete.request.state = 'completed'; complete.conversation.rounds[0].status = 'done'; complete.jobs[1].status = 'succeeded'; complete.jobs[1].result_path = '/second.png';
+  h.watchers[0].next(complete); await h.flush();
+  assert.equal(imageProgress(h).length, 0); assert.equal(h.find('p', p => p.className === 'agent-round-outcome').length, 0);
+  assert.equal(h.find('div', p => p.className === 'agent-tool-status').length, 1);
+  assert.equal(h.resultCard(0).some(node => node.props?.['aria-label'] === '复制图片'), true);
+  assert.equal(h.resultCard(1).some(node => node.props?.['aria-label'] === '复制图片'), true);
+  assert.deepEqual(savedDraft(h), draft); assert.equal(h.submissions.length, 0);
+});
+
+test('stopped image work retains upstream uncertainty in its only image status and never claims completion', async t => {
+  const data = displaySnapshot('stopped', { stopRequested: true, upstreamMayContinue: true }), round = data.conversation.rounds[0];
+  round.outputTaskIds = ['pending']; round.responseOutput = [{ type: 'image_generation_call', id: 'native', status: 'completed' }];
+  data.jobs = [{ id: 'pending', status: 'running', metadata: { agent: { agentToolCallId: 'native' } } }];
+  const h = harness(t, { snapshot: data }); await h.flush();
+  assert.equal(imageProgress(h).length, 1); assert.match(JSON.stringify(imageProgress(h)), /已停止后续调用.*可能仍在继续.*检查原请求状态/);
+  assert.doesNotMatch(JSON.stringify(imageProgress(h)), /图片全部成功|已完成|批量生成/);
+  assert.equal(h.find('div', p => p.className === 'agent-tool-status').length, 0); assert.equal(h.submissions.length, 0);
 });
 
 test('browser terminal observation uses the original send boundary and repeated snapshots cannot extend it; refresh is unknown', async t => {

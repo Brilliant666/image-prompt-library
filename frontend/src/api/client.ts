@@ -13,6 +13,8 @@ async function responseError(response: Response) {
   try {
     const payload = JSON.parse(body) as { detail?: unknown };
     if (typeof payload.detail === 'string' && payload.detail.trim()) return payload.detail;
+    if (payload.detail && typeof payload.detail === 'object' && 'message' in payload.detail
+      && typeof payload.detail.message === 'string' && payload.detail.message.trim()) return payload.detail.message;
   } catch {
     // Keep plain-text provider and server errors unchanged.
   }

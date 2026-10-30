@@ -6,6 +6,7 @@ MIT (2026), pinned 1e9d5af60aadd9117a835cc2da43908b8e3370dd.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import re
 import time
@@ -32,7 +33,7 @@ from backend.services.agent_context_pipeline import (
 )
 from backend.services import agent_execution_timing as timing
 from backend.services import agent_editing_task as editing
-from backend.services.agent_diagnostics import safe_diagnostics
+from backend.services.agent_diagnostics import safe_diagnostics, network_configuration_diagnostics
 from backend.services.api_network import ApiNetworkError, create_api_client
 from backend.services.agent_image_inputs import encode_verified_image
 
@@ -43,7 +44,7 @@ _clients = {}
 _closing = set()
 
 
-def safe_http_failure(response):
+def safe_http_failure(response, *, secrets=()):
     """Inspect a bounded error body, persist only recognized diagnostic fields."""
     chunks, size = [], 0
     try:
@@ -61,12 +62,12 @@ def safe_http_failure(response):
     except (ValueError, UnicodeError):
         body = {}
     return safe_diagnostics({'http_status': response.status_code,
-                             'error': body.get('error') if isinstance(body, dict) else None})
+                             'error': body.get('error') if isinstance(body, dict) else None}, secrets=secrets, allow_message=True)
 
 
 def exception_diagnostics(exc):
     if isinstance(exc, ApiNetworkError):
-        return safe_diagnostics({'category': 'local_validation'})
+        return network_configuration_diagnostics(exc.message)
     if isinstance(exc, AgentError):
         return exc.diagnostics or safe_diagnostics({'category': 'incomplete_stream' if exc.code == 'upstream_outcome_unknown' else
                                                    'reference_missing' if exc.code in {'reference_missing', 'frozen_reference_invalid'} else 'unknown'})
@@ -108,7 +109,11 @@ def image_reference_ids(task, prompt, refs, *, reference_ids=None, native_contex
     if task and native_context is None:
         required_refs = []
         for aid in editing.required_asset_ids(task):
-            alias = next((ref for ref, value in reversed(list(refs.items())) if value == aid), None)
+            # Prefer the exact alias already used by this tool. Adding another
+            # alias for its required target would upload the same asset twice.
+            alias = next((ref for ref in reference_ids if refs.get(ref) == aid), None)
+            if alias is None:
+                alias = next((ref for ref, value in reversed(list(refs.items())) if value == aid), None)
             if alias is None:
                 raise AgentError('reference_missing', '当前编辑对象或辅助参考不在本轮冻结图片中。', 400)
             required_refs.append(alias)
@@ -215,6 +220,13 @@ def native_image(repo, request_id, step, item, refs, secrets=(), *, native_conte
         with connect(repo.library) as conn:
             conn.execute("UPDATE generation_jobs SET prompt_text=?,metadata=json_set(metadata,'$.response.revised_prompt',?) "
                          "WHERE id=? AND provider='agent_native' AND status IN ('queued','running')", (revised, revised, job.id))
+    if terminal and item.get('status') == 'completed':
+        task = editing.execution_task(repo.request(request_id)['round'])
+        attached = {entry['assetId'] for entry in native_context['references']}
+        if native_context['complete'] and task and attached == set(editing.required_asset_ids(task)):
+            repo.confirm_request_image_roles(request_id, refs)
+        if isinstance(revised, str) and revised.strip():
+            repo.record_task_execution(request_id, revised)
     result = item.get("result")
     if isinstance(result, dict):
         result = next((result[k] for k in ("b64_json", "base64", "image", "data") if isinstance(result.get(k), str)), None)
@@ -222,7 +234,9 @@ def native_image(repo, request_id, step, item, refs, secrets=(), *, native_conte
         if terminal and item.get('status') == 'failed':
             record_native_failed_terminal(repo, job.id)
         repo.jobs.record_execution(job.id, phase='failed')
-        return repo.jobs.mark_failed(job.id, "原生图像工具未能生成图片。", diagnostics={'error': item.get('error')})
+        return repo.jobs.mark_failed(job.id, "原生图像工具未能生成图片。",
+            diagnostics=safe_diagnostics({'error': item.get('error')},
+                secrets=(*secrets, request['round']['prompt'], item.get('revised_prompt')), allow_message=True))
     if item.get("status") != "completed":
         if job.status == 'queued':
             repo.record_execution(request_id, phase='generating_images')
@@ -282,7 +296,9 @@ def call_responses(repo, request_id, step, refs, *, body_override=None, native_c
         raise
     body, foundations, prior_preloads = response_body(
         request, input_items, mask, secret, reused_skills=reused_skills, body_override=body_override)
-    output_state = ResponseOutput(request_id, step, request["round"]["responseOutput"], [secret])
+    error_secrets = [secret, request['round']['prompt'], *(part.get('text') for entry in body.get('input', [])
+        if isinstance(entry, dict) for part in entry.get('content', []) if isinstance(part, dict) and part.get('type') in {'input_text', 'output_text'})]
+    output_state = ResponseOutput(request_id, step, request["round"]["responseOutput"], [secret], error_secrets=error_secrets)
     completed = None
     pending_native_images = {}
     native_started = {}
@@ -300,7 +316,7 @@ def call_responses(repo, request_id, step, refs, *, body_override=None, native_c
         output = payload.get("output", [])
         contains_image = isinstance(output, list) and any(isinstance(item, dict) and item.get("type") == "image_generation_call" for item in output)
         try:
-            validate_response_payload(payload, require_completed=bool(pending_native_images) or contains_image)
+            validate_response_payload(payload, require_completed=bool(pending_native_images) or contains_image, secrets=error_secrets)
         except AgentError:
             repo.update(request_id, outcome="known")
             raise
@@ -358,7 +374,7 @@ def call_responses(repo, request_id, step, refs, *, body_override=None, native_c
             if not response.is_success:
                 # Never interpolate arbitrary upstream bodies/headers into errors.
                 repo.update(request_id, outcome="known")
-                raise AgentError("upstream_error", f"Responses 返回 HTTP {response.status_code}；请求不会自动重试。", diagnostics=safe_http_failure(response))
+                raise AgentError("upstream_error", f"Responses 返回 HTTP {response.status_code}；请求不会自动重试。", diagnostics=safe_http_failure(response, secrets=error_secrets))
             if "text/event-stream" not in response.headers.get("content-type", ""):
                 chunks = []
                 for chunk in response.iter_bytes():
@@ -393,7 +409,8 @@ def call_responses(repo, request_id, step, refs, *, body_override=None, native_c
                         repo.record_response_details(request_id, step, event.get("response"), secrets=[secret])
                         repo.update(request_id, outcome="known")
                         source = event.get('response') if isinstance(event.get('response'), dict) else event
-                        raise AgentError("upstream_error", "Responses 流未成功完成；不会自动重试。", diagnostics={'error': source.get('error')})
+                        raise AgentError("upstream_error", "Responses 流未成功完成；不会自动重试。",
+                            diagnostics=safe_diagnostics({'error': source.get('error') or source}, secrets=error_secrets, allow_message=True))
                     if kind == "response.output_text.delta":
                         combined = output_state.delta(event, event_id)
                         if combined is not None:
@@ -595,15 +612,35 @@ def _execute_calls(repo, request_id, step, output, refs):
             if len(images) - already > remaining:
                 raise AgentError("budget_exhausted", "本批图片超过本轮剩余额度。")
             selection = arguments.get('referenceSelection')
-            task = (editing.select_references(repo, request, selection, refs) if selection is not None
-                    else editing.execution_task(request['round']))
+            update = arguments.get('taskContextUpdate')
+            receipt = ({'step': step, 'callId': call_id,
+                        'argumentsSha256': hashlib.sha256(encoded(arguments).encode('utf-8')).hexdigest()}
+                       if update is not None else None)
+            applied = repo.task_update_receipt(request_id, receipt) if receipt else False
+            planned = request
+            if update is not None and not applied:
+                from backend.services import agent_task_state
+                candidate = repo.update_task_context(request_id, update, refs, dry_run=True,
+                                                    tool_receipt=receipt, reference_selection=selection)
+                planned = {**request, 'round': {**request['round'], 'taskContext': candidate,
+                    'editingTask': agent_task_state.project_editing(candidate, request['round'].get('editingTask'))}}
+            task = (editing.execution_task(planned['round']) if update is not None
+                    else editing.select_references(repo, planned, selection, refs) if selection is not None
+                    else editing.execution_task(planned['round']))
             # Preflight the whole batch before changing the branch selection or
             # creating its first job. Legacy calls without selection retain the
             # same unresolved-target protection as before.
             for image in images:
                 image_reference_ids(task, image['prompt'], refs)
-            if selection is not None:
-                repo.select_request_references(request_id, selection, refs)
+            if update is not None and not applied:
+                repo.update_task_context(request_id, update, refs, tool_receipt=receipt, reference_selection=selection)
+            # Inline selection/state share the receipt transaction. Recovery
+            # reaches the linked-job guard without replaying an older selection.
+            if update is None:
+                if selection is not None:
+                    repo.select_request_references(request_id, selection, refs)
+                else:
+                    repo.confirm_request_image_roles(request_id, refs)
             jobs = []
             repo.record_execution(request_id, phase='waiting_jobs')
             for image in images:
@@ -883,8 +920,9 @@ class NativeAgentImageProvider:
             with response_stream(client, "POST", profile["base_url"].rstrip("/") + "/responses", is_complete=lambda: payload is not None,
                                  headers={"Authorization": "Bearer " + profile["api_key"]}, json=body) as response:
                 if not response.is_success:
-                    raise AgentError("upstream_error", f"原生图片接口返回 HTTP {response.status_code}。", diagnostics=safe_http_failure(response))
-                payload = read_native_response(response, lambda: check_active(repo, request_id))
+                    raise AgentError("upstream_error", f"原生图片接口返回 HTTP {response.status_code}。",
+                        diagnostics=safe_http_failure(response, secrets=(profile['api_key'], job.prompt_text)))
+                payload = read_native_response(response, lambda: check_active(repo, request_id), secrets=(profile['api_key'], job.prompt_text))
                 provider_ms = timing.elapsed(provider_started)
             repo.jobs.record_execution(job_id, phase='processing_results', providerMs=provider_ms)
             result_started = timing.monotonic()
@@ -892,6 +930,8 @@ class NativeAgentImageProvider:
             images = [item for item in payload.get("output", []) if isinstance(item, dict) and item.get("type") == "image_generation_call"]
             if len(images) == 1 and images[0].get('status') == 'failed':
                 record_native_failed_terminal(repo, job_id)
+                raise AgentError('upstream_error', '原生图像工具未能生成图片。', diagnostics=safe_diagnostics(
+                    {'error': images[0].get('error')}, secrets=(profile['api_key'], job.prompt_text), allow_message=True))
             if len(images) != 1 or images[0].get("status") != "completed" or not images[0].get("result"):
                 raise AgentError("upstream_error", "原生单图任务未返回恰好一张图片。")
             value = images[0]["result"]

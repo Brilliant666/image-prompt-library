@@ -75,7 +75,7 @@ test('assistant output follows text/tool/text order and never renders hidden rea
 });
 
 test('tool captions use readable labels without exposing internal function names', () => {
-  for (const [name, label] of [['generate_image', '生成图片'], ['generate_image_batch', '批量生成图片'], ['image_generation', '生成图片'], ['continue_generation', '继续生成图片'], ['web_search', '网络搜索'], ['read_agent_skill', '读取创作技能']]) {
+  for (const [name, label] of [['generate_image', '生成图片'], ['generate_image_batch', '生成图片'], ['image_generation', '生成图片'], ['continue_generation', '继续生成图片'], ['web_search', '网络搜索'], ['read_agent_skill', '读取创作技能']]) {
     assert.equal(response.getAgentToolLabel(name), label);
   }
   assert.equal(response.getAgentToolLabel('unknown_internal_function'), '执行工具');

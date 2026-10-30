@@ -1,4 +1,6 @@
 """Offline preview exercises real HTTP routes, workers and persistence."""
+import base64
+from io import BytesIO
 import json
 import os
 from pathlib import Path
@@ -11,8 +13,9 @@ import time
 from fastapi.testclient import TestClient
 import httpx
 import pytest
+from PIL import Image
 
-from scripts.preview_agent import main, preview_session, PROMPT_MARKERS, REVERSE_PROMPT, prompt_candidate
+from scripts.preview_agent import main, preview_session, PreviewProvider, PROVIDER_URL, PROMPT_MARKERS, REVERSE_PROMPT, prompt_candidate, synthetic_png
 
 
 @pytest.fixture
@@ -44,6 +47,51 @@ def wait_request(client, request_id):
             return snapshot
         time.sleep(0.02)
     pytest.fail("Preview request did not settle: " + json.dumps(snapshot, ensure_ascii=False))
+
+
+def test_clipboard_receiver_is_loopback_only_and_cannot_read_or_send_clipboard_data(preview):
+    client, provider, _, _ = preview
+    before = provider.counts.copy()
+    page = client.get('/__preview__/clipboard')
+    assert page.status_code == 200
+    assert page.headers['content-type'].startswith('text/html')
+    assert 'no-store' in page.headers['cache-control']
+    assert "connect-src 'none'" in page.headers['content-security-policy']
+    assert '图片粘贴接收区' in page.text
+    assert "addEventListener('paste'" in page.text and 'event.clipboardData.files' in page.text
+    assert 'transparentPixels' in page.text and 'fullyTransparentPixels' in page.text
+    assert 'navigator.clipboard' not in page.text and 'fetch(' not in page.text
+    assert client.post('/__preview__/clipboard').status_code == 405
+    remote = TestClient(client.app, base_url='http://127.0.0.1:8766', client=('203.0.113.7', 12345))
+    try:
+        assert remote.get('/__preview__/clipboard').status_code == 403
+    finally:
+        remote.close()
+    assert provider.counts == before
+
+
+@pytest.mark.parametrize('image_format,background', [('png', 'transparent'), ('jpeg', 'opaque'), ('webp', 'transparent')])
+@pytest.mark.parametrize('multipart', [False, True])
+def test_synthetic_images_respect_json_and_multipart_format_without_changing_default_fixtures(image_format, background, multipart):
+    provider = PreviewProvider(delay=0)
+    body = {'model': 'gpt-image-preview', 'prompt': 'Synthetic geometric image', 'output_format': image_format, 'background': background}
+    with httpx.Client(transport=httpx.MockTransport(provider.handle)) as client:
+        if multipart:
+            response = client.post(PROVIDER_URL + '/images/edits', data=body,
+                                   files={'image[]': ('fixture.png', synthetic_png(), 'image/png')})
+        else:
+            response = client.post(PROVIDER_URL + '/images/generations', json=body)
+    assert response.status_code == 200, response.text
+    with Image.open(BytesIO(base64.b64decode(response.json()['data'][0]['b64_json']))) as image:
+        assert image.format == {'png': 'PNG', 'jpeg': 'JPEG', 'webp': 'WEBP'}[image_format]
+        assert image.size == (384, 256)
+        alpha = image.convert('RGBA').getchannel('A')
+        assert (alpha.getextrema()[0] < 255) == (background == 'transparent')
+        if background == 'transparent':
+            assert alpha.getpixel((0, 0)) == 0 and alpha.getextrema()[1] == 255
+    with Image.open(BytesIO(synthetic_png())) as original:
+        assert original.format == 'PNG' and original.mode == 'RGB'
+    assert provider.counts == {'images': 1}
 
 
 def test_startup_isolates_config_blocks_external_and_keeps_diagnostics_readonly(tmp_path, monkeypatch):

@@ -14,7 +14,7 @@ export type AgentAssistantBlock =
 
 export function getAgentToolLabel(name: string): string {
   const labels: Record<string, string> = {
-    generate_image: '生成图片', generate_image_batch: '批量生成图片', image_generation: '生成图片',
+    generate_image: '生成图片', generate_image_batch: '生成图片', image_generation: '生成图片',
     continue_generation: '继续生成图片', web_search: '网络搜索', read_agent_skill: '读取创作技能',
   };
   return labels[name] || '执行工具';
@@ -26,7 +26,53 @@ function matchesCall(task: GenerationJobRecord, item: AgentOutputItem) {
   return Boolean(callId && link && [link.agentToolCallId, link.agentBatchCallId, link.toolCallId, link.callId].includes(callId));
 }
 
-const imageToolNames = new Set(['generate_image', 'generate_image_batch', 'image_generation']);
+const imageJobToolNames = new Set(['generate_image', 'generate_image_batch', 'image_generation']);
+// A continuation authorizes the next step; it does not create an image job.
+export const isAgentImageTool = (name: string) => imageJobToolNames.has(name) || name === 'continue_generation';
+
+/** One result-area status, based on actual jobs rather than authorization caps. */
+export function getAgentImageProgress(round: AgentRound, tasks: GenerationJobRecord[], request?: AgentRequest | null): { text: string; kind: 'progress' | 'warning' | 'error' } | null {
+  const ids = [...new Set(round.outputTaskIds)];
+  const calls = (round.responseOutput || []).filter(item => item.type === 'image_generation_call' || item.type === 'function_call' && imageJobToolNames.has(item.name || ''));
+  if (!ids.length && !calls.length) return null;
+  const own = request?.id === round.requestId ? request : null;
+  const jobs = ids.map(id => tasks.find(task => task.id === id));
+  const count = (statuses: string[]) => jobs.filter(job => job && statuses.includes(job.status)).length;
+  const succeeded = count(['succeeded', 'accepted']), failed = count(['failed']), stopped = count(['cancelled']);
+  const missing = jobs.some(job => !job);
+  const unknown = jobs.some(job => job?.status === 'unknown' || (job?.metadata?.failure as { outcomeUnknown?: boolean } | undefined)?.outcomeUnknown)
+    || own?.state === 'unknown' || round.resultSummary?.outcomeUnknown;
+  if (unknown) return { text: '图片结果未知；请先检查原请求状态，不会自动重发。', kind: 'warning' };
+  if (missing) return { text: '图片结果未知：部分图片记录不可用；请查看回答详情，不会自动重发。', kind: 'warning' };
+  if (own?.stopRequested || own?.state === 'stop_requested' || own?.state === 'stopped') {
+    return { text: own.upstreamMayContinue ? '已停止后续调用；已发出的图片请求可能仍在继续，请先检查原请求状态。' : `图片生成已停止${succeeded ? `，已保留 ${succeeded} 张结果` : ''}。`, kind: 'warning' };
+  }
+  if (count(['running', 'queued'])) {
+    const waiting = !count(['running']);
+    return { text: ids.length === 1 ? (waiting ? '图片已排队，等待生成' : '正在生成图片')
+      : `${waiting ? '等待生成' : '正在生成'} ${ids.length} 张 · 已完成 ${succeeded} 张${failed ? ` · 失败 ${failed} 张` : ''}`, kind: 'progress' };
+  }
+  if (ids.length && succeeded === ids.length) {
+    const matched = calls.filter(call => jobs.some(job => job && matchesCall(job, call)));
+    if (calls.length > matched.length && (round.status === 'running' || own?.state === 'running' || own?.state === 'waiting_for_jobs')) {
+      return { text: `正在准备后续图片请求 · 已完成 ${succeeded} 张`, kind: 'progress' };
+    }
+    if (matched.length && calls.length > matched.length) return { text: `已保留 ${succeeded} 张结果；另有图片调用未获得结果，请查看回答详情。`, kind: 'warning' };
+    return null;
+  }
+  if (succeeded) return { text: `部分图片生成成功 · 已完成 ${succeeded} / ${ids.length} 张${failed ? `，失败 ${failed} 张` : stopped ? `，停止 ${stopped} 张` : ''}`, kind: 'warning' };
+  if (failed) return { text: '本次未生成图片，请查看结果卡中的失败原因。', kind: 'error' };
+  if (stopped || round.resultSummary?.requestState === 'stopped') return { text: '图片生成已停止。', kind: 'warning' };
+  if (count(['discarded'])) return { text: '图片结果已清理。', kind: 'warning' };
+  if (round.failure || round.status === 'error' || own?.state === 'failed' || own?.state === 'interrupted') {
+    const failure = getAgentFailure(round.failure || 'unknown');
+    return { text: `${failure.label} · ${failure.detail || failure.action}`, kind: 'error' };
+  }
+  if (round.status === 'running' || own?.state === 'running' || own?.state === 'queued' || own?.state === 'waiting_for_jobs') {
+    return { text: '正在准备图片请求', kind: 'progress' };
+  }
+  return { text: '未获得图片结果，请查看回答详情。', kind: 'warning' };
+}
 
 /** A completed function-call payload only says the model finished its arguments. */
 function imageToolState(tasks: GenerationJobRecord[], missing: boolean, pending: boolean): string {
@@ -79,30 +125,60 @@ export function getAgentRoundStatus(round: AgentRound, summary: AgentResultSumma
     if (summary.imageJobsDiscarded) return agentPhaseLabels.discarded;
   }
   if (summary.requestState === 'stopped' || summary.requestState === 'stop_requested') return summary.requestState === 'stopped' ? agentPhaseLabels.stopped : '正在停止后续调用';
-  if (summary.requestState === 'failed' || summary.requestState === 'interrupted') return round.failure ? getAgentFailure(round.failure.kind).label : '本轮请求未完成';
+  if (summary.requestState === 'failed' || summary.requestState === 'interrupted') {
+    if (!round.failure) return '本轮请求未完成';
+    const failure = getAgentFailure(round.failure);
+    return [failure.label, failure.detail].filter(Boolean).join(' · ');
+  }
   if (round.execution && agentPhaseLabels[round.execution.phase]) return agentPhaseLabels[round.execution.phase];
   return summary.requestState === 'queued' ? '等待执行' : summary.requestState === 'running' ? '等待文字模型' : '已完成';
 }
 
-export function getAgentJobFailure(job: GenerationJobRecord): { label: string; action: string; kind: string } {
-  const kind = (job.metadata?.failure as { kind?: string } | undefined)?.kind || 'unknown';
-  return getAgentFailure(kind);
+interface AgentFailureData { kind?: string; detail?: string; reasonProvided?: boolean; outcomeUnknown?: boolean }
+export interface AgentFailurePresentation { label: string; action: string; kind: string; detail?: string }
+
+/** A rejected request can finish before an image job exists. Never invent one. */
+export function getAgentRequestFailure(round: AgentRound, request?: AgentRequest | null): AgentFailurePresentation | null {
+  if (round.outputTaskIds.length || round.retryTaskIds?.length || !round.failure) return null;
+  const own = request?.id === round.requestId ? request : null;
+  const state = own?.state || round.resultSummary?.requestState || (round.status === 'error' ? 'failed' : round.status);
+  if (!['failed', 'interrupted'].includes(state) || round.failure.outcomeUnknown
+    || round.resultSummary?.outcomeUnknown || own?.stopRequested || own?.upstreamMayContinue) return null;
+  const failure = getAgentFailure(round.failure);
+  const imageCall = (round.responseOutput || []).some(item => item.type === 'image_generation_call'
+    || item.type === 'function_call' && imageJobToolNames.has(item.name || ''));
+  return failure.kind === 'unknown' && !imageCall && !round.directRecipe
+    ? { ...failure, label: '本次请求未完成' } : failure;
 }
 
-export function getAgentFailure(kind: string): { label: string; action: string; kind: string } {
+export function getAgentJobFailure(job: GenerationJobRecord): AgentFailurePresentation {
+  const value = getAgentFailure(job.metadata?.failure as AgentFailureData | undefined);
+  return job.status === 'unknown' ? { ...value, label: '图片结果未知', action: '请先查看原请求状态，确认结果前不要重复生成。' } : value;
+}
+
+export function getAgentFailure(failure: string | AgentFailureData | null | undefined): AgentFailurePresentation {
+  const data = typeof failure === 'string' ? { kind: failure } : failure;
+  const kind = data?.kind || 'unknown';
   const messages: Record<string, [string, string]> = {
     quota: ['余额不足', '请检查生图供应商余额后再决定是否重试。'],
     authentication: ['认证或权限问题', '请检查供应商配置与访问权限。'],
     model_unsupported: ['模型或接口不支持', '请检查生图供应商与模型是否匹配。'],
-    moderation: ['供应商审核拒绝', '请检查请求内容；不会自动改写或切换供应商。'],
+    moderation: ['供应商审核拒绝', '可查看失败详情，或在对话中修改要求。'],
     rate_limit: ['供应商限流', '请稍后再决定是否重试。'],
     service: ['供应商服务暂时异常', '请稍后检查原请求状态。'],
     network: ['网络超时或连接中断', '请先检查原请求状态，避免重复生成。'],
     reference_missing: ['参考图片不可用', '请重新选择有效的参考图片。'],
+    configuration: ['网络或请求配置需要检查', '请检查 API 配置后再发送；不会自动重试。'],
+    request_too_large: ['请求内容过大', '请减少本次发送的图片或上下文内容后再试；不会自动重发。'],
     unknown: ['图片请求未完成', '请查看详情并检查原请求状态。'],
   };
   const [label, action] = messages[kind] || messages.unknown;
-  return { label, action, kind: messages[kind] ? kind : 'unknown' };
+  // Only the backend's bounded, sanitized public detail is displayed. Never use
+  // raw job.error, request.error.message or arbitrary provider response bodies.
+  const detail = typeof data?.detail === 'string' && data.detail.trim()
+    ? data.detail.trim().slice(0, 1600)
+    : kind === 'moderation' ? '供应商未提供更具体的拒绝原因。' : undefined;
+  return { label, action, kind: messages[kind] ? kind : 'unknown', ...(detail ? { detail } : {}) };
 }
 
 function messagePartText(part: NonNullable<AgentOutputItem['content']>[number]): string {
@@ -160,7 +236,7 @@ export function getAgentAssistantBlocks(round: AgentRound, tasks: GenerationJobR
     const skillCompleted = item.name === 'read_agent_skill' && output.some(result => result.type === 'function_call_output' && result.call_id === id);
     const matchingSlots = slots.filter(slot => slot.task && matchesCall(slot.task, item));
     const name = item.type === 'web_search_call' ? 'web_search' : item.name || 'image_generation';
-    const state = imageToolNames.has(name)
+    const state = imageJobToolNames.has(name)
       ? imageToolState(matchingSlots.flatMap(slot => slot.task ? [slot.task] : []), slots.some(slot => !slot.task), round.status === 'running')
       : skillCompleted ? 'completed' : item.status;
     blocks.push({ type: 'tool', key: `tool:${id}`, callId: id, name, state });

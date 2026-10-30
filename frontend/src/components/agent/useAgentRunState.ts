@@ -46,6 +46,7 @@ export function useAgentRunState(options: Options) {
   const snapshotVersion = useRef(0);
   const summaryRevisions = useRef(new Map<string, number>());
   const [pending, setPending] = useState(() => readPendingAgentSubmissions(localStorage));
+  const [submittingRequestIds, setSubmittingRequestIds] = useState<ReadonlySet<string>>(() => new Set());
   const boundaries = useRef<Record<string, AgentSubmissionBoundary>>(Object.fromEntries(pending.map(entry => [entry.payload.requestId, { conversationId: entry.conversationId, draft: 0, authorization: { images: 0, search: 0 } }])));
   const [conversationLoading, setConversationLoading] = useState(false);
   const [conversationLoadError, setConversationLoadError] = useState('');
@@ -215,6 +216,7 @@ export function useAgentRunState(options: Options) {
       }
       entry.payload.expectedRevision = latest.revision;
     }
+    setSubmittingRequestIds(ids => new Set(ids).add(entry.payload.requestId));
     try {
       savePendingAgentSubmission(localStorage, entry);
       if (prepared.boundary) boundaries.current[entry.payload.requestId] = prepared.boundary;
@@ -232,6 +234,8 @@ export function useAgentRunState(options: Options) {
         throw Error('对话已改变；已尝试读取最新状态。草稿与附件保留，请确认后再次发送。');
       }
       throw new Error(`${errorText(reason)}${!(reason instanceof AgentApiError) ? '。提交结果不确定；请检查原请求，不要重新发起。' : ''}`);
+    } finally {
+      if (mounted.current) setSubmittingRequestIds(ids => { const next = new Set(ids); next.delete(entry.payload.requestId); return next; });
     }
   });
   const reconcile = async (entry: PendingAgentSubmission, retry = false) => runCommand(async command => {
@@ -273,7 +277,7 @@ export function useAgentRunState(options: Options) {
     }
   });
   const newConversation = () => runCommand(command => command.createConversation());
-  return { activeId, activeIdRef, setActiveId, current, busy, error, setError, notice, setNotice, pending,
+  return { activeId, activeIdRef, setActiveId, current, busy, error, setError, notice, setNotice, pending, submittingRequestIds,
     conversationLoading, conversationLoadError, reloadConversation, terminalObservations, inFlight,
     applySnapshot, runCommand, submitPrepared, reconcile, stop, resume, newConversation };
 }

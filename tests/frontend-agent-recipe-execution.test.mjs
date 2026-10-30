@@ -71,9 +71,9 @@ function harness(t, options = {}) {
   };
   const base = { react: hooks, 'react/jsx-runtime': { jsx, jsxs: jsx }, '../../api/agentClient': { agentApi: api, AgentApiError, getAgentConfig: async () => config, watchAgentRequest: (id, onSnapshot) => { watchers.push({ id, onSnapshot }); return () => {}; } }, '../../utils/playground/agentAssistantBlocks': blocks, '../../utils/playground/agentSubmission': submission, '../../utils/localPreferences': { readLocalPreferences: () => ({ persistInputOnRestart: true }) } };
   const runState = evaluate(runStateJs, base, globals);
-  const deps = { ...base, 'react-dom': { createPortal: value => value }, 'lucide-react': new Proxy({}, { get: (_, key) => key }), '../../hooks/useModalFocus': { useModalFocus: () => ({ containerRef: {}, handleModalKeyDown() {} }) }, './useAgentConversations': { useAgentConversations: () => ({ rows: [], refresh() {}, upsert() {}, remove() {} }) }, './useAgentScroll': { useAgentScroll: () => () => {} }, './useAgentRunState': runState, '../../api/client': { api: {}, mediaUrl: path => `/media/${path}` }, '../../utils/playground/agentConversationState': conversation, '../../utils/playground/agentImageReferences': references, '../../utils/compatibleRecipe': compatible, '../../utils/agentGalleryBridge': bridge, '../../utils/agentInputPreferences': inputPreferences, '../../utils/clipboard': {}, './AgentMarkdown': { AgentMarkdown: 'markdown' }, './AgentReferencePicker': { AgentReferencePicker: 'picker' }, './AgentImageOptions': { __esModule: true, default: 'image-options' }, '../gallery/SizeDialog': { __esModule: true, default: 'size-dialog' }, './AgentWorkspace.css': {}, './AgentResponseDetails': { AgentResponseDetails: 'response-details' }, './AgentImageRetryButton': { __esModule: true, default: 'image-retry' } };
+  const deps = { ...base, 'react-dom': { createPortal: value => value }, 'lucide-react': new Proxy({}, { get: (_, key) => key }), '../../hooks/useModalFocus': { useModalFocus: () => ({ containerRef: {}, handleModalKeyDown() {} }) }, './useAgentConversations': { useAgentConversations: () => ({ rows: [], refresh() {}, upsert() {}, remove() {} }) }, './useAgentScroll': { useAgentScroll: () => () => {} }, './useAgentRunState': runState, '../../api/client': { api: {}, mediaUrl: path => `/media/${path}` }, '../../utils/playground/agentConversationState': conversation, '../../utils/playground/agentImageReferences': references, '../../utils/compatibleRecipe': compatible, '../../utils/agentGalleryBridge': bridge, '../../utils/agentInputPreferences': inputPreferences, '../../utils/clipboard': {}, '../../utils/imageClipboard': { copyFinalImageToClipboard: async () => { throw Error('Unexpected image copy in this harness'); } }, './AgentMarkdown': { AgentMarkdown: 'markdown' }, './AgentReferencePicker': { AgentReferencePicker: 'picker' }, './AgentImageOptions': { __esModule: true, default: 'image-options' }, '../gallery/SizeDialog': { __esModule: true, default: 'size-dialog' }, './AgentWorkspace.css': {}, './AgentResponseDetails': { AgentResponseDetails: 'response-details' }, './AgentImageRetryButton': { __esModule: true, default: 'image-retry' } };
   const Component = evaluate(workspaceJs, deps, globals).default;
-  const render = () => { cursor = 0; dirty = false; tree = Component({ active: true, onOpenSettings() {}, onLibraryChanged() {}, onOpenJob() {}, onJobsChanged: () => updates.push(true), ...props }); effects.splice(0).forEach(fn => fn()); };
+  const render = () => { cursor = 0; dirty = false; tree = Component({ active: true, onOpenSettings() {}, onLibraryChanged() {}, onOpenJob() {}, onJobsChanged: () => updates.push(true), ...props }); options.onRender?.(tree); effects.splice(0).forEach(fn => fn()); };
   const flush = async () => { for (let i = 0; i < 30; i++) { if (dirty && !unmounted) render(); await Promise.resolve(); } };
   const unmount = () => { if (unmounted) return; unmounted = true; slots.forEach(slot => slot?.cleanup?.()); };
   render(); t.after(unmount);
@@ -91,7 +91,8 @@ function harness(t, options = {}) {
 }
 
 test('production direct click freezes the selected Prompt identity, Gallery image settings and role order without a text POST', async t => {
-  const h = harness(t); await h.flush();
+  const recoveryRenders = [];
+  const h = harness(t, { onRender: tree => recoveryRenders.push(nodes(tree).some(node => node.props?.['aria-label'] === '直接生成回执待确认')) }); await h.flush();
   assert.equal(h.node('markdown').promptSelectionDisabled, false);
   assert.match(h.node('markdown').getGenerationSummary(selectedText), /本次图片参数：3 张 · gallery-image · 1536x1024 · high · webp · opaque · 压缩 0/);
   assert.match(h.node('markdown').referenceSummary, /1\. 主要图片；2\. 辅助 · 风格/);
@@ -101,9 +102,11 @@ test('production direct click freezes the selected Prompt identity, Gallery imag
   assert.deepEqual(body, { requestId: 'direct-1', expectedRevision: 12, branchRoundId: 'r1', taskId: 'task', taskRevision: 7, promptVersionId: 'selected', configRevision: 4, imageConfig: { profileId: 'image-gallery', model: 'gallery-image' }, params, imageCount: 3, confirmed: true });
   assert.equal(Object.hasOwn(body, 'prompt'), false); assert.equal(Object.hasOwn(body, 'refs'), false);
   const frozen = JSON.parse(h.storage.get('ipl.agent.pending-prompt-executions.v1'))[0]; assert.deepEqual(frozen.payload, body);
+  assert.equal(recoveryRenders.includes(true), false, 'the current direct POST must never flash its recovery card');
   h.update({ galleryImageSettings: { provider: 'openai_compatible', profileId: 'other', model: 'changed', params: { ...params, size: '1024x1024' }, count: 1 } }); await h.flush();
   assert.deepEqual(h.direct[0].payload, body);
   h.direct[0].resolve(receipt(body)); await h.flush();
+  assert.equal(recoveryRenders.includes(true), false, 'successful acceptance never needs a recovery card');
   assert.equal(h.node('textarea', 'Agent 消息').value, 'Unsent draft\n  keep exact');
   assert.equal(h.node('button', '持续生图模式')['aria-pressed'], false);
   assert.equal(h.submission.readPendingPromptExecutions({ getItem: key => h.storage.get(key) }).length, 0);
@@ -129,9 +132,12 @@ test('production optimization uses the chosen raw Prompt, normal text only and p
 test('a lost direct acknowledgement retains its immutable identity and all later checks are GET-only', async t => {
   const h = harness(t); await h.flush();
   h.generate(); await h.flush(); const body = h.direct[0].payload;
+  assert.equal(h.node('div', '直接生成回执待确认'), undefined);
   h.direct[0].reject(new TypeError('network reset')); await h.flush();
+  assert.ok(h.node('div', '直接生成回执待确认'));
   assert.match(h.text(), /结果尚未确认/); assert.equal(h.direct.length, 1);
   h.node('button', '检查本次直接生成状态').onClick(); await h.flush();
+  assert.ok(h.node('div', '直接生成回执待确认'), 'checking a lost receipt must retain its recovery card while busy');
   assert.equal(h.receipts[0].id, body.requestId); assert.equal(h.receipts[0].conversationId, 'current');
   h.receipts[0].reject(new h.AgentApiError(404, 'not_found', '尚未找到原请求')); await h.flush();
   h.node('button', '检查本次直接生成状态').onClick(); await h.flush();

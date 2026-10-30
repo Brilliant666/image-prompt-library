@@ -52,15 +52,34 @@ message source. No Key is sent to the browser.
 
 ## Receipts, failures and assets
 
+Selecting a known image role can resolve that image-role question even if the
+subsequent generation fails. It never marks an unavailable result as successful
+or declares unrelated historical text complete. Image copying and opening
+answer details make no model request; retries still require an explicit action.
+
 A single transaction records the operation, its stable request identity and all
 existing queue jobs. Double-clicks reuse the receipt. A lost acknowledgement or
 page refresh checks the original receipt with GET; it does not resend a paid
 POST. An unknown provider outcome is not automatically retried.
 
+Direct execution, image retry and answer retry are different actions. Direct
+execution uses the clicked Prompt block; image retry preserves the actual
+execution Prompt and frozen image sources while applying the currently chosen
+image settings; answer retry creates another conversational answer in a sibling
+branch. None turns an unknown result into a confirmed failure that is safe to
+replay. Copying an image, copying its generation Prompt and viewing details do
+not execute any of these actions.
+
 The operation card is labeled **Generated from a confirmed recipe** rather than
 inventing an assistant text response. Agent and Gallery show the same jobs.
 Actual dispatch records the exact executed Prompt even for a provider failure
 or unknown outcome; a local validation failure is not called an execution.
+
+Failure details can include safe provider codes, parameter/moderation fields
+and a bounded, sanitized plain-text explanation. Missing reasons stay unknown.
+An HTTP 413 identifies a request-size rejection rather than a guessed safety
+refusal. Local upload/configuration rejection and a lost upstream receipt have
+different submission/recovery meanings; displaying a reason never starts a retry.
 
 For a confirmed failure, the existing explicit image retry can use the current
 image settings while preserving the Prompt, reference bytes and source recipe.

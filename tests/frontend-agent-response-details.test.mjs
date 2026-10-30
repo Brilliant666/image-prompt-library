@@ -26,6 +26,17 @@ const render = (details, props = {}) => renderToStaticMarkup(React.createElement
 const missing = { inputTokens: null, outputTokens: null, totalTokens: null, cachedInputTokens: null, reasoningTokens: null };
 const details = () => ({ version: 1, steps: [], skills: [], usage: { ...missing, reportedSteps: 0, totalSteps: 1, complete: false } });
 
+test('actual response details show the safe specific reason as text and preserve known preflight failures', () => {
+  const html = render(undefined, { round: { id: 'network', requestId: 'network', status: 'error', outputTaskIds: [],
+    error: 'RAW_ERROR_DO_NOT_USE', failure: { kind: 'configuration', outcomeUnknown: false,
+      detail: '无法确认 Windows 物理直连出口，本次请求尚未提交。 <unsafe-markup>' } } });
+  assert.match(html, /具体原因/);
+  assert.match(html, /Windows 物理直连出口/);
+  assert.match(html, /&lt;unsafe-markup&gt;/);
+  assert.doesNotMatch(html, /<unsafe-markup>|RAW_ERROR_DO_NOT_USE|图片请求未完成/);
+  assert.doesNotMatch(html, /<details[^>]* open/);
+});
+
 test('context diagnostics come from the persisted backend receipt inside optional details', () => {
   const html = render(undefined, { round: {
     id: 'receipt', requestId: 'request-receipt', outputTaskIds: [], status: 'done',

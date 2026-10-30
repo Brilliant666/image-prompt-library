@@ -17,6 +17,7 @@ from backend.schemas import (
 )
 from backend.services.generation_jobs import (
     GenerationJobConflict,
+    GenerationImageValidationError,
     GenerationJobRepository,
     sanitize_generation_error,
     sanitize_generation_parameters,
@@ -216,7 +217,7 @@ async def upload_generation_result(
 ):
     data = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail="Generation result upload too large")
+        raise HTTPException(status_code=413, detail={"code": "image_file_too_large", "message": "生成结果超过 30 MiB 上限；原文件未修改。"})
     try:
         parsed_metadata = json.loads(metadata) if metadata else {}
         if not isinstance(parsed_metadata, dict):
@@ -234,6 +235,8 @@ async def upload_generation_result(
         )
     except KeyError as exc:
         raise HTTPException(status_code=404) from exc
+    except GenerationImageValidationError as exc:
+        raise HTTPException(status_code=exc.status, detail={"code": exc.code, "message": str(exc)}) from exc
     except (GenerationJobConflict, ValueError, UnidentifiedImageError) as exc:
         raise HTTPException(status_code=409 if isinstance(exc, GenerationJobConflict) else 400, detail=str(exc)) from exc
 

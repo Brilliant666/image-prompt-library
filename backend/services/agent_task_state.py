@@ -6,6 +6,7 @@ Only user actions can select a Prompt or confirm a proposed constraint.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from uuid import uuid4
 
@@ -88,11 +89,104 @@ def dependency(context, round_id, reason):
         context['historyDependencies'].append({'roundId': round_id, 'reason': reason})
 
 
-def advance(previous, editing_task, *, prompt, branch_id, boundary=False, requirements_history=(), explicit_target=False):
+ROLE_CHANGE = 'target_changed_requires_prior_evidence'
+ROLE_CHANGE_UNRESOLVED = '已添加新的编辑对象；旧图与约束是否继续适用尚需确认。'
+ROLE_UNRESOLVED = {ROLE_CHANGE_UNRESOLVED, '请选择本次编辑对象。',
+                   '新增附件尚未指定角色；当前明确选择的编辑对象保持不变。'}
+TEXT_DEPENDENCIES = {'unreconciled_user_addition'}
+
+
+def recorded_role_selection(context, history):
+    """Use local binding proofs or tool-job records, never provider receipts alone."""
+    from backend.services.agent_editing_task import references
+    refs = references(history, [], 0)
+    wanted_target = (context.get('target') or {}).get('assetId')
+    wanted_aux = [(image['assetId'], image['role']) for image in context.get('auxiliaries', [])]
+    proof = context.get('_imageRoleBinding', {})
+    if (proof.get('targetAssetId') == wanted_target and proof.get('auxiliaries') == [list(item) for item in wanted_aux]):
+        source = next((row for row in history if row['id'] == proof.get('roundId')), None)
+        if source and (source.get('taskContext') or {}).get('taskId') == context.get('taskId'):
+            return source['index']
+    for row in reversed(history):
+        recorded = row.get('taskContext') or {}
+        if (recorded.get('taskId') != context.get('taskId')
+                or (recorded.get('target') or {}).get('assetId') != wanted_target
+                or [(image['assetId'], image['role']) for image in recorded.get('auxiliaries', [])] != wanted_aux):
+            continue
+        outputs = row.get('responseOutput', [])
+        receipts = {item.get('call_id'): item for item in outputs if item.get('type') == 'function_call_output'}
+        for call in reversed(outputs):
+            if (call.get('type') != 'function_call' or call.get('call_id') not in receipts
+                    or call.get('call_id') not in row.get('_verifiedImageCalls', [])):
+                continue
+            try:
+                arguments = json.loads(call['arguments'])
+                receipt = json.loads(receipts[call['call_id']]['output'])
+                if not isinstance(arguments, dict):
+                    continue
+                selection = arguments.get('referenceSelection') if call.get('name') in {'generate_image', 'generate_image_batch'} else None
+                if not isinstance(selection, dict) or not isinstance(receipt, dict) or 'error' in receipt:
+                    continue
+                if not ('images' in receipt or receipt.get('status') in {'done', 'error'}):
+                    continue
+                target = refs.get(selection.get('targetRef'))
+                auxiliary = [(refs.get(image['ref']), image['role']) for image in selection.get('auxiliaries', [])]
+                if wanted_target and target == wanted_target and auxiliary == wanted_aux:
+                    return row['index']
+            except (ValueError, TypeError, KeyError):
+                continue
+    return None
+
+
+def reconcile(context, *, history=(), image_roles_resolved=False):
+    """Resolve only evidenced image-role causes; keep exact textual sources.
+
+    Callers prove bindings through frozen-asset validation and their existing
+    branch/revision CAS. A generated Prompt is never proof that prose is met.
+    Legacy/overflow and unknown evidence reasons deliberately remain untouched.
+    """
+    sources = {row['id']: row for row in history}
+    receipt_index = None if image_roles_resolved else recorded_role_selection(context, history)
+    kept, text_sources = [], []
+    removed_role = False
+    for item in context['historyDependencies']:
+        row = sources.get(item['roundId'])
+        prior = (row or {}).get('taskContext')
+        first_binding = (prior is not None and not prior.get('target') and
+                         not any((prior_row.get('taskContext') or {}).get('taskId') == prior.get('taskId')
+                                 and prior_row['index'] <= row['index']
+                                 and any(prior_row.get(key) for key in ('inputImageIds', 'taskImageIds', 'outputTaskIds', 'retryTaskIds'))
+                                 for prior_row in history))
+        paired_selection = row is not None and receipt_index is not None and row['index'] <= receipt_index
+        if item['reason'] == ROLE_CHANGE and (image_roles_resolved or first_binding or paired_selection):
+            removed_role = True
+            # Binding pixels does not waive the source turn's written request.
+            if row is None or row.get('prompt'):
+                text_sources.append(item['roundId'])
+        else:
+            kept.append(item)
+    context['historyDependencies'] = kept
+    for round_id in text_sources:
+        dependency(context, round_id, 'unreconciled_user_addition')
+    if image_roles_resolved:
+        context['_imageRoleBinding'] = {'roundId': context['branchRoundId'],
+            'targetAssetId': (context.get('target') or {}).get('assetId'),
+            'auxiliaries': [[image['assetId'], image['role']] for image in context.get('auxiliaries', [])]}
+        context['unresolvedItems'] = [item for item in context['unresolvedItems'] if item not in ROLE_UNRESOLVED]
+    elif removed_role and not any(item['reason'] == ROLE_CHANGE for item in kept):
+        context['unresolvedItems'] = [item for item in context['unresolvedItems'] if item != ROLE_CHANGE_UNRESOLVED]
+    return refresh(context)
+
+
+def advance(previous, editing_task, *, prompt, branch_id, boundary=False, requirements_history=(), explicit_target=False, history=()):
     target = (editing_task or {}).get('target')
     if not editing_task and previous and previous['taskType'] != 'image_edit':
         target = previous.get('target')
-    changed_target = bool(previous and target and (previous.get('target') or {}).get('assetId') != target['assetId']
+    prior_visual = previous and any((row.get('taskContext') or {}).get('taskId') == previous.get('taskId') and
+                                   any(row.get(key) for key in ('inputImageIds', 'taskImageIds', 'outputTaskIds', 'retryTaskIds'))
+                                   for row in history)
+    changed_target = bool(previous and (previous.get('target') or prior_visual) and target
+                          and (previous.get('target') or {}).get('assetId') != target['assetId']
                           and previous.get('branchRoundId') and not (editing_task or {}).get('continuesTask')
                           and not explicit_target)
     if previous and previous.get('pendingUserTask'):
@@ -150,7 +244,9 @@ def advance(previous, editing_task, *, prompt, branch_id, boundary=False, requir
         if '请选择本次编辑对象。' not in value['unresolvedItems']:
             value['unresolvedItems'].append('请选择本次编辑对象。')
     value['pendingUserTask'] = False
-    return refresh(value)
+    resolved = bool(explicit_target or (editing_task or {}).get('continuesTask') and previous and
+                    target and target != previous.get('target'))
+    return reconcile(value, history=history, image_roles_resolved=resolved)
 
 
 def project_editing(context, previous=None):
@@ -169,11 +265,11 @@ def project_editing(context, previous=None):
             'requirementsInHistory': bool(previous.get('requirementsInHistory')) or len(requirements) > 4000,
             'constraints': [c['text'] for c in context['constraints'] if c['status'] == 'active'][:12],
             'workflow': previous.get('workflow', 'auto'), 'needsTargetSelection': context['target'] is None,
-            'candidates': []}
+            'candidates': copy.deepcopy(previous.get('candidates', [])) if context['target'] is None else []}
 
 
 def apply(context, operations, *, actor, branch_id, select_asset, validate_source, user_text='', prompt_archive=None,
-          restore_prompt=None):
+          restore_prompt=None, history=()):
     from backend.services.agent_repository import AgentError
 
     def invalid(message='任务状态操作无效。'):
@@ -183,21 +279,36 @@ def apply(context, operations, *, actor, branch_id, select_asset, validate_sourc
     prompt_archive = prompt_archive if prompt_archive is not None else {}
     previous_revision = value['revision']
     allowed_model = {'set_task_type', 'set_target', 'set_auxiliaries', 'add_constraint', 'update_constraint',
-                     'revoke_constraint', 'set_prompt', 'restore_working_prompt', 'set_unresolved', 'set_history_dependencies'}
-    for operation in operations:
+                     'revoke_constraint', 'set_prompt', 'restore_working_prompt', 'set_unresolved', 'set_history_dependencies',
+                     'start_task', 'reconcile_text_source'}
+    for operation_index, operation in enumerate(operations):
         item = operation.model_dump(exclude_none=True) if hasattr(operation, 'model_dump') else operation
         op, text = item.get('op'), item.get('text')
         if actor == 'model' and op not in allowed_model:
             invalid('模型只能提议任务状态，不能代替用户确认或新建任务。')
         provenance = source(actor, branch_id)
         user_authority = actor == 'user'
-        if actor == 'model' and item.get('sourceQuote') is not None:
+        if actor == 'model' and item.get('sourceQuote') is not None and op != 'reconcile_text_source':
             quote = item['sourceQuote']
             if not isinstance(quote, str) or not quote.strip() or quote not in user_text:
                 invalid('约束来源必须逐字匹配本轮用户原文。')
             provenance = source('user', branch_id, quote=quote, authority='user_instruction', interpretedBy='model')
             user_authority = True
-        if op == 'new_task':
+        if op == 'start_task':
+            # This is an interpretation of this exact user request, not model
+            # authority to confirm constraints, select a draft or grant tools.
+            # Starting first keeps the rest of the batch scoped to the new task.
+            if (actor != 'model' or operation_index != 0 or not user_text.strip()
+                    or item.get('sourceQuote') != user_text or text not in (None, user_text)
+                    or item.get('taskType') not in {'chat', 'image_edit', 'image_generation', 'prompt',
+                                                    'analysis', 'reverse', 'prompt_optimization'}):
+                invalid('新任务必须逐字引用本轮完整用户要求，并作为首个操作。')
+            previous_task_id = value['taskId']
+            value = new(user_text, branch_id, task_type=item['taskType'])
+            value['_taskBoundary'] = {'previousTaskId': previous_task_id, 'roundId': branch_id,
+                                      'sourceSha256': hashlib.sha256(user_text.encode('utf-8')).hexdigest(),
+                                      'interpretedBy': 'model'}
+        elif op == 'new_task':
             value = new(text or '', branch_id, task_type=item.get('taskType', 'chat'))
             value['pendingUserTask'] = True
         elif op == 'set_task_type':
@@ -269,6 +380,31 @@ def apply(context, operations, *, actor, branch_id, select_asset, validate_sourc
                 value.pop('workingPromptSource', None)
         elif op == 'set_unresolved':
             value['unresolvedItems'] = item.get('items', [])
+        elif op == 'reconcile_text_source':
+            # Exact frozen sources, not a generated Prompt or a successful image
+            # job alone, support removing a textual transcript dependency.
+            round_id = item.get('roundId')
+            source_text = (user_text if round_id == branch_id else
+                           next((row['prompt'] for row in history if row['id'] == round_id), None))
+            latest = value.get('latestUserAddition') or {}
+            dependencies = value['historyDependencies']
+            required = any(d['roundId'] == round_id and d['reason'] in TEXT_DEPENDENCIES for d in dependencies)
+            if (not source_text or item.get('sourceQuote') != source_text
+                    or not (required or latest.get('roundId') == round_id)):
+                invalid('只能协调当前任务所需的完整冻结用户原文。')
+            prompt_id = item.get('id') or working_prompt_id(value)
+            prompt = next((p for p in value['promptVersions'] if p['id'] == prompt_id), None)
+            if not prompt or prompt['kind'] != 'candidate':
+                invalid('协调文本必须指向当前任务已记录的候选 Prompt。')
+            # Keep the provenance without copying another hidden transcript.
+            # Candidate status remains unchanged and is never user confirmation.
+            value.setdefault('_textReconciliations', {})[round_id] = {
+                'promptVersionId': prompt_id, 'roundId': branch_id, 'actor': actor,
+                'sourceSha256': hashlib.sha256(source_text.encode('utf-8')).hexdigest()}
+            value['historyDependencies'] = [d for d in dependencies
+                if not (d['roundId'] == round_id and d['reason'] in TEXT_DEPENDENCIES)]
+            if latest.get('roundId') == round_id:
+                latest['reconciled'] = True
         elif op == 'set_history_dependencies':
             dependencies = item.get('dependencies', [])
             for entry in dependencies:
@@ -291,7 +427,9 @@ def apply(context, operations, *, actor, branch_id, select_asset, validate_sourc
     value['revision'] = previous_revision + 1
     value['branchRoundId'] = branch_id
     trim_prompts(value, prompt_archive)
-    return refresh(value)
+    roles = any((item.model_dump() if hasattr(item, 'model_dump') else item)['op']
+                in ({'set_target', 'set_auxiliaries'} if value.get('target') else {'set_target'}) for item in operations)
+    return reconcile(value, history=history, image_roles_resolved=roles)
 
 
 def record_execution(context, prompt, *, round_id, prompt_archive=None):

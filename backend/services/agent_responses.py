@@ -10,6 +10,7 @@ import json
 from contextlib import contextmanager, suppress
 import httpx
 from backend.services.agent_repository import AgentError, encoded
+from backend.services.agent_diagnostics import safe_diagnostics
 
 MAX_RESPONSE_BYTES = 80 * 1024 * 1024
 
@@ -25,16 +26,17 @@ def response_stream(client, *args, is_complete, **kwargs):
             raise
 
 
-def validate_response_payload(payload, *, require_completed=False):
+def validate_response_payload(payload, *, require_completed=False, secrets=()):
     if not isinstance(payload, dict) or not isinstance(payload.get("output", []), list):
         raise AgentError("upstream_error", "Responses 返回格式无效。")
     status = payload.get("status")
     if payload.get("error") or status not in ({"completed"} if require_completed else {None, "completed"}):
-        raise AgentError("upstream_error", "Responses 未成功完成；不会自动重试。", diagnostics={'error': payload.get('error')})
+        raise AgentError("upstream_error", "Responses 未成功完成；不会自动重试。",
+                         diagnostics=safe_diagnostics({'error': payload.get('error')}, secrets=secrets, allow_message=True))
     return payload
 
 
-def read_native_response(response, check_running):
+def read_native_response(response, check_running, *, secrets=()):
     """Read one bounded response without retrying or accepting partial images."""
     size = 0
     if "text/event-stream" not in response.headers.get("content-type", ""):
@@ -45,7 +47,7 @@ def read_native_response(response, check_running):
             if size > MAX_RESPONSE_BYTES:
                 raise AgentError("upstream_error", "原生图片数据过大。")
             chunks.append(chunk)
-        return validate_response_payload(json.loads(b"".join(chunks)), require_completed=True)
+        return validate_response_payload(json.loads(b"".join(chunks)), require_completed=True, secrets=secrets)
 
     data_lines, output = [], {}
 
@@ -61,13 +63,14 @@ def read_native_response(response, check_running):
         kind = event.get("type")
         if kind in {"error", "response.failed", "response.incomplete"}:
             source = event.get('response') if isinstance(event.get('response'), dict) else event
-            raise AgentError("upstream_error", "原生图片响应未成功完成；不会自动重试。", diagnostics={'error': source.get('error')})
+            raise AgentError("upstream_error", "原生图片响应未成功完成；不会自动重试。",
+                             diagnostics=safe_diagnostics({'error': source.get('error') or source}, secrets=secrets, allow_message=True))
         if kind == "response.output_item.done":
             item = event.get("item")
             if isinstance(item, dict) and item.get("id"):
                 output[item["id"]] = item
         if kind == "response.completed":
-            payload = validate_response_payload(event.get("response"), require_completed=True)
+            payload = validate_response_payload(event.get("response"), require_completed=True, secrets=secrets)
             return payload if "output" in payload else {**payload, "output": list(output.values())}
         return None
 
@@ -101,12 +104,14 @@ def redact(value, secrets=()):
     return value
 
 
-def safe_output(items, secrets=()):
+def safe_output(items, secrets=(), *, error_secrets=()):
     result = []
     for raw in items if isinstance(items, list) else []:
         if not isinstance(raw, dict) or not isinstance(raw.get("type"), str):
             continue
         item = redact(dict(raw), secrets)
+        if 'error' in item:
+            item['error'] = safe_diagnostics({'error': item['error']}, secrets=(*secrets, *error_secrets), allow_message=True).get('error', {})
         if item["type"] == "image_generation_call":
             item.pop("result", None)
         if item["type"] == "function_call" and isinstance(item.get("arguments"), str):
@@ -156,17 +161,27 @@ def output_text(items):
 class ResponseOutput:
     """One model step's sanitized stream, including provisional message identity."""
 
-    def __init__(self, request_id, step, previous=(), secrets=()):
+    def __init__(self, request_id, step, previous=(), secrets=(), *, error_secrets=()):
         self.request_id, self.step = request_id, step
         self.base_output = list(previous)
         self.secrets = secrets
+        self.error_secrets = error_secrets
         self.current_output = []
         self.stream_item_ids = {}
         self.provisional_message_ids = set()
         self.seen_delta_events, self.completed_message_ids = set(), set()
 
+    def _provider_output(self, items):
+        # Client-owned function results are produced by execute_calls, never by
+        # the provider. Validate the complete incoming batch before merging, so
+        # a forged result cannot skip execution or replace a real base receipt.
+        if any(isinstance(item, dict) and item.get('type') == 'function_call_output'
+               for item in (items if isinstance(items, list) else [])):
+            raise AgentError('upstream_error', '供应商返回了不受信任的工具回执；本轮已停止，不会自动执行或重发。')
+        return safe_output(items, self.secrets, error_secrets=self.error_secrets)
+
     def publish(self, items):
-        clean = safe_output(items, self.secrets)
+        clean = self._provider_output(items)
         for i, item in enumerate(clean):
             if not item.get("id") and not item.get("call_id") and i < len(self.current_output) and self.current_output[i].get("type") == item.get("type"):
                 if self.current_output[i].get("id"):
@@ -221,7 +236,7 @@ class ResponseOutput:
 
     def item(self, event):
         item, kind = event['item'], event['type']
-        item = safe_output([item], self.secrets)[0]
+        item = self._provider_output([item])[0]
         slot = event.get("output_index", 0)
         provisional = self.stream_item_ids.get(slot)
         if item.get("type") == "message" and kind == "response.output_item.added":
@@ -247,7 +262,7 @@ class ResponseOutput:
         return self.publish([item])
 
     def complete(self, output):
-        clean = safe_output(output, self.secrets)
+        clean = self._provider_output(output)
         for i, item in enumerate(clean):
             if not item.get("id") and not item.get("call_id"):
                 candidate = self.current_output[i] if i < len(self.current_output) and self.current_output[i].get("type") == item.get("type") else None

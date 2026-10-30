@@ -83,6 +83,31 @@ Browser validation with this offline provider has covered:
 These checks use synthetic images and provider replies; real-model visual
 results, native IME behavior and paid-provider behavior have not been validated.
 
+## Manual image clipboard acceptance
+
+The preview also exposes **http://127.0.0.1:8766/__preview__/clipboard**, a
+loopback-only paste receiver. It reads only the user's native paste event,
+displays the pasted image and reports its format, dimensions and transparent
+pixel counts. It does not read the clipboard on its own, upload the image or
+send its contents to a model. Its network policy blocks outgoing connections.
+
+1. Create a synthetic successful image in the preview, then choose **Copy image**
+   on that result. Test PNG, JPEG, WebP and a transparent PNG/WebP separately;
+   the preview supplier honors those output-format and background settings.
+2. Open the receiver and press **Ctrl+V** (or the platform paste shortcut).
+   Confirm a real image is pasted, the visible dimensions/orientation are
+   retained, and transparent samples retain transparency. The clipboard may
+   contain PNG even when the original file is JPEG or WebP.
+3. Separately use **Copy generation Prompt** and paste into a text editor. It
+   must copy the execution text, not substitute an image or submit a request.
+4. Check denied clipboard permission or an unsupported browser: the application
+   must report failure and leave the result available for original-file download.
+
+Record the browser/platform and actual outcomes. Unit tests with a stubbed
+`ClipboardItem` or `navigator.clipboard.write`, and scripted DOM paste events,
+do not establish native operating-system clipboard acceptance. This procedure
+is a reproducible manual check, not a claim that every browser has passed it.
+
 Validation (no listening server or model calls):
 
 ```sh

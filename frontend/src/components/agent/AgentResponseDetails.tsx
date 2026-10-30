@@ -97,7 +97,7 @@ export function AgentResponseDetails({ details, modelInfo, request, round, jobs 
         <div><dt>状态</dt><dd>{round.taskContext.completeness}</dd></div>
       </dl>{round.taskContext.historyDependencies.length > 0 && <ul>{round.taskContext.historyDependencies.map((entry, index) => <li key={`${entry.roundId}:${index}`}>{entry.roundId} · {entry.reason}</li>)}</ul>}</section>}
       {(round || details && (hasUsage || extraUsage || steps.length > 0)) && <dl><TokenRows usage={details?.usage || missingUsage} fields={hasUsage ? tokenFields.slice(2) : tokenFields} showMissing /></dl>}
-      {round?.failure && <dl><div><dt>请求诊断</dt><dd>{getAgentFailure(round.failure.kind).label} · {getAgentFailure(round.failure.kind).kind}</dd></div></dl>}
+      {round?.failure && <dl><div><dt>请求诊断</dt><dd>{getAgentFailure(round.failure).label}</dd></div>{getAgentFailure(round.failure).detail && <div><dt>具体原因</dt><dd>{getAgentFailure(round.failure).detail}</dd></div>}</dl>}
       {round && <section aria-label="阶段耗时"><h4>阶段耗时</h4>
         <dl>{timingFields.map(([field, label]) => <div key={field}><dt>{label}</dt><dd>{duration(round.execution?.timings[field])}</dd></div>)}</dl>
         <dl><div><dt>本页面发送至收到终态</dt><dd>{duration(terminalObservationMs)}</dd></div></dl>
@@ -120,6 +120,7 @@ export function AgentResponseDetails({ details, modelInfo, request, round, jobs 
           return <div className="agent-response-step" key={job.id}><p>图片任务 {index + 1}</p><dl>
             {jobTimingFields.map(([field, label]) => <div key={field}><dt>{label}</dt><dd>{duration(execution?.timings?.[field])}</dd></div>)}
             {failure && <div><dt>诊断分类</dt><dd>{failure.label} · {failure.kind}</dd></div>}
+            {failure?.detail && <div><dt>具体原因</dt><dd>{failure.detail}</dd></div>}
           </dl>{job.provider === 'agent_native' && <p className="agent-help">原生图片耗时仅记录图像工具事件至有效终态的观察区间；未收到工具事件时无法单独测量，不能用 Responses 总耗时代替。</p>}</div>;
         })}
       </section>}

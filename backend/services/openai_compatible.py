@@ -21,7 +21,7 @@ from backend.services.generation_jobs import GenerationJobConflict, GenerationJo
 from backend.services.image_store import MAX_IMAGE_PIXELS
 from backend.services.image_download import download_image, ImageDownloadError, MAX_IMAGE_BYTES
 from backend.services.image_api_stream import ImageStreamError, iter_image_events, read_json_response
-from backend.services.agent_diagnostics import safe_diagnostics
+from backend.services.agent_diagnostics import safe_diagnostics, network_configuration_diagnostics
 from backend.services.api_network import (
     NETWORK_DEFAULTS, ApiNetworkError, create_api_client, public_network_settings,
     update_network_settings, validate_network_settings,
@@ -588,10 +588,8 @@ class OpenAICompatibleProvider:
             if http_started is not None:
                 diagnostics.setdefault('provider_ms', round((time.monotonic() - http_started) * 1000, 3))
             if isinstance(error, dict):
-                diagnostics["error"] = {key: _safe_value(error[key], settings["api_key"]) for key in ("type", "code", "param", "message") if key in error}
-                moderation = _safe_moderation_details(error.get("moderation_details"))
-                if moderation is not None:
-                    diagnostics["error"]["moderation_details"] = moderation
+                diagnostics["error"] = safe_diagnostics({'error': error},
+                    secrets=(settings['api_key'], prompt, request_prompt), allow_message=category != 'local_validation')['error']
             # Never concatenate upstream prose/JSON into a persisted or visible error.
             raise OpenAICompatibleError(message + "; no automatic retry was attempted.", dict(diagnostics)) from None
 
@@ -618,7 +616,8 @@ class OpenAICompatibleProvider:
         except OpenAICompatibleError:
             raise
         except ApiNetworkError as error:
-            fail("local_validation", str(error))
+            diagnostics.update(network_configuration_diagnostics(error.message))
+            fail("local_validation", str(error), {'code': 'network_configuration'})
         except ImageStreamError as error:
             fail(error.category, str(error))
         except httpx.ConnectTimeout:

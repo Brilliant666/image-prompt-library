@@ -9,6 +9,8 @@ import argparse
 import base64
 from collections import Counter
 from contextlib import ExitStack, contextmanager
+from email.parser import BytesParser
+from email.policy import default as email_policy
 import gc
 from io import BytesIO
 import ipaddress
@@ -60,17 +62,84 @@ def prompt_candidate(prompt, task=None):
     return text, ("gpt-image", "composition") if english else ("image-prompt-reverse", "analysis")
 
 
-def synthetic_png(number=0):
+def synthetic_image(number=0, *, output_format='png', transparent=False):
     """Public geometric fixtures; no imported files, metadata or private images."""
     colors = [(35, 90, 145), (195, 100, 50), (70, 130, 90)]
-    image = Image.new("RGB", (384, 256), (238, 234, 223))
+    alpha = transparent and output_format != 'jpeg'
+    image = Image.new('RGBA' if alpha else 'RGB', (384, 256), (0, 0, 0, 0) if alpha else (238, 234, 223))
     draw = ImageDraw.Draw(image)
-    draw.rectangle((32, 32, 180, 224), fill=colors[number % len(colors)])
-    draw.ellipse((160, 58, 338, 236), fill=colors[(number + 1) % len(colors)])
+    color = lambda index: (*colors[index % len(colors)], 255) if alpha else colors[index % len(colors)]
+    draw.rectangle((32, 32, 180, 224), fill=color(number))
+    draw.ellipse((160, 58, 338, 236), fill=color(number + 1))
     draw.line((24, 24, 360, 232), fill="white", width=6)
     output = BytesIO()
-    image.save(output, "PNG")
+    image.save(output, {'png': 'PNG', 'jpeg': 'JPEG', 'webp': 'WEBP'}[output_format],
+               **({'lossless': True} if output_format == 'webp' else {}))
     return output.getvalue()
+
+
+def synthetic_png(number=0):
+    return synthetic_image(number)
+
+
+CLIPBOARD_RECEIVER = """<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>离线图片粘贴验收</title>
+<style>body{font:16px system-ui;background:#f7f8fa;color:#222;margin:24px}main{max-width:880px;margin:auto}textarea{box-sizing:border-box;width:100%;min-height:100px;padding:16px;border:1px solid #aaa;border-radius:12px;font:inherit}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:white;border-radius:10px;padding:16px}canvas{max-width:100%;height:auto;background:repeating-conic-gradient(#ddd 0% 25%,white 0% 50%) 50%/20px 20px;border:1px solid #aaa}</style>
+<main><h1>离线图片粘贴验收</h1><p>在 Agent 图片卡点击“复制图片”，回到此页并在下方按 Ctrl+V。页面仅处理这次真实粘贴事件，不主动读取剪贴板、不上传或保存。</p>
+<textarea id="paste-target" aria-label="图片粘贴接收区" autofocus placeholder="点击这里，再按 Ctrl+V 粘贴图片；普通文字也可正常粘贴。"></textarea>
+<p id="paste-status" role="status">尚未收到粘贴事件</p><pre id="paste-report" aria-label="粘贴结果">{"state":"empty"}</pre>
+<canvas id="paste-canvas" aria-label="实际粘贴图片" hidden></canvas></main>
+<script>
+const target = document.getElementById('paste-target');
+const report = document.getElementById('paste-report');
+const status = document.getElementById('paste-status');
+const canvas = document.getElementById('paste-canvas');
+let pasteCount = 0;
+target.addEventListener('paste', async event => {
+  const operation = ++pasteCount;
+  canvas.hidden = true; canvas.width = 0; canvas.height = 0;
+  report.textContent = JSON.stringify({state:'processing', source:'native-paste-event', trusted:event.isTrusted, pasteCount:operation}, null, 2);
+  const files = Array.from(event.clipboardData.files).filter(file => file.type.startsWith('image/'));
+  if (!files.length) {
+    status.textContent = '本次未收到图片；文字按正常方式粘贴。';
+    report.textContent = JSON.stringify({state:'text', source:'native-paste-event', trusted:event.isTrusted, pasteCount:operation, images:[]}, null, 2);
+    return;
+  }
+  event.preventDefault();
+  status.textContent = '正在检查粘贴的图片';
+  const images = [];
+  try {
+    for (const file of files) {
+      if (file.size > 64 * 1024 * 1024) throw new Error('图片超过离线接收页的内存保护上限');
+      const url = URL.createObjectURL(file), image = new Image();
+      try {
+        await new Promise((resolve, reject) => { image.onload = resolve; image.onerror = () => reject(new Error('粘贴图片无法解码')); image.src = url; });
+        if (operation !== pasteCount) return;
+        const width = image.naturalWidth, height = image.naturalHeight;
+        if (!width || !height || width * height > 32000000) throw new Error('图片分辨率超过离线接收页的内存保护上限');
+        canvas.width = width; canvas.height = height; canvas.hidden = false;
+        const context = canvas.getContext('2d'); context.drawImage(image, 0, 0);
+        const pixels = context.getImageData(0, 0, width, height).data;
+        let transparentPixels = 0, fullyTransparentPixels = 0;
+        for (let index = 3; index < pixels.length; index += 4) {
+          if (pixels[index] < 255) transparentPixels++;
+          if (pixels[index] === 0) fullyTransparentPixels++;
+        }
+        images.push({type:file.type, bytes:file.size, width, height, transparentPixels, fullyTransparentPixels,
+          topLeftRGBA:Array.from(pixels.slice(0, 4))});
+      } finally { URL.revokeObjectURL(url); image.removeAttribute('src'); }
+    }
+    if (operation !== pasteCount) return;
+    report.textContent = JSON.stringify({state:'image', source:'native-paste-event', trusted:event.isTrusted, pasteCount:operation, images}, null, 2);
+    status.textContent = '已收到 ' + images.length + ' 张实际图片';
+  } catch (error) {
+    if (operation !== pasteCount) return;
+    report.textContent = JSON.stringify({state:'error', source:'native-paste-event', trusted:event.isTrusted, pasteCount:operation, error:error.message}, null, 2);
+    status.textContent = '本次粘贴验收失败';
+  }
+});
+</script></html>"""
 
 
 class PreviewStream(httpx.SyncByteStream):
@@ -164,6 +233,21 @@ class PreviewProvider:
             number = self.counts[kind]
             self.requests.append({"kind": kind, "number": number, "path": path, "bytes": len(raw)})
         if kind == "images":
+            content_type = request.headers.get('content-type', '')
+            if content_type.startswith('application/json'):
+                image_options = json.loads(raw)
+            elif content_type.startswith('multipart/form-data'):
+                message = BytesParser(policy=email_policy).parsebytes(
+                    b'Content-Type: ' + content_type.encode('ascii') + b'\r\nMIME-Version: 1.0\r\n\r\n' + raw)
+                image_options = {part.get_param('name', header='content-disposition'): part.get_payload(decode=True).decode('utf-8')
+                                 for part in message.iter_parts()
+                                 if part.get_param('name', header='content-disposition') in {'output_format', 'background'}}
+            else:
+                image_options = {}
+            image_format = image_options.get('output_format', 'png')
+            transparent = image_options.get('background') == 'transparent'
+            if image_format not in {'png', 'jpeg', 'webp'} or image_format == 'jpeg' and transparent:
+                return httpx.Response(400, json={'error': {'code': 'synthetic_image_format', 'message': 'Unsupported synthetic output format/background combination.'}})
             # A failed batch member succeeds on explicit retry with the same recipe.
             marker = re.search(rb"preview-fail-once-[a-zA-Z0-9_-]+", raw)
             with self.lock:
@@ -173,7 +257,7 @@ class PreviewProvider:
             self.stopping.wait(self.delay)
             if fail:
                 return httpx.Response(400, json={"error": {"code": "synthetic_image_failure", "message": "Synthetic member failed; use explicit retry."}})
-            return httpx.Response(200, json={"data": [{"b64_json": base64.b64encode(synthetic_png(number)).decode()}]})
+            return httpx.Response(200, json={"data": [{"b64_json": base64.b64encode(synthetic_image(number, output_format=image_format, transparent=transparent)).decode()}]})
 
         body = json.loads(raw)
         prompt, followups, all_input = self.current_turn(body)
@@ -353,6 +437,7 @@ def preview_session(root, *, frontend_dist=None, delay=0.12, slow_delay=0.5):
         from backend.main import create_app
         from fastapi import HTTPException, Request
         from fastapi.routing import APIRoute
+        from fastapi.responses import HTMLResponse
         from backend.services.agent_execution import drain_agent_requests
         from backend.services.generation_queue import drain_generation_jobs
         app = create_app(root / "library", frontend_dist_path=frontend_dist or ROOT / "frontend" / "dist")
@@ -365,6 +450,13 @@ def preview_session(root, *, frontend_dist=None, delay=0.12, slow_delay=0.5):
                     "promptMarkers": dict(PROMPT_MARKERS)}
         diagnostics.__annotations__["request"] = Request
         app.router.routes.insert(0, APIRoute("/__preview__/diagnostics", diagnostics, methods=["GET"]))
+        async def clipboard_receiver(request):
+            if not request.client or request.client.host not in {'127.0.0.1', '::1'}:
+                raise HTTPException(403, 'Preview clipboard receiver is loopback-only')
+            return HTMLResponse(CLIPBOARD_RECEIVER, headers={'Cache-Control': 'no-store',
+                'Content-Security-Policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src blob:; connect-src 'none'; base-uri 'none'; frame-ancestors 'none'"})
+        clipboard_receiver.__annotations__['request'] = Request
+        app.router.routes.insert(0, APIRoute('/__preview__/clipboard', clipboard_receiver, methods=['GET']))
         try:
             yield app, provider, seeds
         finally:

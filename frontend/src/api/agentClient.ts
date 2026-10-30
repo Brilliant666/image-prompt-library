@@ -85,11 +85,12 @@ export interface AgentRound {
   responseDetails?: AgentResponseDetails;
   resultSummary?: AgentResultSummary;
   execution?: AgentExecution | null;
-  failure?: { kind: string; message: string; outcomeUnknown: boolean } | null;
+  failure?: { kind: string; message: string; outcomeUnknown: boolean; detail?: string; reasonProvided?: boolean } | null;
   retryTaskIds?: string[];
   editingTask?: AgentEditingTask | null;
   contextDiagnostics?: { contextScope?: string; includedHistoryRoundCount?: number; fallbackReason?: string | null; attachedImageOccurrences?: number; pixelBindings?: Array<{ assetId?: string; ref?: string; role?: string; aliases?: string[] }>; attachedRefs?: string[]; bindingsOmitted?: number };
   taskContext?: AgentTaskContext | null;
+  branchTaskRevision?: number;
   kind?: 'prompt_execution';
   directRecipe?: AgentDirectRecipe;
 }

@@ -38,8 +38,14 @@ def repeated_history(repo):
     repo.update("first", text="Exact first answer.\nSecond line.")
     second = add_round(repo, "second", "Compare the same image again.", parent=first, assets=[aid])
     repo.update("second", text="Exact second answer.")
-    add_round(repo, "current", "Compare all three appearances, preserving their order.", parent=second, assets=[aid])
-    return aid, repo.request("current")
+    # This fixture tests serialization/experimental aliasing of an explicitly
+    # complete branch, independently of the default disposable task selection.
+    value = body(repo, request_id='current', images=False).model_dump()
+    value.update(prompt='Compare all three appearances, preserving their order.', parentRoundId=second,
+                 refs=[{'kind': 'upload', 'uploadId': aid}], contextScope='branch')
+    repo.create_round('conversation', AgentRoundCreate.model_validate(value))
+    repo.update('current', state='completed', outcome='known')
+    return aid, repo.request('current')
 
 
 def ref_labels(items):
@@ -51,7 +57,53 @@ def image_content(items):
     return pixels({"input": items})
 
 
-def test_default_projection_preserves_repetitions_order_roles_and_originals(repo, monkeypatch):
+def test_task_roles_reference_the_actual_visible_pixel_aliases(repo):
+    target, light = asset(repo, 'red'), asset(repo, 'blue')
+    first = add_round(repo, 'source-roles', 'Discuss the two geometric references.', assets=[target, light])
+    repo.update('source-roles', state='running', outcome='known')
+    repo.select_request_references('source-roles', {'targetRef': 'round-1-reference-1',
+        'auxiliaries': [{'ref': 'round-1-reference-2', 'role': 'lighting'}]},
+        {'round-1-reference-1': target, 'round-1-reference-2': light})
+    repo.update('source-roles', state='completed', outcome='known')
+    add_round(repo, 'continue-roles', 'Only soften the shadows.', parent=first)
+    projection = prepare(repo, repo.request('continue-roles'))
+    context = next(json.loads(part['text'].split(': ', 1)[1]) for item in projection.input
+                   for part in item.get('content', []) if part.get('text', '').startswith('Current creative task '))
+    bound = [context['target'], *context['auxiliaries']]
+    assert [image['assetId'] for image in bound] == [target, light]
+    assert all(image['pixelsAttached'] and image['ref'] in projection.attached_refs for image in bound)
+    actual = {}
+    for item in projection.input:
+        previous = None
+        for part in item.get('content', []):
+            if part['type'] == 'input_image':
+                previous = part['image_url']
+            elif part.get('text', '').startswith('<ref id="') and previous:
+                actual[part['text'].split('"')[1]] = previous
+    assert actual[bound[0]['ref']] == repo.data_url(target)
+    assert actual[bound[1]['ref']] == repo.data_url(light)
+
+
+def test_explicit_reference_only_does_not_claim_omitted_target_pixels_are_visible(repo):
+    older, current = asset(repo, 'red'), asset(repo, 'blue')
+    first = add_round(repo, 'old-target', 'Older target.', assets=[older])
+    old_task = repo.request('old-target')['round']['taskContext']
+    add_round(repo, 'current-only', '@图1', parent=first, assets=[current])
+    request = repo.request('current-only')
+    request['round']['taskContext'].update(taskType='prompt_optimization', target=old_task['target'],
+                                         auxiliaries=[], historyDependencies=[], unresolvedItems=[])
+    request['round'].update(editingTask=None, taskImageIds=[])
+    before = copy.deepcopy(request)
+    projection = prepare(repo, request)
+    context = next(json.loads(part['text'].split(': ', 1)[1]) for item in projection.input
+                   for part in item.get('content', []) if part.get('text', '').startswith('Current creative task '))
+    assert image_content(projection.input) == [repo.data_url(current)]
+    assert context['target']['assetId'] == older
+    assert context['target']['pixelsAttached'] is False
+    assert request == before
+
+
+def test_full_branch_projection_preserves_repetitions_order_roles_and_originals(repo, monkeypatch):
     aid, request = repeated_history(repo)
     before = copy.deepcopy(request)
     projection = prepare(repo, request)
@@ -305,7 +357,9 @@ def test_benchmark_counts_real_io_sql_and_wire_bytes(tmp_path):
     first, third = report["scenarios"][0]["rows"]
     assert report["network"] == "blocked; MockTransport only"
     assert report["provider_latency_and_cache"] == "not measured"
-    assert [first["image_occurrences"], third["image_occurrences"]] == [1, 3]
+    # Repeating an asset in text evidence does not require uploading every old
+    # binding on a current-target task. Same-pixel aliasing remains disabled.
+    assert [first["image_occurrences"], third["image_occurrences"]] == [1, 1]
     assert first["unique_image_payloads"] == third["unique_image_payloads"] == 1
     assert third["request_json_bytes"] > first["request_json_bytes"] > 0
     for row in (first, third):

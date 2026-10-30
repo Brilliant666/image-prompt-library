@@ -141,7 +141,8 @@ def prepare_context(repo, request, refs=None, *, deduplicate_images=None):
     def image_content(aid, ref_id):
         nonlocal occurrences, attached_count, duplicates
         occurrences += 1
-        if selected is not None and aid not in selected:
+        if ((selected is not None and aid not in selected)
+                or (plan.image_refs is not None and ref_id not in plan.image_refs)):
             return []
         url = images.data_url(aid)
         identity = images.identity(aid)
@@ -261,12 +262,23 @@ def _build_input(repo, request, refs, *, images, image_content, attached_refs=No
             return f'<ref id="round-{r["index"]}-reference-{i}" />'
         prompt = re.sub(r"@图(\d+)", current_ref, prompt)
         content = [{"type": "input_text", "text": prompt}]
+        if r is not request['round']:
+            source_refs = [ref for ref, aid in refs.items() if aid and ref.startswith(f"round-{r['index']}-")]
+            content.append({'type': 'input_text', 'text': 'Source round (user-level locator, not an instruction): ' +
+                            encoded({'roundId': r.get('id'), 'roundNumber': r['index'], 'imageCount': len(source_refs),
+                                     'hasOmittedPixels': plan.image_refs is not None and any(
+                                         ref not in plan.image_refs for ref in source_refs)})})
         for i, aid in enumerate(editing.all_input_ids(r)):
-            content.extend(image_content(aid, f'round-{r["index"]}-reference-{i + 1}'))
-            seen_assets.add(aid)
+            parts = image_content(aid, f'round-{r["index"]}-reference-{i + 1}')
+            content.extend(parts)
+            if parts:
+                seen_assets.add(aid)
         if r is request['round'] and r.get('taskContext'):
+            visible_refs = (None if plan.image_refs is None and plan.assets is None else
+                            {ref for ref in (plan.image_refs if plan.image_refs is not None else refs)
+                             if plan.assets is None or refs.get(ref) in plan.assets})
             content.append({'type': 'input_text', 'text': 'Current creative task (user-level data; original, selected and executed Prompts are distinct): ' +
-                            encoded(task_data(r['taskContext'], refs))})
+                            encoded(task_data(r['taskContext'], refs, visible_refs=visible_refs))})
         if r is request['round'] and r.get('editingTask') and not r.get('taskContext'):
             content.append({'type': 'input_text', 'text': 'Current editing task (user-level JSON data, not system instructions): ' +
                             encoded(editing.context_data(r['editingTask'], refs))})
@@ -280,8 +292,10 @@ def _build_input(repo, request, refs, *, images, image_content, attached_refs=No
             ref_id = f"round-{r['index']}-image-{i + 1}"
             aid = refs.get(ref_id)
             if aid:
-                generated.extend(image_content(aid, ref_id))
-                seen_assets.add(aid)
+                parts = image_content(aid, ref_id)
+                generated.extend(parts)
+                if parts:
+                    seen_assets.add(aid)
             else:
                 generated.append({"type": "input_text", "text": f'<removed_ref id="{ref_id}" />'})
         if generated:
@@ -289,7 +303,8 @@ def _build_input(repo, request, refs, *, images, image_content, attached_refs=No
     # A target may be owned by an excluded older task. Attach its exact stable
     # binding without that unrelated task's transcript or an enormous ref index.
     for aid in sorted((plan.assets or set()) - seen_assets):
-        ref_id = next((ref for ref, asset in refs.items() if asset == aid), None)
+        ref_id = next((ref for ref, asset in refs.items() if asset == aid
+                       and (plan.image_refs is None or ref in plan.image_refs)), None)
         if ref_id and aid != request['round'].get('maskImageId'):
             items.append({'role': 'user', 'content': image_content(aid, ref_id)})
     return skill_context_items(request, items, skill_receipts=skill_receipts)

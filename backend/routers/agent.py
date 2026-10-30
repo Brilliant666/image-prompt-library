@@ -7,7 +7,7 @@ from starlette.concurrency import run_in_threadpool
 
 from backend.agent_schemas import AgentConfigSave, AgentConversationCreate, AgentConversationPatch, AgentEditingTaskPatch, AgentTaskContextPatch, AgentPromptExecutionCreate, AgentResume, AgentRoundCreate
 from backend.services.agent_execution import schedule_request, stop_request
-from backend.services.agent_repository import ACTIVE_STATES, AgentError, AgentRepository, encoded
+from backend.services.agent_repository import ACTIVE_STATES, MAX_REFERENCE_BYTES, AgentError, AgentRepository, encoded
 from backend.services.agent_progress import ProgressLimit, ProgressSession
 
 router = APIRouter(prefix="/agent", tags=["agent"])
@@ -202,5 +202,5 @@ def resume(request_id: str, payload: AgentResume, request: Request):
 async def upload(request: Request, file: UploadFile = File(...), kind: str = Form("reference")):
     if kind not in {"reference", "mask"}:
         raise HTTPException(400, detail={"code": "invalid_reference", "message": "上传用途无效。"})
-    image = repo(request).store_asset(await file.read(30 * 1024 * 1024 + 1), None, kind)
+    image = repo(request).store_asset(await file.read(MAX_REFERENCE_BYTES + 1), None, kind)
     return {"uploadId": image["id"], "image": image}
