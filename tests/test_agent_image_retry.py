@@ -413,6 +413,9 @@ def test_retry_library_humanization_preserves_order_recipe_and_real_root_link(so
 def test_retry_forged_lineage_or_reference_mapping_does_not_rewrite_prompt(source, corruption):
     client, repo, original, _, calls = source
     created = post(source).json()['job']
+    # A valid result was obtained first. Corrupting its later lineage must not
+    # turn the original user Prompt into an inferred reference-image Prompt.
+    repo.jobs.stage_result(created['id'], image_bytes('green'), 'synthetic.png')
     metadata, parameters = created['metadata'], created['parameters']
     with connect(repo.library) as conn:
         if corruption == 'registration':
@@ -428,13 +431,31 @@ def test_retry_forged_lineage_or_reference_mapping_does_not_rewrite_prompt(sourc
             metadata['agentRetry'][corruption] = 'unrelated'
         conn.execute('UPDATE generation_jobs SET metadata=?,parameters=? WHERE id=?',
                      (json.dumps(metadata), json.dumps(parameters), created['id']))
-    repo.jobs.stage_result(created['id'], image_bytes('green'), 'synthetic.png')
     accepted = client.post(f"/api/generation-jobs/{created['id']}/accept-as-new-item", json={'auto_title': False})
     assert accepted.status_code == 200, accepted.text
     prompt = accepted.json()['item']['prompts'][0]
     assert prompt['text'] == original.prompt_text
     assert 'agent_reference_prompt' not in prompt['provenance']
     assert repo.jobs.get_job(created['id']).prompt_text == original.prompt_text
+    assert not calls
+
+
+@pytest.mark.parametrize('corruption',['sourceRequestId','roundId','conversationId'])
+def test_result_registration_rejects_already_corrupt_agent_owner_and_preserves_image(source,corruption):
+    client,repo,original,_,calls = source
+    created = post(source).json()['job']
+    metadata = created['metadata']
+    metadata['agentRetry'][corruption] = 'unrelated'
+    with connect(repo.library) as conn:
+        conn.execute('UPDATE generation_jobs SET metadata=? WHERE id=?',(json.dumps(metadata),created['id']))
+    with pytest.raises(GenerationJobConflict):
+        repo.jobs.stage_result(created['id'],image_bytes('green'),'synthetic.png')
+    current = repo.jobs.get_job(created['id'])
+    assert current.status == 'queued' and current.result_path is None
+    directory = repo.library/'generation-results'/created['id']
+    assert next(directory.glob('result-*')).read_bytes() == image_bytes('green')
+    assert (directory/'local-result.json').is_file()
+    assert repo.jobs.get_job(original.id).prompt_text == original.prompt_text
     assert not calls
 
 

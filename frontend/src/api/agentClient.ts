@@ -318,6 +318,7 @@ export const agentApi = {
   request: (id: string, signal?: AbortSignal) => request<AgentSnapshot>(`/requests/${encodeURIComponent(id)}`, { signal }),
   stop: (id: string) => request<AgentSnapshot>(`/requests/${encodeURIComponent(id)}/stop`, { method: 'POST', body: '{}' }),
   resume: (id: string, resumeId: string) => request<AgentSnapshot>(`/requests/${encodeURIComponent(id)}/resume`, { method: 'POST', body: JSON.stringify({ resumeId }) }),
+  recoverResults: (id: string) => request<AgentSnapshot>(`/requests/${encodeURIComponent(id)}/recover-results`, { method: 'POST' }),
   upload: (file: File, kind: 'reference' | 'mask' = 'reference') => {
     const body = new FormData(); body.append('file', file); body.append('kind', kind);
     return request<{ uploadId: string; image: AgentImage }>('/uploads', { method: 'POST', body });

@@ -6,18 +6,22 @@ import type { GenerationJobRecord } from '../../types';
 import { resolveAuto4k } from '../../utils/compatibleRecipe';
 import { recipeInputs } from '../../utils/recipeInputs';
 import { clearImageRetry, readImageRetries, saveImageRetry } from '../../utils/playground/agentImageRetry';
+import { localResultRecovery } from '../../utils/localResultRecovery';
+import LocalResultRecovery from '../LocalResultRecovery';
 
 /** One click is one explicit image request. Uncertain receipts can only be read. */
-export default function AgentImageRetryButton({ job, conversationId, config, selection, params, sizeMode, disabled, onReceipt }: {
+export default function AgentImageRetryButton({ job, conversationId, config, selection, params, sizeMode, disabled, onReceipt, onRecovered }: {
   job: GenerationJobRecord; conversationId: string; config: AgentConfigResponse;
   selection?: { profileId?: string | null; model: string }; params: AgentImageParams;
   sizeMode?: 'auto4k'; disabled?: boolean; onReceipt: (value: AgentImageRetryReceipt) => void;
+  onRecovered?: (job: GenerationJobRecord) => void;
 }) {
   const [pending, setPending] = useState(() => readImageRetries(localStorage).find(row => row.sourceJobId === job.id && row.conversationId === conversationId));
   const [busy, setBusy] = useState(false), [error, setError] = useState('');
   const running = useRef(false), alive = useRef(true);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   async function retry() {
+    if (localResultRecovery(job)) return;
     if (running.current || disabled && !pending) return;
     running.current = true; setBusy(true); setError('');
     let entry = pending;
@@ -65,5 +69,6 @@ export default function AgentImageRetryButton({ job, conversationId, config, sel
       }
     } finally { running.current = false; if (alive.current) setBusy(false); }
   }
+  if (localResultRecovery(job)) return <LocalResultRecovery job={job} onRecovered={onRecovered} />;
   return <span className="agent-image-retry"><button type="button" aria-label={pending ? '检查图片重试状态' : '重试图片'} title={pending ? '检查原重试状态，不会再次生成' : '重试：保留提示词和参考图，使用当前生图设置'} disabled={busy || Boolean(disabled && !pending)} onClick={() => void retry()}>{busy ? <LoaderCircle className="spin" size={15} /> : <RotateCcw size={15} />}</button>{error && <span className="agent-error" role="alert">{error}</span>}</span>;
 }

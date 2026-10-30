@@ -91,6 +91,50 @@ class ImportDraftConflict(ValueError):
     pass
 
 
+def resolve_import_staging_path(library_path: Path | str, staged_path: str, *, require_file: bool = True) -> Path:
+    """Check the staging boundary for reading and for repository-owned writes.
+
+    Component checks and later identity checks cover ordinary replacements; they
+    are not a claim of eliminating every hostile local filesystem race.
+    """
+    windows = PureWindowsPath(staged_path)
+    relative = Path(staged_path.replace("\\", "/"))
+    message = "Import draft media must be staged inside the library import folder without links"
+    if (relative.is_absolute() or windows.drive or windows.root or ".." in relative.parts
+            or relative.parts[:1] != (IMPORT_STAGING_ROOT,) or len(relative.parts) < 2
+            or any(":" in part for part in relative.parts)):
+        raise ImportDraftConflict(message)
+    try:
+        library = Path(library_path).resolve(strict=True)
+        expected_root = library / IMPORT_STAGING_ROOT
+        candidate = library
+        for index, part in enumerate(relative.parts):
+            candidate = candidate / part
+            try:
+                info = candidate.lstat()
+            except FileNotFoundError:
+                if require_file:
+                    raise
+                break
+            if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+                raise ImportDraftConflict(message)
+            if index < len(relative.parts) - 1 and not stat.S_ISDIR(info.st_mode):
+                raise ImportDraftConflict(message)
+            if index == len(relative.parts) - 1 and not stat.S_ISREG(info.st_mode):
+                raise ImportDraftConflict("Import staged image must be a regular file")
+        candidate = library / relative
+        if (expected_root.resolve(strict=False) != expected_root
+                or not candidate.resolve(strict=require_file).is_relative_to(expected_root)):
+            raise ImportDraftConflict(message)
+        return candidate
+    except ImportDraftConflict:
+        raise
+    except FileNotFoundError:
+        raise ImportDraftConflict("Import staged image is missing; replace it and retry") from None
+    except (OSError, RuntimeError, ValueError):
+        raise ImportDraftConflict(message) from None
+
+
 class ImportDraftRepository:
     def __init__(self, library_path: Path | str):
         self.library_path = Path(library_path)
@@ -157,38 +201,7 @@ class ImportDraftRepository:
     def _staged_file(self, staged_path: str | None) -> Path | None:
         if not staged_path:
             return None
-        # Check both path syntaxes, including drive-relative paths and UNC on
-        # POSIX. Staging is not a formal media root or an arbitrary local path.
-        windows = PureWindowsPath(staged_path)
-        relative = Path(staged_path.replace("\\", "/"))
-        message = "Import draft media must be staged inside the library import folder without links"
-        if (relative.is_absolute() or windows.drive or windows.root or ".." in relative.parts
-                or relative.parts[:1] != (IMPORT_STAGING_ROOT,) or len(relative.parts) < 2
-                or any(":" in part for part in relative.parts)):
-            raise ImportDraftConflict(message)
-        try:
-            library = self.library_path.resolve(strict=True)
-            expected_root = library / IMPORT_STAGING_ROOT
-            candidate = library
-            for index, part in enumerate(relative.parts):
-                candidate = candidate / part
-                info = candidate.lstat()
-                if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
-                    raise ImportDraftConflict(message)
-                if index < len(relative.parts) - 1 and not stat.S_ISDIR(info.st_mode):
-                    raise ImportDraftConflict(message)
-            if not stat.S_ISREG(info.st_mode):
-                raise ImportDraftConflict("Import staged image must be a regular file")
-            # A redirected staging root must never redefine the allowed root.
-            staging_root = (library / IMPORT_STAGING_ROOT).resolve(strict=True)
-            resolved = candidate.resolve(strict=True)
-            if staging_root != expected_root or not resolved.is_relative_to(expected_root):
-                raise ImportDraftConflict(message)
-            return candidate
-        except FileNotFoundError:
-            raise ImportDraftConflict("Import staged image is missing; replace it and retry") from None
-        except (OSError, RuntimeError, ValueError):
-            raise ImportDraftConflict(message) from None
+        return resolve_import_staging_path(self.library_path, staged_path)
 
     def _read_staged_image(self, media: ImportDraftMedia) -> tuple[bytes, tuple]:
         path = self._staged_file(media.staged_path)
@@ -307,6 +320,9 @@ class ImportDraftRepository:
                     for media in prepared:
                         image_input = self._publish_media(directory, media)
                         self.items.add_image_in_transaction(conn, item_id, image_input)
+                    for media in prepared:
+                        if _file_identity(self._staged_file(media.media.staged_path).lstat()) != media.source_identity:
+                            raise ImportDraftConflict("Import staged image changed; retry the import")
                     timestamp = now()
                     conn.execute("UPDATE import_drafts SET status='accepted', accepted_item_id=?, accepted_at=?, updated_at=? WHERE id=?",
                                  (item_id, timestamp, timestamp, draft_id))

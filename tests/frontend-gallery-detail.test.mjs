@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import ts from 'typescript';
+import { localRecoveryDependencies } from './helpers/local-result-recovery.mjs';
 
 async function compile(path) {
   return ts.transpileModule(await readFile(new URL(path, import.meta.url), 'utf8'), {
@@ -11,7 +12,7 @@ async function compile(path) {
 function evaluate(js, dependencies, clock = {}) {
   const module = { exports: {} };
   new Function('require', 'module', 'exports', 'window', js)(name => {
-    assert.ok(name in dependencies, `unmocked dependency: ${name}`);
+    if (name in localRecoveryDependencies) return localRecoveryDependencies[name]; assert.ok(name in dependencies, `unmocked dependency: ${name}`);
     return dependencies[name];
   }, module, module.exports, clock);
   return module.exports;
@@ -68,6 +69,17 @@ const job = {
   parameters: { size: '2160x3840', quality: 'max', compatible_profile_name: 'Selected provider', input_images: [{ id: 'ref', name: 'Source original', result_path: 'originals/reference.png' }] },
   metadata: { requested: { quality: 'high', moderation: 'low' }, decoded_image: { width: 941, height: 1676, format: 'webp' } },
 };
+
+test('actual Gallery detail gives retained results a local action without supplier-failure or paid-resubmission guidance', async t => {
+  const pending = { ...job, status: 'failed', result_path: null, error: 'Old generic provider failure', metadata: {
+    local_result_recovery: { state: 'pending', message: '图片已取得，本地保存记录待恢复。', can_recover: true } } };
+  const h = harness(t, pending);
+  const control = h.find('local-result-recovery'); assert.ok(control);
+  assert.equal(h.find('button', props => props.className === 'pg-detail-reuse'), undefined);
+  assert.equal(h.find('p', props => props.children === pending.error), undefined);
+  control.onRecovered({ ...pending, id: pending.id, status: 'succeeded', result_path: job.result_path }); await h.flush();
+  assert.equal(h.events.changed, 1); assert.deepEqual(h.events.writes, []);
+});
 
 test('detail copy preserves exact text and changes only local copy feedback with an original-file download', async t => {
   const h = harness(t, job);

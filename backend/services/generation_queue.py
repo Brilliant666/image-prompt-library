@@ -88,6 +88,7 @@ def recover_interrupted_generation_jobs(library_path: Path | str, *, provider: s
     Persisted queued jobs are still safe to drain because they have not started.
     """
     repo = GenerationJobRepository(Path(library_path))
+    repo.recover_local_results(provider=provider)
     repo.resume_pending_discard_repairs()
     repo.clear_terminal_stream_previews()
     return repo.mark_running_provider_jobs_failed(provider, INTERRUPTED_BY_BACKEND_RESTART_ERROR)
@@ -113,7 +114,8 @@ def enqueue_generation_jobs(library_path: Path | str, *, provider: str = CODEX_P
         available = MAX_CONCURRENT_GENERATION_JOBS - len(_active)
         if available <= 0:
             return
-        queued = [job for job in repo.next_queued_provider_jobs(provider, limit=available + len(_active)) if job.id not in _active][:available]
+        queued = [job for job in repo.next_queued_provider_jobs(provider, limit=available + len(_active))
+                  if job.id not in _active and not job.metadata.get('local_result_recovery')][:available]
         if not queued:
             active_count = sum(active_provider == provider for active_provider in _active_providers.values())
             repo.clear_provider_backoff_if_drained(provider, active_count=active_count)
@@ -181,7 +183,10 @@ def run_generation_job_now(library_path: Path | str, job_id: str):
 
 
 def _run_provider_job(library, job_id, provider):
-    job = GenerationJobRepository(library).get_job(job_id)
+    repo = GenerationJobRepository(library)
+    job = repo.get_job(job_id)
+    if repo.local_result_recovery(job_id) is not None:
+        return repo.recover_local_result(job_id)
     if provider in {COMPATIBLE_PROVIDER_ID, "agent_native_batch"} and (job.metadata or {}).get("agentRetry"):
         from .agent_image_retry import run_agent_image_retry
         return run_agent_image_retry(library, job_id)

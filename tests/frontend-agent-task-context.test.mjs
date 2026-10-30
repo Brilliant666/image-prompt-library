@@ -2,11 +2,12 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import ts from 'typescript';
+import { localRecoveryDependencies } from './helpers/local-result-recovery.mjs';
 
 const compile = async path => ts.transpileModule(await readFile(new URL(path, import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
 function evaluate(js, deps, globals = {}) {
   const module = { exports: {} };
-  new Function('require', 'module', 'exports', ...Object.keys(globals), js)(name => { assert.ok(name in deps, `unmocked dependency: ${name}`); return deps[name]; }, module, module.exports, ...Object.values(globals));
+  new Function('require', 'module', 'exports', ...Object.keys(globals), js)(name => { if (name in localRecoveryDependencies) return localRecoveryDependencies[name]; assert.ok(name in deps, `unmocked dependency: ${name}`); return deps[name]; }, module, module.exports, ...Object.values(globals));
   return module.exports;
 }
 const utility = async path => evaluate(await compile(`../frontend/src/utils/${path}.ts`), {});

@@ -8,9 +8,11 @@ import { providerPauseSeconds } from '../utils/generationSets';
 import { mapGenerationRetryJob, rememberGenerationReviewOpenContext, resolveGenerationRetryGroup } from '../utils/generationSiblings';
 import { readGenerationQueueHistory, saveGenerationQueueHistory, clearGenerationQueueHistory, beginGenerationQueueMutation, generationQueueMutationPending, subscribeGenerationQueueMutation } from '../utils/generationQueueHistory';
 import type { Translator } from '../utils/i18n';
+import LocalResultRecovery from './LocalResultRecovery';
+import { localResultRecovery } from '../utils/localResultRecovery';
 
 function isActive(job: GenerationJobRecord) {
-  return job.status === 'queued' || job.status === 'running';
+  return !localResultRecovery(job) && (job.status === 'queued' || job.status === 'running');
 }
 
 function hasDisplayableResult(job: GenerationJobRecord) {
@@ -25,6 +27,7 @@ function statusIcon(job: GenerationJobRecord) {
 }
 
 function statusLabel(job: GenerationJobRecord, t: Translator, isUsedAsGenerationReference = false) {
+  if (localResultRecovery(job)) return '图片已取得 · 待恢复';
   if (job.status === 'queued') return t('queueQueued');
   if (job.status === 'running') return t('queueRunning');
   if (job.status === 'succeeded') return isUsedAsGenerationReference ? t('queueUsedAsReference') : t('queueReady');
@@ -223,7 +226,7 @@ function retriedByJobId(job: GenerationJobRecord) {
 }
 
 function canRetryFailedJob(job: GenerationJobRecord) {
-  return job.status === 'failed' && !retriedByJobId(job);
+  return job.status === 'failed' && !retriedByJobId(job) && !localResultRecovery(job);
 }
 
 function canDiscardTransientResult(job: GenerationJobRecord) {
@@ -730,6 +733,7 @@ export default function GenerationQueueDrawer({
   };
 
   const renderFailedJob = (job: GenerationJobRecord) => {
+    if (localResultRecovery(job)) return <article className="generation-queue-failure" key={job.id}><LocalResultRecovery job={job} onRecovered={recovered => { clearGenerationQueueHistory(libraryScope); setJobs(current => current.map(row => row.id === recovered.id ? recovered : row)); onChanged?.(recovered); void refresh(); }}/><button type="button" onClick={() => onOpenJob(job)}>查看原任务</button></article>;
      const failure = generationFailure(job, t);
      const moderationGuidance = generationModerationGuidance(job, t);
     const retryId = retriedByJobId(job);
@@ -984,6 +988,7 @@ export default function GenerationQueueDrawer({
                     </button>
                     <span className="generation-queue-row-actions">
                       <b>{statusLabel(job, t, isUsedAsGenerationReference(job, jobs))}</b>
+                      {localResultRecovery(job) && <LocalResultRecovery job={job} onRecovered={recovered => { clearGenerationQueueHistory(libraryScope); setJobs(current => current.map(row => row.id === recovered.id ? recovered : row)); onChanged?.(recovered); void refresh(); }}/>}
                       {job.status === 'discarded' && <em className="generation-cancel-copy">{t('queueRecordRetained')}</em>}
                        {isStaleRunningJob(job) && <em className="generation-stale-copy">{t('generationStalled')}</em>}
                       {isActive(job) && (

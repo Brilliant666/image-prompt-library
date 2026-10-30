@@ -150,3 +150,46 @@ def test_true_duplicate_is_rechecked_with_the_same_accept_transaction(tmp_path):
     assert repo.get_draft(another.id).duplicate_of_item_id == accepted.item.id
     with closing(connect(repo.library_path)) as conn:
         assert conn.execute("SELECT count(*) FROM items").fetchone()[0] == 1
+
+
+def test_source_replaced_during_publication_still_rolls_back(tmp_path, monkeypatch):
+    repo, path, draft = fixture(tmp_path)
+    publish = repo._publish_media
+    def publish_then_replace(*args):
+        result = publish(*args)
+        path.unlink()
+        path.write_bytes(png("blue"))
+        return result
+    monkeypatch.setattr(repo, "_publish_media", publish_then_replace)
+    with pytest.raises(ImportDraftConflict, match="changed"):
+        repo.accept_draft(draft.id)
+    no_formal_rows(repo, draft)
+
+
+def test_repository_ingest_does_not_write_through_redirected_staging_root(tmp_path):
+    import os
+    import subprocess
+    from backend.schemas import RepositoryIngestRequest
+    from backend.services.repository_ingest import ingest_repository_to_drafts
+    library = tmp_path / "library"
+    ImportDraftRepository(library)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = library / "import-staging"
+    if os.name == "nt":
+        subprocess.run(["cmd.exe", "/d", "/c", "mklink", "/J", str(link), str(outside)], check=True, capture_output=True)
+    else:
+        link.symlink_to(outside, target_is_directory=True)
+    source = tmp_path / "repository"
+    source.mkdir()
+    (source / "image.png").write_bytes(png())
+    (source / "gallery.md").write_text("# Collection\n\n## Synthetic\n\n![Image](image.png)\n\n```text\nSynthetic prompt\n```\n", encoding="utf8")
+    try:
+        with pytest.raises(ImportDraftConflict):
+            ingest_repository_to_drafts(RepositoryIngestRequest(path=str(source)), library)
+        assert not list(outside.iterdir())
+        with closing(connect(library)) as conn:
+            assert conn.execute("SELECT count(*) FROM import_drafts").fetchone()[0] == 0
+    finally:
+        if os.name == "nt": os.rmdir(link)
+        else: link.unlink()

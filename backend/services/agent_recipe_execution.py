@@ -175,6 +175,8 @@ def run_execution(repo, request_id):
     while True:
         check_active(repo, request_id)
         jobs = [repo.jobs.get_job(jid) for jid in request['round']['outputTaskIds']]
+        if any(job.metadata.get('local_result_recovery') for job in jobs):
+            raise AgentError('local_result_pending', '图片已取得，本地保存记录待恢复；请恢复原结果，不要重新生成。')
         if all(job.status not in {'queued', 'running'} for job in jobs):
             break
         time.sleep(0.05)

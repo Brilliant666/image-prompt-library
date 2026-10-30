@@ -47,6 +47,8 @@ function cardHarness(options = {}) {
     useEffect(effect, deps) { const i = cursor++, previous = slots[i]; if (!previous || deps?.some((value, index) => !Object.is(value, previous.deps?.[index]))) { previous?.cleanup?.(); slots[i] = { deps, cleanup: effect() }; } },
   };
   const globals = { ...hooks, mediaUrl: value => `http://isolated.test/media/${value}`, errorText: reason => reason.message,
+    localResultRecovery: job => job.metadata?.local_result_recovery,
+    LocalResultRecovery: 'local-result-recovery',
     statusText: { queued: '排队中', running: '生成中', succeeded: '已生成', accepted: '已收录', failed: '失败', unknown: '未知', cancelled: '已停止' },
     sameOriginImage: value => value || '', getAgentJobFailure: options.failure || response.getAgentJobFailure,
     copyTextToClipboard: async text => { textWrites.push(text); return options.textCopy?.(text) ?? true; },
@@ -89,6 +91,22 @@ test('actual final result card has separate direct actions for image and exact P
   assert.equal(h.button('图片更多操作'), undefined);
   assert.equal(h.button('复制生图提示词').children, '复制生图提示词', 'Prompt copying is a named text action, distinct from image copying');
   h.button('复制生图提示词').onClick(); await h.flush(); assert.deepEqual(h.textWrites, ['  exact\nPrompt  ']);
+});
+
+test('actual Agent result card prioritizes retained local results over paid retry and supplier-failure presentation', async () => {
+  const recovered = [];
+  const h = cardHarness({ props: { job: { id: 'paid-original', status: 'failed', prompt_text: 'Exact original prompt',
+    metadata: { local_result_recovery: { state: 'pending', message: '图片已取得，本地保存记录待恢复。', can_recover: true } } },
+    retry: 'paid retry', onRecovered: job => recovered.push(job) } });
+  const control = h.all().find(node => node.type === 'local-result-recovery');
+  assert.ok(control, 'a paid final result needs local recovery, rather than another paid generation');
+  assert.equal(h.button('复制失败原因'), undefined);
+  assert.equal(h.all().some(node => [node.props?.children].flat(Infinity).includes('paid retry')), false);
+  const restored = { id: 'paid-original', status: 'succeeded', result_path: 'generation-results/paid-original/final.png' };
+  control.props.onRecovered(restored);
+  assert.deepEqual(recovered, [restored]);
+  assert.deepEqual(h.imageWrites, []);
+  assert.deepEqual(h.textWrites, []);
 });
 
 test('terminal results expose Prompt copying directly and retain their applicable result actions', async () => {

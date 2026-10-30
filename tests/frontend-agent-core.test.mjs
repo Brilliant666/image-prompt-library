@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import ts from 'typescript';
+import { localRecoveryDependencies } from './helpers/local-result-recovery.mjs';
 import React from 'react';
 import * as jsxRuntime from 'react/jsx-runtime';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -17,7 +18,7 @@ async function compile(path) {
 function instantiate(js, deps, globals = {}) {
   const module = { exports: {} };
   new Function('require', 'module', 'exports', ...Object.keys(globals), js)(name => {
-    assert.ok(name in deps, `unmocked dependency: ${name}`); return deps[name];
+    if (name in localRecoveryDependencies) return localRecoveryDependencies[name]; assert.ok(name in deps, `unmocked dependency: ${name}`); return deps[name];
   }, module, module.exports, ...Object.values(globals));
   return module.exports;
 }
@@ -178,7 +179,7 @@ function nodes(node) { return !node || typeof node !== 'object' ? [] : [node, ..
 function deferred() { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; }
 function harness(t, options = {}) {
   const slots = [], effects = [], timers = new Map(), calls = [], listeners = new Map(), scrollFrames = new Map(), scrollObservers = [];
-  const stops = [], resumes = [], jobsChanged = [];
+  const stops = [], resumes = [], jobsChanged = [], localRecoveries = [];
   const submissions = [], creations = [], requestReads = [], watchers = [], profileChanges = [], panelFocusCalls = [], settingsOpens = [], sharedChanges = [];
   const jobReads = [], jobReplies = [], conversationReads = [], conversationUpdates = [], imageDecodes = [], taskUpdates = [], uploads = [], referenceReads = [];
   const root = { inert: false };
@@ -214,6 +215,7 @@ function harness(t, options = {}) {
   const agentApi = {
     stop(id) { const reply = deferred(); stops.push({ id, ...reply }); return reply.promise; },
     resume(id, resumeId) { const reply = deferred(); resumes.push({ id, resumeId, ...reply }); return reply.promise; },
+    recoverResults(id) { localRecoveries.push(id); return options.recoverResults(id); },
     deleteConversation: async id => options.deleteConversation?.(id),
     upload: async file => { uploads.push(file); return options.upload?.(file) ?? { uploadId: `restored-${uploads.length}`, image: { status: 'available', url: `http://isolated.test/restored-${uploads.length}.png` } }; },
     updateEditingTask: async (id, body) => { taskUpdates.push({ id, body }); return options.updateEditingTask?.(id, body) ?? { ...snapshot, revision: snapshot.revision + 1, editingTask: body.task }; },
@@ -277,7 +279,7 @@ function harness(t, options = {}) {
   const close = async () => { find('button', p => p['aria-label'] === '关闭 Agent 面板')[0].onClick(); await flush(); };
   const unmount = () => { if (unmounted) return; unmounted = true; slots.forEach(slot => slot?.cleanup?.()); };
   render(); t.after(unmount);
-  return { stops, resumes, jobsChanged, calls, find, open, close, root, profileChanges, panelFocusCalls, settingsOpens, sharedChanges, flush, unmount, submissions, creations, requestReads, watchers, snapshot, storage, AgentApiError, inputPreferences, jobReads, conversationReads, conversationUpdates, imageDecodes, taskUpdates, uploads, referenceReads, scrollObservers, window: globalMocks.window,
+  return { stops, resumes, jobsChanged, localRecoveries, calls, find, open, close, root, profileChanges, panelFocusCalls, settingsOpens, sharedChanges, flush, unmount, submissions, creations, requestReads, watchers, snapshot, storage, AgentApiError, inputPreferences, jobReads, conversationReads, conversationUpdates, imageDecodes, taskUpdates, uploads, referenceReads, scrollObservers, window: globalMocks.window,
     updateProps(next) { props = { ...props, ...next }; render(); }, queueJobRead() { const reply = deferred(); jobReplies.push(reply); return reply; },
     resultCard(index = 0) { const card = nodes(tree).filter(node => typeof node.type === 'function' && node.type.name === 'ResultCard')[index]; assert.ok(card, 'actual result card should be rendered'); const savedCursor = cursor; cursor = slots.length; const content = card.type(card.props); cursor = savedCursor; return nodes(content); },
     setConfig(value) { config = { ...config, ...value }; }, dispatch(name) { globalMocks.window.dispatchEvent({ type: name }); }, show() { active = true; render(); }, get late() { return late; }, get pendingTimers() { return timers.size; }, get configReads() { return configReads; }, hide() { active = false; render(); } };
@@ -1332,6 +1334,50 @@ async function configureImages(h) {
 }
 const completedJob = (id, metadata = {}) => ({ id, status: 'succeeded', provider: 'openai_compatible', model: 'gpt-image-result', result_path: `http://isolated.test/${id}.png`, metadata, parameters: {}, accepted_image_id: null });
 const reference = id => ({ reference: { kind: 'upload', uploadId: id }, url: `http://isolated.test/${id}.png`, label: `${id}.png` });
+
+test('actual workspace local recovery refreshes the original result without touching the next draft or ordered attachments', async t => {
+  const data = displaySnapshot('failed'); data.revision = 1;
+  const original = { id: 'retained-paid-job', provider: 'openai_compatible', status: 'failed', prompt_text: 'Original executed prompt',
+    metadata: { local_result_recovery: { state: 'pending', message: '图片已取得，本地保存记录待恢复。', can_recover: true } } };
+  data.jobs = [original]; data.images = [];
+  data.conversation.rounds[0].outputTaskIds = [original.id];
+  const restored = { ...original, status: 'succeeded', result_path: `generation-results/${original.id}/final.png`, metadata: {} };
+  let recovered = false;
+  const h = harness(t, { snapshot: data, draft: { text: '  Next unsent draft\n\nKeep whitespace\t ', refs: [reference('one'), reference('two')], params },
+    conversation: async () => recovered ? { ...data, revision: 2, jobs: [restored] } : data });
+  await h.flush();
+  const before = structuredClone(savedDraft(h));
+  const control = h.resultCard().find(node => node.type === 'local-result-recovery');
+  assert.ok(control); recovered = true; control.props.onRecovered(restored); await h.flush();
+  assert.deepEqual(savedDraft(h), before);
+  assert.equal(h.find('textarea')[0].value, before.text);
+  assert.ok(h.resultCard().some(node => node.props?.['aria-label'] === '查看生成结果'));
+  assert.equal(h.submissions.length, 0); assert.equal(h.creations.length, 0); assert.equal(h.taskUpdates.length, 0);
+});
+
+test('Native final retained before a job INSERT can recover from the original request without text retry, resume or draft loss', async t => {
+  const pending=deferred();
+  const data=displaySnapshot('failed',{error:{code:'local_result_pending',message:'图片已取得，本地保存记录待恢复。'},canResume:true});
+  data.revision=1;data.images=[];data.jobs=[];data.conversation.rounds[0].error='图片已取得，本地保存记录待恢复。';
+  const h=harness(t,{snapshot:data,draft:{text:'  Unsent next prompt\n\nKeep me\t ',refs:[reference('one'),reference('two')],params},recoverResults:()=>pending.promise});await h.flush();
+  const before=structuredClone(savedDraft(h));const button=h.find('button',p=>p['aria-label']==='恢复本轮本地结果')[0];assert.ok(button);
+  assert.equal(h.find('button',p=>p['aria-label']==='重试回答').length,0);assert.equal(h.find('button',p=>p['aria-label']==='继续已确认安全的步骤').length,0);
+  button.onClick();button.onClick();await h.flush();assert.deepEqual(h.localRecoveries,['request-current']);
+  const restored=structuredClone(data);restored.revision=2;restored.request.state='completed';restored.request.error=null;restored.request.canResume=false;
+  restored.conversation.rounds[0].error=null;restored.conversation.rounds[0].status='done';restored.conversation.rounds[0].outputTaskIds=['native-retained'];
+  restored.jobs=[{id:'native-retained',provider:'agent_native',status:'succeeded',result_path:'generation-results/native-retained/result.png',prompt_text:'Exact executed prompt'}];
+  pending.resolve(restored);await h.flush();assert.deepEqual(savedDraft(h),before);assert.equal(h.find('textarea')[0].value,before.text);
+  assert.equal(h.find('button',p=>p['aria-label']==='恢复本轮本地结果').length,0);assert.ok(h.resultCard().some(node=>node.props?.['aria-label']==='查看生成结果'));
+  assert.deepEqual(h.submissions,[]);assert.deepEqual(h.resumes,[]);assert.deepEqual(h.creations,[]);assert.deepEqual(h.taskUpdates,[]);
+});
+
+test('a failed request-level local recovery retains its error and permits only another explicit local check', async t => {
+  const data=displaySnapshot('failed',{error:{code:'local_result_pending',message:'图片已取得，本地保存记录待恢复。'}});data.revision=1;data.jobs=[];data.images=[];
+  let attempts=0;const h=harness(t,{snapshot:data,recoverResults:async()=>{attempts++;throw Error('本地结果仍需核对；不会重新生成。');}});await h.flush();
+  h.find('button',p=>p['aria-label']==='恢复本轮本地结果')[0].onClick();await h.flush();assert.equal(attempts,1);
+  assert.ok(h.find('p',p=>p.role==='alert').some(p=>JSON.stringify(p.children).includes('本地结果仍需核对')));
+  assert.ok(h.find('button',p=>p['aria-label']==='恢复本轮本地结果')[0]);assert.deepEqual(h.submissions,[]);assert.deepEqual(h.resumes,[]);
+});
 const allDrafts = h => JSON.parse(h.storage.get('ipl.agent.drafts.v1'));
 
 test('explicit image mode survives accepted and reconciled sends, while search stays single-request and off revokes images', async t => {
@@ -2066,4 +2112,31 @@ test('a real revision conflict refreshes only through GET and requires another e
   h.find('button', p => p['aria-label'] === '发送 Agent 消息')[0].onClick(); await h.flush();
   assert.equal(h.submissions.length, 2); assert.equal(h.submissions[1].payload.expectedRevision, 9); assert.equal(h.submissions[1].payload.parentRoundId, 'new-selected-branch');
   assert.equal(h.submissions[1].payload.prompt, before.text); assert.deepEqual(h.submissions[1].payload.refs, before.refs.map(choice => choice.reference));
+});
+
+
+test('late Native local-result receipt reloads the current branch instead of installing an older request', async t => {
+  const pending = deferred();
+  const data = displaySnapshot('failed', { error: { code: 'local_result_pending', message: '图片已取得，本地保存记录待恢复。' } });
+  data.revision = 1; data.jobs = []; data.images = [];
+  let visible = data;
+  const h = harness(t, { snapshot: data,
+    draft: { text: '  Keep the next branch draft\n\nUnchanged\t ', refs: [reference('first'), reference('second')], params },
+    recoverResults: () => pending.promise, conversation: async () => visible });
+  await h.flush(); const before = structuredClone(savedDraft(h));
+  h.find('button', p => p['aria-label'] === '恢复本轮本地结果')[0].onClick(); await h.flush();
+  const newer = { ...structuredClone(data.conversation.rounds[0]), id: 'r2', requestId: 'request-new-branch',
+    parentRoundId: 'r1', index: 2, status: 'running', prompt: 'Already running on the newer branch', error: null };
+  visible = { ...structuredClone(data), revision: 3,
+    conversation: { ...structuredClone(data.conversation), activeRoundId: newer.id, rounds: [...data.conversation.rounds, newer] },
+    request: { ...structuredClone(data.request), id: newer.requestId, roundId: newer.id, state: 'running', error: null, canResume: false } };
+  const oldReceipt = { ...structuredClone(visible), revision: 2,
+    request: { ...structuredClone(data.request), state: 'failed', error: null, canResume: false } };
+  const reads = h.conversationReads.length;
+  pending.resolve(oldReceipt); await h.flush();
+  assert.equal(h.conversationReads.length, reads + 1, 'the request-specific receipt must reload the selected branch with a GET');
+  assert.equal(h.watchers.at(-1)?.id, newer.requestId, 'the newer branch request remains the observed in-flight request');
+  assert.deepEqual(savedDraft(h), before); assert.equal(h.find('textarea')[0].value, before.text);
+  assert.deepEqual(h.localRecoveries, ['request-current']);
+  assert.deepEqual(h.submissions, []); assert.deepEqual(h.resumes, []); assert.deepEqual(h.creations, []); assert.deepEqual(h.taskUpdates, []);
 });

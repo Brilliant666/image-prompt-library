@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import ts from 'typescript';
+import { localRecoveryDependencies } from './helpers/local-result-recovery.mjs';
 
 const sourceUrl = new URL('../frontend/src/components/GenerationQueueDrawer.tsx', import.meta.url);
 const compile = source => ts.transpileModule(source, {
@@ -93,7 +94,7 @@ function harness(t, apiOverrides = {}, propOverrides = {}, environment = {}) {
   };
   const module = { exports: {} };
   new Function('require', 'module', 'exports', 'window', 'document', componentJs)(
-    name => { assert.ok(name in deps, `Unexpected dependency ${name}`); return deps[name]; },
+    name => { if (name in localRecoveryDependencies) return localRecoveryDependencies[name]; assert.ok(name in deps, `Unexpected dependency ${name}`); return deps[name]; },
     module, module.exports, window, undefined,
   );
   const props = {
@@ -144,6 +145,21 @@ test('closed summary never becomes a one-row detail page; opening waits for the 
   h.calls.at(-1).resolve(result([job('latest-detail')]));
   await h.flush();
   assert.equal(h.rows().length, 1, 'a completed detail read remains authoritative');
+});
+
+test('actual queue shows local registration recovery and refreshes the same job without offering paid failure retry', async t => {
+  let paid = 0;
+  const pending = job('paid-retained', { status: 'failed', metadata: { local_result_recovery: {
+    state: 'pending', message: '图片已取得，本地保存记录待恢复。', can_recover: true } } });
+  const h = harness(t, { retryGenerationJob: async () => { paid++; throw Error('No paid retry'); } });
+  h.calls[0].resolve(result([pending])); await h.flush(); h.open(); await h.flush();
+  h.calls.at(-1).resolve(result([pending])); await h.flush();
+  assert.equal(h.button('queueRetryFailed'), undefined);
+  const control = h.node((props, type) => type === 'local-result-recovery'); assert.ok(control);
+  const restored = { ...pending, status: 'succeeded', result_path: 'generation-results/paid-retained/final.png', metadata: {} };
+  control.onRecovered(restored); await h.flush();
+  h.calls.at(-1).resolve(result([restored])); await h.flush();
+  assert.equal(h.node((props, type) => type === 'local-result-recovery'), undefined); assert.equal(paid, 0);
 });
 
 test('close/reopen and unmount invalidate late responses without losing the detail cache', async t => {

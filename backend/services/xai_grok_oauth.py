@@ -571,7 +571,7 @@ class XaiGrokOAuthProvider:
                 "source_job_id": job_id,
                 "mode": "image_edit" if input_images else "text_to_image",
                 "input_image_count": len(input_images),
-            })
+            }, job_snapshot=job)
         except GrokOAuthRateLimitError as exc:
             failed = repo.mark_failed(job_id, str(exc), exc.retry_after_seconds)
             repo.record_provider_rate_limit(PROVIDER_ID, exc.retry_after_seconds)
@@ -580,6 +580,8 @@ class XaiGrokOAuthProvider:
                 retry_after_seconds=exc.retry_after_seconds,
             ) from exc
         except Exception as exc:
+            if isinstance(repo.local_result_recovery(job_id), dict):
+                return repo.get_job(job_id)
             failed = repo.mark_failed(job_id, str(exc))
             raise GrokOAuthError(failed.error or "Grok image generation failed") from exc
 

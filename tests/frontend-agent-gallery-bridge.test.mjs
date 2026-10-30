@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import ts from 'typescript';
+import { localRecoveryDependencies } from './helpers/local-result-recovery.mjs';
 
 async function compile(path) {
   return ts.transpileModule(await readFile(new URL(path, import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
@@ -9,7 +10,7 @@ async function compile(path) {
 function evaluate(js, dependencies, globals = {}) {
   const module = { exports: {} };
   new Function('require', 'module', 'exports', ...Object.keys(globals), js)(name => {
-    assert.ok(name in dependencies, `unmocked dependency: ${name}`); return dependencies[name];
+    if (name in localRecoveryDependencies) return localRecoveryDependencies[name]; assert.ok(name in dependencies, `unmocked dependency: ${name}`); return dependencies[name];
   }, module, module.exports, ...Object.values(globals));
   return module.exports;
 }

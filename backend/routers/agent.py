@@ -1,4 +1,5 @@
 import asyncio
+import sqlite3
 import time
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
@@ -182,6 +183,15 @@ async def get_request_events(request_id: str, request: Request):
     return StreamingResponse(progress_events(request, repository, request_id, token, snapshot, structure),
                              media_type="text/event-stream",
                              headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
+
+@router.post("/requests/{request_id}/recover-results")
+def recover_request_results(request_id: str, request: Request):
+    """Restore this request's obtained images without resuming model execution."""
+    try:
+        return repo(request).recover_request_results(request_id)
+    except (sqlite3.Error, OSError):
+        raise AgentError('local_result_pending', '本地登记暂时不可用；原图片已保留，不会重新请求供应商。', 503) from None
 
 
 @router.post("/requests/{request_id}/stop")

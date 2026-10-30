@@ -9,6 +9,8 @@ import { recipeInputs } from '../../utils/recipeInputs';
 import { copyTextToClipboard } from '../../utils/clipboard';
 import { useModalFocus } from '../../hooks/useModalFocus';
 import { GenerationResultSummary } from '../GenerationResultSummary';
+import LocalResultRecovery from '../LocalResultRecovery';
+import { localResultRecovery } from '../../utils/localResultRecovery';
 import './DetailModal.css';
 
 interface Props {
@@ -87,7 +89,8 @@ export default function DetailModal({ job, t, onClose, onChange, onAccepted, onR
   const prompt = galleryJobPrompt(job);
   const inputs = recipeInputs(job, mediaUrl);
   const requested = { ...job.parameters, ...record(job.metadata?.requested) };
-  const status = galleryStatus[job.status] || job.status;
+  const recovery = localResultRecovery(job);
+  const status = recovery ? '图片已取得 · 待恢复' : galleryStatus[job.status] || job.status;
   const actualSize = canUse && job.result_width && job.result_width > 0 && job.result_height && job.result_height > 0
     ? `${job.result_width} × ${job.result_height}` : '';
   const parameterRows: Array<[string, unknown]> = [
@@ -159,13 +162,13 @@ export default function DetailModal({ job, t, onClose, onChange, onAccepted, onR
                 {parameterRows.map(([label, value]) => <div key={String(label)}><dt>{label}</dt><dd>{parameter(value)}</dd></div>)}
               </dl>
             </section>
-            {job.error && <p className="pg-error" role="alert">{job.error}</p>}
-            <GenerationResultSummary job={job} t={t}/>
+            {recovery ? <LocalResultRecovery job={job} onRecovered={() => onChange()}/> : job.error && <p className="pg-error" role="alert">{job.error}</p>}
+            {!recovery && <GenerationResultSummary job={job} t={t}/>}
             {inputs.length > 0 && <section className="pg-detail-section" aria-label="原始参考"><h3>原始参考</h3><div className="pg-input-images">{inputs.map((input, index) => <div key={input.id}>{input.previewUrl ? <img src={input.previewUrl} alt={`原始参考 ${index + 1}`}/> : <span>参考图缺失</span>}<span title={input.name}>{index + 1}. {input.name}</span></div>)}</div></section>}
             <details className="pg-detail-provenance"><summary>请求配方与来源</summary><dl><dt>供应商</dt><dd>{parameter(job.parameters?.compatible_profile_name || job.provider)}</dd><dt>请求模型</dt><dd>{parameter(job.model)}</dd><dt>任务 ID</dt><dd>{job.id}</dd></dl><pre>{JSON.stringify(job.parameters, null, 2)}</pre></details>
             <p className="pg-detail-created">创建于 <time dateTime={job.created_at}>{new Date(job.created_at).toLocaleString()}</time></p>
             {job.accepted_image_id && <p className="pg-detail-saved"><Check size={14}/>已收录到 Library，重复操作不会再次创建资产。</p>}
-            {job.status === 'failed' && <p className="pg-note">需要再次生成时请先恢复配方。重新提交可能收费，不会自动重试。</p>}
+            {job.status === 'failed' && !recovery && <p className="pg-note">需要再次生成时请先恢复配方。重新提交可能收费，不会自动重试。</p>}
           </div>
           <div className="pg-detail-bottom">
             {error && <p role="alert" className="pg-error">{error}</p>}
@@ -191,11 +194,11 @@ export default function DetailModal({ job, t, onClose, onChange, onAccepted, onR
               <button className="pg-detail-save-confirm" disabled={busy || (attachMode && !target)} onClick={() => void accept()}>{busy ? '保存中…' : '确认保存'}</button>
             </div>}
             <div className="pg-detail-actions">
-              <button className="pg-detail-reuse" onClick={() => onReuse(job)}><RotateCcw size={16}/>恢复配方</button>
+              {!recovery && <button className="pg-detail-reuse" onClick={() => onReuse(job)}><RotateCcw size={16}/>恢复配方</button>}
               <button disabled={!canUse} onClick={() => onReuse(job, true)}><ImagePlus size={16}/>继续编辑</button>
               {canUse && onSendToAgent && <button onClick={() => onSendToAgent(job, 'reference')}><MessageSquare size={16}/>带到 Agent 继续</button>}
               {canUse && !job.accepted_image_id && <button className="pg-detail-save" aria-expanded={saveOpen} onClick={() => setSaveOpen(!saveOpen)}>{saveOpen ? '取消收录' : '保存到 Library'}</button>}
-              {['queued', 'running'].includes(job.status) && <button disabled={busy} onClick={() => { setBusy(true); void api.cancelGenerationJob(job.id).then(onChange).catch(e => setError(String(e))).finally(() => setBusy(false)); }}><Square size={14}/>停止任务</button>}
+              {!recovery && ['queued', 'running'].includes(job.status) && <button disabled={busy} onClick={() => { setBusy(true); void api.cancelGenerationJob(job.id).then(onChange).catch(e => setError(String(e))).finally(() => setBusy(false)); }}><Square size={14}/>停止任务</button>}
             </div>
           </div>
         </div>

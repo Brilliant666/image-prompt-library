@@ -22,6 +22,8 @@ import { extractPromptTemplateVariableRecords, resolvePromptTemplate } from '../
 import { createGenerationReviewSession, generationResultPosition, generationReviewNext, generationReviewOpenContext, generationReviewSlotNavigation, generationReviewSummary, generationSiblingNavigation, isActionableGenerationResult, mapGenerationRetryJobs, mapGenerationRetryToReviewSlot, reconcileGenerationReviewSession, resolveGenerationReviewSlot, retainPendingRetryJobIds, type GenerationReviewSession } from '../utils/generationSiblings';
 import { useModalFocus } from '../hooks/useModalFocus';
 import SuggestedTitleField from './SuggestedTitleField';
+import LocalResultRecovery from './LocalResultRecovery';
+import { localResultRecovery } from '../utils/localResultRecovery';
 
 function providerReady(provider: GenerationProviderStatus) {
   return Boolean(provider.available && provider.authenticated && provider.configured);
@@ -1666,6 +1668,7 @@ export default function GenerationPanel({
   };
 
   const discardAndRetryJob = async (job: GenerationJobRecord) => {
+    if (job.metadata?.local_result_recovery) { setMessage('图片已取得，请先恢复本地结果；不会重新生成。'); return; }
     const reviewSession = ensureBatchReviewSession(job);
     setBusy(true);
     setActiveJobId(job.id);
@@ -1722,6 +1725,7 @@ export default function GenerationPanel({
   };
 
   const retryFailedJob = async (job: GenerationJobRecord) => {
+    if (job.metadata?.local_result_recovery) { setMessage('图片已取得，请先恢复本地结果；不会重新生成。'); return; }
     const reviewSession = ensureBatchReviewSession(job);
     if (!canRetryFailedJob(job)) {
       const retryId = retriedByJobId(job);
@@ -2091,6 +2095,10 @@ export default function GenerationPanel({
     if (!selectedStageJob) {
       return <div className="generation-stage generation-stage-ready"><strong>{t('generationReady')}</strong></div>;
     }
+    if (localResultRecovery(selectedStageJob)) return <div className="generation-stage"><LocalResultRecovery job={selectedStageJob} onRecovered={restored => {
+      invalidateGenerationRefreshRequests(); updateGenerationJobs(current => current.map(job => job.id === restored.id ? restored : job));
+      onQueueChangedRef.current?.(); void refreshJobs();
+    }}/></div>;
     const reviewSlot = batchReviewSession?.slots.find(slot => slot.currentJobId === selectedStageJob.id || slot.originalJobId === selectedStageJob.id);
     const reviewOutcome = reviewSlot?.resolution
       || (pendingRetryJobIds.includes(selectedStageJob.id) ? 'retrying' : undefined)

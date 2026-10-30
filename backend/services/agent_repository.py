@@ -792,6 +792,15 @@ class AgentRepository:
             original = next((r for r in rounds if r["id"] == body.derivedFromRoundId), None)
             if original:
                 original_request = self.request(original["requestId"])
+                if body.origin == 'regenerate':
+                    if (original_request.get('error') or {}).get('code') == 'local_result_pending':
+                        raise AgentError('local_result_pending','图片已取得，本地保存记录待恢复；请检查原结果，不要重新生成。')
+                    if (original_request['upstream_outcome'] == 'unknown'
+                            and original_request['body'].get('authorization',{}).get('allowImageGeneration')):
+                        raise AgentError('upstream_outcome_unknown','原图片请求结果尚未确认；请先检查原请求，不会重新收费提交。')
+                    for jid in original_request['round'].get('outputTaskIds',[]):
+                        if self.jobs.local_result_recovery(jid) is not None:
+                            raise AgentError('local_result_pending','图片已取得，本地保存记录待恢复；请检查原结果，不要重新生成。')
                 reuse_inputs = original_request["body"].get("refs", []) == serialized["refs"]
         history = self.path(rounds, body.parentRoundId)
         if body.origin != 'send' and original_request is not None:
@@ -960,6 +969,62 @@ class AgentRepository:
     def create_prompt_execution(self, cid, body):
         from backend.services.agent_recipe_execution import create_execution
         return create_execution(self, cid, body)
+
+    def recover_request_results(self, request_id):
+        """Repair only this request's retained finals, never resume its model."""
+        from backend.services.agent_native_result_recovery import native_receipts_for_request
+        request = self.request(request_id)
+        if request['stop_requested'] or request['state'] == 'stopped':
+            raise AgentError('local_result_conflict','本轮已停止；保留的图片不会自动替代已提交操作。')
+        if request['state'] in ACTIVE_STATES:
+            raise AgentError('request_active','本轮仍在处理，请等待原请求结束后检查本地结果。')
+        with connect(self.library) as conn:
+            self._conversation(conn,request['conversation_id'])
+            visible = conn.execute('SELECT 1 FROM agent_rounds WHERE id=? AND deleted=0',(request['round_id'],)).fetchone()
+            if not visible:
+                raise AgentError('not_found','原轮次已删除，不能自动恢复其结果。',404)
+            linked = [row[0] for row in conn.execute('SELECT job_id FROM agent_tool_jobs WHERE request_id=?',(request_id,))]
+        native = native_receipts_for_request(self.jobs,request_id)
+        recovered, blocked = [], bool(native['blocked'])
+        candidates = list(dict.fromkeys([*linked,*native['job_ids']]))
+        for jid in candidates:
+            try:
+                try:
+                    job = self.jobs.get_job(jid)
+                except KeyError:
+                    job = None
+                if jid in native['job_ids'] or job is not None and self.jobs.local_result_recovery(jid) is not None:
+                    result = self.jobs.recover_local_result(jid)
+                    if result.status in {'succeeded','accepted'}:
+                        recovered.append(jid)
+                elif job is not None and job.status in {'succeeded','accepted'} and job.result_path:
+                    recovered.append(jid)
+            except (OSError,ValueError,KeyError):
+                blocked = True
+        if blocked or not recovered:
+            raise AgentError('local_result_pending','部分本地结果仍无法核验；文件已保留，不会重新请求供应商。')
+        with connect(self.library) as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            current = conn.execute('SELECT state,stop_requested,error FROM agent_requests WHERE id=?',(request_id,)).fetchone()
+            if current is None or current['stop_requested'] or current['state'] in ACTIVE_STATES or current['state'] == 'stopped':
+                raise AgentError('local_result_conflict','请求状态已改变；本地结果已保留，不会继续执行模型。')
+            self._conversation(conn,request['conversation_id'])
+            if not conn.execute('SELECT 1 FROM agent_rounds WHERE id=? AND deleted=0',(request['round_id'],)).fetchone():
+                raise AgentError('local_result_conflict','原轮次已删除；本地结果不会覆盖用户操作。')
+            round_data = json.loads(conn.execute('SELECT data FROM agent_rounds WHERE id=?',(request['round_id'],)).fetchone()[0])
+            error = json.loads(current['error']) if current['error'] else None
+            receipt = {'state':'recovered','jobIds':recovered}
+            if round_data.get('localResultRecovery') == receipt and not (error and error.get('code') == 'local_result_pending'):
+                conn.commit()
+                return self.snapshot(request['conversation_id'],request_id)
+            round_data['localResultRecovery'] = receipt
+            if error and error.get('code') == 'local_result_pending':
+                round_data.pop('error',None)
+                conn.execute('UPDATE agent_requests SET error=NULL,upstream_outcome=\'known\' WHERE id=?',(request_id,))
+            self._save_round(conn,round_data)
+            self._touch(conn,request['conversation_id'])
+            conn.commit()
+        return self.snapshot(request['conversation_id'],request_id)
 
     def prompt_execution_receipt(self, request_id, cid):
         request = self.request(request_id)
@@ -1409,7 +1474,8 @@ class AgentRepository:
                             "modelInfo": model_info(request["frozen"], request["round"]),
                             "params": request["body"]["params"], "imageCount": request["body"].get('imageCount', 1),
                             "authorization": request["body"]["authorization"], "usage": request["usage"], "toolCalls": list(calls.values()),
-                            "canResume": request["state"] == "interrupted" and request["upstream_outcome"] != "unknown" and not request["stop_requested"],
+                            "canResume": request["state"] == "interrupted" and request["upstream_outcome"] != "unknown" and not request["stop_requested"]
+                                         and not self._local_results_block_resume(request['id']),
                             "recoveryReason": request["error"]["message"] if request["error"] else None,
                             "upstreamOutcome": request["upstream_outcome"], "stopRequested": bool(request["stop_requested"]),
                             "upstreamMayContinue": bool(request["stop_requested"] and request["upstream_outcome"] == "unknown"), "error": request["error"]}
@@ -1516,6 +1582,32 @@ class AgentRepository:
         self.update(request_id, state="stopped", error={"code": "stopped", "message": "已停止生成。"})
         return self.snapshot(request_id=request_id)
 
+    def _local_results_block_resume(self, request_id, *, connection=None):
+        """A local repair never authorizes re-running the original model POST."""
+        from contextlib import closing, nullcontext
+        from types import SimpleNamespace
+        from backend.services.generation_result_recovery import evidence
+        manager = closing(connect(self.library)) if connection is None else nullcontext(connection)
+        with manager as conn:
+            marker = conn.execute('''SELECT json_extract(r.error,'$.code') AS error_code,
+                json_extract(a.data,'$.localResultRecovery.state') AS recovery
+                FROM agent_requests r JOIN agent_rounds a ON a.id=r.round_id WHERE r.id=?''',(request_id,)).fetchone()
+            if marker and (marker['error_code'] == 'local_result_pending' or marker['recovery'] == 'recovered'):
+                return True
+            rows = conn.execute('''SELECT j.id,j.provider,j.status,j.metadata,j.result_path,t.step
+                FROM agent_tool_jobs t JOIN generation_jobs j ON j.id=t.job_id WHERE t.request_id=?''',(request_id,)).fetchall()
+            for job in rows:
+                metadata = json.loads(job['metadata'])
+                if metadata.get('local_result_recovered'):
+                    return True
+                if evidence(self.library,SimpleNamespace(id=job['id'],result_path=job['result_path'])):
+                    return True
+                if (job['provider'] == 'agent_native' and job['status'] in {'succeeded','accepted'}
+                        and not conn.execute("SELECT 1 FROM agent_steps WHERE request_id=? AND step=? AND state='completed'",
+                                             (request_id,job['step'])).fetchone()):
+                    return True
+        return False
+
     def resume(self, request_id, resume_id):
         with connect(self.library) as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -1527,6 +1619,8 @@ class AgentRepository:
             row = conn.execute("SELECT * FROM agent_requests WHERE id=?", (request_id,)).fetchone()
             if not row or row["state"] != "interrupted" or row["upstream_outcome"] == "unknown" or row["stop_requested"]:
                 raise AgentError("resume_not_safe", "无法安全恢复；原请求不会自动重发。")
+            if self._local_results_block_resume(request_id,connection=conn):
+                raise AgentError('resume_not_safe','本轮已取得或保留图片结果；请检查原结果，原模型请求不会重新执行。')
             self._conversation(conn, row["conversation_id"])
             if not conn.execute("SELECT 1 FROM agent_rounds WHERE id=? AND deleted=0", (row["round_id"],)).fetchone():
                 raise AgentError("resume_not_safe", "原轮次已删除，不能恢复请求。")

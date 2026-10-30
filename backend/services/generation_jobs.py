@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from contextlib import nullcontext, suppress
 from io import BytesIO
+from itertools import islice
 from threading import RLock
 
 from PIL import Image, UnidentifiedImageError
@@ -75,6 +76,10 @@ _ACCEPT_ARTIFACTS_METADATA_KEY = "_generation_accept_artifacts"
 ACCEPT_CLAIM_LEASE_AFTER = timedelta(minutes=10)
 _DISCARD_REPAIR_LOCK = RLock()
 _QUEUE_CLOCK_LOCK = RLock()
+_RESULT_RECOVERY_LOCK = RLock()
+_RESULT_STATE_LOCK = RLock()
+_RESULT_STAGING_ACTIVE: set[tuple[str,str]] = set()
+_RESULT_STAGING_EPOCH = 0
 # In-process origins only. Restarted/evicted jobs have an unknown queue duration;
 # wall-clock timestamps must not be substituted for a monotonic measurement.
 _QUEUE_CLOCKS: OrderedDict[tuple[str, str], float] = OrderedDict()
@@ -1087,6 +1092,7 @@ class GenerationJobRepository:
             self.clear_stream_preview(row["id"])
 
     def mark_running(self, job_id: str, *, queued_only: bool = False) -> GenerationJobRecord:
+        self.assert_no_local_result_pending(job_id)
         timestamp = now()
         with connect(self.library_path) as conn:
             conn.execute('BEGIN IMMEDIATE')
@@ -1116,6 +1122,7 @@ class GenerationJobRepository:
         return self.get_job(job_id)
 
     def mark_failed(self, job_id: str, error: str, retry_after_seconds: int | None = None, *, diagnostics: dict | None = None) -> GenerationJobRecord:
+        self.assert_no_local_result_pending(job_id)
         timestamp = now()
         redacted_error = sanitize_generation_error(error)
         with connect(self.library_path) as conn:
@@ -1182,9 +1189,11 @@ class GenerationJobRepository:
                 """,
                 (provider,),
             ).fetchall()
-        return [self.mark_failed(row["id"], error) for row in rows]
+        return [self.mark_failed(row["id"], error) for row in rows
+                if not self.get_job(row['id']).metadata.get('local_result_recovery')]
 
     def mark_stale_running_failed(self, job_id: str) -> GenerationJobRecord:
+        self.assert_no_local_result_pending(job_id)
         job = self.get_job(job_id)
         if job.provider == "openai_compatible":
             raise GenerationJobConflict("Elapsed time alone cannot establish failure of a paid image request. Check the service logs before resubmitting; local cancellation does not cancel upstream work or billing.")
@@ -1219,41 +1228,160 @@ class GenerationJobRepository:
         self.clear_stream_preview(job_id)
         return self.get_job(job_id)
 
-    def stage_result(self, job_id: str, data: bytes, filename: str, metadata: dict | None = None) -> GenerationJobRecord:
+    def local_result_recovery(self, job_id: str) -> dict | None:
+        from backend.services.generation_result_recovery import (
+            BLOCKED_MESSAGE, PENDING_MESSAGE, RecoveryConflict, evidence, validate_receipt,
+        )
         job = self.get_job(job_id)
+        if not evidence(self.library_path, job):
+            return None
+        try:
+            receipt = validate_receipt(self.library_path, job)
+            if job.status in {'succeeded','accepted'} and job.result_sha256 == receipt['result']['sha256']:
+                return None
+            if (job.status not in {'queued','running','failed'} or job.result_path
+                    or job.metadata.get('retried_by_generation_job_id')
+                    or job.metadata.get(_ACCEPT_CLAIM_METADATA_KEY)):
+                raise RecoveryConflict(BLOCKED_MESSAGE)
+            return {'state':'pending', 'message':PENDING_MESSAGE, 'can_recover':True}
+        except (OSError,ValueError):
+            return {'state':'blocked', 'message':BLOCKED_MESSAGE, 'can_recover':False}
+
+    def assert_no_local_result_pending(self, job_id: str) -> None:
+        state = self.local_result_recovery(job_id)
+        if state is not None:
+            raise GenerationJobConflict(state['message'])
+
+    def recover_local_result(self, job_id: str) -> GenerationJobRecord:
+        from backend.services.generation_result_recovery import validate_receipt, evidence, RecoveryConflict
+        try:
+            with _RESULT_RECOVERY_LOCK:
+                from backend.services.agent_native_result_recovery import ensure_native_job
+                ensure_native_job(self,job_id)
+                job = self.get_job(job_id)
+                if not evidence(self.library_path, job):
+                    if job.status in {'succeeded','accepted'} and job.result_path:
+                        self._prepare_result_image(job)
+                        return job
+                    raise GenerationJobConflict('No proven local final result is available to recover')
+                receipt = validate_receipt(self.library_path, job)
+                return self._register_local_result(job_id, receipt, recovery=True)
+        except (RecoveryConflict,OSError) as exc:
+            from backend.services.generation_result_recovery import BLOCKED_MESSAGE
+            raise GenerationJobConflict(BLOCKED_MESSAGE) from None
+
+    def recover_local_results(self, *, provider: str | None = None, limit: int = 100) -> dict:
+        from backend.services.generation_result_recovery import RECEIPT_NAME
+        from backend.services.agent_native_result_recovery import recover_native_results
+        result = recover_native_results(self,provider=provider,limit=limit)
+        root = self.library_path / GENERATION_RESULT_ROOT
+        if not root.is_dir():
+            return result
+        # Only explicit receipts are considered. Never claim orphan images by
+        # their filenames or scan/rewrite the user's historical assets.
+        for receipt in islice(root.glob('*/' + RECEIPT_NAME),max(0,min(limit,1000))):
+            job_id = receipt.parent.name
+            try:
+                job = self.get_job(job_id)
+                if provider is not None and job.provider != provider:
+                    continue
+                self.recover_local_result(job_id)
+                if job_id not in result['recovered']:
+                    result['recovered'].append(job_id)
+            except (KeyError,OSError,ValueError,sqlite3.Error):
+                if job_id not in result['blocked']:
+                    result['blocked'].append(job_id)
+        return result
+
+    def stage_result(self, job_id: str, data: bytes, filename: str, metadata: dict | None = None,
+                     *, job_snapshot: GenerationJobRecord | None = None) -> GenerationJobRecord:
+        global _RESULT_STAGING_EPOCH
+        from backend.services.generation_result_recovery import write_receipt
+        job = job_snapshot or self.get_job(job_id)
+        if job.id != job_id:
+            raise GenerationJobConflict('Result identity differs from the generation job')
+        if job_snapshot is None and job.metadata.get(_ACCEPT_CLAIM_METADATA_KEY):
+            # A fresh local request can reject a known invalid mutation before
+            # creating anything. Paid providers pass their pre-dispatch snapshot
+            # so a cancellation/acceptance race still preserves received bytes.
+            raise GenerationJobConflict('Generation job is currently being accepted')
         if job.status in {"accepted", "discarded", "cancelled"}:
             raise GenerationJobConflict("Generation job is already finalized")
         _validate_storeable_image_bytes(data)
         with Image.open(BytesIO(data)) as image:
-            width, height = image.size
-        suffix = Path(filename).suffix.lower()
-        if suffix not in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
-            suffix = ".png"
+            suffix = {'PNG':'.png','JPEG':'.jpg','WEBP':'.webp','GIF':'.gif'}[image.format]
         sha = hashlib.sha256(data).hexdigest()
-        result_rel = Path(GENERATION_RESULT_ROOT) / job_id / f"result-{sha[:12]}{suffix}"
+        result_rel = Path(GENERATION_RESULT_ROOT) / job_id / f"result-{sha}{suffix}"
         result_abs = resolve_generation_write_path(
             self.library_path,
             result_rel.as_posix(),
             allowed_root=GENERATION_RESULT_ROOT,
         )
-        result_abs.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write_bytes(result_abs, data)
+        with _RESULT_RECOVERY_LOCK:
+            active_key = (str(self.library_path.resolve()),job_id)
+            with _RESULT_STATE_LOCK:
+                _RESULT_STAGING_EPOCH += 1
+                _RESULT_STAGING_ACTIVE.add(active_key)
+            try:
+                from backend.services.generation_result_recovery import job_directory
+                job_directory(self.library_path, job_id)
+                result_abs.parent.mkdir(parents=True, exist_ok=True)
+                _atomic_write_bytes(result_abs, data)
+                # Receipt creation failure deliberately retains the paid bytes.
+                try:
+                    receipt = write_receipt(self.library_path, job, result_rel.as_posix(), data)
+                except OSError:
+                    logger.error('Could not persist local recovery receipt for %s; final image retained but automatic recovery evidence is incomplete',job_id,exc_info=True)
+                    raise
+                return self._register_local_result(job_id, receipt, metadata)
+            finally:
+                with _RESULT_STATE_LOCK:
+                    _RESULT_STAGING_ACTIVE.discard(active_key)
+                    _RESULT_STAGING_EPOCH += 1
+
+    def _register_local_result(self, job_id: str, receipt: dict, metadata: dict | None = None, *, recovery=False) -> GenerationJobRecord:
+        from backend.services.generation_result_recovery import identity, clear_receipt
+        result = receipt['result']
         timestamp = now()
-        preserve_result_file = False
         try:
             with connect(self.library_path) as conn:
                 conn.execute("BEGIN IMMEDIATE")
                 row = conn.execute("SELECT * FROM generation_jobs WHERE id=?", (job_id,)).fetchone()
                 if row is None:
                     raise KeyError(job_id)
-                preserve_result_file = row["result_path"] == result_rel.as_posix()
+                current = self._record_from_row(row)
+                if identity(current) != receipt['identity_sha256']:
+                    raise GenerationJobConflict('Local result identity no longer matches this task')
+                raw_metadata = _from_json(row['metadata'],{})
+                if isinstance(raw_metadata,dict) and raw_metadata.get(_ACCEPT_CLAIM_METADATA_KEY):
+                    raise GenerationJobConflict('Generation job is currently being accepted')
+                if recovery:
+                    from backend.services.generation_result_recovery import validate_receipt
+                    # Revalidate under the writer claim. No competing local
+                    # recovery or committed cancel/cleanup can slip past it.
+                    if validate_receipt(self.library_path,current) != receipt:
+                        raise GenerationJobConflict('Local result changed during recovery')
+                if row['status'] in {'succeeded','accepted'}:
+                    if row['result_sha256'] != result['sha256'] or row['result_path'] != result['path']:
+                        raise GenerationJobConflict('A different result is already registered')
+                    conn.commit()
+                    clear_receipt(self.library_path, current)
+                    return self.get_job(job_id)
+                self._assert_result_owner_active(conn,current)
                 result_metadata = _from_json(row["metadata"], {})
                 if not isinstance(result_metadata, dict):
                     result_metadata = {}
                 if result_metadata.get(_ACCEPT_CLAIM_METADATA_KEY):
                     raise GenerationJobConflict("Generation job is currently being accepted")
-                if row["status"] not in {"queued", "running"}:
+                if (row["status"] not in ({"queued", "running", "failed"} if recovery else {"queued", "running"})
+                        or row['result_path'] or result_metadata.get('retried_by_generation_job_id')):
                     raise GenerationJobConflict(f"Generation result cannot be staged from status {row['status']}")
+                result_metadata.pop('local_result_recovery', None)
+                if recovery:
+                    result_metadata['local_result_recovered'] = True
+                    result_metadata['decoded_image'] = {key:result[key] for key in ('format','width','height')}
+                    for key in ('failure','error_kind','error_diagnostics','retry_after_seconds'):
+                        result_metadata.pop(key, None)
                 sanitized_metadata = sanitize_generation_parameters(metadata, redact_image_data=True)
                 if sanitized_metadata:
                     for key, value in sanitized_metadata.items():
@@ -1262,6 +1390,8 @@ class GenerationJobRepository:
                         if key == "reference_image_copies":
                             continue
                         if key == "stream_preview":
+                            continue
+                        if key == 'local_result_recovery':
                             continue
                         if key in {"retry_of_generation_job_id", "retried_by_generation_job_id"} and key in result_metadata:
                             continue
@@ -1272,9 +1402,9 @@ class GenerationJobRepository:
                     UPDATE generation_jobs
                     SET status='succeeded', result_path=?, result_width=?, result_height=?, result_sha256=?,
                         metadata=?, error=NULL, updated_at=?, completed_at=?
-                    WHERE id=? AND status IN ('queued', 'running')
+                    WHERE id=? AND status IN ('queued', 'running', 'failed')
                     """,
-                    (result_rel.as_posix(), width, height, sha, _to_json(result_metadata), timestamp, timestamp, job_id),
+                    (result['path'], result['width'], result['height'], result['sha256'], _to_json(result_metadata), timestamp, timestamp, job_id),
                 )
                 if cursor.rowcount != 1:
                     raise GenerationJobConflict("Generation job result could not be staged")
@@ -1283,14 +1413,41 @@ class GenerationJobRepository:
             # A busy or failed database write says nothing about the provider
             # result. Keep the paid image bytes under the job's own result folder
             # (the name includes the content hash), so they can be recovered.
-            logger.warning("Could not record generation result for %s; kept %s", job_id, result_rel.as_posix(), exc_info=True)
+            logger.warning("Could not record generation result for %s; kept final image and local recovery receipt", job_id, exc_info=True)
             raise
-        except Exception:
-            if not preserve_result_file:
-                result_abs.unlink(missing_ok=True)
-            raise
-        self.clear_stream_preview(job_id)
+        # Even a user-operation conflict must not destroy a received paid image.
+        clear_receipt(self.library_path, self.get_job(job_id))
+        with suppress(OSError,sqlite3.Error):
+            self.clear_stream_preview(job_id)
         return self.get_job(job_id)
+
+    @staticmethod
+    def _assert_result_owner_active(conn, job: GenerationJobRecord) -> None:
+        """Serialize result registration with Agent stop/delete operations.
+
+        A stop may have read outputTaskIds before a Native local repair added
+        its original mapping. Checking only the child row can miss that stop.
+        Explicit standalone image retries have their own authorization; the
+        historical source stop does not cancel a later user-created retry, but
+        deleting its source round/conversation still invalidates ownership.
+        """
+        retry = job.metadata.get('agentRetry')
+        is_retry = isinstance(retry,dict) and bool(retry)
+        link = retry if is_retry else job.metadata.get('agent')
+        if not isinstance(link,dict):
+            return
+        request_id = link.get('sourceRequestId') if is_retry else link.get('requestId')
+        if not request_id:
+            return
+        owner = conn.execute('''SELECT r.stop_requested,r.state,r.round_id,r.conversation_id,
+            a.deleted AS round_deleted,c.deleted AS conversation_deleted
+            FROM agent_requests r JOIN agent_rounds a ON a.id=r.round_id
+            JOIN agent_conversations c ON c.id=r.conversation_id WHERE r.id=?''',(request_id,)).fetchone()
+        if (owner is None or owner['round_deleted'] or owner['conversation_deleted']
+                or owner['round_id'] != link.get('roundId')
+                or owner['conversation_id'] != link.get('conversationId')
+                or not is_retry and (owner['stop_requested'] or owner['state'] == 'stopped')):
+            raise GenerationJobConflict('原对话已停止、删除或改变；保留的本地图片不会覆盖用户操作。')
 
     def _resolve_job_result_image_path(self, job: GenerationJobRecord) -> Path:
         if not job.result_path:
@@ -2468,6 +2625,7 @@ class GenerationJobRepository:
         return self.get_job(job_id)
 
     def retry_failed_job(self, job_id: str) -> GenerationJobRecord:
+        self.assert_no_local_result_pending(job_id)
         retry_id = new_id("gen")
         timestamp = now()
         inserted = False
@@ -2556,6 +2714,7 @@ class GenerationJobRepository:
             raise
 
     def discard_and_retry_job(self, job_id: str) -> GenerationJobRetryResult:
+        self.assert_no_local_result_pending(job_id)
         # A concurrent caller must not mistake an in-progress discard repair for
         # a previous interrupted operation and report a second successful claim.
         with _DISCARD_REPAIR_LOCK:
@@ -2900,8 +3059,12 @@ class GenerationJobRepository:
         )
 
     def next_queued_provider_jobs(self, provider: str, *, limit: int) -> list[GenerationJobRecord]:
+        wanted = max(0,int(limit))
+        if not wanted:
+            return []
+        result = []
         with connect(self.library_path) as conn:
-            rows = conn.execute(
+            cursor = conn.execute(
                 """
                 SELECT * FROM generation_jobs
                 WHERE provider=? AND status='queued'
@@ -2912,19 +3075,38 @@ class GenerationJobRepository:
                       AND agent_requests.stop_requested=0
                   ))
                 ORDER BY created_at ASC
-                LIMIT ?
                 """,
-                (provider, limit),
-            ).fetchall()
-        return [self._record_from_row(row) for row in rows]
+                (provider,),
+            )
+            try:
+                while len(result) < wanted:
+                    rows = cursor.fetchmany(min(64,wanted))
+                    if not rows:
+                        break
+                    for row in rows:
+                        job = self._record_from_row(row)
+                        if not job.metadata.get('local_result_recovery'):
+                            result.append(job)
+                            if len(result) == wanted:
+                                break
+            finally:
+                cursor.close()
+        return result
 
     def _record_from_row(self, row) -> GenerationJobRecord:
+        active_key = (str(self.library_path.resolve()),row['id'])
+        with _RESULT_STATE_LOCK:
+            staging_epoch = _RESULT_STAGING_EPOCH
+            was_staging = active_key in _RESULT_STAGING_ACTIVE
         data = dict(row)
         data["reference_image_ids"] = [str(value) for value in _from_json(data.get("reference_image_ids"), [])]
         params = _from_json(data.get("parameters"), {})
         meta = _from_json(data.get("metadata"), {})
         data["parameters"] = params if isinstance(params, dict) else {}
         data["metadata"] = meta if isinstance(meta, dict) else {}
+        # Recovery availability is a read-time projection of local evidence,
+        # never an assertion accepted from provider-supplied metadata.
+        data['metadata'].pop('local_result_recovery',None)
         # Old records are projected safely, without mutating their stored history.
         if isinstance(data['metadata'].get('error_diagnostics'), dict):
             failure = classify_failure(data['metadata']['error_diagnostics'])
@@ -2932,4 +3114,22 @@ class GenerationJobRepository:
             data['metadata']['error_diagnostics'] = safe_diagnostics(data['metadata']['error_diagnostics'])
             if data.get('error'):
                 data['error'] = failure['message']
-        return GenerationJobRecord(**data)
+        record = GenerationJobRecord(**data)
+        from backend.services.generation_result_recovery import describe_evidence
+        if (record.status not in {'succeeded','accepted'}
+                and not was_staging):
+            state = describe_evidence(self.library_path,record)
+            if state is not None:
+                # The row may have been read just before another worker
+                # committed and removed its receipt. An unreferenced-looking
+                # filename in that stale snapshot must not abort the Agent.
+                with connect(self.library_path) as latest_connection:
+                    latest = latest_connection.execute('SELECT status,result_path FROM generation_jobs WHERE id=?',(record.id,)).fetchone()
+                # Only in-memory state is inspected while holding this lock.
+                # Path.resolve/SQLite/file reads can yield to a committing
+                # worker and must stay outside the atomic epoch+active check.
+                with _RESULT_STATE_LOCK:
+                    if (staging_epoch == _RESULT_STAGING_EPOCH and active_key not in _RESULT_STAGING_ACTIVE
+                            and (latest is None or not (latest['status'] in {'succeeded','accepted'} and latest['result_path']))):
+                        record.metadata['local_result_recovery'] = state
+        return record

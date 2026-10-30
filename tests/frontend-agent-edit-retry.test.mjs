@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import ts from 'typescript';
+import { localRecoveryDependencies } from './helpers/local-result-recovery.mjs';
 
 async function compile(path) { return ts.transpileModule(await readFile(new URL(path, import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText; }
-function evaluate(js, dependencies, globals = {}) { const module = { exports: {} }; new Function('require', 'module', 'exports', ...Object.keys(globals), js)(name => { assert.ok(name in dependencies, name); return dependencies[name]; }, module, module.exports, ...Object.values(globals)); return module.exports; }
+function evaluate(js, dependencies, globals = {}) { const module = { exports: {} }; new Function('require', 'module', 'exports', ...Object.keys(globals), js)(name => { if (name in localRecoveryDependencies) return localRecoveryDependencies[name]; assert.ok(name in dependencies, name); return dependencies[name]; }, module, module.exports, ...Object.values(globals)); return module.exports; }
 const code = Object.fromEntries(await Promise.all(['AgentImageRetryDialog', 'AgentImageRetryButton', 'AgentEditingTaskDialog', 'AgentFailedImageEditDialog'].map(async name => [name, await compile(`../frontend/src/components/agent/${name}.tsx`)])));
 const retryUtility = evaluate(await compile('../frontend/src/utils/playground/agentImageRetry.ts'), {});
 const referenceUtility = evaluate(await compile('../frontend/src/utils/playground/agentImageReferences.ts'), {});
@@ -47,6 +48,14 @@ function harness(t, component, initialProps = {}, options = {}) {
   render(); t.after(() => { if (!unmounted) unmount(); });
   return { posts, reads, receipts, saves, applied, storage, jobReads, imageReads, flush, find, unmount, AgentApiError, update(next) { Object.assign(props, next); render(); }, text: () => text(tree), get late() { return late; } };
 }
+
+test('actual Agent retry button delegates retained-result evidence to local recovery without creating a paid identity', async t => {
+  const original={...job(),metadata:{local_result_recovery:{state:'pending',message:'图片已取得，本地保存记录待恢复。',can_recover:true}}};
+  const recovered=[];const h=harness(t,'AgentImageRetryButton',{job:original,onRecovered:value=>recovered.push(value)});await h.flush();
+  assert.equal(h.find('button','重试图片'),undefined);
+  const local=h.find('local-result-recovery');assert.ok(local);const result={...original,status:'succeeded',metadata:{}};
+  local.onRecovered(result);assert.deepEqual(recovered,[result]);assert.deepEqual(h.posts,[]);assert.deepEqual(h.reads,[]);assert.equal(h.storage.size,0);
+});
 
 test('actual retry confirmation changes only image routing and parameters, then creates one authorized task with no text planning', async t => {
   const pending = deferred(), h = harness(t, 'AgentImageRetryDialog', {}, { post: () => pending.promise }); await h.flush();

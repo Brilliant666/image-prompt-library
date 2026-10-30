@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import re
-import shutil
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -16,7 +15,8 @@ from backend.schemas import (
     RepositoryIngestRequest,
     RepositoryIngestResult,
 )
-from backend.services.import_drafts import ImportDraftRepository
+from backend.services.import_drafts import ImportDraftRepository, MAX_IMPORT_IMAGE_BYTES, resolve_import_staging_path
+from backend.services.image_store import _atomic_write_bytes
 
 HEADING_RE = re.compile(r"^(?P<marks>#{1,6})\s+(?P<title>.+?)\s*$", re.MULTILINE)
 IMAGE_RE = re.compile(r"!\[[^\]]*\]\((?P<path>[^)\s]+)(?:\s+\"[^\"]*\")?\)")
@@ -90,15 +90,22 @@ def _stage_image(library_path: Path, source_root: Path, image_value: str, batch_
     if not source_path.is_file():
         warnings.append(f"Image file not found: {image_value}")
         return None
-    sha = hashlib.sha256(source_path.read_bytes()).hexdigest()
+    with source_path.open("rb") as source:
+        data = source.read(MAX_IMPORT_IMAGE_BYTES + 1)
+    if len(data) > MAX_IMPORT_IMAGE_BYTES:
+        warnings.append("Repository image exceeds the 30 MB file limit")
+        return None
+    sha = hashlib.sha256(data).hexdigest()
     staged_rel = Path("import-staging") / batch_id / f"{source_path.stem}-{sha[:12]}{source_path.suffix.lower()}"
-    staged_abs = library_path / staged_rel
+    staged_abs = resolve_import_staging_path(library_path, staged_rel.as_posix(), require_file=False)
     staged_abs.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source_path, staged_abs)
+    staged_abs = resolve_import_staging_path(library_path, staged_rel.as_posix(), require_file=False)
+    _atomic_write_bytes(staged_abs, data)
     width = None
     height = None
     try:
-        with Image.open(source_path) as image:
+        from io import BytesIO
+        with Image.open(BytesIO(data)) as image:
             width, height = image.size
     except Exception:
         warnings.append(f"Could not read image dimensions: {image_value}")
