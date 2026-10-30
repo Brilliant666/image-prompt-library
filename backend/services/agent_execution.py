@@ -348,9 +348,22 @@ def call_responses(repo, request_id, step, refs, *, body_override=None, native_c
         try:
             validate_response_payload(payload, require_completed=bool(pending_native_images) or contains_image, secrets=error_secrets)
         except AgentError:
+            # Explicit failed/incomplete receipts may still report billable
+            # usage. There are no confirmed final images to register here.
+            with suppress(sqlite3.Error):
+                record_model(payload)
+                repo.record_response_details(request_id, step, payload, secrets=[secret])
             repo.update(request_id, outcome="known")
             raise
         completed = payload
+        if (contains_image or pending_native_images) and not request['body']['authorization']['allowImageGeneration']:
+            # A known terminal cannot grant a tool the caller did not authorize.
+            # Reject before writing a Native image or successful recovery proof.
+            with suppress(sqlite3.Error):
+                record_model(payload)
+                repo.record_response_details(request_id, step, payload, secrets=[secret])
+            repo.update(request_id, outcome='known')
+            raise AgentError('authorization_denied', '本轮未授权生成图片。')
         # All valid images in one terminal are protected before the first
         # optional SQLite observation. Do not preserve failed/incomplete output.
         final_images = output if "output" in payload else list(pending_native_images.values())
@@ -506,7 +519,10 @@ def call_responses(repo, request_id, step, refs, *, body_override=None, native_c
                                 job = native_image(repo, request_id, step, {"id": tool_id, "type": "image_generation_call", "status": "in_progress"}, refs, [secret], native_context=native_context)
                             raw = event.get("partial_image_b64")
                             if job and isinstance(raw, str) and raw:
-                                with suppress(sqlite3.Error, OSError):
+                                # Preview decoding/storage is best-effort. Keep
+                                # reading the paid stream for its valid final;
+                                # authorization/stop and terminal checks stay outside.
+                                with suppress(sqlite3.Error, OSError, ValueError):
                                     preview = repo.store_asset(base64.b64decode(raw, validate=True), {"kind": "job", "jobId": job.id})
                                     with connect(repo.library) as conn:
                                         latest = conn.execute("SELECT metadata FROM generation_jobs WHERE id=?", (job.id,)).fetchone()

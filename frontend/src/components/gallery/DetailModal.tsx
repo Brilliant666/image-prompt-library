@@ -10,7 +10,7 @@ import { copyTextToClipboard } from '../../utils/clipboard';
 import { useModalFocus } from '../../hooks/useModalFocus';
 import { GenerationResultSummary } from '../GenerationResultSummary';
 import LocalResultRecovery from '../LocalResultRecovery';
-import { localResultRecovery } from '../../utils/localResultRecovery';
+import { localResultRecovery, localResultRecoveryLabel } from '../../utils/localResultRecovery';
 import './DetailModal.css';
 
 interface Props {
@@ -90,7 +90,7 @@ export default function DetailModal({ job, t, onClose, onChange, onAccepted, onR
   const inputs = recipeInputs(job, mediaUrl);
   const requested = { ...job.parameters, ...record(job.metadata?.requested) };
   const recovery = localResultRecovery(job);
-  const status = recovery ? '图片已取得 · 待恢复' : galleryStatus[job.status] || job.status;
+  const status = localResultRecoveryLabel(job) || galleryStatus[job.status] || job.status;
   const actualSize = canUse && job.result_width && job.result_width > 0 && job.result_height && job.result_height > 0
     ? `${job.result_width} × ${job.result_height}` : '';
   const parameterRows: Array<[string, unknown]> = [

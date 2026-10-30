@@ -729,13 +729,8 @@ class OpenAICodexNativeProvider:
                 try:
                     repo = GenerationJobRepository(library_path)
                     job = repo.get_job(job_id)
-                    if job.provider == PROVIDER_ID and job.status in {"queued", "failed"}:
-                        try:
-                            job = repo.mark_running(job_id)
-                        except GenerationJobConflict:
-                            job = repo.get_job(job_id)
-                    if job.provider == PROVIDER_ID and job.status not in {"succeeded", "accepted", "discarded", "cancelled"}:
-                        repo.mark_failed(job_id, safe_error)
+                    if job.provider == PROVIDER_ID and job.status == 'queued' and job.started_at is None:
+                        repo.mark_preflight_failed(job_id, safe_error)
                 except (GenerationJobConflict, KeyError, OSError):
                     pass
             raise CodexNativeAuthError(safe_error) from exc

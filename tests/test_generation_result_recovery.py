@@ -24,6 +24,27 @@ def picture(color='purple'):
     return stream.getvalue()
 
 
+def test_unsafe_result_root_minimal_descriptor_stays_conservatively_blocked(tmp_path):
+    import os
+    import subprocess
+    from types import SimpleNamespace
+    from backend.services.generation_result_recovery import evidence
+    library = tmp_path/'library'
+    library.mkdir()
+    target = tmp_path/'outside'
+    target.mkdir()
+    root = library/'generation-results'
+    if os.name == 'nt':
+        subprocess.run(['cmd','/c','mklink','/J',str(root),str(target)],check=True,capture_output=True)
+        assert root.lstat().st_file_attributes & 0x400
+    else:
+        root.symlink_to(target,target_is_directory=True)
+    # Resume checks can intentionally supply only these two safe fields.
+    job = SimpleNamespace(id='gen_minimal',result_path=None)
+    assert evidence(library,job) is True
+    assert list(target.iterdir()) == []
+
+
 @pytest.fixture
 def provider_case(tmp_path, monkeypatch):
     library = tmp_path/'library'

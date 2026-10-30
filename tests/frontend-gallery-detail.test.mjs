@@ -338,3 +338,14 @@ test('completion of item B does not cancel item A pending title refresh', async 
   assert.equal(current.prompts, original.prompts); assert.equal(current.images, original.images);
   cleanup();
 });
+
+
+test('Gallery detail labels unverified local evidence without claiming a final image was obtained', async t => {
+  const blocked = { ...job, status: 'running', result_path: null, metadata: { local_result_recovery: {
+    state: 'blocked', message: '本地恢复证据尚未通过核验；请检查原任务。', can_recover: false } } };
+  const h = harness(t, blocked);
+  assert.equal(h.find('span', props => props.className === 'pg-detail-status running').children, '本地结果需核对');
+  assert.equal(h.find('button', props => props.className === 'pg-detail-reuse'), undefined);
+  assert.equal(h.find('local-result-recovery').job, blocked); assert.deepEqual(h.events.writes, []);
+  assert.doesNotMatch(JSON.stringify(h.tree), /图片已取得/);
+});

@@ -175,7 +175,17 @@ def evidence(library, job):
                 and any(re.fullmatch(r'result-[a-f0-9]{12,64}\.(?:png|jpg|jpeg|webp|gif)',p.name)
                         for p in directory.glob('result-*')))
     except (OSError,RecoveryConflict):
-        return True
+        # A rejected preflight has authoritatively sent no provider request.
+        # All other unsafe directories remain blocked: they may hide an
+        # already obtained final result and must never trigger a paid replay.
+        # Codex validates these roots before mark_running and before any POST.
+        # Let only its never-dispatched queued job reach that rejecting
+        # preflight; other providers/started jobs retain the conservative gate.
+        never_dispatched_codex = (getattr(job,'provider',None) == 'openai_codex_oauth_native'
+            and getattr(job,'status',None) == 'queued' and getattr(job,'started_at',False) is None)
+        metadata = getattr(job,'metadata',None)
+        return not (never_dispatched_codex
+            or isinstance(metadata,dict) and metadata.get('_generation_preflight_failed') is True)
 
 
 def clear_receipt(library, job):

@@ -112,10 +112,29 @@ def test_native_pending_conflict_never_fabricates_a_job_or_replays(repo, monkeyp
 @pytest.mark.parametrize('status', ['failed','incomplete'])
 def test_invalid_native_terminal_with_image_never_creates_recoverable_success(repo, monkeypatch, status):
     start(repo, native=True)
-    calls = transport(monkeypatch, payload={'status':status,'output':[image_result()]})
+    calls = transport(monkeypatch, payload={'status':status,'output':[image_result()],
+        'usage':{'input_tokens':10,'output_tokens':5,'total_tokens':15}})
     execution.run_request(repo.library, 'request')
     assert not list((repo.library/'generation-results').glob('*/native-final.json'))
     assert repo.jobs.recover_local_results()['recovered'] == []
+    assert repo.request('request')['round']['responseDetails']['steps'][0]['usage']['totalTokens'] == 15
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize('stream',[False,True])
+def test_unrequested_native_terminal_cannot_create_success_proof_or_hide_authorization_error(repo, monkeypatch, stream):
+    set_mode(repo,'native')
+    repo.create_round('conversation',body(repo,images=False))
+    response = {'status':'completed','output':[image_result()]}
+    calls = transport(monkeypatch,**({'events':[terminal(response['output'])]} if stream else {'payload':response}))
+    execution.run_request(repo.library,'request')
+    request = repo.request('request')
+    assert request['error']['code'] == 'authorization_denied'
+    assert request['upstream_outcome'] == 'known'
+    assert not list((repo.library/'generation-results').glob('*/native-final.json'))
+    assert not list((repo.library/'generation-results').glob('*/result-*'))
+    with closing(connect(repo.library)) as conn:
+        assert conn.execute('SELECT count(*) FROM generation_jobs').fetchone()[0] == 0
     assert len(calls) == 1
 
 
@@ -333,3 +352,20 @@ def test_native_valid_png_above_download_cap_still_survives_registration_failure
     job = repo.jobs.get_job(recovered['recovered'][0])
     assert job.status == 'succeeded' and job.result_width == job.result_height == 3000
     assert (repo.library/job.result_path).read_bytes() == data
+
+
+@pytest.mark.parametrize('preview',['not-valid-base64!',base64.b64encode(b'not a decodable image').decode()])
+def test_native_invalid_preview_cannot_abandon_valid_final(repo, monkeypatch, preview):
+    start(repo,native=True)
+    image = image_result()
+    calls = transport(monkeypatch,events=[
+        {'type':'response.output_item.added','item':{**image,'status':'in_progress','result':None}},
+        {'type':'response.image_generation_call.partial_image','item_id':image['id'],'partial_image_b64':preview},
+        terminal([image])])
+    execution.run_request(repo.library,'request')
+    request = repo.request('request')
+    assert request['state'] == 'completed'
+    assert len(request['round']['outputTaskIds']) == 1
+    job = repo.jobs.get_job(request['round']['outputTaskIds'][0])
+    assert job.status == 'succeeded' and (repo.library/job.result_path).read_bytes() == image_bytes()
+    assert len(calls) == 1

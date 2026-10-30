@@ -9,7 +9,7 @@ import { mapGenerationRetryJob, rememberGenerationReviewOpenContext, resolveGene
 import { readGenerationQueueHistory, saveGenerationQueueHistory, clearGenerationQueueHistory, beginGenerationQueueMutation, generationQueueMutationPending, subscribeGenerationQueueMutation } from '../utils/generationQueueHistory';
 import type { Translator } from '../utils/i18n';
 import LocalResultRecovery from './LocalResultRecovery';
-import { localResultRecovery } from '../utils/localResultRecovery';
+import { localResultRecovery, localResultRecoveryLabel } from '../utils/localResultRecovery';
 
 function isActive(job: GenerationJobRecord) {
   return !localResultRecovery(job) && (job.status === 'queued' || job.status === 'running');
@@ -20,6 +20,7 @@ function hasDisplayableResult(job: GenerationJobRecord) {
 }
 
 function statusIcon(job: GenerationJobRecord) {
+  if (localResultRecovery(job)) return <History size={16} />;
   if (isActive(job)) return <Clock3 size={16} />;
   if (job.status === 'succeeded') return <ImagePlus size={16} />;
   if (job.status === 'failed') return <XCircle size={16} />;
@@ -27,7 +28,8 @@ function statusIcon(job: GenerationJobRecord) {
 }
 
 function statusLabel(job: GenerationJobRecord, t: Translator, isUsedAsGenerationReference = false) {
-  if (localResultRecovery(job)) return '图片已取得 · 待恢复';
+  const recoveryLabel = localResultRecoveryLabel(job);
+  if (recoveryLabel) return recoveryLabel;
   if (job.status === 'queued') return t('queueQueued');
   if (job.status === 'running') return t('queueRunning');
   if (job.status === 'succeeded') return isUsedAsGenerationReference ? t('queueUsedAsReference') : t('queueReady');
@@ -256,7 +258,7 @@ function jobModel(job: GenerationJobRecord) {
 }
 
 function isStaleRunningJob(job: GenerationJobRecord) {
-  if (job.status !== 'running') return false;
+  if (job.status !== 'running' || localResultRecovery(job)) return false;
   const started = Date.parse(job.started_at || job.updated_at || job.created_at);
   return Number.isFinite(started) && Date.now() - started > STALE_RUNNING_JOB_MS;
 }
@@ -798,12 +800,13 @@ export default function GenerationQueueDrawer({
     .filter(entry => entry.seconds > 0);
 
   const sections = [
+    { key: 'local-recovery', title: '本地结果待恢复／需核对', jobs: jobs.filter(job => Boolean(localResultRecovery(job))) },
     { key: 'active', title: t('queueInProgress'), jobs: jobs.filter(job => !groupedJobIds.has(job.id) && isActive(job)) },
-    { key: 'ready', title: t('queueReadyForReview'), jobs: jobs.filter(job => !groupedJobIds.has(job.id) && job.status === 'succeeded') },
-    { key: 'failed', title: t('queueNeedsAttention'), jobs: jobs.filter(job => !groupedJobIds.has(job.id) && job.status === 'failed') },
+    { key: 'ready', title: t('queueReadyForReview'), jobs: jobs.filter(job => !groupedJobIds.has(job.id) && !localResultRecovery(job) && job.status === 'succeeded') },
+    { key: 'failed', title: t('queueNeedsAttention'), jobs: jobs.filter(job => !groupedJobIds.has(job.id) && !localResultRecovery(job) && job.status === 'failed') },
     // A cleared batch slot is absent from the gallery, so keep its own history
     // entry available even when the batch also has a summary card.
-    { key: 'recent', title: t('queueRecent'), jobs: jobs.filter(job => job.status === 'discarded' || (!groupedJobIds.has(job.id) && ['accepted', 'cancelled'].includes(job.status))) },
+    { key: 'recent', title: t('queueRecent'), jobs: jobs.filter(job => !localResultRecovery(job) && (job.status === 'discarded' || (!groupedJobIds.has(job.id) && ['accepted', 'cancelled'].includes(job.status)))) },
   ];
   const visibleSections = sections.filter(section => section.jobs.length > 0);
   const hasHistoricalActivity = jobTotal > 0 || Object.values(statusCounts || {}).some(count => Number(count) > 0);

@@ -1104,6 +1104,7 @@ class GenerationJobRepository:
                 'timings': {key: None for key in ('queueMs', 'preparationMs', 'providerMs', 'resultWriteMs')}})
             allowed = {'queued'} if queued_only else {'queued', 'failed'}
             if row['status'] in allowed:
+                metadata.pop('_generation_preflight_failed', None)
                 execution['timings']['queueMs'] = _queue_duration(self.library_path, job_id)
                 execution['phase'] = 'preparing'
             cursor = conn.execute(
@@ -1119,6 +1120,30 @@ class GenerationJobRepository:
             current = self.get_job(job_id)
             expected = 'queued' if queued_only else 'queued or failed'
             raise GenerationJobConflict(f"Generation job must be {expected} before run; current status is {current.status}")
+        return self.get_job(job_id)
+
+    def mark_preflight_failed(self, job_id: str, error: str) -> GenerationJobRecord:
+        """Record a rejected, never-dispatched attempt without claiming paid bytes.
+
+        Storage validation can fail before the normal pending-result guard can
+        safely inspect its directory. Only a queued job that has never started
+        can take this path; an earlier dispatch must keep its recovery evidence.
+        """
+        timestamp = now()
+        with connect(self.library_path) as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            row = conn.execute('SELECT status,started_at,result_path,metadata FROM generation_jobs WHERE id=?', (job_id,)).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            if row['status'] != 'queued' or row['started_at'] is not None or row['result_path']:
+                raise GenerationJobConflict('Only a never-dispatched queued job can fail preflight')
+            metadata = sanitize_generation_parameters(_from_json(row['metadata'], {}), redact_image_data=True)
+            metadata['_generation_preflight_failed'] = True
+            metadata['error_kind'] = _classify_error(str(error or ''))
+            conn.execute("""UPDATE generation_jobs SET status='failed',error=?,metadata=?,
+                started_at=?,completed_at=?,updated_at=? WHERE id=?""",
+                (sanitize_generation_error(error),_to_json(metadata),timestamp,timestamp,timestamp,job_id))
+            conn.commit()
         return self.get_job(job_id)
 
     def mark_failed(self, job_id: str, error: str, retry_after_seconds: int | None = None, *, diagnostics: dict | None = None) -> GenerationJobRecord:
@@ -1377,6 +1402,7 @@ class GenerationJobRepository:
                         or row['result_path'] or result_metadata.get('retried_by_generation_job_id')):
                     raise GenerationJobConflict(f"Generation result cannot be staged from status {row['status']}")
                 result_metadata.pop('local_result_recovery', None)
+                result_metadata.pop('_generation_preflight_failed', None)
                 if recovery:
                     result_metadata['local_result_recovered'] = True
                     result_metadata['decoded_image'] = {key:result[key] for key in ('format','width','height')}
@@ -1392,6 +1418,8 @@ class GenerationJobRepository:
                         if key == "stream_preview":
                             continue
                         if key == 'local_result_recovery':
+                            continue
+                        if key == '_generation_preflight_failed':
                             continue
                         if key in {"retry_of_generation_job_id", "retried_by_generation_job_id"} and key in result_metadata:
                             continue
@@ -1431,14 +1459,24 @@ class GenerationJobRepository:
         historical source stop does not cancel a later user-created retry, but
         deleting its source round/conversation still invalidates ownership.
         """
-        retry = job.metadata.get('agentRetry')
-        is_retry = isinstance(retry,dict) and bool(retry)
-        link = retry if is_retry else job.metadata.get('agent')
+        mapping = conn.execute('SELECT request_id FROM agent_tool_jobs WHERE job_id=?',(job.id,)).fetchone()
+        is_retry = mapping is None and bool(re.fullmatch(r'gen_retry_[a-f0-9]{64}',job.id))
+        if mapping is None and not is_retry:
+            # Metadata alone does not establish Agent ownership. Ordinary
+            # imports/uploads may retain literal, untrusted provenance fields.
+            return
+        link = job.metadata.get('agentRetry' if is_retry else 'agent')
         if not isinstance(link,dict):
-            return
+            raise GenerationJobConflict('Agent result ownership is missing or changed')
         request_id = link.get('sourceRequestId') if is_retry else link.get('requestId')
-        if not request_id:
-            return
+        if is_retry:
+            retry_id = link.get('retryId')
+            mapping = conn.execute('SELECT request_id FROM agent_tool_jobs WHERE job_id=?',(link.get('rootSourceJobId'),)).fetchone()
+            if (not isinstance(retry_id,str) or job.id != 'gen_retry_'+hashlib.sha256(retry_id.encode()).hexdigest()
+                    or mapping is None):
+                raise GenerationJobConflict('Agent retry ownership is missing or changed')
+        if not request_id or request_id != mapping['request_id']:
+            raise GenerationJobConflict('Agent result ownership is missing or changed')
         owner = conn.execute('''SELECT r.stop_requested,r.state,r.round_id,r.conversation_id,
             a.deleted AS round_deleted,c.deleted AS conversation_deleted
             FROM agent_requests r JOIN agent_rounds a ON a.id=r.round_id

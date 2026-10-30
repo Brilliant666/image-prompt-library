@@ -76,7 +76,7 @@ jobs:
       - name: Build local app
         run: npm run build
       - name: Run Windows installer contracts
-        run: python -m uv run --no-sync python -m pytest -p no:cacheprovider -q tests/test_windows_installer.py tests/test_library_archives.py tests/test_import_atomicity.py tests/test_import_atomicity_edges.py tests/test_result_recovery_archives.py tests/test_native_recovery_archives.py tests/test_local_recovery_stop_race.py
+        run: python -m uv run --no-sync python -m pytest -p no:cacheprovider -q tests/test_windows_installer.py tests/test_library_archives.py tests/test_import_atomicity.py tests/test_import_atomicity_edges.py tests/test_result_recovery_archives.py tests/test_native_recovery_archives.py tests/test_local_recovery_stop_race.py tests/test_openai_codex_native.py::test_codex_native_rejects_real_result_root_junction_before_provider_call
       - name: Run native Windows installer smoke
         shell: powershell
         run: |
