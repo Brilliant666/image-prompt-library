@@ -4,7 +4,7 @@ import { Check, Copy } from 'lucide-react';
 import { copyTextToClipboard } from '../../utils/clipboard';
 import './AgentCodeBlock.css';
 
-export function AgentCodeBlock({ children }: { children: ReactNode }) {
+export function AgentCodeBlock({ children, prompt = false, copyText, onSelectPrompt, onOptimizePrompt, onGeneratePrompt, sourceId, generationSummary, referenceSummary, promptSelectionDisabled = false }: { children: ReactNode; prompt?: boolean; copyText?: string; onSelectPrompt?: (text: string) => void; onOptimizePrompt?: (text: string) => void; onGeneratePrompt?: (text: string) => void; sourceId?: string; generationSummary?: string; referenceSummary?: string; promptSelectionDisabled?: boolean }) {
   const content = useRef<HTMLPreElement>(null);
   const mounted = useRef(true);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -19,9 +19,9 @@ export function AgentCodeBlock({ children }: { children: ReactNode }) {
   }, []);
 
   async function copy() {
-    // Read only the displayed code, keeping whitespace and excluding the
-    // surrounding explanation, language label and copy control.
-    const text = content.current?.textContent;
+    // Prompt source preserves original whitespace, including an unfinished
+    // streamed fence. Code keeps its normal rendered-text copy behavior.
+    const text = copyText ?? content.current?.textContent;
     if (!text) return;
     let copied = false;
     try { copied = await copyTextToClipboard(text); } catch { /* Keep manual selection available. */ }
@@ -31,13 +31,19 @@ export function AgentCodeBlock({ children }: { children: ReactNode }) {
     timer.current = setTimeout(() => { timer.current = null; setStatus('idle'); }, 1800);
   }
 
-  return <div className="agent-code-block">
+  const label = prompt ? '复制提示词' : '复制文本';
+  return <div data-prompt-source={prompt ? sourceId : undefined} className={`agent-code-block${prompt ? ' agent-prompt-block' : ''}`}>
     <div className="agent-code-block-toolbar">
-      <button type="button" aria-label="复制文本" onClick={() => void copy()}>
+      {prompt && <strong className="agent-prompt-block-title">提示词 <span>· 纯文本</span></strong>}
+      {prompt && onOptimizePrompt && <button type="button" aria-label="继续优化此提示词" disabled={promptSelectionDisabled || !copyText} onClick={() => { if (copyText) onOptimizePrompt(copyText); }}>继续优化</button>}
+      {prompt && onGeneratePrompt && <button type="button" aria-label="使用此提示词生成图片" disabled={promptSelectionDisabled || !copyText} onClick={() => { if (copyText) onGeneratePrompt(copyText); }}>生成图片</button>}
+      {prompt && onSelectPrompt && !onGeneratePrompt && <button type="button" aria-label="设为当前任务 Prompt" disabled={promptSelectionDisabled || !copyText} onClick={() => { if (copyText) onSelectPrompt(copyText); }}>设为当前 Prompt</button>}
+      <button type="button" aria-label={label} onClick={() => void copy()} disabled={prompt && copyText === ''}>
         {status === 'copied' ? <Check size={13} /> : <Copy size={13} />}
-        <span aria-live="polite">{status === 'copied' ? '已复制' : status === 'failed' ? '复制失败，请手动选择' : '复制文本'}</span>
+        <span aria-live="polite">{status === 'copied' ? '已复制' : status === 'failed' ? '复制失败，请手动选择' : label}</span>
       </button>
     </div>
     <pre ref={content}>{children}</pre>
+    {prompt && onGeneratePrompt && <p className="agent-prompt-generation-summary">{generationSummary}{referenceSummary ? ` · ${referenceSummary}` : ''}</p>}
   </div>;
 }

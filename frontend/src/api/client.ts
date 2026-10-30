@@ -1,5 +1,5 @@
 import type { TitleSuggestionProvider, OpenAICompatibleConfig, OpenAICompatibleProfiles, AppConfig, AppUpdateRequest, AppUpdateResult, AppUpdateStatus, CleanupApplyRequest, CleanupApplyResult, CleanupPreview, ClusterRecord, CodexNativeAuthPollRequest, CodexNativeAuthPollResponse, CodexNativeAuthStart, GenerationJobAcceptAsNewItemPayload, GenerationJobAcceptResult, GenerationJobCreate, GenerationJobList, GenerationJobRecord, GenerationJobRetryResult, GenerationJobSetCreate, GenerationJobSetRecord, GenerationProviderStatus, GrokOAuthPollRequest, ItemBatchRequest, ItemBatchResult, ItemCreate, ItemDetail, ItemImageUpdate, ItemList, ItemSortMode, ItemSummary, ProviderDeviceAuthStart, TagRecord, TitleSuggestionRequest, TitleSuggestionResponse, UploadImageRole } from '../types';
-import type { ImageRecord, ItemUpdate, ModelCatalog } from '../types';
+import type { ImageRecord, ItemUpdate, ModelCatalog, OpenAICompatibleProfileSave } from '../types';
 import { readJson } from './readJson';
 import { DEFAULT_ITEM_SORT } from '../utils/searchSort';
 import { captureFormData, type CaptureLanguageResult, type CaptureRequest } from '../utils/quickCapture';
@@ -13,6 +13,8 @@ async function responseError(response: Response) {
   try {
     const payload = JSON.parse(body) as { detail?: unknown };
     if (typeof payload.detail === 'string' && payload.detail.trim()) return payload.detail;
+    if (payload.detail && typeof payload.detail === 'object' && 'message' in payload.detail
+      && typeof payload.detail.message === 'string' && payload.detail.message.trim()) return payload.detail.message;
   } catch {
     // Keep plain-text provider and server errors unchanged.
   }
@@ -247,7 +249,7 @@ export const api = isDemoMode ? {
   openAICompatibleProfiles: async (): Promise<OpenAICompatibleProfiles> => ({ profiles: [], default_profile_id: null }),
   openAICompatibleModels: async (_id: string): Promise<ModelCatalog> => ({ models: [], fetched_at: null, checked_at: null, error: null }),
   refreshOpenAICompatibleModels: (_id: string) => demoReadOnly(),
-  saveOpenAICompatibleProfile: (_id: string, _payload: Omit<OpenAICompatibleConfig, 'api_key_present'> & { api_key?: string; make_default?: boolean }) => demoReadOnly(),
+  saveOpenAICompatibleProfile: (_id: string, _payload: OpenAICompatibleProfileSave) => demoReadOnly(),
   deleteOpenAICompatibleProfile: (_id: string) => demoReadOnly(),
   defaultOpenAICompatibleProfile: (_id: string) => demoReadOnly(),
   openAICompatibleConfig: async (): Promise<OpenAICompatibleConfig> => ({ display_name: 'OpenAI compatible', base_url: '', model: '', timeout: 300, api_key_present: false }),
@@ -311,7 +313,7 @@ export const api = isDemoMode ? {
   openAICompatibleProfiles: () => readJson<OpenAICompatibleProfiles>('/api/generation-providers/openai-compatible/profiles'),
   openAICompatibleModels: (id: string) => readJson<ModelCatalog>(`/api/generation-providers/openai-compatible/profiles/${encodeURIComponent(id)}/models`),
   refreshOpenAICompatibleModels: (id: string) => json<ModelCatalog>(`/api/generation-providers/openai-compatible/profiles/${encodeURIComponent(id)}/models/refresh`, { method: 'POST' }),
-  saveOpenAICompatibleProfile: (id: string, payload: Omit<OpenAICompatibleConfig, 'api_key_present'> & { api_key?: string; make_default?: boolean }) => json<OpenAICompatibleProfiles>(`/api/generation-providers/openai-compatible/profiles/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(payload) }),
+  saveOpenAICompatibleProfile: (id: string, payload: OpenAICompatibleProfileSave) => json<OpenAICompatibleProfiles>(`/api/generation-providers/openai-compatible/profiles/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(payload) }),
   deleteOpenAICompatibleProfile: (id: string) => json<OpenAICompatibleProfiles>(`/api/generation-providers/openai-compatible/profiles/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   defaultOpenAICompatibleProfile: (id: string) => json<OpenAICompatibleProfiles>(`/api/generation-providers/openai-compatible/profiles/${encodeURIComponent(id)}/default`, { method: 'PUT' }),
   openAICompatibleConfig: () => json<OpenAICompatibleConfig>('/api/generation-providers/openai-compatible/config'),

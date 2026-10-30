@@ -141,10 +141,13 @@ def test_legacy_backup_upgrades_only_restored_database_and_reuses_old_frozen_byt
         with db.connect(repo.library) as conn:
             conn.execute("DROP TABLE agent_frozen_sources")
             conn.execute("DROP INDEX idx_agent_assets_source_kind")
-            conn.execute("DELETE FROM schema_migrations WHERE version=?", (db.MIGRATIONS[-1],))
+            conn.execute("DROP INDEX idx_generation_agent_retry_conversation")
+            conn.execute("ALTER TABLE agent_conversations DROP COLUMN editing_tasks")
+            conn.execute("DELETE FROM schema_migrations WHERE version IN ('018_agent_frozen_sources.sql','019_agent_editing_tasks.sql')")
         conn.close()
         archive = backup_library(repo.library, tmp_path / "legacy.tar.gz")
-        assert verify_backup(archive)["migrations"] == db.MIGRATIONS[:-1]
+        legacy_migrations = db.MIGRATIONS[:db.MIGRATIONS.index('018_agent_frozen_sources.sql')]
+        assert verify_backup(archive)["migrations"] == legacy_migrations
         destination = tmp_path / "upgraded"
         restore_library(archive, destination, confirm=True)
         restored = AgentRepository(destination)
@@ -159,7 +162,7 @@ def test_legacy_backup_upgrades_only_restored_database_and_reuses_old_frozen_byt
             assert conn.execute("SELECT asset_id FROM agent_frozen_sources").fetchall()[0][0] == frozen
         conn.close()
         with db.connect(repo.library) as conn:
-            assert [row[0] for row in conn.execute("SELECT version FROM schema_migrations ORDER BY rowid")] == db.MIGRATIONS[:-1]
+            assert [row[0] for row in conn.execute("SELECT version FROM schema_migrations ORDER BY rowid")] == legacy_migrations
         conn.close()
     gc.collect()
 

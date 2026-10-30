@@ -4,6 +4,9 @@ import hashlib
 import os
 from pathlib import Path
 import socket
+import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 
 import httpx
 import pytest
@@ -17,12 +20,72 @@ def small_baseline():
     return diagnostic.run(checkpoints=(1, 3), repeats=1)
 
 
+@pytest.mark.parametrize("fails", [False, True])
+def test_measure_closes_connections_even_when_callback_fails(fails):
+    # Retain a strong reference so collection cannot hide a leaked SQLite handle.
+    connections = []
+    original_connect = sqlite3.connect
+
+    def callback():
+        conn = sqlite3.connect(":memory:")
+        connections.append(conn)
+        with conn:
+            value = conn.execute("SELECT 42").fetchone()[0]
+        if fails:
+            raise ValueError("measured operation failed")
+        return value
+
+    if fails:
+        with pytest.raises(ValueError, match="measured operation failed"):
+            diagnostic.measure(callback, 1)
+    else:
+        value, cost = diagnostic.measure(callback, 1)
+        assert value == 42
+        assert cost["connections"] == cost["statements"] == cost["selects"] == 1
+    assert sqlite3.connect is original_connect
+    assert len(connections) == 1
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        connections[0].execute("SELECT 1")
+
+
+def test_measure_counts_worker_sql_without_taking_connection_ownership():
+    ready, release = Event(), Event()
+    connections = []
+
+    def worker():
+        conn = sqlite3.connect(":memory:")
+        connections.append(conn)
+        try:
+            assert conn.execute("SELECT 7").fetchone()[0] == 7
+            ready.set()
+            assert release.wait(5)
+            # The measurement has ended, but the worker still owns this handle.
+            return conn.execute("SELECT 8").fetchone()[0]
+        finally:
+            conn.close()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        def callback():
+            pending = pool.submit(worker)
+            assert ready.wait(5)
+            return pending
+        try:
+            pending, cost = diagnostic.measure(callback, 1)
+            assert cost["connections"] == cost["selects"] == 1
+        finally:
+            release.set()
+        assert pending.result(timeout=5) == 8
+    assert len(connections) == 1
+
+
 def test_real_context_and_snapshot_grow_without_claiming_provider_cache(small_baseline):
     assert small_baseline["provider_cache"] == "not measured"
     assert small_baseline["network"] == "blocked; MockTransport only"
     for scenario in small_baseline["scenarios"]:
         first, third = scenario["rows"]
         assert [first["rounds"], third["rounds"]] == [1, 3]
+        # Both foundations stay in instructions; history remains the five
+        # real conversation items without a synthetic leading guidance message.
         assert [first["input_items"], third["input_items"]] == [1, 5]
         for field in ("request_json_bytes", "snapshot_json_bytes", "stored_history_json_bytes_all_requests"):
             assert third[field] > first[field] > 0
@@ -34,7 +97,9 @@ def test_real_context_and_snapshot_grow_without_claiming_provider_cache(small_ba
                 assert cost["min_ms"] <= cost["median_ms"] <= cost["max_ms"]
             assert row["build_input_only"]["median_ms"] >= 0
         comparison, = scenario["prefix_comparisons"]
-        assert comparison["equal_leading_input_items"] == first["input_items"]
+        # Current task metadata belongs to the current message; its identity
+        # changes across turns rather than pretending to be a cache hit.
+        assert comparison["equal_leading_input_items"] == 0
         assert comparison["instructions_equal"] and comparison["tools_equal"]
 
 
@@ -51,9 +116,10 @@ def test_image_payload_counts_actual_repeated_bytes(small_baseline):
     probes = {p["intent"]: p for p in third["reference_scope_probes"]}
     assert probes["new_image_with_implicit_history"]["image_occurrences"] == 3
     # The explicitly selected ancestor and the newly attached current image
-    # retain their distinct roles; a greeting needs only the current attachment.
+    # retain their distinct roles. A greeting alone cannot erase an existing
+    # unreconciled task: only an explicit scope/task action can do that.
     assert probes["exact_reference_only"]["image_occurrences"] == 2
-    assert probes["greeting"]["image_occurrences"] == 1
+    assert probes["greeting"]["image_occurrences"] == 3
 
 
 def test_tool_followups_preserve_history_and_measure_skill_repetition(small_baseline):
@@ -62,14 +128,19 @@ def test_tool_followups_preserve_history_and_measure_skill_repetition(small_base
         followups = scenario["tool_followups"]
         assert [row["simulated_image_jobs_used"] for row in followups] == [0, 1, 2]
         for row in followups:
+            # An overview tool receipt points to the existing instructions body;
+            # all original conversation items and their order remain exact.
             assert row["repeated_leading_input_items"] == last["input_items"]
+            assert row["unchanged_input_item_occurrences"] == last["input_items"]
             assert row["input_items"] == last["input_items"] + 2
             assert row["skill_tool_output_bytes"] > 0
             assert row["attached_image_bytes"] == last["attached_image_bytes"]
         assert followups[0]["same_tools_as_first_call"]
         assert not followups[-1]["same_tools_as_first_call"]
         assert followups[-1]["tools_json_bytes"] < followups[0]["tools_json_bytes"]
-        assert not scenario["task_switch"]["instructions_equal"]
+        assert scenario["task_switch"]["instructions_equal"]
+        assert followups[0]["same_instructions_as_first_call"]
+        assert not followups[-1]["same_instructions_as_first_call"]  # Remaining quota metadata changed.
 
 
 def test_isolation_restores_environment_blocks_network_and_keeps_cache_unknown(tmp_path, monkeypatch):

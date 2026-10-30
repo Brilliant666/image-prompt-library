@@ -3,7 +3,11 @@ export type AppearancePreset = 'pure_white' | 'gallery_vermilion' | 'pine_archiv
 export type UploadImageRole = 'result_image' | 'reference_image';
 export type UiLanguage = 'zh_hant' | 'zh_hans' | 'en';
 export type AiProvider = TitleSuggestionProvider | 'openai_compatible';
-export interface OpenAICompatibleConfig { display_name: string; base_url: string; model: string; timeout: number; api_key_present: boolean; models?: string[]; base_url_mode?: 'versioned' | 'custom'; stream?: boolean; partial_images?: number; response_format?: 'auto' | 'b64_json' }
+export type ApiNetworkMode = 'direct' | 'environment' | 'proxy';
+export interface ApiNetworkConfig { network_mode?: ApiNetworkMode; proxy_url_present?: boolean; proxy_endpoint?: string }
+export interface ApiNetworkUpdate { network_mode: ApiNetworkMode; proxy_url?: string; remove_proxy_url?: boolean }
+export interface OpenAICompatibleConfig extends ApiNetworkConfig { display_name: string; base_url: string; model: string; timeout: number; api_key_present: boolean; models?: string[]; base_url_mode?: 'versioned' | 'custom'; stream?: boolean; partial_images?: number; response_format?: 'auto' | 'b64_json' }
+export type OpenAICompatibleProfileSave = Omit<OpenAICompatibleConfig, 'api_key_present' | 'proxy_url_present' | 'proxy_endpoint'> & Partial<ApiNetworkUpdate> & { api_key?: string; make_default?: boolean };
 export interface CatalogModel { id: string; image_generation: boolean | null }
 export interface ModelCatalog { models: CatalogModel[]; fetched_at: string | null; checked_at: string | null; error: string | null }
 export interface OpenAICompatibleProfile extends OpenAICompatibleConfig { id: string; configured: boolean; model_catalog?: ModelCatalog }

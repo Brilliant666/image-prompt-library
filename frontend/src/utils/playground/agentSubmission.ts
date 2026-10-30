@@ -1,4 +1,4 @@
-import type { AgentRoundCreate } from '../../api/agentClient';
+import type { AgentPromptExecutionInput, AgentRoundCreate } from '../../api/agentClient';
 import type { ReferenceChoice } from './agentImageReferences';
 
 export interface AgentDraft {
@@ -9,11 +9,31 @@ export interface AgentDraft {
   sizeMode?: 'auto4k';
   editId: string | null;
   origin: AgentRoundCreate['origin'];
+  contextScope?: NonNullable<AgentRoundCreate['contextScope']>;
+  historyRoundIds?: string[];
+  contextOverrideFor?: { taskId: string | null; branchRoundId: string | null } | null;
 }
 export const AGENT_DRAFT_KEY = 'ipl.agent.drafts.v1';
+export const AGENT_IMAGE_MODE_PREFIX = 'ipl.agent.image-mode.v1.';
+
+// Store explicit conversation preferences separately from drafts and frozen
+// request permissions. An unsent new conversation must never inherit a mode.
+export function readAgentImageMode(storage: Pick<Storage, 'getItem'>, conversationId: string): boolean {
+  try { return Boolean(conversationId && conversationId !== 'new' && storage.getItem(AGENT_IMAGE_MODE_PREFIX + conversationId) === 'true'); }
+  catch { return false; }
+}
+
+export function saveAgentImageMode(storage: Pick<Storage, 'setItem' | 'removeItem'>, conversationId: string, enabled: boolean): void {
+  if (!conversationId || conversationId === 'new') return;
+  // Independent keys prevent another tab updating a different conversation
+  // from restoring a choice this tab has just switched off.
+  const key = AGENT_IMAGE_MODE_PREFIX + conversationId;
+  if (enabled) storage.setItem(key, 'true');
+  else storage.removeItem(key);
+}
 
 export function acknowledgeAgentDraft(draft: AgentDraft, clearInput: boolean): AgentDraft {
-  return { ...draft, ...(clearInput ? { text: '', refs: [] } : {}), origin: 'send', editId: null };
+  return { ...draft, ...(clearInput ? { text: '', refs: [] } : {}), origin: 'send', editId: null, ...(draft.contextScope ? { contextScope: 'task', historyRoundIds: [], contextOverrideFor: null } : {}) };
 }
 
 export function readAgentDrafts(storage: Pick<Storage, 'getItem'>, enabled: boolean): Record<string, AgentDraft> {
@@ -26,13 +46,19 @@ export function readAgentDrafts(storage: Pick<Storage, 'getItem'>, enabled: bool
       if (!draft || typeof draft !== 'object' || typeof draft.text !== 'string' || !Array.isArray(draft.refs) || !draft.params || typeof draft.params !== 'object' || typeof draft.params.size !== 'string' || typeof draft.params.quality !== 'string') continue;
       if (!draft.refs.every((ref: ReferenceChoice) => ref && typeof ref === 'object' && typeof ref.label === 'string' && typeof ref.url === 'string' && ref.reference && (ref.reference.kind === 'library' && typeof ref.reference.imageId === 'string' || ref.reference.kind === 'job' && typeof ref.reference.jobId === 'string' || ref.reference.kind === 'upload' && typeof ref.reference.uploadId === 'string'))) continue;
       if (!['send', 'edit', 'regenerate'].includes(draft.origin) || (draft.editId !== null && typeof draft.editId !== 'string')) continue;
-      output[id] = draft;
+      // Older drafts have no context choice. Invalid stored scopes must never
+      // silently widen a new request to the complete branch.
+      output[id] = { ...draft,
+        ...('contextScope' in draft ? { contextScope: ['task', 'selected', 'branch'].includes(draft.contextScope) ? draft.contextScope : 'task' } : {}),
+        ...('historyRoundIds' in draft ? { historyRoundIds: Array.isArray(draft.historyRoundIds) ? draft.historyRoundIds.filter((roundId: unknown) => typeof roundId === 'string') : [] } : {}),
+        ...('contextOverrideFor' in draft ? { contextOverrideFor: draft.contextOverrideFor && typeof draft.contextOverrideFor === 'object' && (draft.contextOverrideFor.taskId === null || typeof draft.contextOverrideFor.taskId === 'string') && (draft.contextOverrideFor.branchRoundId === null || typeof draft.contextOverrideFor.branchRoundId === 'string') ? draft.contextOverrideFor : null } : {}),
+      };
     }
     return output;
   } catch { return {}; }
 }
 
-export interface PendingAgentSubmission { conversationId: string; payload: AgentRoundCreate }
+export interface PendingAgentSubmission { conversationId: string; payload: AgentRoundCreate; preserveDraft?: boolean }
 const JOURNAL = 'ipl.agent.pending-submissions.v1';
 
 // A safety journal is independent from the optional draft preference. A reload
@@ -49,6 +75,8 @@ export function draftFromPendingAgentSubmission(entry: PendingAgentSubmission, p
     ...(payload.imageConfig ? { imageConfig: structuredClone(payload.imageConfig) } : {}),
     editId: payload.derivedFromRoundId || null,
     origin: payload.origin,
+    ...(payload.contextScope ? { contextScope: payload.contextScope } : {}),
+    ...(payload.historyRoundIds ? { historyRoundIds: [...payload.historyRoundIds] } : {}),
   };
 }
 
@@ -71,6 +99,33 @@ export function savePendingAgentSubmission(storage: Pick<Storage, 'getItem' | 's
 
 export function clearPendingAgentSubmission(storage: Pick<Storage, 'getItem' | 'setItem'>, requestId: string) {
   storage.setItem(JOURNAL, JSON.stringify(readPendingAgentSubmissions(storage).filter(item => item.payload.requestId !== requestId)));
+}
+
+export interface PendingPromptExecution { conversationId: string; payload: AgentPromptExecutionInput }
+export const AGENT_PROMPT_EXECUTIONS_KEY = 'ipl.agent.pending-prompt-executions.v1';
+export function readPendingPromptExecutions(storage: Pick<Storage, 'getItem'>): PendingPromptExecution[] {
+  try {
+    const value: unknown = JSON.parse(storage.getItem(AGENT_PROMPT_EXECUTIONS_KEY) || '[]');
+    return Array.isArray(value) ? value.filter((entry): entry is PendingPromptExecution => {
+      if (!entry || typeof entry !== 'object') return false;
+      const { conversationId, payload } = entry as PendingPromptExecution;
+      return typeof conversationId === 'string' && Boolean(conversationId) && Boolean(payload && typeof payload === 'object'
+        && ['requestId', 'taskId', 'promptVersionId'].every(key => typeof payload[key as keyof AgentPromptExecutionInput] === 'string' && payload[key as keyof AgentPromptExecutionInput])
+        && Number.isSafeInteger(payload.expectedRevision) && Number.isSafeInteger(payload.taskRevision) && Number.isSafeInteger(payload.configRevision)
+        && payload.params && typeof payload.params.size === 'string' && typeof payload.params.quality === 'string'
+        && payload.imageConfig && typeof payload.imageConfig.model === 'string' && [1, 3, 5, 10].includes(payload.imageCount) && payload.confirmed === true);
+    }) : [];
+  } catch { return []; }
+}
+export function savePendingPromptExecution(storage: Pick<Storage, 'getItem' | 'setItem'>, entry: PendingPromptExecution) {
+  const records = readPendingPromptExecutions(storage);
+  const same = records.find(record => record.payload.requestId === entry.payload.requestId);
+  if (same && JSON.stringify(same) !== JSON.stringify(entry)) throw new Error('同一直接生成请求的冻结配方不能改变。');
+  if (records.some(record => record.conversationId === entry.conversationId && record.payload.requestId !== entry.payload.requestId)) throw new Error('此会话还有尚未确认的直接生成，请先检查原回执。');
+  storage.setItem(AGENT_PROMPT_EXECUTIONS_KEY, JSON.stringify([...records.filter(record => record.payload.requestId !== entry.payload.requestId), structuredClone(entry)]));
+}
+export function clearPendingPromptExecution(storage: Pick<Storage, 'getItem' | 'setItem'>, requestId: string) {
+  storage.setItem(AGENT_PROMPT_EXECUTIONS_KEY, JSON.stringify(readPendingPromptExecutions(storage).filter(record => record.payload.requestId !== requestId)));
 }
 
 export function getAgentResumeId(storage: Pick<Storage, 'getItem' | 'setItem'>, requestId: string, createId: () => string): string {

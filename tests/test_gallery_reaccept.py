@@ -90,22 +90,28 @@ def test_migration_repairs_legacy_deleted_receipt_once(tmp_path):
     client = TestClient(create_app(library_path=library))
     job, _, _ = staged(client)
     item = GenerationJobRepository(library).accept_result_as_new_item(job["id"]).item
-    # Recreate the pre-receipt-trigger schema and its physical deletion behavior.
+    # Recreate schema 014, before the 015 receipt trigger, including removal of
+    # later schema objects. Merely rewinding its ledger does not create an old DB.
     # Current application writes must not be run against an obsolete schema.
+    legacy_boundary = db.MIGRATIONS.index('015_generation_reaccept.sql')
     with db.connect(library) as conn:
+        conn.execute("DROP INDEX idx_generation_agent_retry_conversation")
+        conn.execute("ALTER TABLE agent_conversations DROP COLUMN editing_tasks")
         conn.execute("DROP TABLE agent_frozen_sources")
         conn.execute("DROP INDEX idx_agent_assets_source_kind")
         conn.execute("DROP INDEX idx_items_deleted_at")
         conn.execute("ALTER TABLE items DROP COLUMN deleted_at")
         conn.execute("DROP TABLE gallery_title_jobs")
         conn.execute("DROP TRIGGER generation_image_deleted")
-        conn.executemany("DELETE FROM schema_migrations WHERE version=?", [(name,) for name in db.MIGRATIONS[14:]])
+        conn.executemany("DELETE FROM schema_migrations WHERE version=?", [(name,) for name in db.MIGRATIONS[legacy_boundary:]])
         conn.execute("DELETE FROM item_search WHERE item_id=?", (item.id,))
         conn.execute("DELETE FROM items WHERE id=?", (item.id,))
         conn.commit()
         row = conn.execute("SELECT status,accepted_image_id FROM generation_jobs WHERE id=?", (job["id"],)).fetchone()
         assert row["status"] == "accepted"
         assert row["accepted_image_id"] is None
+        assert [row[0] for row in conn.execute('SELECT version FROM schema_migrations ORDER BY rowid')] == db.MIGRATIONS[:legacy_boundary]
+        assert 'editing_tasks' not in {row[1] for row in conn.execute('PRAGMA table_info(agent_conversations)')}
     init_db(library)
     repaired = client.get(f"/api/generation-jobs/{job['id']}").json()
     assert repaired["status"] == "succeeded"

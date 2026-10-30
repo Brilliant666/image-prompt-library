@@ -6,9 +6,11 @@ import type { ModelCatalog, OpenAICompatibleProfile, OpenAICompatibleProfiles, U
 import { compatibleEndpointPreview, parseProfileModels, profileValidation } from '../utils/profileSettings';
 import { readGenerationPreference, resetGenerationPreference, updateRememberedModel } from '../utils/generationPreferences';
 import type { CompatibleRecipe } from '../utils/compatibleRecipe';
+import { apiNetworkErrorMessage, apiNetworkIssue, apiNetworkMode, apiNetworkPayload } from '../utils/apiNetwork';
+import ApiNetworkSettings from './ApiNetworkSettings';
 import './OpenAICompatibleSettings.css';
 
-const newProfile = (): OpenAICompatibleProfile => ({ id: crypto.randomUUID(), display_name: '', base_url: '', model: '', models: [], base_url_mode: 'versioned', stream: false, partial_images: 0, response_format: 'auto', timeout: 300, api_key_present: false, configured: false });
+const newProfile = (): OpenAICompatibleProfile => ({ id: crypto.randomUUID(), display_name: '', base_url: '', model: '', models: [], base_url_mode: 'versioned', stream: false, partial_images: 0, response_format: 'auto', timeout: 300, api_key_present: false, configured: false, network_mode: 'direct' });
 const emptyCatalog = (): ModelCatalog => ({ models: [], fetched_at: null, checked_at: null, error: null });
 const catalogErrorReasons: Record<string, string> = {
   'Save an API URL and API key before refreshing models.': '请先保存接口地址和密钥。',
@@ -28,6 +30,8 @@ export default function OpenAICompatibleSettings({ onSaved, uiLanguage, isDefaul
   const [collection, setCollection] = useState<OpenAICompatibleProfiles>();
   const [config, setConfig] = useState<OpenAICompatibleProfile>();
   const [apiKey, setApiKey] = useState('');
+  const [proxyUrl, setProxyUrl] = useState('');
+  const [removeProxy, setRemoveProxy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [deletePending, setDeletePending] = useState(false);
@@ -68,6 +72,8 @@ export default function OpenAICompatibleSettings({ onSaved, uiLanguage, isDefaul
     setShowAllModels(false);
     setConfig({ ...profile });
     setApiKey('');
+    setProxyUrl('');
+    setRemoveProxy(false);
     setMessage('');
     setDeletePending(false);
     setResetPending(false);
@@ -158,7 +164,7 @@ export default function OpenAICompatibleSettings({ onSaved, uiLanguage, isDefaul
       // Never display arbitrary service responses, which may contain credentials.
       if (request === epoch.current) setMessage(chinese ? '暂时无法确认操作结果。请重新读取列表核对后再操作。' : 'Could not confirm the result. Reload the profile list before trying again.');
     } finally {
-      if (request === epoch.current) { setApiKey(''); inFlight.current = false; setBusy(false); }
+      if (request === epoch.current) { setApiKey(''); setProxyUrl(''); inFlight.current = false; setBusy(false); }
     }
   };
   const save = (event: FormEvent) => {
@@ -170,10 +176,14 @@ export default function OpenAICompatibleSettings({ onSaved, uiLanguage, isDefaul
       setMessage(issue === 'name' ? (chinese ? '请填写配置名称。' : 'Enter a profile name.') : issue === 'url' ? (chinese ? '请填写 HTTP(S) Base URL，不包含密钥、查询参数、片段或 /images/ 接口路径。' : 'Enter an HTTP(S) Base URL without credentials, query parameters, fragments or an /images/ endpoint.') : issue === 'models' ? (chinese ? '最多 100 个模型，每个 ID 不超过 200 字符，不含控制字符。' : 'Use up to 100 model IDs, each at most 200 characters and without control characters.') : issue === 'partial_images' ? (chinese ? '中间预览图数量必须是 0–3 的整数。' : 'Partial images must be a whole number from 0 to 3.') : (chinese ? '超时必须是 1–1800 之间的整数秒。' : 'Timeout must be a whole number from 1 to 1800 seconds.'));
       return;
     }
-    const { id, api_key_present: _present, configured: _configured, model_catalog: _catalog, ...fields } = config;
+    const networkMode = apiNetworkMode(config.network_mode);
+    const networkDraft = { proxyUrl, removeProxy };
+    const networkIssue = apiNetworkIssue(networkMode, networkDraft, config.proxy_url_present === true);
+    if (networkIssue) { setMessage(apiNetworkErrorMessage(networkIssue, uiLanguage)); return; }
+    const { id, api_key_present: _present, configured: _configured, model_catalog: _catalog, proxy_url_present: _proxyPresent, proxy_endpoint: _proxyEndpoint, ...fields } = config;
     catalogEpoch.current += 1;
     const previousModel = collection?.profiles.find(profile => profile.id === id)?.model || '';
-    void mutate(() => api.saveOpenAICompatibleProfile(id, { ...fields, models, ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}) }), id, value => {
+    void mutate(() => api.saveOpenAICompatibleProfile(id, { ...fields, models, ...apiNetworkPayload(networkMode, networkDraft), ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}) }), id, value => {
       const saved = value.profiles.find(profile => profile.id === id);
       if (!saved || saved.model === previousModel) return;
       try { updateRememberedModel(localStorage, id, saved.model); } catch { /* A saved profile still applies to the open composer if browser storage is unavailable. */ }
@@ -182,7 +192,7 @@ export default function OpenAICompatibleSettings({ onSaved, uiLanguage, isDefaul
   };
   const stored = collection?.profiles.some(p => p.id === config?.id);
   const storedProfile = collection?.profiles.find(p => p.id === config?.id);
-  const dirty = Boolean(apiKey || (config && (storedProfile ? JSON.stringify(config) !== JSON.stringify(storedProfile) || JSON.stringify(parseProfileModels(modelsText)) !== JSON.stringify(storedProfile.models || []) : JSON.stringify({ ...config, id: '' }) !== JSON.stringify({ ...newProfile(), id: '' }) || modelsText.trim())));
+  const dirty = Boolean(apiKey || proxyUrl || removeProxy || (config && (storedProfile ? JSON.stringify(config) !== JSON.stringify(storedProfile) || JSON.stringify(parseProfileModels(modelsText)) !== JSON.stringify(storedProfile.models || []) : JSON.stringify({ ...config, id: '' }) !== JSON.stringify({ ...newProfile(), id: '' }) || modelsText.trim())));
   const discoveredModels = [...catalog.models].filter(model => showAllModels || model.image_generation !== false).sort((a, b) => (a.image_generation === true ? 0 : a.image_generation === null ? 1 : 2) - (b.image_generation === true ? 0 : b.image_generation === null ? 1 : 2));
   const modelSuggestions = [...new Set([...parseProfileModels(modelsText), ...catalog.models.map(model => model.id)])];
   const catalogErrorReason = catalog.error && Object.prototype.hasOwnProperty.call(catalogErrorReasons, catalog.error) ? (chinese ? catalogErrorReasons[catalog.error] : catalog.error) : '';
@@ -254,6 +264,10 @@ export default function OpenAICompatibleSettings({ onSaved, uiLanguage, isDefaul
         <label>Base URL<input required type="url" spellCheck={false} value={config.base_url} onChange={e => setConfig({ ...config, base_url: e.target.value })} placeholder="https://api.example.com/v1" /><small>{chinese ? '填写接口根地址，不包含密钥或完整生图路径。下方显示实际请求地址。' : 'Enter the API root without credentials or a complete image endpoint. Actual request addresses are shown below.'}</small></label>
         <label>{chinese ? '地址拼接方式' : 'Base URL mode'}<select aria-label={chinese ? '地址拼接方式' : 'Base URL mode'} value={config.base_url_mode || 'versioned'} onChange={e => setConfig({ ...config, base_url_mode: e.target.value as 'versioned' | 'custom' })}><option value="versioned">{chinese ? '标准 /v1（兼容已有配置）' : 'Standard /v1 (existing behavior)'}</option><option value="custom">{chinese ? '使用填写的根路径' : 'Use the exact base path'}</option></select><small>{chinese ? '标准方式统一补为一个 /v1；自定义方式不补 /v1。末尾斜杠不改变所选规则。' : 'Standard mode applies one /v1 suffix. Custom mode adds no /v1. A trailing slash does not change the selected rule.'}</small></label>
         <label>API Key<input type="password" autoComplete="new-password" spellCheck={false} value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder={config.api_key_present ? (chinese ? '已保存；留空保留此接口的密钥' : 'Saved; leave blank to keep this API key') : (chinese ? '输入此接口的 API Key' : 'Enter this API key')} /><small className="compatible-key-status"><KeyRound size={12} aria-hidden="true" />{config.api_key_present ? (chinese ? '密钥已保存在服务端，页面不会读取原值' : 'Key saved on the server; its value is never read by this page') : (chinese ? '尚未保存密钥' : 'No saved key')}</small></label>
+        <ApiNetworkSettings key={config.id} uiLanguage={uiLanguage} mode={apiNetworkMode(config.network_mode)}
+          proxyUrl={proxyUrl} proxyUrlPresent={config.proxy_url_present === true} proxyEndpoint={config.proxy_endpoint}
+          removeProxy={removeProxy} disabled={busy} onModeChange={mode => setConfig(current => current ? { ...current, network_mode: mode } : current)}
+          onProxyUrlChange={setProxyUrl} onRemoveProxyChange={setRemoveProxy} />
         <div className="compatible-request-settings">
           <h5>{chinese ? '模型与请求' : 'Model and request'}</h5>
           <section className="compatible-model-catalog" aria-label={chinese ? '接口模型清单' : 'API model catalog'}>

@@ -1,0 +1,16 @@
+{
+  "name": "image-prompt-library-agent-sdk-probe",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {"test": "node --test experiment.test.mjs"},
+  "dependencies": {"@librechat/agents": "4.1.1"},
+  "overrides": {
+    "@langfuse/core": "5.10.1",
+    "@langfuse/langchain": "5.10.1",
+    "@langfuse/otel": "5.10.1",
+    "@langfuse/tracing": "5.10.1",
+    "@opentelemetry/exporter-trace-otlp-http": "0.220.0",
+    "@opentelemetry/otlp-exporter-base": "0.220.0"
+  }
+}

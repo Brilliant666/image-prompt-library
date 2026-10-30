@@ -4,10 +4,12 @@ import io
 import json
 import os
 import shlex
+import site
 import subprocess
 import sys
 import tarfile
 import tempfile
+import venv
 import zipfile
 from pathlib import Path
 
@@ -133,6 +135,47 @@ subprocess.check_output = check_output_subprocess
 
 def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
+
+
+def create_test_runtime(target: Path, *, with_dependencies: bool = True) -> Path:
+    runtime = target / ".venv"
+    venv.create(runtime, with_pip=False, symlinks=os.name != "nt")
+    python = runtime / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    if with_dependencies:
+        # A bare symlink to sys.executable loses the caller's venv on POSIX.
+        # Keep a real target venv and reuse the test environment's dependencies
+        # offline, without installing into or relying on the base interpreter.
+        purelib = Path(subprocess.check_output(
+            [str(python), "-I", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+            text=True,
+            timeout=30,
+        ).strip())
+        (purelib / "test-dependencies.pth").write_text(
+            "\n".join(site.getsitepackages()) + "\n", encoding="utf-8",
+        )
+    return python
+
+
+@pytest.mark.parametrize("with_dependencies", [True, False])
+def test_runtime_fixture_preserves_virtualenv_dependencies(tmp_path, with_dependencies):
+    target = tmp_path / "release with spaces"
+    python = create_test_runtime(target, with_dependencies=with_dependencies)
+    result = subprocess.run(
+        [str(python), "-I", "-c", "import sys; print(sys.prefix); import fastapi; print(fastapi.__file__)"],
+        text=True,
+        capture_output=True,
+        timeout=30,
+    )
+
+    assert Path(result.stdout.splitlines()[0]).resolve() == (target / ".venv").resolve()
+    assert (target / ".venv" / "pyvenv.cfg").is_file()
+    if with_dependencies:
+        assert result.returncode == 0, result.stdout + result.stderr
+        import fastapi
+        assert Path(result.stdout.splitlines()[1]).resolve() == Path(fastapi.__file__).resolve()
+    else:
+        assert result.returncode != 0
+        assert "No module named 'fastapi'" in result.stderr
 
 
 def package_release(tmp_path: Path, version: str) -> Path:
@@ -1287,7 +1330,8 @@ def test_posix_rollback_refuses_symlinked_transaction_lock_without_external_muta
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX runtime symlink behavior is covered by the Ubuntu CI job")
-def test_posix_rollback_validates_runtime_and_swaps_managed_pointers(tmp_path):
+@pytest.mark.parametrize("runtime_has_dependencies", [True, False])
+def test_posix_rollback_validates_runtime_and_swaps_managed_pointers(tmp_path, runtime_has_dependencies):
     import shutil
 
     current_version = "v9.9.5-test"
@@ -1319,11 +1363,11 @@ def test_posix_rollback_validates_runtime_and_swaps_managed_pointers(tmp_path):
     shutil.copytree(current_target, previous_target)
     (previous_target / "VERSION").write_text(previous_version + "\n", encoding="utf-8")
     for target in (current_target, previous_target):
-        runtime = target / ".venv" / "bin"
-        runtime.mkdir(parents=True)
-        (runtime / "python").symlink_to(Path(sys.executable))
+        create_test_runtime(target, with_dependencies=target == current_target or runtime_has_dependencies)
     previous_link = prefix / "app" / "previous"
     previous_link.symlink_to(previous_target, target_is_directory=True)
+    sentinel = library / "private-sentinel.txt"
+    sentinel.write_text("unchanged\n", encoding="utf-8")
 
     result = subprocess.run(
         ["bash", str(current_target / "scripts" / "appctl.sh"), "rollback"],
@@ -1333,10 +1377,18 @@ def test_posix_rollback_validates_runtime_and_swaps_managed_pointers(tmp_path):
         capture_output=True,
         timeout=120,
     )
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert (prefix / "app" / "current").resolve() == previous_target.resolve()
-    assert previous_link.resolve() == current_target.resolve()
+    if runtime_has_dependencies:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (prefix / "app" / "current").resolve() == previous_target.resolve()
+        assert previous_link.resolve() == current_target.resolve()
+    else:
+        assert result.returncode != 0
+        assert "No module named 'fastapi'" in result.stderr
+        assert (prefix / "app" / "current").resolve() == current_target.resolve()
+        assert previous_link.resolve() == previous_target.resolve()
+    assert sentinel.read_text(encoding="utf-8") == "unchanged\n"
     assert not (prefix / ".transaction.lock").exists()
+    assert not list(prefix.glob(".rollback-health-*"))
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX v0.8.0 rollback migration is covered by the Ubuntu CI job")
@@ -1373,9 +1425,7 @@ def test_posix_rollback_migrates_pristine_v080_management_plane_and_records_prov
     (previous_target / "VERSION").write_text("v0.8.0\n", encoding="utf-8")
     (previous_target / "scripts" / "load-env.sh").unlink()
     for target in (current_target, previous_target):
-        runtime = target / ".venv" / "bin"
-        runtime.mkdir(parents=True)
-        (runtime / "python").symlink_to(Path(sys.executable))
+        create_test_runtime(target)
     legacy_management = {
         relative: (ROOT / "tests" / "fixtures" / "upstream-v0.8.0" / relative).read_bytes()
         for relative in ("scripts/install.sh", "scripts/install-sample-data.sh", "scripts/appctl.sh")
@@ -1602,9 +1652,7 @@ def test_posix_rollback_non_v080_missing_load_env_fails_without_mutation(tmp_pat
     (previous_target / "VERSION").write_text("v9.9.4\n", encoding="utf-8")
     (previous_target / "scripts" / "load-env.sh").unlink()
     for target in (current_target, previous_target):
-        runtime = target / ".venv" / "bin"
-        runtime.mkdir(parents=True)
-        (runtime / "python").symlink_to(Path(sys.executable))
+        create_test_runtime(target)
     previous_link = prefix / "app" / "previous"
     previous_link.symlink_to(previous_target, target_is_directory=True)
     before = previous_target / "scripts" / "appctl.sh"

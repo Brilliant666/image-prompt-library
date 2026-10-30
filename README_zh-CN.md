@@ -62,6 +62,10 @@
 
 Agent 在本地服务中保存会话、消息分支和图片引用。编辑或重新生成消息会创建新分支，并保留原分支。可以搜索已保存的会话，将生成图作为参考继续使用，也可从结果返回来源会话。
 
+- **在聊天中自然继续任务。** 当前任务、工作提示词版本和图片角色由会话背后维护，不需要填写独立任务表。需要旧图时按具体来源取回，不会仅因旧问题尚未解决就附上全部历史图片；原文、原图和分支仍保留。
+- **从选定的提示词块直接生图。** 使用该块的原文、已确认的参考图和当前可见图片设置。Hybrid 直接进入 Images 队列，不额外请求文本模型规划；Native 使用其图片工具。图片重试复用实际执行的提示词和冻结参考图；结果未知时应核对原回执，不会自动重放。详见[确认提示词与重试边界](docs/AGENT_CONFIRMED_RECIPES.md)。
+- **明确选择复制图片或提示词。** 成功图片卡片分别提供复制图片和复制生成提示词。剪贴板转换不会替换原文件；需要原始字节和元数据时使用下载。
+- **了解失败原因再尝试。** 详情区分上传限制、HTTP 413 请求大小拒绝、供应商错误和结果未知。显示可用的供应商错误码及脱敏后的简短说明，不猜测未提供的原因。Agent 参考图支持 PNG、JPEG、WebP，每张不超过 **30 MiB 和 16,000,000 像素**；不支持的格式与无法解码的文件会分别提示。
 - 选择兼容的 API 配置及完整的**文本模型 ID**。Hybrid 模式通过 Responses 执行文本与工具请求，通过所选 Images 配置执行生图任务；Native 模式接收 Responses 图片工具的结果。供应商需要支持所选方式。
 - **持续生图模式默认关闭。** 可以仅授权本轮生图，也可以主动开启生图模式，允许当前会话后续发送继续生成图片。每次请求仍会固定本轮的图片数量与模型步骤上限；网络搜索需要独立配置并逐轮授权。
 - 默认 **Enter 发送，Shift+Enter 换行**，输入法选字期间不会发送。服务接受请求后清空已提交的文本和参考图，保留生图参数；Gallery 与 Agent 的输入偏好可以分别调整。
@@ -70,13 +74,17 @@ Agent 在本地服务中保存会话、消息分支和图片引用。编辑或�
 
 Responses 进度会实时推送至浏览器，连接不可用时退回只读轮询。刷新或重新连接不会重新提交付费请求。**停止**阻止新的调用，已经发送到供应商的请求仍可能完成或计费。详见[工作区行为与兼容限制](docs/PLAYGROUND.md)。
 
+[离线预览](docs/AGENT_PREVIEW.md)使用合成图片和模拟供应商，验证应用流程，不代表真实模型质量、供应商延迟或 Prompt Cache 收益已通过验收。真实系统剪贴板的图片复制与粘贴仍需按浏览器手动验收，模拟剪贴板测试不能替代它。
+
 ## 快速开始
 
 源码构建需要 **Python 3.10+** 和 **Node.js 24**。在已有源码目录中按照[独立维护说明](docs/INDEPENDENT_MAINTENANCE.md)操作。Windows PowerShell 示例：
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e '.[dev]'
+.\.venv\Scripts\python.exe -m pip install uv==0.12.16
+$env:UV_PROJECT_ENVIRONMENT = Join-Path (Get-Location) '.venv'
+.\.venv\Scripts\python.exe -m uv sync --locked --extra dev --inexact --python .\.venv\Scripts\python.exe
 npm ci
 npm run build
 $env:IMAGE_PROMPT_LIBRARY_PATH = Join-Path $HOME 'ImagePromptLibrary'
@@ -84,6 +92,8 @@ $env:IMAGE_PROMPT_LIBRARY_PATH = Join-Path $HOME 'ImagePromptLibrary'
 ```
 
 启动前选择图库路径，确认没有其他实例占用同一图库，且 8000 端口空闲。打开 [127.0.0.1:8000](http://127.0.0.1:8000)，在终端按 `Ctrl-C` 停止。macOS/Linux 启动方式见[开发指南](docs/DEVELOPMENT.md)。
+
+**开发与验证：**请使用[隔离开发示例](docs/INDEPENDENT_MAINTENANCE.md#从源码开发与启动)，同时隔离图库和凭据，并使用 8010 端口。上面的快速开始用于日常本地使用。
 
 新图库默认是空的。选择**快捷收录**，加入图片与原始提示词即可保存，不必先配置 AI。已有安装版可使用以下命令检查状态：
 

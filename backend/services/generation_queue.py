@@ -182,6 +182,9 @@ def run_generation_job_now(library_path: Path | str, job_id: str):
 
 def _run_provider_job(library, job_id, provider):
     job = GenerationJobRepository(library).get_job(job_id)
+    if provider in {COMPATIBLE_PROVIDER_ID, "agent_native_batch"} and (job.metadata or {}).get("agentRetry"):
+        from .agent_image_retry import run_agent_image_retry
+        return run_agent_image_retry(library, job_id)
     if provider == COMPATIBLE_PROVIDER_ID and (job.metadata or {}).get("agent"):
         from .agent_execution import run_compatible_agent_job
         return run_compatible_agent_job(library, job_id)

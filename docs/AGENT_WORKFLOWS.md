@@ -4,11 +4,38 @@ The Agent is an API-based assistant for visual analysis, prompt writing, reverse
 
 ## Using the workflows
 
+Agent references accept PNG, JPEG and WebP, up to 30 MiB and 16,000,000 pixels
+per image. These are separate limits: a small JPEG file may still exceed the
+pixel limit. Upload errors distinguish size, resolution, unsupported format and
+decode failures without changing the original file. Successful attachments and
+the current text remain available if a later file in the selection fails.
+
+Uploads are decoded and checked before an asset is stored. Byte size, pixel
+count and the image decoder's safety limit can return HTTP 413 with different
+messages; unsupported format returns 415 and corrupt or incomplete image data
+returns 400. This is local attachment validation, not a supplier moderation
+decision. Passing it does not guarantee that the entire later model request
+fits an upstream gateway's request-size limit.
+
+On a successful final image, **Copy image** copies the actual result into the
+clipboard. **Copy generation Prompt** is a separate explicit result-card action; Prompt
+blocks still copy exact text. Where needed, the clipboard representation is
+converted to PNG in memory at its full visible dimensions, including orientation
+and transparency. This does not replace the stored original or guarantee its
+metadata/encoded bytes; **Download original** remains the original-file action.
+Unsupported browsers and denied clipboard permission report failure instead of
+silently copying text.
+
+Image progress is shown once alongside the actual result group, using created
+jobs rather than the authorization limit. Successful results do not retain a
+technical batch-tool banner. Partial failures, unknown outcomes and stopped
+requests remain visible, with the full tool trace in answer details.
+
 In **Settings → Agent**, **Enable professional image-prompt workflows** is on by default, including when opening an older configuration. Both bundled skills share this switch. Saving it does not call a model or change the chosen API profiles, models or image parameters.
 
 | Request | Expected workflow |
 | --- | --- |
-| Ordinary conversation | Text response; no automatic skill body or image request |
+| Ordinary conversation | Natural text response; both skills' core guidance is available without forcing a prompt template or image request |
 | Attach an image and ask about its light or composition | Normal visual analysis, distinguishing observation from inference |
 | “使用图片反推工作流，给我简短中文提示词” | Reverse guidance applied to the supplied image pixels; a derived prompt, not a claim to know the original prompt |
 | “使用 GPT Image Skill 优化，给我更短的英文版本” | Prompt refinement with the original intent and constraints retained |
@@ -16,15 +43,65 @@ In **Settings → Agent**, **Enable professional image-prompt workflows** is on 
 | “先反推图片，再优化成英文 Prompt” | Relevant sections from both skills, without loading every chapter |
 | Request generation with image permission enabled | Existing Native or Hybrid tools and Gallery task receipts |
 
-Uploading an image or enabling image permission alone does not request generation. When the switch is off, ordinary chat, visual input and authorized generation remain available, but automatic skill loading and `read_agent_skill` are disabled. The local selector is conservative, not an extra paid classifier; unusual phrasing can still require a model-driven finite section read. See [skill sources, chapters and adaptation](agent-skills/README.md).
+Uploading an image or enabling image permission alone does not request generation. When professional workflows are enabled, every request contains both skills' overview bodies, in a stable order. The model uses the conversation to decide whether to apply them and whether to read a deeper chapter; the application does not classify requests using trigger words or an extra model call. Turning professional workflows off removes skill guidance and `read_agent_skill` from new requests while preserving ordinary chat, visual input and authorized generation. Saved conversation records are not changed. See [skill sources, chapters and adaptation](agent-skills/README.md).
 
-Reusable prompts are separate Markdown blocks with a **Copy text** button. Copying preserves their displayed whitespace without copying the explanation. Original user input remains available in history. Neither reverse prompting nor refinement automatically overwrites a Library item or creates an empty image entry.
+### Continue a professional task
+
+Short messages such as “就换白色的”, “保持原来的姿势” and “换一身女仆装” have the same skill foundations available as longer instructions. The model interprets them using the current conversation, editing target and confirmed requirements. An answer to its clarification can continue the same task. A task change, greeting or unrelated question is interpreted in context; it does not have to satisfy a local list of trigger words.
+
+Both pinned overview bodies are supplied once per model request. Further chapters are available through the read-only `read_agent_skill` tool, chosen by the model rather than a local task router. Already supplied chapter bodies can be reused without adding another copy of the same automatic guidance for every previous round. The record distinguishes supplied guidance from an actual tool call; neither grants image permission. Disabling professional workflows also disables guidance reuse in new requests; re-enabling restores the foundations and chapter reader.
+
+### Read and copy a prompt
+
+Recognized prompt blocks show **提示词 · 纯文本** and a visible **复制提示词** button. Natural-language prompts wrap within the card, including long lines; wrapping does not insert characters into the copied text. Standard fenced prompt blocks copy directly from their source, preserving spaces, line endings and paragraphs, without the Markdown fence or surrounding explanation. An unfinished streamed block can also be copied. Ordinary replies stay ordinary replies, and programming code keeps its code-block display and copy behavior. Markdown and formulas remain available.
+
+Original user input remains available in history. Original, reverse-derived and optimized prompts do not overwrite one another. Neither reverse prompting nor refinement automatically overwrites a Library item or creates an empty image entry.
 
 Native uses the Responses image tool. Hybrid uses the chosen text Responses profile and the existing Images API queue. Current API continues to follow the workspace profile. The selected configuration is frozen for each request. Generated results retain their conversation, round, execution prompt, references, model and Gallery job; Gallery and Library selections can be brought back into the same workspace for further editing.
 
 ## Correctness and recovery boundaries
 
-- Ambiguous image instructions retain images from the current conversation branch. A new attachment does not make earlier images irrelevant. Exact reference-only requests can narrow historical pixels; missing or deleted explicit references fail rather than silently substitute an image.
+### Continue an image edit
+
+The current editing task records a stable target image, auxiliary references and their roles, the user's requirements and confirmed constraints. Describe changes or end the task in the conversation; no separate task form is required. The model can select the target and auxiliary roles from this branch's verified image references, or ask a clarification when the target is ambiguous. Each branch keeps its own task, and unavailable references cannot silently substitute another image. Task roles supplement the required visual history rather than removing it.
+
+For continuous edits, local image tools can select the subject and auxiliary roles in the same call that supplies the execution prompt. The server validates the entire batch's references before changing the selection or creating jobs. This removes a separate model round trip when selection and generation can be decided together; it does not bypass image permission, job limits or uncertain-result recovery. A direct Native image tool still requires selection to be resolved before its upstream call; Native batch functions validate locally first. Actual provider latency and whether the model uses this shorter path depend on the provider.
+
+The composer keeps one **Image mode** switch, initially off for each new conversation. Explicit choices are remembered per conversation in this browser and restored after reload or switching conversations; historical request permissions never enable the switch. An unsent new conversation's choice is saved only when that conversation is created by sending. Turning the switch off is also remembered. Storage failures are reported without clearing the current draft or attachments. The switch visibly shows on/off, and the model receives the frozen request's authorization state so it can explain that image mode is off instead of claiming the application lacks image capabilities.
+
+Turning image mode on permits the model to interpret a full visual prompt or a natural generation request; it does not force generation for analysis or prompt refinement. Skill availability is independent of this switch. **Image settings** in Hybrid share the Gallery's provider, model, dimensions, quality, format and image count. Changes work in both directions, while each workspace retains its own draft and attachments. Automatic dimensions are resolved from the prompt and references of the request being sent. Previously submitted requests retain their frozen settings. Native and Current API continue to use their Responses image tool and do not silently inherit an incompatible Gallery protocol.
+
+The configured maximum jobs and model steps remain backend safeguards, without duplicate per-turn controls. Image count is a requested default, separate from the safety maximum; a choice above that maximum is rejected explicitly. These limits are request-count controls, not monetary budgets.
+
+When changing the image API profile, the image-model field adopts that profile's saved default. A full manual model ID remains possible. This does not change the text profile, another profile's settings or an already submitted request.
+
+### Retry an answer or image
+
+The compact **Retry** button on an image reuses its actual execution prompt and original frozen references with the current image settings. It creates a new linked Gallery job without an additional text-model planning request, and retains the original result or confirmed failure. The composer draft and attachments are unaffected. Change the prompt by describing the desired change in the conversation. A repeated submission identity returns the same receipt; an uncertain response requires checking that receipt instead of sending again. Quota, moderation and rate-limit failures never automatically retry or change suppliers.
+
+Successful, saved and confirmed failed results can be retried when their source is complete. Hybrid remains on the Images queue; Native remains on Responses. Native direct results require a reliable execution prompt and a complete record of the pixels actually sent, including necessary history images. Old results without this evidence, excessive reference counts, missing originals, protocol changes and unknown outcomes block direct retry rather than substituting another request.
+
+On a text answer, **Retry** immediately requests another answer in a sibling branch using the original user message and input references. It does not enable image generation or search, and does not replace an unsent draft. This preservation also applies when the submission receipt is lost and the page is reloaded.
+
+### Results and progress
+
+Each round reports its own durable image jobs. A completed text-model tool call is not an image-generation success. All failed jobs show that no image was produced; mixed batches retain and identify their successful images. Details distinguish submitted jobs, successful images, failures and the authorized maximum. Saved Library images remain part of the successful count.
+
+Progress distinguishes local preparation, waiting for the text model, receiving output, waiting for image tasks, generating and saving results. Safe diagnostic categories identify quota, model/interface compatibility, moderation, rate limits, service failures, uncertain connections and unavailable references. Unknown provider errors are not classified by guessing from prose. No category automatically retries a paid request or switches providers. Persisted diagnostics retain only selected public fields and a bounded, sanitized plain-text supplier explanation, not the complete error response. Known secrets, authorization values, URL queries, image payloads and echoed request content are removed; request identities are hashed and endpoint names contain only a recognized API route.
+
+An upstream **HTTP 413** is shown as a request-size rejection, including when
+the response is HTML or otherwise lacks usable JSON. It does not mean that the
+image failed content moderation. A confirmed local connection-configuration
+failure can say the request was not submitted; a timeout or disconnect without
+a terminal receipt remains uncertain. Provider-supplied fields cannot assert
+that a local preflight occurred. These distinctions do not trigger automatic
+retry, route changes or a switch to another provider.
+
+Advanced details contain measured monotonic durations. Headers and first-event milestones start at the same HTTP request and must not be added together. Tool execution includes image queue/call time. Direct Native Responses can combine text and image execution, so its separately observed image-tool interval is not a separate pure-provider latency measurement. Missing historical or post-restart measurements show as unrecorded. Browser send-to-terminal observation includes backend work and transport, and is only available in the page that observed it. Optional timing-storage failures emit a safe warning and cannot overturn a paid-request receipt or trigger another request.
+
+Missing usage values remain unknown; an explicitly reported zero stays zero. These measurements do not estimate actual tokens, money, provider capacity or cache eligibility.
+
+- Ambiguous image instructions retain their source wording and locators on the current branch. An unresolved flag does not attach all historical images. Required visual evidence and selected/read source rounds include their inherited target and auxiliaries; a model must read omitted evidence or clarify its source before judging it. A new attachment alone does not make earlier images irrelevant. Missing or deleted required references fail rather than silently substitute an image.
 - Native results require a valid completed Responses receipt and a complete image. Failed or incomplete responses containing images are not successful tasks. Previously confirmed sibling tasks remain saved.
 - A verified terminal SSE receipt is not undone by connection teardown. A disconnect without a valid terminal remains uncertain and does not automatically replay a paid POST.
 - Identified duplicate deltas and terminal events are ignored; different legitimate events containing the same text remain distinct. Final message output can replace previews without duplicating text.
@@ -37,45 +114,132 @@ From a development checkout with the test dependencies installed:
 ```sh
 python scripts/diagnose_agent_context.py --rounds 5 25 50 100 --repeats 3
 python scripts/diagnose_agent_result_snapshots.py --rounds 5 25 50 100 --repeats 3
-python -m pytest -q tests/test_agent_context_diagnostic.py
+python scripts/diagnose_agent_execution.py --rounds 5 25 50 100 --repeats 3
+python -m pytest -q tests/test_agent_context_diagnostic.py tests/test_agent_execution_diagnostic.py
 ```
 
-Both tools create temporary synthetic libraries and block network connections. Context requests use `MockTransport`; the result-copy diagnostic stages generated fixtures without dispatching a queue worker. Output contains aggregate measurements, not prompts, credentials or existing library contents. Measurements are diagnostic observations, not timing thresholds.
+All three tools create temporary synthetic libraries and block network connections. Context requests use `MockTransport`; the result-copy diagnostic stages generated fixtures without dispatching a queue worker. The execution diagnostic runs the real Agent request loop, SSE parsing, Images queue and result persistence against `MockTransport`. Output contains aggregate measurements, not prompts, credentials or existing library contents. No tool reads a production library or contacts a supplier.
 
-The comparison below uses `main` at `0aa6c8f` and the correctness/workflow changes. Each read timing is the median of three runs on the same Windows machine; creation is measured once because replay is a different operation. Each image-history round adds a deterministic 197,104-byte PNG. JSON bytes include Base64; raw image bytes do not. These numbers are **not tokens, API latency, cost or cache hits**.
+The following samples were collected on Windows with Python 3.10.10 on 2026-10-26. Reads use the median of three repetitions. Request creation and execution run once because repeating a mutation would measure idempotent replay instead. Timings vary with local scheduling and filesystem load; they are observations, not performance thresholds or proof of a speed improvement. JSON sizes include Base64, while image byte counts do not. None of these byte counts are tokens or prices.
 
-| Rounds | Image request JSON bytes before → after | Raw image bytes / occurrences, unchanged | `build_input` ms before → after | Snapshot ms before → after | Build SQL connections / statements | Snapshot SQL connections / statements |
+### Same-fixture context comparison
+
+The result-observability baseline ([PR #20](https://github.com/Brilliant666/image-prompt-library/pull/20), stage A) and the task/skill workflow version (stage C) use the same fixture: each image-history round independently uploads one 197,104-byte synthetic PNG. Request JSON adds 548 bytes at 5 rounds and 863 bytes at the later checkpoints. Required image counts and raw pixels are unchanged. Re-uploading identical source bytes in this particular fixture creates independent upload assets; it is separate from copying historical generated results.
+
+| Rounds | Image request JSON bytes, A → C | Raw image bytes / occurrences, unchanged | C context preparation ms | C `build_input` ms | C snapshot ms | C snapshot connections / SELECTs |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 5 | 1,326,520 → 1,328,238 | 985,520 / 5 | 23.302 → 23.416 | 10.340 → 11.620 | 5 / 10 | 8 / 20 |
-| 25 | 6,605,892 → 6,607,610 | 4,927,600 / 25 | 114.653 → 116.394 | 36.124 → 37.468 | 25 / 50 | 28 / 60 |
-| 50 | 13,205,117 → 13,206,835 | 9,855,200 / 50 | 245.287 → 438.082 | 68.004 → 130.793 | 50 / 100 | 53 / 110 |
-| 100 | 26,403,569 → 26,405,287 | 19,710,400 / 100 | 473.725 → 840.943 | 137.357 → 260.587 | 100 / 200 | 103 / 210 |
+| 5 | 1,328,238 → 1,328,786 | 985,520 / 5 | 32.444 | 35.367 | 14.488 | 8 / 14 |
+| 25 | 6,607,610 → 6,608,473 | 4,927,600 / 25 | 136.767 | 132.675 | 42.977 | 28 / 34 |
+| 50 | 13,206,835 → 13,207,698 | 9,855,200 / 50 | 264.892 | 262.085 | 85.436 | 53 / 59 |
+| 100 | 26,405,287 → 26,406,150 | 19,710,400 / 100 | 535.732 | 537.930 | 188.976 | 103 / 109 |
 
-The SQL counts and image occurrence counts are unchanged. The unchanged snapshot implementation also became slower in the later samples; this run does not identify the cause of timing variation or establish a speed improvement. Text-only JSON grows from 13,568 bytes at 5 rounds to 111,795 at 100; its build time is 0.032–0.220 ms and snapshot time 4.287–7.430 ms, with three snapshot connections and ten statements.
+Context preparation includes loading the request and resolving references. `build_input` is measured separately with an already-read request and reference map; these independent medians must not be subtracted as if they were nested observations of one call. The snapshot adds one SELECT compared with the stage A baseline for the editing-task/retry projection. The indirect-reference probe retains 5/25/50/100 branch images; the exact-reference-plus-current-attachment probe retains two, and a greeting with an attachment retains one. Necessary pixels are not dropped to improve timing.
 
-The indirect-reference probe (“use the previous light” with a new attachment) previously supplied only one image at every checkpoint. It now supplies 5/25/50/100 branch images respectively. This is an intentional correctness cost with linear transmission, not a second copy of each image inside the request. The exact-reference-plus-current-attachment probe stays at two images, and the greeting-plus-attachment probe stays at one.
+| Rounds | Text-only JSON bytes, A → C | C context preparation ms | C `build_input` ms | C snapshot ms |
+| ---: | ---: | ---: | ---: | ---: |
+| 5 | 13,568 → 14,116 | 3.193 | 0.148 | 6.958 |
+| 25 | 34,244 → 35,107 | 2.139 | 0.214 | 6.537 |
+| 50 | 60,094 → 60,957 | 2.718 | 0.276 | 9.583 |
+| 100 | 111,795 → 112,658 | 2.847 | 0.409 | 15.966 |
+
+Text-only snapshots use three connections and nine SELECTs at each checkpoint. Repeated local runs showed substantial timing variation, so the stable byte and query counts are stronger evidence about work performed than the timing difference between two runs.
+
+### Frozen outputs after asset reuse
+
+The immutable frozen-asset reuse change in [PR #19](https://github.com/Brilliant666/image-prompt-library/pull/19) already removed the earlier quadratic physical-copy behavior. With one distinct 12,420-byte generated fixture per round, the current result-snapshot diagnostic finds one frozen original per prior result, **zero duplicate physical copies** and **zero additional files on request-ID replay**. Original Gallery result files remain separate from these frozen references.
+
+| Rounds | Frozen original files / duplicate copies | Frozen bytes | `create_round` ms | `build_input` ms | Snapshot ms | Cumulative frozen history JSON bytes |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 5 | 4 / 0 | 49,680 | 60.917 | 20.625 | 21.515 | 9,728 |
+| 25 | 24 / 0 | 298,080 | 228.156 | 120.685 | 91.618 | 306,394 |
+| 50 | 49 / 0 | 608,580 | 724.717 | 404.179 | 296.540 | 1,247,994 |
+| 100 | 99 / 0 | 1,229,580 | 1,653.093 | 945.837 | 598.297 | 5,016,319 |
+
+The corresponding request JSON sizes are 73,868 / 411,979 / 834,629 / 1,679,930 bytes. Snapshot connections/SELECTs are 13/19, 53/59, 103/109 and 203/209. Physical image growth is linear, but copying the prior conversation's JSON into each frozen request still produces approximately quadratic cumulative history JSON. Image resolution and snapshot construction also perform increasing per-asset database reads and validation. A follow-up can investigate batched reads and immutable history manifests while preserving frozen identity, branches, deletion behavior, backups and recovery. This workflow change does not rewrite historical requests or asset ownership.
+
+### Full execution with measured phases
+
+The execution fixture starts with one synthetic input image and creates a distinct 12,420-byte result in every round. It runs **104 Responses POSTs and 100 Images POSTs** through the real engine and image queue. Each of the four checkpoint rounds includes one initial model call, one image call and one model follow-up; the other rounds finish after their image result. Counts come from the mock transport, not an assumed request multiplier.
+
+| Rounds | First model request JSON bytes | Raw image bytes / occurrences | Context preparation ms | Snapshot ms | Snapshot connections / SELECTs |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 5 | 95,847 | 62,100 / 5 | 26.299 | 34.991 | 15 / 21 |
+| 25 | 439,436 | 310,500 / 25 | 216.656 | 224.954 | 55 / 61 |
+| 50 | 868,926 | 621,000 / 50 | 481.536 | 396.005 | 105 / 111 |
+| 100 | 1,727,816 | 1,242,000 / 100 | 951.737 | 825.677 | 205 / 211 |
+
+The mock deliberately waits 5 ms before model headers, another 5 ms before its first SSE event, another 5 ms before completion, and 10 ms in the Images response. The table below reads persisted stage measurements after reloading the request. It is **not a benchmark of a real model or supplier**.
+
+| Rounds | Preparation ms | First model call's first event ms | Model response ms, two calls | Image provider interval ms | Tools ms | Result processing ms |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 5 | 173 | 47 | 140 | 0 | 187 | 16 |
+| 25 | 751 | 31 | 172 | 16 | 281 | 30 |
+| 50 | 1,531 | 47 | 188 | 32 | 297 | 47 |
+| 100 | 2,845 | 63 | 234 | 15 | 265 | 79 |
+
+Preparation includes request creation as well as pre-model work. Tool time contains queueing, dispatch, the image call, persistence and completion polling. First event means the first received SSE event, **not the first visible text token**. Model-response duration includes the local stream handling performed within that measured interval. The execution clock on this Python/Windows runtime has 15.625 ms resolution, so a 10 ms mock wait can measure 0; this measured zero is different from an unrecorded `null`. The diagnostic reports both execution-clock and high-resolution benchmark-clock precision.
+
+Creation itself took 89.303 / 450.914 / 946.936 / 1,778.339 ms; `run_request` took 564.470 / 1,180.521 / 1,737.674 / 2,721.977 ms. At 100 rounds that execution used 331 SQLite connections and 419 SELECTs. These local measurements demonstrate why total time minus image-call time cannot all be labelled text-model latency. They cannot determine whether a particular real conversation was delayed by routing, throttling, model computation or the network.
 
 ### Skill content and cache prefixes
 
-For the fixed prompt-refinement task, selected chapter bodies grow from 2,861 to 3,221 UTF-8 bytes; the catalog from 1,023 to 1,242; full instructions from 5,198 to 6,916. Request JSON grows by a constant 1,718 bytes at every checkpoint; the tool schema stays at 2,078 bytes. Ordinary greetings preload no chapter bodies.
+The measurements below describe the earlier task-selected preload implementation. The current implementation supplies both overview bodies at a fixed position in instructions on every enabled request, without moving them from instructions into history on the next turn. This is a bounded request-size change, not evidence of provider cache hits or a repeat of the historical timing measurements.
 
-First-call instructions and tools are stable across this fixed task. The leading input items remain equal for 9/9, 49/49 and 99/99 items between successive checkpoints. Task selection and remaining image quotas can change instructions and tools. An actual matching skill receipt allows its exact pinned chapter body to be reused rather than loaded twice; in the measured follow-up, instructions shrink from 6,916 to 5,188 bytes. That also changes the instruction prefix, so reduced duplication does not prove better provider cache reuse. Missing `cached_tokens` remains unknown. Real provider routing, cache eligibility and cache lifetime have not been measured by these tools.
+The full execution fixture uses `gpt-image/overview` and `gpt-image/editing`, totalling 3,292 UTF-8 bytes. After the initial load, their bodies appear once each in the reusable input guidance and not again in instructions. They still travel in the full-context HTTP request; local reuse does not mean the supplier has cached them or that no bytes are transmitted.
 
-### Frozen output copies remain a separate problem
+The first preload moves from instructions into durable input guidance on the next request, changing the prefix once. Across the later 5→25, 25→50 and 50→100 checkpoints, instructions and tools match; 17/18, 98/99 and 199/200 previous input items remain equal from the beginning. The current editing-task data is not identical when that user turn later becomes history. Within a checkpoint's tool follow-up, the existing input prefix is preserved, but the tool schema shrinks from 2,078 to 449 bytes after image permission is exhausted. New tasks, different skill sections or configuration changes can also change prefixes. No optimization keeps an unauthorized tool available merely for cache stability.
 
-With one distinct 12,420-byte generated fixture per round:
+For usage-parsing verification, the synthetic provider reports fixed 120 input, 20 output and 140 total tokens per model call. It omits `cached_tokens` in 52 receipts and explicitly reports 0 in the other 52; both cases remain distinct after persistence. These values are **fixture reports, not actual token usage, cache measurements or cost savings**. Real supplier cache eligibility, routing and lifetime remain unverified. A missing cache field cannot establish a zero hit rate, and stable local prefixes alone cannot establish cache hits.
 
-| Rounds | Frozen copies before / after | Distinct frozen image hashes | Frozen bytes | `create_round` ms before → after | Snapshot ms before → after |
-| ---: | ---: | ---: | ---: | ---: | ---: |
-| 5 | 10 / 10 | 4 | 124,200 | 72.554 → 97.579 | 18.233 → 25.468 |
-| 25 | 300 / 300 | 24 | 3,726,000 | 419.142 → 732.022 | 77.804 → 139.941 |
-| 50 | 1,225 / 1,225 | 49 | 15,214,500 | 774.196 → 1,413.861 | 138.073 → 263.780 |
-| 100 | 4,950 / 4,950 | 99 | 61,479,000 | 2,738.475 → 2,891.513 | 485.911 → 515.940 |
+### Transport phase observations
 
-This remains `n(n−1)/2` frozen copies, in addition to the original result files. A separate asset-ownership change should address immutable shared bytes and reference lifetimes before introducing summaries or a new Agent harness. Its acceptance boundary must include stopped/uncertain requests, deleted Gallery results, Library copies, old branches, repeated requests, backup/restore and migration rollback. No existing assets are rewritten by the workflow change.
+For new Agent requests, **Answer details → Advanced information → Stage timings** includes per-model-call connection time (DNS and TCP together), TLS handshake time, request-body upload time, the subsequent wait for response headers, and request-body size. These observations use the existing HTTP request and do not send probes, retry requests, or change model instructions. Only durations and a byte count are saved; transport headers, credentials and payloads are not recorded by the observer.
+
+Upload time measures local socket writes, not proof that the server has consumed the entire body. Waiting for headers can include network, gateway and upstream processing; it is not pure model inference time. Header and first-event milestones share the request's start and must not be added to these phases. Request bytes are not tokens or cost. Missing, unfinished or unavailable phases remain unrecorded, including older conversations and connection phases absent on a reused connection. Measurements are persisted when the model call ends; refreshing a completed conversation preserves them without replaying the request.
+
+### Lossless image request encoding
+
+Agent Responses requests can losslessly recompress static PNG image data before
+Base64 encoding, including reference images and masks. Original asset files,
+frozen identities, dimensions, scanline data and all retained PNG metadata stay
+unchanged. Image selection, order and reference labels are not changed. Native
+batch/retry requests use the same encoding; Hybrid Images API uploads continue
+to use the original files.
+
+Only PNGs between 64 KiB and 32 MiB with supported structures and at most 128 MiB
+of decompressed scanline data are considered. PNGs marked as using normal or
+maximum compression are skipped; the others use a fast deflate pass to limit
+preparation time. The result must save both 1 KiB and
+5%; otherwise the original encoding is sent. Animations, other formats and
+unsupported or invalid encodings pass through unchanged. No resizing, JPEG
+conversion, colour reduction or image omission is performed.
+
+An in-memory cache retains at most 128 compression decisions and 32 MiB of
+compressed bytes. It creates no new Library assets or on-disk copies. Frozen
+source checks still run before cache lookup: a missing or changed reference
+continues to fail rather than silently using cached pixels.
+
+The API setting **Request Base64 image data** controls the image response format
+(`response_format: b64_json`); it does not compress Agent inputs or remove the
+Base64 expansion. Already compressed PNGs and photographs may save little or
+nothing. Smaller request bytes alone do not establish a particular token, cost
+or latency reduction; supplier-side timing still needs separate measurement.
 
 ## Validation scope
 
+Image generation uses one main progress message. Pending result frames do not
+offer result menus or editing actions. Failed and unknown results keep a padded
+message card with their explanation and details; an unknown result cannot be
+blindly retried. Successful cards retain image copying and Prompt reuse.
+
+Failures may include a short, sanitized supplier explanation alongside public
+error codes, parameter names and moderation categories. Explanations are plain
+text, not instructions or HTML, and never establish that a guessed refusal
+reason is true. If the supplier gave no explanation, the UI says so. Old errors
+whose detailed message was not retained cannot be reconstructed. Local network
+configuration failures are distinguished from unknown upstream outcomes; viewing
+or copying a diagnostic does not submit another request.
+
 Regression suites verify actual request image bytes, JSON/SSE terminal states, duplicate events, frozen configuration, authorization and HTTP-to-worker-to-Gallery/Library behavior with mock providers. Frontend tests exercise production callbacks, configuration events and clipboard behavior. Isolated browser acceptance checks the actual settings, uploads, prompt blocks, Native/Hybrid results and asset picker against the real local backend with a synthetic provider. Scripted responses verify wiring and preservation, not model intelligence or visual quality.
 
-Real supplier compatibility, output quality, paid generation, system IME and supplier-side cache behavior require separate acceptance. No live provider call, production-library migration or deployment is part of these diagnostics.
+Real supplier compatibility, output quality, paid generation, system IME and supplier-side latency/cache behavior require separate acceptance. Clipboard callback tests verify application logic but cannot prove a native operating-system copy/paste transfer; use the [offline preview's manual receiver](AGENT_PREVIEW.md#manual-image-clipboard-acceptance) for that separate browser-specific check. No live provider call, production-library migration or deployment is part of these diagnostics.

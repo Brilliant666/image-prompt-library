@@ -4,9 +4,14 @@ import test from 'node:test';
 import ts from 'typescript';
 
 const source = await readFile(new URL('../frontend/src/utils/captureOrganizer.ts', import.meta.url), 'utf8');
-const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
+const networkSource = await readFile(new URL('../frontend/src/utils/apiNetwork.ts', import.meta.url), 'utf8');
+const networkJs = ts.transpileModule(networkSource, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
+const networkUrl = `data:text/javascript;base64,${Buffer.from(networkJs).toString('base64')}`;
+const network = await import(networkUrl);
+const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText.replaceAll("'./apiNetwork'", JSON.stringify(networkUrl));
+const organizer = await import(`data:text/javascript;base64,${Buffer.from(js).toString('base64')}`);
 const { organizerDefaults, organizerPayload, organizerHasChanges, readOrganizerConfig, organizerSettingsRequest,
-  organizerTestTimeoutMs, readOrganizerTestResult, testOrganizerConnection } = await import(`data:text/javascript;base64,${Buffer.from(js).toString('base64')}`);
+  organizerTestTimeoutMs, readOrganizerTestResult, testOrganizerConnection } = organizer;
 const saved = { ...organizerDefaults, base_url: 'https://example.invalid/v1', configured: true, has_api_key: true };
 const safeError = (code) => (error) => error.code === code && !error.message.includes('test-only-secret');
 
@@ -19,6 +24,26 @@ test('organizer defaults are opt-in and never reuse an image provider key', () =
   assert.equal(empty.generate_title, true);
   assert.equal(empty.assign_collection, true);
   assert.equal(empty.allow_new_collections, true);
+  assert.equal(empty.network_mode, 'direct');
+  assert.equal(empty.proxy_url_present, false);
+  assert.equal(empty.proxy_endpoint, '');
+});
+
+test('organizer network configuration is independently allowlisted and proxy writes preserve blank secrets', () => {
+  const config = readOrganizerConfig({ ...saved, network_mode: 'proxy', proxy_url_present: true,
+    proxy_url: 'http://sample:test-only-secret@proxy.example.test:8080', proxy_endpoint: 'http://sample:test-only-secret@proxy.example.test:8080' });
+  assert.equal(config.proxy_endpoint, 'http://proxy.example.test:8080');
+  assert.equal(config.proxy_url, undefined);
+  assert.equal(JSON.stringify(config).includes('test-only-secret'), false);
+  const payload = organizerPayload(config, '', config);
+  assert.equal(payload.network_mode, 'proxy');
+  for (const field of ['proxy_url', 'remove_proxy_url', 'proxy_url_present', 'proxy_endpoint']) assert.equal(field in payload, false);
+  assert.equal(organizerPayload(config, '', config, { proxyUrl: 'socks5://sample:test-only-secret@proxy.example.test:1080', removeProxy: false }).proxy_url, 'socks5://sample:test-only-secret@proxy.example.test:1080');
+  assert.throws(() => organizerPayload(config, '', config, { proxyUrl: '', removeProxy: true }), safeError('proxy_required'));
+  assert.equal(organizerPayload({ ...config, network_mode: 'direct' }, '', config, { proxyUrl: '', removeProxy: true }).remove_proxy_url, true);
+  assert.throws(() => organizerPayload(saved, '', saved, { proxyUrl: 'http://proxy.example.test:0', removeProxy: false }), safeError('proxy_url'));
+  assert.equal(organizerHasChanges(config, '', config, { proxyUrl: 'http://new.example.test:8080', removeProxy: false }), true);
+  assert.equal(organizerHasChanges(config, '', config, { proxyUrl: '', removeProxy: true }), true);
 });
 
 test('public configuration ignores accidental secrets and never infers call success from configured', () => {
@@ -226,4 +251,110 @@ test('connection-test deadline reports uncertainty with no second request', asyn
   assert.equal(result.category, 'timeout');
   assert.equal(result.outcome_uncertain, true);
   assert.equal(fetch.mock.callCount(), 1);
+});
+
+const organizerComponentSource = await readFile(new URL('../frontend/src/components/CaptureOrganizerSettings.tsx', import.meta.url), 'utf8');
+const organizerComponentJs = ts.transpileModule(organizerComponentSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
+const labelsSource = await readFile(new URL('../frontend/src/utils/captureOrganizerLabels.ts', import.meta.url), 'utf8');
+const labelsJs = ts.transpileModule(labelsSource, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
+const labels = await import(`data:text/javascript;base64,${Buffer.from(labelsJs).toString('base64')}`);
+function walk(node) { return !node || typeof node !== 'object' ? [] : [node, ...(Array.isArray(node.props?.children) ? node.props.children.flat(Infinity) : [node.props?.children]).flatMap(walk)]; }
+function organizerHarness(t, initial = {}) {
+  let publicConfig = { ...saved, ...initial };
+  const requests = [];
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    requests.push({ url, method: options.method, body: options.body && JSON.parse(options.body) });
+    assert.equal(url, '/api/capture-organizer/config', 'settings interactions must not invoke a paid connection test');
+    if (options.method === 'PUT') {
+      const { proxy_url, remove_proxy_url, ...fields } = JSON.parse(options.body);
+      publicConfig = { ...publicConfig, ...fields, ...(remove_proxy_url ? { proxy_url_present: false, proxy_endpoint: '' }
+        : proxy_url ? { proxy_url_present: true, proxy_endpoint: network.safeProxyEndpoint(proxy_url) } : {}) };
+    }
+    return new Response(JSON.stringify(publicConfig), { status: 200 });
+  });
+  const slots = [], effects = []; let cursor = 0, dirty = false, tree;
+  const hooks = {
+    useState(value) { const i = cursor++; if (!(i in slots)) slots[i] = value; return [slots[i], update => { slots[i] = typeof update === 'function' ? update(slots[i]) : update; dirty = true; }]; },
+    useRef(value) { const i = cursor++; if (!(i in slots)) slots[i] = { current: value }; return slots[i]; },
+    useEffect(effect, deps) { const i = cursor++; if (!slots[i] || deps.some((dep, index) => dep !== slots[i].deps[index])) { const old = slots[i]; slots[i] = { deps }; effects.push(() => { old?.cleanup?.(); slots[i].cleanup = effect(); }); } },
+  };
+  const jsx = (type, props) => ({ type, props });
+  const dependencies = { react: hooks, 'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'fragment' }, 'lucide-react': { Sparkles: 'Sparkles' },
+    '../utils/captureOrganizer': organizer, '../utils/captureOrganizerLabels': labels, '../utils/apiNetwork': network,
+    './ApiNetworkSettings': { __esModule: true, default: 'ApiNetworkSettings' }, './capture-organizer-settings.css': {} };
+  const mod = { exports: {} };
+  new Function('require', 'module', 'exports', 'location', organizerComponentJs)(name => { assert.ok(name in dependencies, name); return dependencies[name]; }, mod, mod.exports, { search: '' });
+  function render() { cursor = 0; dirty = false; tree = mod.exports.default({ uiLanguage: 'zh_hans' }); effects.splice(0).forEach(effect => effect()); }
+  async function flush() { for (let i = 0; i < 30; i++) { if (dirty) render(); await Promise.resolve(); } if (dirty) render(); }
+  render(); t.after(() => slots.forEach(slot => slot?.cleanup?.()));
+  return { flush, requests, find: (type, predicate = () => true) => walk(tree).find(node => node.type === type && predicate(node.props))?.props, get tree() { return tree; } };
+}
+
+test('organizer actual settings callbacks persist independent network choices without a model request', async t => {
+  const h = organizerHarness(t); await h.flush();
+  assert.equal(h.find('ApiNetworkSettings').mode, 'direct');
+  h.find('ApiNetworkSettings').onModeChange('environment'); await h.flush();
+  h.find('form').onSubmit({ preventDefault() {} }); await h.flush();
+  assert.equal(h.requests.at(-1).body.network_mode, 'environment');
+  assert.equal(h.find('ApiNetworkSettings').mode, 'environment');
+  h.find('ApiNetworkSettings').onModeChange('proxy');
+  h.find('ApiNetworkSettings').onProxyUrlChange('https://sample:test-only-secret@proxy.example.test:8443'); await h.flush();
+  const testButton = h.find('button', props => props['aria-describedby'] === 'capture-organizer-test-help');
+  assert.equal(testButton.disabled, true); testButton.onClick(); await h.flush();
+  assert.equal(h.requests.length, 2, 'dirty secrets cannot be sent by the existing test button');
+  h.find('form').onSubmit({ preventDefault() {} }); await h.flush();
+  assert.equal(h.requests.at(-1).body.proxy_url, 'https://sample:test-only-secret@proxy.example.test:8443');
+  assert.equal(h.find('ApiNetworkSettings').proxyUrl, '');
+  assert.equal(h.find('ApiNetworkSettings').proxyEndpoint, 'https://proxy.example.test:8443');
+  assert.equal(JSON.stringify(h.tree).includes('test-only-secret'), false);
+  h.find('input', props => props.maxLength === 120).onChange({ target: { value: 'vision-model-new' } }); await h.flush();
+  h.find('form').onSubmit({ preventDefault() {} }); await h.flush();
+  assert.equal(h.requests.at(-1).body.model, 'vision-model-new');
+  for (const field of ['proxy_url', 'remove_proxy_url', 'proxy_url_present', 'proxy_endpoint']) assert.equal(field in h.requests.at(-1).body, false, field);
+  assert.equal(h.find('ApiNetworkSettings').proxyUrlPresent, true);
+  h.find('ApiNetworkSettings').onModeChange('direct');
+  h.find('ApiNetworkSettings').onRemoveProxyChange(true); await h.flush();
+  h.find('form').onSubmit({ preventDefault() {} }); await h.flush();
+  assert.equal(h.requests.at(-1).body.remove_proxy_url, true);
+  assert.equal(h.find('ApiNetworkSettings').proxyUrlPresent, false);
+  assert.equal(h.find('ApiNetworkSettings').removeProxy, false);
+  assert.deepEqual(h.requests.map(request => request.method), ['GET', 'PUT', 'PUT', 'PUT', 'PUT']);
+});
+
+test('organizer local validation preserves unsent proxy and key drafts until a corrected save completes', async t => {
+  const h = organizerHarness(t, { enabled: true, assign_collection: false, network_mode: 'proxy',
+    proxy_url_present: true, proxy_endpoint: 'http://proxy-a.example.test:8080' });
+  await h.flush();
+  const proxyB = 'http://sample:test-only-proxy-b-secret@proxy-b.example.test:8080';
+  const titleToggle = () => h.find('label', props => props.className === 'capture-organizer-toggle'
+    && props.children[1].props.children === '自动生成标题').children[0].props;
+  h.find('ApiNetworkSettings').onProxyUrlChange(proxyB);
+  h.find('input', props => props.type === 'password').onChange({ target: { value: 'test-only-new-key' } });
+  titleToggle().onChange({ target: { checked: false } }); await h.flush();
+  h.find('form').onSubmit({ preventDefault() {} }); await h.flush();
+  assert.deepEqual(h.requests.map(request => request.method), ['GET'], 'local validation must not submit the secret draft');
+  assert.match(JSON.stringify(h.find('div', props => props.role === 'alert')), /至少选择标题或 Collection/);
+  assert.equal(h.find('ApiNetworkSettings').proxyUrl, proxyB);
+  assert.equal(h.find('input', props => props.type === 'password').value, 'test-only-new-key');
+  titleToggle().onChange({ target: { checked: true } }); await h.flush();
+  h.find('form').onSubmit({ preventDefault() {} }); await h.flush();
+  assert.deepEqual(h.requests.map(request => request.method), ['GET', 'PUT']);
+  assert.equal(h.requests.at(-1).body.proxy_url, proxyB, 'the corrected save must use proxy B instead of keeping saved proxy A');
+  assert.equal(h.requests.at(-1).body.api_key, 'test-only-new-key');
+  assert.equal(h.find('ApiNetworkSettings').proxyEndpoint, 'http://proxy-b.example.test:8080');
+  assert.equal(h.find('ApiNetworkSettings').proxyUrl, '');
+  assert.equal(h.find('input', props => props.type === 'password').value, '');
+  assert.doesNotMatch(JSON.stringify(h.tree), /test-only-proxy-b-secret|test-only-new-key/);
+});
+
+test('organizer proxy validation uses shared rules before any save and never echoes credentials', async t => {
+  const h = organizerHarness(t); await h.flush();
+  h.find('ApiNetworkSettings').onModeChange('proxy'); await h.flush();
+  h.find('form').onSubmit({ preventDefault() {} }); await h.flush();
+  assert.equal(h.requests.length, 1);
+  assert.match(JSON.stringify(h.find('div', props => props.role === 'alert')), /请填写代理地址/);
+  h.find('ApiNetworkSettings').onProxyUrlChange('https://sample:test-only-secret@proxy.example.test/path'); await h.flush();
+  h.find('form').onSubmit({ preventDefault() {} }); await h.flush();
+  assert.equal(h.requests.length, 1);
+  assert.equal(JSON.stringify(h.find('div', props => props.role === 'alert')).includes('test-only-secret'), false);
 });

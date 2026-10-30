@@ -62,6 +62,10 @@
 
 Agent 將對話、訊息分支和圖片參考保存在本機伺服器。編輯或重新生成訊息會建立分支，原有分支仍保留。你可以搜尋已儲存的對話、將生成圖片用作參考，或從結果返回來源對話。
 
+- **在對話中自然延續任務。** 目前任務、工作提示詞版本與圖片角色由對話背後維護，不必填寫獨立任務表。需要舊圖時會依具體來源取回，不會只因舊問題尚未解決就附上全部歷史圖片；原文、原圖與分支仍保留。
+- **從選定的提示詞區塊直接生圖。** 使用該區塊的原文、已確認的參考圖與目前可見的圖片設定。Hybrid 直接進入 Images 佇列，不額外請求文字模型規劃；Native 使用其圖片工具。圖片重試沿用實際執行的提示詞與凍結參考圖；結果未知時應核對原回執，不會自動重播。詳見[確認提示詞與重試邊界](docs/AGENT_CONFIRMED_RECIPES.md)。
+- **明確選擇複製圖片或提示詞。** 成功圖片卡片分別提供複製圖片與複製生成提示詞。剪貼簿轉換不會取代原始檔案；需要原始位元組與中繼資料時請使用下載。
+- **了解失敗原因後再嘗試。** 詳情區分上傳限制、HTTP 413 請求大小拒絕、供應商錯誤與結果未知。顯示可用的供應商錯誤碼與去除敏感資料後的簡短說明，不猜測未提供的原因。Agent 參考圖支援 PNG、JPEG、WebP，每張不超過 **30 MiB 與 16,000,000 像素**；不支援的格式與無法解碼的檔案會分別提示。
 - 選擇相容的 API 設定檔與完整的**文字模型 ID**。Hybrid 模式透過 Responses 處理文字與工具，再使用選定的 Images 設定檔建立圖片任務；Native 模式接收 Responses 圖片工具的結果。供應商必須支援所選路徑。
 - **持續生圖模式預設關閉。** 你可以只授權某一輪生成圖片，或明確開啟生圖模式，讓目前對話之後送出的訊息也能生成圖片。每次請求仍會固定其圖片數量及模型步數上限。網路搜尋需要另外設定，並逐輪授權。
 - 預設為 **Enter 送出**、**Shift+Enter 換行**，輸入法組字時不會送出。伺服器接受請求後會清空文字與參考圖，保留圖片設定；畫廊和 Agent 的輸入偏好可分別調整。
@@ -70,13 +74,17 @@ Agent 將對話、訊息分支和圖片參考保存在本機伺服器。編輯�
 
 Responses 的進度會串流至瀏覽器，無法串流時改用唯讀輪詢。重新整理或重新連線不會再次送出付費請求。**停止**會阻止新的呼叫；已送至上游的請求仍可能完成或計費。詳見[工作區行為與相容性限制](docs/PLAYGROUND.md)。
 
+[離線預覽](docs/AGENT_PREVIEW.md)使用合成圖片與模擬供應商，驗證應用流程，不代表真實模型品質、供應商延遲或 Prompt Cache 效益已通過驗收。真實系統剪貼簿的圖片複製與貼上仍需依瀏覽器手動驗收，模擬剪貼簿測試不能取代這項驗收。
+
 ## 快速開始
 
 從原始碼建置需要 **Python 3.10+** 和 **Node.js 24**。請在既有原始碼目錄依照[啟動與維護說明](docs/INDEPENDENT_MAINTENANCE.md)操作。Windows PowerShell：
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e '.[dev]'
+.\.venv\Scripts\python.exe -m pip install uv==0.12.16
+$env:UV_PROJECT_ENVIRONMENT = Join-Path (Get-Location) '.venv'
+.\.venv\Scripts\python.exe -m uv sync --locked --extra dev --inexact --python .\.venv\Scripts\python.exe
 npm ci
 npm run build
 $env:IMAGE_PROMPT_LIBRARY_PATH = Join-Path $HOME 'ImagePromptLibrary'
@@ -84,6 +92,8 @@ $env:IMAGE_PROMPT_LIBRARY_PATH = Join-Path $HOME 'ImagePromptLibrary'
 ```
 
 啟動前請選定圖庫路徑，確認沒有其他執行個體使用同一圖庫，且 8000 連接埠空閒。開啟 [127.0.0.1:8000](http://127.0.0.1:8000)；在終端機按 `Ctrl-C` 停止。macOS/Linux 請參閱[開發指南](docs/DEVELOPMENT.md)。
+
+**開發與驗證：**請使用[隔離開發範例](docs/INDEPENDENT_MAINTENANCE.md#从源码开发与启动)，同時隔離圖庫與憑證，並使用 8010 連接埠。上方快速開始用於日常本機使用。
 
 新圖庫預設為空。選擇**快速收錄**，加入圖片與原始提示詞後儲存；AI 設定為選用。既有安裝副本可透過以下指令檢查：
 

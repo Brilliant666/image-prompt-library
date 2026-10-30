@@ -8,6 +8,8 @@ import logging
 import math
 import re
 import sqlite3
+import time
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from contextlib import nullcontext, suppress
@@ -33,10 +35,18 @@ from backend.schemas import (
 )
 from backend.services.credential_safety import contains_embedded_credential, sanitize_structured_credentials
 from backend.services.image_store import MAX_IMAGE_PIXELS, _atomic_write_bytes, store_image
+from backend.services.agent_diagnostics import classify_failure, safe_diagnostics, duration_ms, record_measurement
 
 
 class GenerationJobConflict(ValueError):
     pass
+
+
+class GenerationImageValidationError(GenerationJobConflict):
+    """Safe content-validation detail shared by Agent and Gallery boundaries."""
+    def __init__(self, code: str, message: str, status: int = 400):
+        super().__init__(message)
+        self.code, self.status = code, status
 
 
 def result_generation_model(job: GenerationJobRecord) -> str | None:
@@ -64,12 +74,32 @@ _ACCEPT_ARTIFACTS_METADATA_KEY = "_generation_accept_artifacts"
 # Persist UTC wall-clock age so a lease remains recoverable after restart.
 ACCEPT_CLAIM_LEASE_AFTER = timedelta(minutes=10)
 _DISCARD_REPAIR_LOCK = RLock()
+_QUEUE_CLOCK_LOCK = RLock()
+# In-process origins only. Restarted/evicted jobs have an unknown queue duration;
+# wall-clock timestamps must not be substituted for a monotonic measurement.
+_QUEUE_CLOCKS: OrderedDict[tuple[str, str], float] = OrderedDict()
+
+
+def _remember_queue_start(library_path: Path, job_id: str) -> None:
+    with _QUEUE_CLOCK_LOCK:
+        _QUEUE_CLOCKS[(str(library_path.resolve()), job_id)] = time.monotonic()
+        while len(_QUEUE_CLOCKS) > 4096:
+            _QUEUE_CLOCKS.popitem(last=False)
+
+
+def _queue_duration(library_path: Path, job_id: str) -> float | None:
+    with _QUEUE_CLOCK_LOCK:
+        start = _QUEUE_CLOCKS.pop((str(library_path.resolve()), job_id), None)
+    return duration_ms((time.monotonic() - start) * 1000) if start is not None else None
+
+
 logger = logging.getLogger(__name__)
 
 
-def _verify_image_file(path: Path) -> str:
+def _verify_image_source(source) -> str:
+    """Apply the same input-image checks to a file or already-read original bytes."""
     try:
-        with Image.open(path) as image:
+        with Image.open(source) as image:
             image_format = image.format
             image.verify()
     except (UnidentifiedImageError, OSError, ValueError) as exc:
@@ -77,17 +107,37 @@ def _verify_image_file(path: Path) -> str:
     return Image.MIME.get(image_format or "", "image/png")
 
 
-def _validate_storeable_image_bytes(data: bytes) -> None:
+def _verify_image_file(path: Path) -> str:
+    return _verify_image_source(path)
+
+
+def _validate_storeable_image_bytes(data: bytes, *, allowed_formats=None) -> tuple[str, int, int]:
     try:
         with Image.open(BytesIO(data)) as image:
+            image_format = image.format
             width, height = image.size
             if width * height > MAX_IMAGE_PIXELS:
-                raise GenerationJobConflict(f"Generation image is too large: {width}x{height}")
+                raise GenerationImageValidationError('image_pixel_limit_exceeded',
+                    f'图片为 {width} × {height}，共 {width * height:,} 像素，当前上限为 {MAX_IMAGE_PIXELS:,} 像素；原文件未修改。', 413)
+            if allowed_formats is not None and image_format not in allowed_formats:
+                raise GenerationImageValidationError('image_format_unsupported',
+                    '此图片格式不受支持，请使用 PNG、JPEG 或 WebP 图片；原文件未修改。', 415)
             image.verify()
+        # Some formats only validate headers in verify(). Decode the bounded
+        # raster before persisting anything, without re-encoding the original.
+        with Image.open(BytesIO(data)) as image:
+            image.load()
+        return image_format, width, height
     except GenerationJobConflict:
         raise
-    except (UnidentifiedImageError, OSError, ValueError) as exc:
-        raise GenerationJobConflict("Generation image is invalid") from exc
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning, MemoryError) as exc:
+        # Pillow can reject before returning a usable Image object. Do not
+        # extract guessed dimensions or private metadata from exception text.
+        raise GenerationImageValidationError('image_safety_limit_exceeded',
+            f'图片触发安全解码限制，当前像素上限为 {MAX_IMAGE_PIXELS:,}；请使用较小的图片。原文件未修改。', 413) from exc
+    except (UnidentifiedImageError, OSError, ValueError, SyntaxError, EOFError) as exc:
+        raise GenerationImageValidationError('image_decode_failed',
+            '图片文件已损坏或无法解码，请重新导出后添加；原文件未修改。') from exc
 
 
 def _ensure_resolved_child(path: Path, parent: Path) -> None:
@@ -131,12 +181,13 @@ def resolve_generation_write_path(
     return dest_abs
 
 
-def resolve_generation_input_image_path(
+def resolve_generation_input_image_file(
     library_path: Path | str,
     result_path: str,
     *,
     allowed_roots: set[str] | None = None,
-) -> tuple[Path, str]:
+) -> Path:
+    """Resolve an existing safe input path; callers still validate image bytes."""
     roots = allowed_roots or GENERATION_INPUT_IMAGE_ROOTS
     rel = Path(result_path)
     if not result_path or rel.is_absolute() or ".." in rel.parts or len(rel.parts) < 3 or rel.parts[0] not in roots:
@@ -155,6 +206,16 @@ def resolve_generation_input_image_path(
         raise GenerationJobConflict("Generation edit input image path is invalid") from exc
     if not candidate.is_file():
         raise GenerationJobConflict("Generation edit input image is missing")
+    return candidate
+
+
+def resolve_generation_input_image_path(
+    library_path: Path | str,
+    result_path: str,
+    *,
+    allowed_roots: set[str] | None = None,
+) -> tuple[Path, str]:
+    candidate = resolve_generation_input_image_file(library_path, result_path, allowed_roots=allowed_roots)
     return candidate, _verify_image_file(candidate)
 
 
@@ -435,7 +496,9 @@ class GenerationJobRepository:
             if connection is None:
                 conn.commit()
             else:
+                _remember_queue_start(self.library_path, job_id)
                 return self._record_from_row(conn.execute("SELECT * FROM generation_jobs WHERE id=?", (job_id,)).fetchone())
+        _remember_queue_start(self.library_path, job_id)
         return self.get_job(job_id)
 
     def _prepare_library_reference_inputs(self, job_id: str, parameters: dict) -> tuple[dict, list[str]]:
@@ -1023,21 +1086,33 @@ class GenerationJobRepository:
         for row in rows:
             self.clear_stream_preview(row["id"])
 
-    def mark_running(self, job_id: str) -> GenerationJobRecord:
+    def mark_running(self, job_id: str, *, queued_only: bool = False) -> GenerationJobRecord:
         timestamp = now()
         with connect(self.library_path) as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            row = conn.execute('SELECT metadata,status FROM generation_jobs WHERE id=?', (job_id,)).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            metadata = _from_json(row['metadata'], {})
+            execution = metadata.setdefault('execution', {'version': 1, 'phase': 'queued',
+                'timings': {key: None for key in ('queueMs', 'preparationMs', 'providerMs', 'resultWriteMs')}})
+            allowed = {'queued'} if queued_only else {'queued', 'failed'}
+            if row['status'] in allowed:
+                execution['timings']['queueMs'] = _queue_duration(self.library_path, job_id)
+                execution['phase'] = 'preparing'
             cursor = conn.execute(
                 """
                 UPDATE generation_jobs
-                SET status='running', error=NULL, started_at=COALESCE(started_at, ?), updated_at=?
-                WHERE id=? AND status IN ('queued', 'failed')
+                SET status='running', error=NULL, started_at=COALESCE(started_at, ?), updated_at=?, metadata=?
+                WHERE id=? AND (status='queued' OR (?=0 AND status='failed'))
                 """,
-                (timestamp, timestamp, job_id),
+                (timestamp, timestamp, _to_json(metadata), job_id, int(queued_only)),
             )
             conn.commit()
         if cursor.rowcount != 1:
             current = self.get_job(job_id)
-            raise GenerationJobConflict(f"Generation job must be queued or failed before run; current status is {current.status}")
+            expected = 'queued' if queued_only else 'queued or failed'
+            raise GenerationJobConflict(f"Generation job must be {expected} before run; current status is {current.status}")
         return self.get_job(job_id)
 
     def mark_failed(self, job_id: str, error: str, retry_after_seconds: int | None = None, *, diagnostics: dict | None = None) -> GenerationJobRecord:
@@ -1056,7 +1131,9 @@ class GenerationJobRepository:
             metadata = sanitize_generation_parameters(metadata, redact_image_data=True)
             metadata["error_kind"] = _classify_error(str(error or ""))
             if diagnostics is not None:
-                metadata["error_diagnostics"] = sanitize_generation_parameters(diagnostics, redact_image_data=True)
+                metadata["error_diagnostics"] = safe_diagnostics(diagnostics)
+                metadata["failure"] = classify_failure(diagnostics)
+                redacted_error = metadata["failure"]["message"]
             if retry_after_seconds is not None:
                 metadata["retry_after_seconds"] = max(0, min(300, int(retry_after_seconds)))
             cursor = conn.execute(
@@ -1073,6 +1150,27 @@ class GenerationJobRepository:
             raise GenerationJobConflict(f"Generation job cannot be marked failed from status {current.status}")
         self.clear_stream_preview(job_id)
         return self.get_job(job_id)
+
+    def record_execution(self, job_id: str, phase: str | None = None, **durations) -> bool:
+        return record_measurement(self._record_execution, job_id, phase, **durations)
+
+    def _record_execution(self, job_id: str, phase: str | None = None, **durations) -> None:
+        """Persist bounded monotonic measurements, never wall-clock estimates."""
+        with connect(self.library_path) as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            row = conn.execute('SELECT metadata FROM generation_jobs WHERE id=?', (job_id,)).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            metadata = _from_json(row['metadata'], {})
+            execution = metadata.setdefault('execution', {'version': 1, 'phase': 'queued',
+                'timings': {key: None for key in ('queueMs', 'preparationMs', 'providerMs', 'resultWriteMs')}})
+            if phase in {'queued', 'preparing', 'generating', 'processing_results', 'completed', 'failed', 'unknown'}:
+                execution['phase'] = phase
+            for key, value in durations.items():
+                if key in {'queueMs', 'preparationMs', 'providerMs', 'resultWriteMs'}:
+                    execution['timings'][key] = duration_ms(value)
+            conn.execute('UPDATE generation_jobs SET metadata=?,updated_at=? WHERE id=?', (_to_json(metadata), now(), job_id))
+            conn.commit()
 
     def mark_running_provider_jobs_failed(self, provider: str, error: str) -> list[GenerationJobRecord]:
         with connect(self.library_path) as conn:
@@ -1308,20 +1406,64 @@ class GenerationJobRepository:
                 prepared.append((data, name, source_image_id, generation_provider, generation_model))
         return prepared
 
+    def _linked_agent_retry(self, job: GenerationJobRecord, specs: list, prepared: list[PreparedReferenceImage]) -> bool:
+        """A retry keeps its real root receipt; it is never a new Agent tool call."""
+        link = job.metadata.get('agentRetry')
+        fields = ('retryId', 'rootSourceJobId', 'sourceJobId', 'sourceRequestId', 'roundId', 'conversationId')
+        if not isinstance(link, dict) or not all(isinstance(link.get(key), str) and link[key] for key in fields):
+            return False
+        if job.id != 'gen_retry_' + hashlib.sha256(link['retryId'].encode('utf-8')).hexdigest():
+            return False
+        with connect(self.library_path) as conn:
+            root = conn.execute('''SELECT g.*, r.data AS agent_round_data
+                FROM generation_jobs g JOIN agent_tool_jobs t ON t.job_id=g.id
+                JOIN agent_requests a ON a.id=t.request_id
+                JOIN agent_rounds r ON r.id=a.round_id AND r.conversation_id=a.conversation_id
+                WHERE g.id=? AND a.id=? AND a.round_id=? AND a.conversation_id=?''',
+                (link['rootSourceJobId'], link['sourceRequestId'], link['roundId'], link['conversationId'])).fetchone()
+            parent = conn.execute('SELECT metadata FROM generation_jobs WHERE id=?', (link['sourceJobId'],)).fetchone()
+            if root is None or parent is None or root['id'] not in json.loads(root['agent_round_data']).get('outputTaskIds', []):
+                return False
+            parent_metadata = json.loads(parent['metadata'])
+            if parent_metadata.get('latestRetryJobId') != job.id:
+                return False
+            if link['sourceJobId'] != root['id']:
+                ancestor = parent_metadata.get('agentRetry')
+                if not isinstance(ancestor, dict) or any(ancestor.get(key) != link[key] for key in (
+                        'rootSourceJobId', 'sourceRequestId', 'roundId', 'conversationId')):
+                    return False
+            original = self._record_from_row(root)
+            original_specs = self._input_image_specs(original)
+            if len(specs) != len(original_specs):
+                return False
+            expected = {entry.get('copied_path'): entry.get('sha256') for entry in
+                        original.metadata.get('reference_image_copies', []) if isinstance(entry, dict)}
+            # A source result may already have been cleaned; its immutable
+            # frozen identity still authenticates the retry's retained bytes.
+            for before, after, image in zip(original_specs, specs, prepared):
+                path = before.get('result_path')
+                asset = conn.execute('SELECT sha256 FROM agent_assets WHERE path=?', (path,)).fetchone()
+                digest = asset['sha256'] if asset else expected.get(path)
+                if before.get('name') != after.get('name') or not digest or hashlib.sha256(image[0]).hexdigest() != digest:
+                    return False
+        return True
+
     def _library_agent_prompt(
         self, job: GenerationJobRecord, text: str, prepared: list[PreparedReferenceImage],
     ) -> tuple[str, dict]:
         """Resolve only linked Agent markers; keep the original recipe untouched."""
         agent = job.metadata.get("agent")
         specs = self._input_image_specs(job)
-        if not isinstance(agent, dict) or not agent.get("requestId") or len(specs) != len(prepared):
+        if len(specs) != len(prepared):
             return text, {}
-        with connect(self.library_path) as conn:
-            linked = conn.execute(
-                "SELECT 1 FROM agent_tool_jobs WHERE job_id=? AND request_id=?",
-                (job.id, agent["requestId"]),
-            ).fetchone()
-        if linked is None:
+        linked = False
+        if isinstance(agent, dict) and agent.get('requestId'):
+            with connect(self.library_path) as conn:
+                linked = conn.execute(
+                    "SELECT 1 FROM agent_tool_jobs WHERE job_id=? AND request_id=?",
+                    (job.id, agent["requestId"]),
+                ).fetchone() is not None
+        if not linked and not self._linked_agent_retry(job, specs, prepared):
             return text, {}
         labels: dict[str, str] = {}
         image_labels: dict[str, str] = {}
@@ -2369,6 +2511,8 @@ class GenerationJobRepository:
                 if not isinstance(original_metadata, dict):
                     original_metadata = {}
                 original_metadata = sanitize_generation_parameters(original_metadata, redact_image_data=True)
+                if original_metadata.get("latestRetryJobId") or original_metadata.get("agentRetry"):
+                    raise GenerationJobConflict("请在 Agent 中核对已有重试并确认当前生图配置，不能从旧入口重复提交。")
                 if original_metadata.get("retried_by_generation_job_id"):
                     raise GenerationJobConflict("Failed generation job has already been retried")
                 original_metadata["retried_by_generation_job_id"] = retry_id
@@ -2420,6 +2564,12 @@ class GenerationJobRepository:
             raise
 
     def discard_and_retry_job(self, job_id: str) -> GenerationJobRetryResult:
+        # A concurrent caller must not mistake an in-progress discard repair for
+        # a previous interrupted operation and report a second successful claim.
+        with _DISCARD_REPAIR_LOCK:
+            return self._discard_and_retry_job(job_id)
+
+    def _discard_and_retry_job(self, job_id: str) -> GenerationJobRetryResult:
         if self.get_job(job_id).provider in {"agent_native", "agent_native_batch"}:
             raise GenerationJobConflict("请在 Agent 对话中重新生成此原生图片，并确认本轮授权。")
         pending = self._resume_pending_discard_repair(job_id)
@@ -2783,4 +2933,11 @@ class GenerationJobRepository:
         meta = _from_json(data.get("metadata"), {})
         data["parameters"] = params if isinstance(params, dict) else {}
         data["metadata"] = meta if isinstance(meta, dict) else {}
+        # Old records are projected safely, without mutating their stored history.
+        if isinstance(data['metadata'].get('error_diagnostics'), dict):
+            failure = classify_failure(data['metadata']['error_diagnostics'])
+            data['metadata']['failure'] = failure
+            data['metadata']['error_diagnostics'] = safe_diagnostics(data['metadata']['error_diagnostics'])
+            if data.get('error'):
+                data['error'] = failure['message']
         return GenerationJobRecord(**data)

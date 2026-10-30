@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -21,6 +21,7 @@ class AgentConfig(AgentModel):
     webSearch: bool = False
     mathFormattingPrompt: bool = True
     professionalPromptWorkflows: bool = True
+    experimentalImageDeduplication: bool = False
 
 
 class AgentConfigSave(AgentModel):
@@ -44,6 +45,49 @@ class AgentRef(AgentModel):
     imageId: str | None = None
     jobId: str | None = None
     uploadId: str | None = None
+
+
+class AgentEditingAuxiliary(AgentModel):
+    ref: AgentRef
+    role: Literal['lighting', 'style', 'subject', 'composition', 'other'] = 'other'
+
+
+class AgentEditingTask(AgentModel):
+    target: AgentRef | None = None
+    auxiliaries: list[AgentEditingAuxiliary] = Field(default_factory=list, max_length=3)
+    requirements: str = Field(default='', max_length=4000)
+    constraints: list[Annotated[str, Field(max_length=500)]] = Field(default_factory=list, max_length=12)
+    workflow: Literal['auto', 'image-prompt-reverse', 'gpt-image'] = 'auto'
+
+
+class AgentEditingTaskPatch(AgentModel):
+    expectedRevision: int = Field(ge=0)
+    branchRoundId: str | None = None
+    task: AgentEditingTask | None
+
+
+class AgentTaskOperation(AgentModel):
+    op: Literal['new_task', 'start_task', 'reconcile_text_source', 'set_task_type', 'set_target', 'set_auxiliaries', 'add_constraint',
+                'update_constraint', 'revoke_constraint', 'set_prompt', 'select_prompt',
+                'restore_prompt', 'restore_working_prompt', 'set_unresolved', 'set_history_dependencies']
+    id: str | None = Field(default=None, max_length=100)
+    roundId: str | None = Field(default=None, max_length=100)
+    text: str | None = Field(default=None, max_length=100_000)
+    kind: Literal['candidate', 'selected'] | None = None
+    taskType: Literal['chat', 'image_edit', 'image_generation', 'prompt', 'analysis', 'reverse', 'prompt_optimization'] | None = None
+    ref: AgentRef | None = None
+    auxiliaries: list[AgentEditingAuxiliary] | None = Field(default=None, max_length=3)
+    items: list[Annotated[str, Field(max_length=1000)]] | None = Field(default=None, max_length=24)
+    source: dict | None = None
+    sourceQuote: str | None = Field(default=None, min_length=1, max_length=100_000)
+    dependencies: list[dict] | None = Field(default=None, max_length=128)
+
+
+class AgentTaskContextPatch(AgentModel):
+    expectedRevision: int = Field(ge=0)
+    branchRoundId: str | None = None
+    taskRevision: int | None = Field(default=None, ge=0)
+    operations: list[AgentTaskOperation] = Field(min_length=1, max_length=24)
 
 
 class AgentMask(AgentModel):
@@ -85,9 +129,27 @@ class AgentRoundCreate(AgentModel):
     configRevision: int = Field(ge=0)
     activeProfileId: str | None = None
     imageConfig: AgentImageConfig | None = None
+    imageCount: Literal[1, 3, 5, 10] = 1
     params: AgentParams = Field(default_factory=AgentParams)
     authorization: AgentAuthorization
+    contextScope: Literal['task', 'branch', 'selected'] = 'task'
+    historyRoundIds: list[Annotated[str, Field(max_length=100)]] = Field(default_factory=list, max_length=128)
+    taskRevision: int | None = Field(default=None, ge=0)
 
 
 class AgentResume(AgentModel):
     resumeId: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+class AgentPromptExecutionCreate(AgentModel):
+    requestId: str = Field(min_length=1, max_length=100, pattern=r'^[A-Za-z0-9_-]+$')
+    expectedRevision: int = Field(ge=0)
+    branchRoundId: str | None = None
+    taskId: str = Field(min_length=1, max_length=100)
+    taskRevision: int = Field(ge=0)
+    promptVersionId: str = Field(min_length=1, max_length=100)
+    configRevision: int = Field(ge=0)
+    imageConfig: AgentImageConfig | None = None
+    params: AgentParams
+    imageCount: Literal[1, 3, 5, 10] = 1
+    confirmed: Literal[True]

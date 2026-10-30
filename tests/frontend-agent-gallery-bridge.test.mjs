@@ -66,7 +66,7 @@ function harness(t, name, props = {}, options = {}) {
     '../../utils/recipeInputs': references, '../../utils/generationPreferences': preferences,
     '../../utils/profileSettings': profileSettings, '../../utils/promptTemplateVariables': templates,
     '../../utils/galleryDraft': { readGalleryDraft: async () => options.draft, saveGalleryDraft: async () => {} },
-    '../../utils/clipboard': { copyTextToClipboard: async () => true },
+    '../../utils/clipboard': { copyTextToClipboard: async () => true }, '../../utils/imageClipboard': { copyFinalImageToClipboard: async () => { throw Error('Unexpected image copy in this harness'); } },
     '../../utils/galleryCardMeta': { galleryImageDimensions: () => undefined, galleryTaskElapsed: () => undefined },
     '../../utils/playground/virtualGrid': { getIndexesInRect: () => [] },
     '../../utils/playground/useVirtualGrid': { useVirtualGrid: (_, count) => ({ startIndex: 0, endIndex: count, paddingTop: 0, paddingBottom: 0, metricsRef: {} }) },
@@ -126,16 +126,20 @@ test('actual workspace native reuse keeps its transport and intent; ordinary reu
   assert.deepEqual(events.slice(-2), ['closed', [ordinary, 'reference']]);
 });
 
-test('actual InputBar reports only image settings and resolves the current template for auto4k', async t => {
+test('actual InputBar shares the auto4k policy without sharing or resolving its own template', async t => {
   const historical = job({ parameters: { compatible_profile_id: 'images', quality: 'high', size: 'auto', size_mode: 'auto4k', background: 'opaque', output_format: 'webp', output_compression: 82, moderation: 'low', base_url_mode: 'custom', stream: true, partial_images: 3, response_format: 'b64_json', prompt_template: '海报 {{ratio}}', prompt_template_values: { ratio: '16:9' } } });
   const h = harness(t, 'InputBar', { promptVariablesEnabled: true, command: { id: 1, job: historical } }); await h.flush();
   const settings = h.reports.at(-1);
-  assert.equal(settings.unavailable, undefined); assert.equal(settings.params.size, '3840x2160');
-  assert.deepEqual(settings.params, { size: '3840x2160', quality: 'high', background: 'opaque', output_format: 'webp', output_compression: 82, moderation: 'low' });
+  assert.equal(settings.unavailable, undefined); assert.equal(settings.params.size, 'auto');
+  assert.equal(settings.sizeMode, 'auto4k'); assert.equal(settings.count, 1);
+  assert.deepEqual(settings.params, { size: 'auto', quality: 'high', background: 'opaque', output_format: 'webp', output_compression: 82, moderation: 'low' });
+  assert.deepEqual(Object.keys(settings).sort(), ['count','model','params','profileId','provider','sizeMode']);
   assert.equal(settings.model, 'image-model'); assert.equal(settings.profileId, 'images');
   assert.equal(h.node('textarea', props => props['aria-label'] === '画廊提示词').value, '海报 {{ratio}}');
   h.node('textarea', props => props['aria-label'] === '画廊提示词').onChange({ target: { value: '海报 1:1 和 16:9' } }); await h.flush();
-  assert.match(h.reports.at(-1).unavailable, /冲突比例/);
+  assert.equal(h.reports.at(-1).unavailable, undefined, 'a Gallery prompt conflict cannot block the Agent own prompt');
+  h.node('textarea', props => props['aria-label'] === '画廊提示词').onChange({ target: { value: '海报 {{missing}}' } }); await h.flush();
+  assert.equal(h.reports.at(-1).unavailable, undefined, 'unfilled Gallery variables are not shared configuration');
 });
 
 test('actual InputBar marks incompatible providers and incomplete configuration unavailable', async t => {
@@ -159,19 +163,83 @@ test('actual InputBar reports a cleared model as unavailable instead of copying 
   assert.equal(h.reports.at(-1).unavailable, undefined);
 });
 
-test('actual InputBar waits for measured reference dimensions instead of exporting a square auto4k guess', async t => {
+test('actual InputBar shares auto4k before its own reference measurement finishes', async t => {
   const decodes = [];
   const draft = { ...recipe.emptyGalleryDraft(), profileId: 'images', prompt: '沿用参考图比例', recipe: { model: 'image-model', size: 'auto', size_mode: 'auto4k', quality: 'auto', background: 'auto', output_format: 'png' }, inputs: [{ id: 'reference', name: 'reference', source: 'uploaded', dataUrl: 'data:image/png;base64,REF', previewUrl: 'data:image/png;base64,REF' }] };
   const h = harness(t, 'InputBar', { preferences: { persistInputOnRestart: true } }, { draft, decode: () => new Promise(resolve => decodes.push(resolve)) });
   await h.flush(); assert.match(h.reports.at(-1).unavailable, /正在读取/);
   decodes.shift()(); await h.flush();
-  assert.match(h.reports.at(-1).unavailable, /首张参考图比例/);
+  assert.equal(h.reports.at(-1).unavailable, undefined);
+  assert.equal(h.reports.at(-1).sizeMode, 'auto4k');
+  assert.equal(h.reports.at(-1).params.size, 'auto');
   decodes.shift()(); await h.flush();
-  assert.ok(h.reports.at(-1).unavailable, 'the second measurement is not complete yet');
+  assert.equal(h.reports.at(-1).unavailable, undefined, 'pending Gallery dimensions do not block another workspace');
   decodes.shift()(); await h.flush();
   assert.equal(h.reports.at(-1).unavailable, undefined);
-  assert.equal(h.reports.at(-1).params.size, compatible.resolveAuto4k(draft.prompt, { width: 1200, height: 800 }).size);
+  assert.equal(h.reports.at(-1).params.size, 'auto', 'only the sender resolves its own dimensions');
   assert.equal(h.node('textarea', props => props['aria-label'] === '画廊提示词').value, draft.prompt);
+});
+
+test('shared settings update only image choices and retain legacy default count', () => {
+  const draft = { ...recipe.emptyGalleryDraft(), prompt: '  own {{subject}}\r\n', templateValues: { subject: 'cat' }, sourceItemId: 'source', aspectRatio: '9:16', aspectInjection: true, inputs: [{ id: 'own', dataUrl: 'data:image/png;base64,OWN' }], recipe: { model: 'old', size: '1024x1024', size_mode: 'auto4k', quality: 'high', background: 'auto', output_format: 'webp', output_compression: 70, stream: true, base_url_mode: 'custom' } };
+  const settings = { provider: 'openai_compatible', profileId: 'images', model: 'new', params: { size: '1536x1024', quality: 'low', background: 'opaque', output_format: 'png' }, prompt: 'must not copy', inputs: ['must not copy'] };
+  const updated = bridge.applyGalleryImageSettings(draft, settings);
+  assert.equal(updated.prompt, draft.prompt); assert.equal(updated.inputs, draft.inputs); assert.equal(updated.templateValues, draft.templateValues); assert.equal(updated.sourceItemId, draft.sourceItemId);
+  assert.equal(updated.aspectRatio, 'auto'); assert.equal(updated.aspectInjection, undefined);
+  assert.deepEqual(updated.recipe, { model: 'new', size: '1536x1024', quality: 'low', background: 'opaque', output_format: 'png' });
+  assert.equal(draft.recipe.model, 'old'); assert.equal(bridge.sharedImageCount(undefined), 1);
+  assert.equal(bridge.sharedImageCount(3), 3); assert.equal(bridge.sharedImageCount(2), 1);
+  assert.equal(bridge.applyGalleryImageSettings(draft, { ...settings, provider: 'agent_native' }), draft);
+});
+
+test('Agent settings update the actual hidden Gallery, preserve its draft, and report local edits without replay', async t => {
+  const ownInput = { id: 'own', name: 'Gallery reference', source: 'uploaded', dataUrl: 'data:image/png;base64,OWN', previewUrl: 'data:image/png;base64,OWN' };
+  const draft = { ...recipe.emptyGalleryDraft(), profileId: 'images', prompt: 'Gallery {{subject}} 9:16', templateValues: { subject: 'cat' }, inputs: [ownInput], recipe: { model: 'image-model', size: 'auto', quality: 'auto', background: 'auto', output_format: 'png' } };
+  const sent = [];
+  const h = harness(t, 'InputBar', { active: false, promptVariablesEnabled: true, preferences: { persistInputOnRestart: true } }, { draft, api: { createGenerationSet: async payload => { sent.push(payload); return { jobs: [] }; } } });
+  await h.flush();
+  const command = { id: 1, settings: { provider: 'openai_compatible', profileId: 'images', model: 'new-model', params: { size: 'auto', quality: 'high', background: 'opaque', output_format: 'webp', output_compression: 82 }, sizeMode: 'auto4k', count: 3 } };
+  h.update({ imageSettingsCommand: command }); await h.flush();
+  assert.equal(h.node('textarea', props => props['aria-label'] === '画廊提示词').value, draft.prompt);
+  assert.equal(h.node('input', props => props.value === 'cat').value, 'cat');
+  assert.equal(h.node('img', props => props.alt === 'Gallery reference').src, ownInput.previewUrl);
+  assert.equal(text(h.node('button', props => props['aria-label'] === '生成数量').children), '数量3 张');
+  assert.equal(h.reports.at(-1).model, 'new-model'); assert.equal(h.reports.at(-1).count, 3);
+  const reports = h.reports.length;
+  h.update({ imageSettingsCommand: { ...command } }); await h.flush();
+  assert.equal(h.reports.length, reports, 're-rendering the same command must not echo or replay it');
+  h.node('button', props => props['aria-label'] === '质量 high').onClick(); await h.flush();
+  h.node('button', props => text(props.children) === '低 · low').onClick(); await h.flush();
+  assert.equal(h.reports.at(-1).params.quality, 'low'); assert.equal(h.reports.at(-1).count, 3);
+  h.node('button', props => props['aria-label'] === '生成图片').onClick(); await h.flush();
+  assert.equal(sent.length, 1); assert.equal(sent[0].count, 3);
+  assert.equal(sent[0].job.prompt_text, draft.prompt); assert.equal(sent[0].job.edited_prompt_text, 'Gallery cat 9:16');
+  assert.equal(sent[0].job.parameters.size, '2160x3840');
+  assert.equal(sent[0].job.parameters.input_images[0].data_url, ownInput.dataUrl);
+});
+
+test('a shared edit waits for a Gallery submission and cannot mutate its frozen request', async t => {
+  let finish;
+  const sent = [];
+  const h = harness(t, 'InputBar', {}, { api: { createGenerationJob: payload => { sent.push(payload); return new Promise(resolve => { finish = resolve; }); } } });
+  await h.flush();
+  h.node('textarea', props => props['aria-label'] === '画廊提示词').onChange({ target: { value: 'original Gallery prompt' } }); await h.flush();
+  h.node('button', props => props['aria-label'] === '生成图片').onClick(); await h.flush();
+  h.update({ imageSettingsCommand: { id: 8, settings: { provider: 'openai_compatible', profileId: 'images', model: 'next-model', params: { size: '1536x1024', quality: 'high', background: 'auto', output_format: 'png' }, count: 5 } } }); await h.flush();
+  assert.equal(sent[0].model, 'image-model'); assert.equal(sent[0].parameters.quality, 'auto');
+  assert.equal(h.reports.at(-1).model, 'image-model');
+  finish(job()); await h.flush();
+  assert.equal(h.reports.at(-1).model, 'next-model'); assert.equal(h.reports.at(-1).count, 5);
+  assert.equal(sent[0].model, 'image-model'); assert.equal(sent[0].parameters.size, 'auto');
+  assert.equal(h.node('textarea', props => props['aria-label'] === '画廊提示词').value, 'original Gallery prompt');
+});
+
+test('missing Gallery references do not make shared image configuration unavailable', async t => {
+  const draft = { ...recipe.emptyGalleryDraft(), profileId: 'images', prompt: '{{unfilled}}', templateValues: {}, recipe: { model: 'image-model', size: 'auto', size_mode: 'auto4k', quality: 'auto', background: 'auto', output_format: 'png' }, inputs: [{ id: 'missing', name: 'missing', source: 'uploaded', missing: true, previewUrl: '' }] };
+  const h = harness(t, 'InputBar', { promptVariablesEnabled: true, preferences: { persistInputOnRestart: true } }, { draft }); await h.flush();
+  assert.equal(h.reports.at(-1).unavailable, undefined);
+  assert.equal(h.reports.at(-1).sizeMode, 'auto4k');
+  assert.equal(h.node('button', props => props['aria-label'] === '生成图片').disabled, true, 'Gallery still validates its own draft');
 });
 
 test('actual InputBar native commands call the Agent bridge instead of restoring an Images recipe', async t => {

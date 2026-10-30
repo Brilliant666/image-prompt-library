@@ -16,6 +16,7 @@ from backend.main import create_app
 from backend.schemas import GenerationJobCreate, ItemCreate, PromptIn
 from backend.services.generation_jobs import (
     GenerationJobConflict,
+    GenerationImageValidationError,
     GenerationJobRepository,
     _classify_error,
     sanitize_generation_error,
@@ -2005,8 +2006,9 @@ def test_stage_result_rejects_truncated_image_before_marking_job_succeeded(tmp_p
     job = repo.create_job(GenerationJobCreate(provider="manual_upload", prompt_text="truncated result"))
     truncated = png_bytes("blue")[:-12]
 
-    with pytest.raises(GenerationJobConflict, match="invalid"):
+    with pytest.raises(GenerationImageValidationError) as failure:
         repo.stage_result(job.id, truncated, "truncated.png")
+    assert failure.value.code == "image_decode_failed"
 
     current = repo.get_job(job.id)
     assert current.status == "queued"

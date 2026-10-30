@@ -11,7 +11,7 @@ import TrashModal, { trashLabels } from './components/TrashModal';
 import QuickCaptureModal from './components/QuickCaptureModal';
 import GalleryWorkspace from './components/gallery/GalleryWorkspace';
 import AgentWorkspace from './components/agent/AgentWorkspace';
-import type { AgentGalleryCommand, GalleryImageSettings } from './utils/agentGalleryBridge';
+import type { AgentGalleryCommand, GalleryImageSettings, GalleryImageSettingsCommand } from './utils/agentGalleryBridge';
 import type { GalleryCommand } from './components/gallery/InputBar';
 import { readLocalPreferences, saveLocalPreferences } from './utils/localPreferences';
 
@@ -97,6 +97,14 @@ export default function App() {
   const [agentFocus,setAgentFocus]=useState<{id:string;token:number}>();
   const [agentGalleryCommand, setAgentGalleryCommand] = useState<AgentGalleryCommand>();
   const [galleryImageSettings, setGalleryImageSettings] = useState<GalleryImageSettings>();
+  const [galleryImageSettingsCommand, setGalleryImageSettingsCommand] = useState<GalleryImageSettingsCommand>();
+  const galleryImageSettingsSequence = useRef(0);
+  const updateSharedImageSettings = useCallback((settings: GalleryImageSettings) => {
+    if (settings.provider !== 'openai_compatible') return;
+    const shared = structuredClone(settings);
+    setGalleryImageSettings(shared);
+    setGalleryImageSettingsCommand({ id: ++galleryImageSettingsSequence.current, settings: shared });
+  }, []);
   const [galleryCommand, setGalleryCommand] = useState<GalleryCommand>();
   const [configSection, setConfigSection] = useState<'api'|'general'|'agent'|'capture'|'data'|'about'>();
   const [configurationRevision, setConfigurationRevision] = useState(0);
@@ -513,8 +521,8 @@ export default function App() {
         : <CardsView t={t} items={localizedData.items} loading={contentLoading || refreshing} emptyMode={emptyMode} total={localizedData.total} sort={activeSort} onSort={updateSort} clusterName={localizedClusterName(selectedCluster, uiLanguage)} hasActiveSearch={Boolean(parsedSearchQuery.q.trim())} onClearCluster={clearCluster} onOpen={setDetailId} onFavorite={isDemoMode ? undefined : favorite} onEdit={isDemoMode ? undefined : editSummary} editingItemId={editingItemId} onToggleSelection={selectionMode ? toggleSelectedItem : undefined} selectedIds={selectedItemIds} onCopyPrompt={copyPrompt} onAdd={isDemoMode ? undefined : openNewItemEditor} onOpenConfig={openConfig} hasMore={dataScopeMatches && hasMore} loadingMore={loadingMore} loadMoreError={loadMoreError} onLoadMore={loadMore} />)}
     </main>
     {!isDemoMode && <>
-      <GalleryWorkspace active={view === 'gallery'} onImageSettingsChange={setGalleryImageSettings} onSendToAgent={(job,intent) => {setAgentGalleryCommand({id:Date.now(),job,intent}); updateView('agent');}} queueOpen={galleryQueueOpen} onQueueOpenChange={setGalleryQueueOpen} t={t} preferences={localPreferences} libraryScope={appConfig?.library_path} command={galleryCommand} focusJobId={focusedGenerationJobId} onCloseDetail={() => setFocusedGenerationJobId(undefined)} refreshKey={generationQueueRefreshKey} configurationRevision={configurationRevision} promptVariablesEnabled={Boolean(appConfig?.features?.camelot?.percival)} promptLanguage={preferredLanguage === 'origin' ? uiLanguage : preferredLanguage} preferredProvider={defaultAiProvider} onOpenAgent={id => {setAgentFocus({id,token:Date.now()}); updateView('agent');}} onOpenSettings={openProviders} onAccepted={(id, autoTitle) => { saved(); setDetailId(id); if (autoTitle) trackGalleryTitle(id); }} onQueueChanged={() => setGenerationQueueRefreshKey(value => value + 1)} />
-      <AgentWorkspace galleryCommand={agentGalleryCommand} galleryImageSettings={galleryImageSettings} onProfileChange={setAgentProfileId} focusConversationId={agentFocus?.id} focusToken={agentFocus?.token} active={view === 'agent'} onOpenSettings={() => { setFocusConfigProviders(false); setConfigSection('agent'); setConfigOpen(true); }} onOpenJob={id => {setFocusedGenerationJobId(id); updateView('gallery');}} onLibraryChanged={saved} onJobsChanged={() => setGenerationQueueRefreshKey(value => value + 1)} />
+      <GalleryWorkspace active={view === 'gallery'} imageSettingsCommand={galleryImageSettingsCommand} onImageSettingsChange={setGalleryImageSettings} onSendToAgent={(job,intent) => {setAgentGalleryCommand({id:Date.now(),job,intent}); updateView('agent');}} queueOpen={galleryQueueOpen} onQueueOpenChange={setGalleryQueueOpen} t={t} preferences={localPreferences} libraryScope={appConfig?.library_path} command={galleryCommand} focusJobId={focusedGenerationJobId} onCloseDetail={() => setFocusedGenerationJobId(undefined)} refreshKey={generationQueueRefreshKey} configurationRevision={configurationRevision} promptVariablesEnabled={Boolean(appConfig?.features?.camelot?.percival)} promptLanguage={preferredLanguage === 'origin' ? uiLanguage : preferredLanguage} preferredProvider={defaultAiProvider} onOpenAgent={id => {setAgentFocus({id,token:Date.now()}); updateView('agent');}} onOpenSettings={openProviders} onAccepted={(id, autoTitle) => { saved(); setDetailId(id); if (autoTitle) trackGalleryTitle(id); }} onQueueChanged={() => setGenerationQueueRefreshKey(value => value + 1)} />
+      <AgentWorkspace galleryCommand={agentGalleryCommand} galleryImageSettings={galleryImageSettings} onGalleryImageSettingsChange={updateSharedImageSettings} onProfileChange={setAgentProfileId} focusConversationId={agentFocus?.id} focusToken={agentFocus?.token} active={view === 'agent'} onOpenSettings={() => { setFocusConfigProviders(false); setConfigSection('agent'); setConfigOpen(true); }} onOpenJob={id => {setFocusedGenerationJobId(id); updateView('gallery');}} onLibraryChanged={saved} onJobsChanged={() => setGenerationQueueRefreshKey(value => value + 1)} />
     </>}
     </div>
     {view === 'cards' && selectionMode && !isDemoMode && (

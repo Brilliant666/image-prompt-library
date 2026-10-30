@@ -18,6 +18,50 @@ def png(color="blue"):
     return buffer.getvalue()
 
 
+def test_two_dispatchers_cannot_reclaim_a_failed_paid_attempt(config, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier, Event, Lock, local
+    from backend.schemas import GenerationJobCreate
+    from backend.services.generation_jobs import GenerationJobConflict, GenerationJobRepository
+    from backend.services import generation_queue
+
+    repo = GenerationJobRepository(config.library_path)
+    job = repo.create_job(GenerationJobCreate(provider='openai_compatible', prompt_text='Synthetic concurrency test'))
+    calls = []
+    def reject(request):
+        calls.append(request)
+        return httpx.Response(402, json={'error': {'code': 'insufficient_quota'}})
+    ready, first_finished, lock, state = Barrier(2), Event(), Lock(), local()
+    claims = []
+    original_claim = GenerationJobRepository.mark_running
+    def coordinated_claim(self, job_id, **kwargs):
+        with lock:
+            state.position = len(claims)
+            claims.append(job_id)
+        # Both dispatchers already observed queued in provider.run_job.
+        ready.wait(timeout=10)
+        if state.position == 1:
+            assert first_finished.wait(timeout=10)
+        return original_claim(self, job_id, **kwargs)
+    monkeypatch.setattr(GenerationJobRepository, 'mark_running', coordinated_claim)
+    with httpx.Client(transport=httpx.MockTransport(reject)) as client:
+        provider = OpenAICompatibleProvider(config, client)
+        monkeypatch.setattr(generation_queue, '_provider_for', lambda _: provider)
+        def dispatch(_):
+            try:
+                generation_queue._run_provider_job(config.library_path, job.id, 'openai_compatible')
+            except (OpenAICompatibleError, GenerationJobConflict) as exc:
+                return type(exc)
+            finally:
+                if state.position == 0:
+                    first_finished.set()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(dispatch, range(2)))
+    assert len(calls) == 1
+    assert set(results) == {OpenAICompatibleError, GenerationJobConflict}
+    assert repo.get_job(job.id).status == 'failed'
+
+
 @pytest.fixture
 def config(tmp_path, monkeypatch):
     cfg = OpenAICompatibleConfig(tmp_path / "private" / "config.json", tmp_path / "library")
@@ -513,7 +557,8 @@ def test_url_result_uses_existing_decode_and_metadata(config, monkeypatch, use_e
         calls.append(request)
         return httpx.Response(200, json={"data": [{"url": "https://cdn.example/image?signature=private", "size": "8x6"}]})
     downloads = []
-    def download(url, timeout, client):
+    def download(url, timeout, client, *, network_settings):
+        assert network_settings['network_mode'] == 'direct'
         downloads.append(url)
         return png()
     monkeypatch.setattr("backend.services.openai_compatible.download_image", download)
@@ -533,7 +578,7 @@ def test_url_download_failure_never_resubmits_post(config, monkeypatch):
     def handler(request):
         calls.append(request)
         return httpx.Response(200, json={"data": [{"url": "https://cdn.example/image?secret=value"}]})
-    def download(*args):
+    def download(*args, **kwargs):
         raise ImageDownloadError("image_download_http", "Image download returned HTTP 410")
     monkeypatch.setattr("backend.services.openai_compatible.download_image", download)
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:

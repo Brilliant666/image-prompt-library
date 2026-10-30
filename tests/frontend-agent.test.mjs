@@ -7,7 +7,11 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import ReactMarkdown from 'react-markdown';
 
 async function sourceModule(path) {
-  const source = await readFile(new URL(path, import.meta.url), 'utf8');
+  let source = await readFile(new URL(path, import.meta.url), 'utf8');
+  if (path.endsWith('/agentClient.ts')) {
+    const progress = ts.transpileModule(await readFile(new URL('../frontend/src/api/agentProgress.ts', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
+    source = source.replace("'./agentProgress'", JSON.stringify(`data:text/javascript;base64,${Buffer.from(progress).toString('base64')}`));
+  }
   const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
   return import(`data:text/javascript;base64,${Buffer.from(js).toString('base64')}`);
 }
@@ -71,7 +75,7 @@ test('assistant output follows text/tool/text order and never renders hidden rea
 });
 
 test('tool captions use readable labels without exposing internal function names', () => {
-  for (const [name, label] of [['generate_image', '生成图片'], ['generate_image_batch', '批量生成图片'], ['image_generation', '生成图片'], ['continue_generation', '继续生成图片'], ['web_search', '网络搜索'], ['read_agent_skill', '读取创作技能']]) {
+  for (const [name, label] of [['generate_image', '生成图片'], ['generate_image_batch', '生成图片'], ['image_generation', '生成图片'], ['continue_generation', '继续生成图片'], ['web_search', '网络搜索'], ['read_agent_skill', '读取创作技能']]) {
     assert.equal(response.getAgentToolLabel(name), label);
   }
   assert.equal(response.getAgentToolLabel('unknown_internal_function'), '执行工具');

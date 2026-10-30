@@ -357,7 +357,10 @@ def test_actual_transport_is_bounded_no_redirect_or_retry_and_redacts_errors(set
         if kind == "timeout":
             raise httpx.ReadTimeout(SECRET)
         return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({"title": SECRET if kind == "secret" else "窗影白裙", "collection": None})}}]})
-    monkeypatch.setattr(httpx, "Client", lambda **kwargs: original_client(transport=httpx.MockTransport(handler), **kwargs))
+    def client(**kwargs):
+        kwargs.pop("transport").close()
+        return original_client(transport=httpx.MockTransport(handler), **kwargs)
+    monkeypatch.setattr(httpx, "Client", client)
     settings = service.OrganizerConfig(library).read()
     if category:
         with pytest.raises(service.RemoteFailure) as raised:
@@ -372,6 +375,9 @@ def _install_transport(monkeypatch, handler):
     original_client = httpx.Client
     def client(**kwargs):
         assert kwargs["follow_redirects"] is False
+        transport = kwargs.pop("transport", None)
+        if transport is not None:
+            transport.close()
         return original_client(transport=httpx.MockTransport(handler), **kwargs)
     monkeypatch.setattr(httpx, "Client", client)
 

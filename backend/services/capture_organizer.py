@@ -24,10 +24,14 @@ from backend.db import connect
 from backend.repositories import ItemRepository, now
 from backend.services.library_archives import LibraryArchiveError, LibraryOperationLock
 from backend.services.credential_safety import contains_embedded_credential
+from backend.services.api_network import (
+    NETWORK_DEFAULTS, ApiNetworkError, create_api_client, public_network_settings,
+    update_network_settings, validate_network_settings,
+)
 
 DEFAULTS = {"enabled": False, "base_url": "", "api_key": "", "model": "gpt-6-luna",
             "timeout_seconds": 60, "generate_title": True, "assign_collection": True,
-            "allow_new_collections": True}
+            "allow_new_collections": True, **NETWORK_DEFAULTS}
 _lock = RLock()
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="capture-organizer")
 _active: set[str] = set()
@@ -90,6 +94,7 @@ def _validated(data):
     for key in DEFAULTS:
         if key in data:
             result[key] = data[key]
+    result.update(validate_network_settings(result))
     for key in ("enabled", "generate_title", "assign_collection", "allow_new_collections"):
         if type(result[key]) is not bool:
             raise OrganizerError("Organizer switches must be boolean values")
@@ -118,7 +123,8 @@ def _digest(value):
 def _config_digest(value):
     # External revision changes whenever credentials/settings are saved. No
     # credential-derived hash enters the asset DB or library backup.
-    return _digest({key: item for key, item in value.items() if key != "api_key"})
+    return _digest({key: item for key, item in value.items() if key not in {"api_key", "proxy_url"}
+                    and not (key == "network_mode" and item == "direct")})
 
 
 class OrganizerConfig:
@@ -143,7 +149,8 @@ class OrganizerConfig:
 
     def public(self, value=None):
         value = value if value is not None else self.read()
-        result = {key: item for key, item in value.items() if key != "api_key" and not key.startswith("_")}
+        result = {key: item for key, item in value.items() if key not in {"api_key", "proxy_url"} and not key.startswith("_")}
+        result.update(public_network_settings(value))
         result.update(has_api_key=bool(value["api_key"]), configured=_configured(value), last_result=None)
         with connect(self.library) as conn:
             row = conn.execute("SELECT status,category,completed_at FROM capture_organizer_jobs "
@@ -160,6 +167,7 @@ class OrganizerConfig:
             with _lock, LibraryOperationLock(self.path.parent, _lock_path=self.path.with_suffix(".lock")):
                 old = self.read()
                 data = {**old, **payload}
+                data.update(update_network_settings(old, payload))
                 incoming_key = payload.get("api_key", "")
                 if not isinstance(incoming_key, str):
                     raise OrganizerError("API Key must be text")
@@ -350,7 +358,7 @@ def request_metadata(settings, prompt, title, image_url, collections):
     try:
         # No redirects, transport retries or fallback endpoint calls. Never echo
         # provider bodies, request headers, exception strings or arbitrary IDs.
-        with httpx.Client(timeout=settings["timeout_seconds"], follow_redirects=False) as client:
+        with create_api_client(settings, timeout=settings["timeout_seconds"]) as client:
             with client.stream("POST", settings["base_url"] + "/chat/completions", json=body,
                                headers={"Authorization": "Bearer " + settings["api_key"]}) as response:
                 http_status = response.status_code
@@ -404,6 +412,8 @@ def request_metadata(settings, prompt, title, image_url, collections):
                 or contains_embedded_credential(title) or contains_embedded_credential(collection or "")):
             raise ValueError()
         return {"title": title.strip(), "collection": collection.strip() if collection else None}
+    except ApiNetworkError:
+        raise RemoteFailure("network_config", http_status) from None
     except httpx.TimeoutException:
         raise RemoteFailure("timeout", http_status) from None
     except httpx.RequestError:
@@ -453,7 +463,8 @@ def test_saved_configuration(library):
                          "", image_url, [])
         return result(http_status=200)
     except RemoteFailure as exc:
-        category = {"network": "connection", "response_too_large": "invalid_response"}.get(exc.category, exc.category)
+        category = {"network": "connection", "network_config": "configuration",
+                    "response_too_large": "invalid_response"}.get(exc.category, exc.category)
         if category not in {"configuration", "authentication", "model", "rate_limit", "timeout", "connection", "http_error", "invalid_response"}:
             category = "invalid_response"
         status = exc.http_status if type(exc.http_status) is int and 100 <= exc.http_status <= 599 else None

@@ -257,7 +257,13 @@ def test_mock_http_request_reuses_saved_vision_config_and_requests_title_only(se
         return httpx.Response(200, json={"choices": [{"message": {
             "content": json.dumps({"title": "Mocked HTTP title", "collection": "Must be ignored"})}}]})
 
-    monkeypatch.setattr(httpx, "Client", lambda **kwargs: original_client(transport=httpx.MockTransport(handler), **kwargs))
+    def mock_client(**kwargs):
+        transport = kwargs.pop("transport", None)
+        if transport is not None:
+            transport.close()
+        return original_client(transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(httpx, "Client", mock_client)
     service.run_gallery_title(library, item["id"])
     assert len(requests) == 1 and status(library, item)["status"] == "succeeded"
     final = client.get(f"/api/items/{item['id']}").json()

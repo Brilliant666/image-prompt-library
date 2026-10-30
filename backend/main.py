@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from .config import APP_VERSION, resolve_hidden_features, resolve_library_path, resolve_library_storage_path, validate_app_owned_paths
 from .db import get_db_path, init_db
-from .routers import agent, app_updates, capture_clients, capture_organizer, captures, cleanup, clusters, generation_jobs, generation_providers, images, import_drafts, items, tags
+from .routers import agent, agent_image_retry, app_updates, capture_clients, capture_organizer, captures, cleanup, clusters, generation_jobs, generation_providers, images, import_drafts, items, tags
 from .services.capture_clients import CAPTURE_HEADERS, CaptureClients, capture_route_allowed, local_target_origin
 from .services.library_archives import LibraryOperationLock
 from .services.capture_organizer import drain_jobs, recover_jobs
@@ -241,6 +241,7 @@ def create_app(library_path: Path | str | None = None, frontend_dist_path: Path 
     app.include_router(clusters.router, prefix="/api")
     app.include_router(tags.router, prefix="/api")
     app.include_router(import_drafts.router, prefix="/api")
+    app.include_router(agent_image_retry.router, prefix="/api")
     app.include_router(generation_jobs.router, prefix="/api")
     app.include_router(generation_providers.router, prefix="/api")
     app.include_router(agent.router, prefix="/api")

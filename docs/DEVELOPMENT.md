@@ -8,61 +8,85 @@ The former `codex/sub2api-images` branch is retained as history.
 
 Use Python 3.10+ and Node.js 24. The commands below are for macOS/Linux; Windows
 PowerShell setup is documented in [Independent maintenance](INDEPENDENT_MAINTENANCE.md#从源码开发与启动).
-Choose a library path and confirm that no other instance is using it before
-starting. A checkout and an installed application are separate copies; editing
+Use an isolated library and credential paths for development. Never point an
+unverified branch at daily data: startup initializes the database and recovers
+queued work. Confirm the test library is unused before starting.
+A checkout and an installed application are separate copies; editing
 source does not update an existing installation.
 
 ```bash
 git clone https://github.com/Brilliant666/image-prompt-library.git
 cd image-prompt-library
 ./scripts/setup.sh
-./scripts/start.sh
+export IMAGE_PROMPT_LIBRARY_PATH="$PWD/.local-work/dev/library"
+export IMAGE_PROMPT_LIBRARY_AUTH_PATH="$PWD/.local-work/dev/auth.json"
+export IMAGE_PROMPT_LIBRARY_GROK_AUTH_PATH="$PWD/.local-work/dev/grok-auth.json"
+export IMAGE_PROMPT_LIBRARY_CONFIG_PATH="$PWD/.local-work/dev/config.json"
+export IMAGE_PROMPT_LIBRARY_OPENAI_COMPATIBLE_CONFIG_PATH="$PWD/.local-work/dev/openai-compatible.json"
+export IMAGE_PROMPT_LIBRARY_CAPTURE_CLIENTS_PATH="$PWD/.local-work/dev/capture-clients.json"
+export IMAGE_PROMPT_LIBRARY_CAPTURE_ORGANIZER_CONFIG_PATH="$PWD/.local-work/dev/capture-organizer.json"
+export BACKEND_PORT=8010
+npm run build
+./.venv/bin/python -m uvicorn backend.main:app --host 127.0.0.1 --port "$BACKEND_PORT"
 ```
 
-Open <http://127.0.0.1:8000/>.
+Open <http://127.0.0.1:8010/>. Use synthetic content and mock providers; do not
+copy personal data or real credentials into this setup. Check an existing test
+directory for queued work before reusing it.
 
 `setup.sh` auto-detects `python3.13`, `python3.12`, `python3.11`, or `python3.10` before falling back to `python3`. On macOS, `/usr/bin/python3` may still be Python 3.9; if setup cannot find a new enough interpreter, install Python 3.10+ and rerun with an explicit interpreter:
 
 ```bash
 PYTHON=/path/to/python3.12 ./scripts/setup.sh
-./scripts/start.sh
 ```
+
+`setup.sh` installs locked dependencies with uv 0.12.16 (`--locked --extra dev`)
+and `npm ci`. It preserves existing local tools with `--inexact` and refuses to
+silently rewrite an outdated lockfile. CI uses a fresh, exact sync of the same lock.
 
 `start.sh` uses `.venv/bin/python` from setup when available and prints an actionable setup message if Python dependencies are missing.
 
-`scripts/start.sh` builds the frontend and serves the built app through FastAPI, so source local use only needs one server after setup.
+For normal local use, `scripts/start.sh` builds the frontend and serves the built app through FastAPI. Unlike the direct isolated command above, it reads `.env`: review its library and credential paths before using it with a development branch.
 
 ## Development mode
 
-For frontend/backend development with Vite hot reload:
+Stop the isolated server with `Ctrl-C`. In the same shell, retaining all isolated
+paths above, start the development backend:
 
 ```bash
-./scripts/dev.sh
+./.venv/bin/python -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8010
+```
+
+In a second terminal at the checkout root, start Vite:
+
+```bash
+BACKEND_PORT=8010 npm run dev -- --host 127.0.0.1 --port 5177
 ```
 
 Open <http://127.0.0.1:5177/>.
 
-Default development ports:
+Ports in this isolated example (script defaults remain unchanged):
 
-- Backend API: <http://127.0.0.1:8000>
+- Backend API: <http://127.0.0.1:8010>
 - Vite frontend: <http://127.0.0.1:5177>
 
 ## Configuration
 
-Copy `.env.example` to `.env` and edit if needed:
+For persistent settings, copy `.env.example` only when `.env` does not exist;
+otherwise edit it without replacing existing values:
 
 ```bash
-cp .env.example .env
+[ -f .env ] || cp .env.example .env
 ```
 
-The POSIX scripts read supported `.env` entries as literal `KEY=value` data; they do not execute shell syntax or expand quotes, variables, or command substitutions. Write paths and values directly, including spaces when needed.
+The POSIX scripts read supported `.env` entries as literal `KEY=value` data; they do not execute shell syntax or expand quotes, variables, or command substitutions. Write paths and values directly, including spaces when needed. `scripts/dev.sh` is also available after reviewing `.env`: its auth/config entries can override shell values. The direct `uvicorn` examples above avoid that source of accidental configuration reuse.
 
 Important settings:
 
 ```bash
-IMAGE_PROMPT_LIBRARY_PATH=./library
+IMAGE_PROMPT_LIBRARY_PATH=./.local-work/dev/library
 BACKEND_HOST=127.0.0.1
-BACKEND_PORT=8000
+BACKEND_PORT=8010
 FRONTEND_PORT=5177
 BACKUP_DIR=./backups
 ```
@@ -136,4 +160,5 @@ See [`BACKUP_AND_RESTORE.md`](BACKUP_AND_RESTORE.md) for the exact payload, cred
 
 ## Tests and contribution workflow
 
-See [`../CONTRIBUTING.md`](../CONTRIBUTING.md) for tests, linting, and project structure.
+See [CONTRIBUTING](../CONTRIBUTING.md) for local and final validation, and
+[AGENTS.md](../AGENTS.md) for the authoritative Draft PR, trial and merge workflow.

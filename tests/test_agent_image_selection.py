@@ -107,7 +107,8 @@ def test_native_selection_only_changes_image_tool_model(repo, mode):
 def test_selecting_images_does_not_grant_authorization_or_reset_quota(repo):
     repo.create_round("conversation", body(repo, selection={"profileId": "image_b", "model": ""}, images=False))
     tools = tools_for(repo.request("request"))
-    assert all(tool["type"] == "function" and tool.get("name") == "read_agent_skill" for tool in tools)
+    assert [tool.get("name") for tool in tools] == ["read_agent_skill", "update_task_context", "read_task_history"]
+    assert all(tool["type"] == "function" for tool in tools)
     assert not any(tool.get("type") in {"image_generation", "web_search"} or
                    tool.get("name") in {"generate_image", "generate_image_batch", "continue_generation"}
                    for tool in tools)

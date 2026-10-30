@@ -21,6 +21,11 @@ from backend.services.generation_jobs import GenerationJobConflict, GenerationJo
 from backend.services.image_store import MAX_IMAGE_PIXELS
 from backend.services.image_download import download_image, ImageDownloadError, MAX_IMAGE_BYTES
 from backend.services.image_api_stream import ImageStreamError, iter_image_events, read_json_response
+from backend.services.agent_diagnostics import safe_diagnostics, network_configuration_diagnostics
+from backend.services.api_network import (
+    NETWORK_DEFAULTS, ApiNetworkError, create_api_client, public_network_settings,
+    update_network_settings, validate_network_settings,
+)
 from backend.services.model_catalog import (
     ERRORS as CATALOG_ERRORS, ModelCatalogCache, ModelCatalogError,
     connection_fingerprint, empty_catalog, fetch_models,
@@ -211,10 +216,11 @@ class OpenAICompatibleConfig:
     def _defaults():
         return {"display_name": "Third-party API", "base_url": "", "api_key": "", "model": "", "timeout": 300,
                 "models": [], "base_url_mode": "versioned", "stream": False, "partial_images": 0,
-                "response_format": "auto"}
+                "response_format": "auto", **NETWORK_DEFAULTS}
 
     @staticmethod
     def _validate_options(value):
+        value.update(validate_network_settings(value))
         if not isinstance(value["models"], list) or len(value["models"]) > 100 or any(
             not isinstance(model, str) or not model.strip() or len(model.strip()) > 200 or
             any(ord(char) < 32 for char in model) for model in value["models"]
@@ -278,8 +284,10 @@ class OpenAICompatibleConfig:
         catalog = self._cached_model_catalog(value)
         value = dict(value)
         present = bool(value.pop("api_key", ""))
+        network = public_network_settings(value)
+        value.pop("proxy_url", None)
         return {**value, "api_key_present": present, "configured": bool(value["base_url"] and present),
-                "model_catalog": catalog}
+                "model_catalog": catalog, **network}
 
     def _cached_model_catalog(self, settings):
         if not settings["base_url"] or not settings["api_key"]:
@@ -318,7 +326,7 @@ class OpenAICompatibleConfig:
         try:
             models, error = None, None
             try:
-                models = fetch_models(root, settings["api_key"], http_client)
+                models = fetch_models(root, settings["api_key"], http_client, network_settings=settings)
             except ModelCatalogError as exc:
                 error = CATALOG_ERRORS[exc.code]
             checked_at = datetime.now(timezone.utc).isoformat()
@@ -382,6 +390,7 @@ class OpenAICompatibleConfig:
             profile_id = profile_id or document["default_profile_id"] or "legacy"
             self._validate_id(profile_id)
             value = dict(document["profiles"].get(profile_id, self._defaults()))
+            value.update(update_network_settings(value, payload))
             for field in ("display_name", "base_url", "model"):
                 if field in payload:
                     value[field] = str(payload[field] or "").strip()
@@ -572,21 +581,24 @@ class OpenAICompatibleProvider:
         started_at = datetime.now(timezone.utc).isoformat()
         started = time.monotonic()
         diagnostics = {"endpoint": url, "started_at": started_at}
+        http_started = None
 
         def fail(category, message, error=None):
             diagnostics.update(category=category, elapsed_seconds=round(time.monotonic() - started, 3))
+            if http_started is not None:
+                diagnostics.setdefault('provider_ms', round((time.monotonic() - http_started) * 1000, 3))
             if isinstance(error, dict):
-                diagnostics["error"] = {key: _safe_value(error[key], settings["api_key"]) for key in ("type", "code", "param", "message") if key in error}
-                moderation = _safe_moderation_details(error.get("moderation_details"))
-                if moderation is not None:
-                    diagnostics["error"]["moderation_details"] = moderation
-            summary = json.dumps({k: v for k, v in diagnostics.items() if k != "endpoint"}, ensure_ascii=False)
-            raise OpenAICompatibleError(message + "; no automatic retry was attempted. " + summary, dict(diagnostics)) from None
+                diagnostics["error"] = safe_diagnostics({'error': error},
+                    secrets=(settings['api_key'], prompt, request_prompt), allow_message=category != 'local_validation')['error']
+            # Never concatenate upstream prose/JSON into a persisted or visible error.
+            raise OpenAICompatibleError(message + "; no automatic retry was attempted.", dict(diagnostics)) from None
 
-        client = self.http_client or httpx.Client(timeout=settings["timeout"], follow_redirects=False, transport=httpx.HTTPTransport(retries=0))
+        client = self.http_client
         try:
+            client = client or create_api_client(settings, timeout=settings["timeout"])
             kwargs = {"data": {k: (str(v).lower() if type(v) is bool else str(v)) for k, v in payload.items()}, "files": [("image[]", item) for item in inputs]} if inputs else {"json": payload}
             accept = "text/event-stream, application/json" if transport["stream"] else "application/json"
+            http_started = time.monotonic()
             with client.stream("POST", url, headers={"Authorization": "Bearer " + settings["api_key"], "Accept": accept},
                                timeout=settings["timeout"], follow_redirects=False, **kwargs) as response:
                 diagnostics.update(http_status=response.status_code, content_type=_safe_value(response.headers.get("content-type"), settings["api_key"]),
@@ -600,8 +612,12 @@ class OpenAICompatibleProvider:
                     # Accept that single response; never send a fallback request.
                     body = read_json_response(response)
                     diagnostics["response_transport"] = "json"
+                diagnostics['provider_ms'] = round((time.monotonic() - http_started) * 1000, 3)
         except OpenAICompatibleError:
             raise
+        except ApiNetworkError as error:
+            diagnostics.update(network_configuration_diagnostics(error.message))
+            fail("local_validation", str(error), {'code': 'network_configuration'})
         except ImageStreamError as error:
             fail(error.category, str(error))
         except httpx.ConnectTimeout:
@@ -611,7 +627,9 @@ class OpenAICompatibleProvider:
         except Exception:
             fail("connection_error", "Image API connection failed; check service logs before resubmitting")
         finally:
-            if self.http_client is None:
+            if http_started is not None:
+                diagnostics.setdefault('provider_ms', round((time.monotonic() - http_started) * 1000, 3))
+            if self.http_client is None and client is not None:
                 client.close()
         if not isinstance(body, dict):
             fail("invalid_json_response", "Image API JSON must be an object")
@@ -643,7 +661,7 @@ class OpenAICompatibleProvider:
         elif isinstance(image_url, str) and image_url:
             diagnostics["image_response"]["transport"] = "url"
             try:
-                data = download_image(image_url, settings["timeout"], self.download_client)
+                data = download_image(image_url, settings["timeout"], self.download_client, network_settings=settings)
             except ImageDownloadError as error:
                 fail(error.category, str(error))
         else:
@@ -729,8 +747,12 @@ class OpenAICompatibleProvider:
             return job
         if job.status != "queued":
             raise GenerationJobConflict("Generation job must be queued; failed paid jobs require explicit resubmission")
-        repo.mark_running(job_id)
+        # The earlier read is not a claim: another dispatcher may have already
+        # called this paid request and persisted its failure in the meantime.
+        repo.mark_running(job_id, queued_only=True)
+        preparation_started = time.monotonic()
         try:
+            repo.record_execution(job_id, 'preparing')
             self.config.validate_path(library_path)
             prompt = job.edited_prompt_text if job.edited_prompt_text is not None else (job.prompt_text or "")
             if not prompt.strip():
@@ -750,12 +772,25 @@ class OpenAICompatibleProvider:
                 parameters["model"] = ((getattr(job, "metadata", {}) or {}).get("requested") or {}).get("model")
             if not parameters.get("model"):
                 raise OpenAICompatibleError("This legacy job has no frozen request model; select a model and create a new task before generating")
+            repo.record_execution(job_id, 'generating', preparationMs=(time.monotonic() - preparation_started) * 1000)
             data, filename, metadata = self.generate(prompt, parameters, inputs,
                 on_partial=lambda data, metadata: repo.stage_stream_preview(job_id, data, metadata))
             metadata["source_job_id"] = job_id
-            return repo.stage_result(job_id, data, filename, metadata)
+            provider_ms = (metadata.get('request_diagnostics') or {}).get('provider_ms')
+            if 'request_diagnostics' in metadata:
+                metadata['request_diagnostics'] = safe_diagnostics(metadata['request_diagnostics'])
+            repo.record_execution(job_id, 'processing_results', providerMs=provider_ms)
+            write_started = time.monotonic()
+            repo.stage_result(job_id, data, filename, metadata)
         except Exception as exc:
+            # A result receipt that was persisted must never be reclassified by
+            # a later instrumentation/read failure.
+            if repo.get_job(job_id).status in {'succeeded', 'accepted'}:
+                raise
             message = str(exc) if isinstance(exc, OpenAICompatibleError) else "Compatible image generation failed; no automatic retry was attempted"
             diagnostics = exc.diagnostics if isinstance(exc, OpenAICompatibleError) else {"category": "internal_error"}
             repo.mark_failed(job_id, message, diagnostics=diagnostics)
+            repo.record_execution(job_id, 'failed', providerMs=diagnostics.get('provider_ms'))
             raise OpenAICompatibleError(message, diagnostics) from None
+        repo.record_execution(job_id, 'completed', resultWriteMs=(time.monotonic() - write_started) * 1000)
+        return repo.get_job(job_id)

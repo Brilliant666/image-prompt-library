@@ -12,6 +12,26 @@ Saving settings does not send a generation request. An empty API key field prese
 
 Settings live in `~/.image-prompt-library/openai-compatible.json`, outside the Library. `IMAGE_PROMPT_LIBRARY_OPENAI_COMPATIBLE_CONFIG_PATH` can override this location in the process environment. The application rejects paths inside the active Library. Library backups and exports do not include this file; protect it separately as a credential file.
 
+## Network connection
+
+Each API profile has a **Network connection / 网络连接** selector:
+
+| Mode | Behavior |
+| --- | --- |
+| Direct (default) / 直连 | Ignores HTTP proxy environment variables. On Windows, public destinations use a verified physical network source address before connecting. Local destinations retain normal local routing. |
+| Follow runtime environment / 跟随运行环境 | Uses the backend process's `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY` settings and normal OS routing, including VPN/TUN routing. |
+| Use a proxy / 指定代理 | Uses the saved HTTP, HTTPS or SOCKS5 proxy. This explicit choice takes precedence over environment proxies and `NO_PROXY`. |
+
+The policy applies to the machine **running the backend**. A hosted application uses its server/container network, not the visitor's browser proxy. The application does not change system proxy rules, routes or DNS. Linux, macOS and containers retain their OS routing; direct mode there disables application-level proxies and does not promise to bypass an OS VPN. On Windows, ambiguous or unavailable physical routes and Fake-IP DNS results produce a clear error instead of silently switching routes. Network discovery is cached briefly (up to ten seconds); source binding cannot override every packet-filter driver.
+
+Agent text requests, Native Responses image tools, Hybrid/Gallery Images calls, model discovery and protected image-result downloads follow the selected profile. The capture text/vision model has its **own** identical network selector; it does not guess a profile from a matching URL. OAuth account connections and application updates keep their existing behavior.
+
+Older configurations without these fields default to direct. Choosing another mode does not replace models, API keys, drafts, references or image parameters. A changed profile cannot redirect an already frozen Agent request; start a new request explicitly after checking the earlier receipt. An unchanged older direct-mode request retains its identity.
+
+Proxy addresses may include credentials. They are stored only in the existing private configuration file; settings responses expose only the host/port and whether a proxy is saved. Leave the password-style input blank to retain it, or use the explicit clear action. Protect configuration backups as credentials. Standard TLS certificate verification remains enabled, including `SSL_CERT_FILE` and `SSL_CERT_DIR` support.
+
+Saving a profile still performs the existing model-list refresh; it never generates an image or calls a text/vision model. There is no automatic switch to another route or replay of a generation POST after a timeout. Image downloads remain bounded, validate each redirect and never forward the API key. Some proxy implementations may reject IPv6-only image CDN CONNECT targets; this reports a download failure without resubmitting generation.
+
 Choose the connection type in Config and the named endpoint in the generation composer. A model remains required for each request: the optional profile default preselects it, while the model icon menu also accepts a custom full model ID. This provider supports images only. Title suggestions remain unavailable when it is selected and never silently fall back to another account. Existing OAuth settings and endpoint addresses are unchanged.
 
 ## Requests and results

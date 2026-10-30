@@ -45,8 +45,9 @@ def _remaining_timeout(deadline, timeout=None):
 
 class _DeadlineStream(httpcore.NetworkStream):
     """Recalculate the budget for every socket read, including HTTP headers."""
-    def __init__(self, stream, deadline):
+    def __init__(self, stream, deadline, tls_hostnames=()):
         self.stream, self.deadline = stream, deadline
+        self.tls_hostnames = tls_hostnames
 
     def read(self, max_bytes, timeout=None):
         return self.stream.read(max_bytes, timeout=_remaining_timeout(self.deadline, timeout))
@@ -55,9 +56,11 @@ class _DeadlineStream(httpcore.NetworkStream):
         return self.stream.write(buffer, timeout=_remaining_timeout(self.deadline, timeout))
 
     def start_tls(self, ssl_context, server_hostname=None, timeout=None):
+        if self.tls_hostnames:
+            server_hostname = self.tls_hostnames[0]
         stream = self.stream.start_tls(ssl_context, server_hostname=server_hostname,
                                        timeout=_remaining_timeout(self.deadline, timeout))
-        return _DeadlineStream(stream, self.deadline)
+        return _DeadlineStream(stream, self.deadline, self.tls_hostnames[1:])
 
     def close(self):
         self.stream.close()
@@ -67,20 +70,37 @@ class _DeadlineStream(httpcore.NetworkStream):
 
 
 class _DeadlineBackend(httpcore.SyncBackend):
-    def __init__(self, deadline):
+    def __init__(self, deadline, delegate=None, tls_hostnames=()):
         self.deadline = deadline
+        self.delegate = delegate if delegate is not None else httpcore.SyncBackend()
+        self.tls_hostnames = tls_hostnames
 
     def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
-        stream = super().connect_tcp(host, port, timeout=_remaining_timeout(self.deadline, timeout),
-                                     local_address=local_address, socket_options=socket_options)
-        return _DeadlineStream(stream, self.deadline)
+        stream = self.delegate.connect_tcp(host, port, timeout=_remaining_timeout(self.deadline, timeout),
+                                           local_address=local_address, socket_options=socket_options)
+        return _DeadlineStream(stream, self.deadline, self.tls_hostnames)
 
 
-def _download_client(deadline):
-    transport = httpx.HTTPTransport(retries=0)
+def _download_client(deadline, *, network_settings=None, url=None, hostname=None):
+    if network_settings is None:
+        transport = httpx.HTTPTransport(retries=0)
+        tls_hostnames = ()
+    else:
+        from .api_network import create_api_transport
+        # Choose NO_PROXY against the original hostname, never the pinned IP.
+        transport = create_api_transport(network_settings, url=url)
+        tls_hostnames = (hostname,)
+        proxy_url = getattr(transport._pool, "_proxy_url", None)
+        if proxy_url is not None and proxy_url.scheme == b"https":
+            tls_hostnames = (proxy_url.host.decode("ascii"), hostname)
     # HTTPX exposes no network_backend argument. Keep this integration in one
     # place and exercise it with a real local socket in the regression suite.
-    transport._pool._network_backend = _DeadlineBackend(deadline)
+    # Delegate preserves the API transport's physical-interface binding. TLS
+    # names are explicit because httpcore's CONNECT path otherwise uses the
+    # pinned IP for origin SNI, or propagates origin SNI to an HTTPS proxy.
+    transport._pool._network_backend = _DeadlineBackend(
+        deadline, transport._pool._network_backend, tls_hostnames,
+    )
     return httpx.Client(trust_env=False, follow_redirects=False, transport=transport)
 
 
@@ -131,10 +151,11 @@ def _public_target(raw, timeout=10):
         raise ImageDownloadError("image_url_blocked", "Image URL requires a public address or explicitly configured HTTPS domain Fake-IP range; private addresses and nonstandard ports are blocked") from None
 
 
-def download_image(raw_url, timeout, client=None):
+def download_image(raw_url, timeout, client=None, *, network_settings=None):
     deadline = time.monotonic() + min(timeout, 120)
     owned = client is None
-    client = client or _download_client(deadline)
+    if client is None and network_settings is None:
+        client = _download_client(deadline)
     try:
         for hop in range(4):
             remaining = deadline - time.monotonic()
@@ -144,11 +165,15 @@ def download_image(raw_url, timeout, client=None):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise ImageDownloadError("image_download_timeout", "Image download timed out")
-            # Never reuse the API client, its authorization, cookies or proxy settings.
+            # Share only API network policy, never API authorization or cookies.
             request = httpx.Request("GET", pinned, headers={"Host": url.netloc.decode(), "Accept": "image/*"},
                                     extensions={"sni_hostname": hostname, "timeout": dict.fromkeys(("connect", "read", "write", "pool"), remaining)})
-            response = client.send(request, stream=True, follow_redirects=False, auth=None)
+            hop_client = client or _download_client(
+                deadline, network_settings=network_settings, url=url, hostname=hostname,
+            )
+            response = None
             try:
+                response = hop_client.send(request, stream=True, follow_redirects=False, auth=None)
                 if response.status_code in (301, 302, 303, 307, 308):
                     location = response.headers.get("location")
                     if not location or hop == 3:
@@ -171,7 +196,10 @@ def download_image(raw_url, timeout, client=None):
                         raise ImageDownloadError("image_too_large", "Image exceeds the 32 MiB download limit")
                 return bytes(data)
             finally:
-                response.close()
+                if response is not None:
+                    response.close()
+                if hop_client is not client:
+                    hop_client.close()
     except ImageDownloadError:
         raise
     except httpx.TimeoutException:
@@ -179,5 +207,5 @@ def download_image(raw_url, timeout, client=None):
     except Exception:
         raise ImageDownloadError("image_download_failed", "Image download failed; generation was not resubmitted") from None
     finally:
-        if owned:
+        if owned and client is not None:
             client.close()
