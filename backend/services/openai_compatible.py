@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import re
 import tempfile
@@ -32,6 +33,7 @@ from backend.services.model_catalog import (
 )
 
 PROVIDER_ID = "openai_compatible"
+logger = logging.getLogger(__name__)
 AUTH_MODE = "api_key"
 MAX_INPUT_IMAGES = 4
 ASPECT_RATIO_SIZES = {
@@ -69,6 +71,10 @@ class OpenAICompatibleError(RuntimeError):
 
 
 class ModelCatalogProfileNotFound(OpenAICompatibleError):
+    pass
+
+
+class OpenAICompatibleApiKeyRequired(OpenAICompatibleError):
     pass
 
 
@@ -411,6 +417,16 @@ class OpenAICompatibleConfig:
                 value["api_key"] = ""
             elif str(payload.get("api_key") or "").strip():
                 value["api_key"] = str(payload["api_key"]).strip()
+            elif value.get("api_key") and profile_id in document["profiles"]:
+                # A saved key belongs to the address it was entered for. Never
+                # send it to a new endpoint unless the user enters it again.
+                previous = document["profiles"][profile_id]
+                try:
+                    previous_url = normalize_base_url(previous.get("base_url", ""), previous.get("base_url_mode", "versioned"))
+                except OpenAICompatibleError:
+                    previous_url = ""
+                if previous_url != value["base_url"]:
+                    raise OpenAICompatibleApiKeyRequired("Enter the API key again when changing the Base URL")
             document["profiles"][profile_id] = value
             if document["default_profile_id"] is None or payload.get("make_default") is True:
                 document["default_profile_id"] = profile_id
@@ -730,7 +746,9 @@ class OpenAICompatibleProvider:
                         on_partial(data, {"width": decoded["width"], "height": decoded["height"],
                                           "partial_image_index": index, "output_format": decoded["format"].lower()})
                     except Exception:
-                        fail("preview_storage", "A partial image could not be stored locally; upstream outcome and billing are unknown, check service logs before resubmitting")
+                        # A preview is display-only. Losing it must not abandon a
+                        # paid request whose final image may still arrive.
+                        logger.warning("Could not store partial image preview; continuing the stream", exc_info=True)
             elif event in ("image_generation.completed", "image_edit.completed"):
                 if not isinstance(value.get("b64_json"), str) or not value["b64_json"]:
                     fail("missing_image", "Image API completion did not contain a final image")

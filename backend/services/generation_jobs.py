@@ -1279,6 +1279,12 @@ class GenerationJobRepository:
                 if cursor.rowcount != 1:
                     raise GenerationJobConflict("Generation job result could not be staged")
                 conn.commit()
+        except sqlite3.Error:
+            # A busy or failed database write says nothing about the provider
+            # result. Keep the paid image bytes under the job's own result folder
+            # (the name includes the content hash), so they can be recovered.
+            logger.warning("Could not record generation result for %s; kept %s", job_id, result_rel.as_posix(), exc_info=True)
+            raise
         except Exception:
             if not preserve_result_file:
                 result_abs.unlink(missing_ok=True)
@@ -1487,21 +1493,7 @@ class GenerationJobRepository:
         return readable, {"agent_reference_prompt": {"raw_text": text, "references": references}}
 
     def _remove_unreferenced_image_files(self, paths: set[str]) -> None:
-        if not paths:
-            return
-        with connect(self.library_path) as conn:
-            for rel_path in paths:
-                if conn.execute(
-                    """SELECT 1 FROM images
-                       WHERE original_path=? OR thumb_path=? OR preview_path=?
-                       LIMIT 1""",
-                    (rel_path, rel_path, rel_path),
-                ).fetchone() is not None:
-                    continue
-                candidate = self.items._safe_library_file(rel_path)
-                if candidate and candidate.is_file():
-                    with suppress(OSError):
-                        candidate.unlink()
+        self.items._remove_unreferenced_media_files(paths)
 
     def _remove_created_images(self, item_id: str, created_images: list[tuple[object, StoredImageInput]]) -> None:
         if not created_images:

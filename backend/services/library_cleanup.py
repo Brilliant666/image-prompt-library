@@ -73,20 +73,36 @@ class LibraryCleanupService:
         removed_files = 0
 
         if remove_broken_image_records and preview.broken_image_records:
-            image_ids = [record.image_id for record in preview.broken_image_records]
-            placeholders = ",".join("?" for _ in image_ids)
             with connect(self.library_path) as conn:
-                removed_records = conn.execute(f"DELETE FROM images WHERE id IN ({placeholders})", image_ids).rowcount
+                conn.execute("BEGIN IMMEDIATE")
+                for record in preview.broken_image_records:
+                    # The preview can be stale: a re-upload may restore the
+                    # missing file. Delete only rows that are still broken now.
+                    row = conn.execute(
+                        f"SELECT {','.join(IMAGE_PATH_COLUMNS)} FROM images WHERE id=? AND item_id=?",
+                        (record.image_id, record.item_id),
+                    ).fetchone()
+                    if row is None or not self._row_is_broken(row):
+                        continue
+                    removed_records += conn.execute("DELETE FROM images WHERE id=?", (record.image_id,)).rowcount
                 conn.commit()
 
         if remove_unreferenced_files:
-            for record in preview.unreferenced_files:
-                candidate = self._safe_media_file(record.path)
-                if candidate is None or candidate.is_symlink() or not candidate.is_file():
-                    continue
-                with suppress(OSError):
-                    candidate.unlink()
-                    removed_files += 1
+            # Media paths are content-addressed, so an upload after the preview can
+            # reference a previewed file again. Re-check references under the write
+            # lock so no new image row can commit between the check and the unlink.
+            with connect(self.library_path) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                for record in preview.unreferenced_files:
+                    if self._path_is_referenced(conn, record.path):
+                        continue
+                    candidate = self._safe_media_file(record.path)
+                    if candidate is None or candidate.is_symlink() or not candidate.is_file():
+                        continue
+                    with suppress(OSError):
+                        candidate.unlink()
+                        removed_files += 1
+                conn.commit()
 
         after = self.preview()
         return CleanupApplyResult(
@@ -94,6 +110,25 @@ class LibraryCleanupService:
             removed_broken_image_records=removed_records,
             removed_unreferenced_files=removed_files,
         )
+
+    def _row_is_broken(self, row) -> bool:
+        for column in IMAGE_PATH_COLUMNS:
+            rel_path = row[column]
+            if not rel_path:
+                continue
+            candidate = self._safe_media_file(rel_path)
+            if candidate is None or not candidate.is_file():
+                return True
+        return False
+
+    def _path_is_referenced(self, conn, rel_path: str) -> bool:
+        paths = (rel_path, self._normalize_rel_path(rel_path))
+        return conn.execute(
+            """SELECT 1 FROM images
+               WHERE original_path IN (?, ?) OR thumb_path IN (?, ?) OR preview_path IN (?, ?)
+               LIMIT 1""",
+            paths * 3,
+        ).fetchone() is not None
 
     def _safe_media_file(self, rel_path: str) -> Path | None:
         rel = Path(rel_path)

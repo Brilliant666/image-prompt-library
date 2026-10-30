@@ -60,7 +60,7 @@ def test_old_config_defaults_do_not_rewrite_and_new_options_copy_reorder(config)
     assert public["partial_images"] == 0 and public["response_format"] == "auto"
     assert public["base_url_mode"] == "versioned"
     assert config.path.read_bytes() == before
-    config.save({"base_url_mode": "custom", "base_url": "https://images.invalid/gateway/", "stream": True,
+    config.save({"base_url_mode": "custom", "base_url": "https://images.invalid/gateway/", "api_key": "synthetic-secret", "stream": True,
                  "partial_images": 2, "response_format": "b64_json", "models": [" first ", "second", "first"]})
     config.copy_profile("legacy", "copy")
     config.reorder_profiles(["copy", "legacy"])
@@ -103,7 +103,7 @@ def test_url_modes_keep_old_normalization_and_custom_root():
 @pytest.mark.parametrize("edits", [False, True])
 @pytest.mark.parametrize("explicit", [False, True])
 def test_json_transport_options_reach_one_request(config, edits, explicit):
-    config.save({"base_url": "https://images.invalid/gateway/", "base_url_mode": "custom",
+    config.save({"base_url": "https://images.invalid/gateway/", "base_url_mode": "custom", "api_key": "synthetic-secret",
                  "stream": explicit, "partial_images": 2, "response_format": "b64_json" if explicit else "auto"})
     calls = []
     def reply(request):

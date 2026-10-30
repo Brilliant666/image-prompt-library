@@ -18,6 +18,8 @@ from backend.schemas import (
 from backend.services.image_store import store_image
 from backend.services.text_normalize import to_traditional
 
+IMPORT_STAGING_ROOT = "import-staging"
+
 
 def _json_default(value):
     if hasattr(value, "model_dump"):
@@ -109,6 +111,20 @@ class ImportDraftRepository:
             ).fetchall()
         return ImportDraftList(drafts=[self._record_from_row(row) for row in rows], total=total, limit=limit, offset=offset)
 
+    def _staged_file(self, staged_path: str | None) -> Path | None:
+        if not staged_path:
+            return None
+        relative = Path(staged_path)
+        if relative.is_absolute() or relative.drive or ".." in relative.parts or relative.parts[:1] != (IMPORT_STAGING_ROOT,):
+            raise ImportDraftConflict("Import draft media must be staged inside the library import folder")
+        staging_root = (self.library_path / IMPORT_STAGING_ROOT).resolve()
+        candidate = (self.library_path / relative).resolve()
+        try:
+            candidate.relative_to(staging_root)
+        except ValueError:
+            raise ImportDraftConflict("Import draft media must be staged inside the library import folder") from None
+        return candidate if candidate.is_file() else None
+
     def accept_draft(self, draft_id: str) -> ImportDraftAcceptResult:
         draft = self.get_draft(draft_id)
         if draft.status == "accepted":
@@ -135,32 +151,25 @@ class ImportDraftRepository:
             tags=draft.suggested_tags,
             prompts=draft.prompts,
         )
+        # Only files staged by repository ingest are read. A draft's original_path
+        # describes the source and never becomes a library path. Validate every
+        # media entry before creating the item, so a rejection leaves nothing behind.
+        staged_media = [(media, self._staged_file(media.staged_path)) for media in draft.media]
         item = self.items.create_item(payload, imported=True)
-        for media in draft.media:
-            original_path = media.staged_path or media.original_path
-            if not original_path:
+        for media, staged_file in staged_media:
+            if staged_file is None:
                 continue
+            stored = store_image(self.library_path, staged_file.read_bytes(), staged_file.name)
             image_input = StoredImageInput(
-                original_path=original_path,
+                original_path=stored.original_path,
+                thumb_path=stored.thumb_path,
+                preview_path=stored.preview_path,
                 remote_url=media.url,
-                width=media.width,
-                height=media.height,
-                file_sha256=media.file_sha256,
+                width=stored.width,
+                height=stored.height,
+                file_sha256=stored.file_sha256,
                 role=media.role,
             )
-            local_file = self.library_path / original_path
-            if media.staged_path and local_file.is_file():
-                stored = store_image(self.library_path, local_file.read_bytes(), Path(original_path).name)
-                image_input = StoredImageInput(
-                    original_path=stored.original_path,
-                    thumb_path=stored.thumb_path,
-                    preview_path=stored.preview_path,
-                    remote_url=media.url,
-                    width=stored.width,
-                    height=stored.height,
-                    file_sha256=stored.file_sha256,
-                    role=media.role,
-                )
             self.items.add_image(item.id, image_input)
         timestamp = now()
         with connect(self.library_path) as conn:

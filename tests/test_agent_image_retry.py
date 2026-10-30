@@ -239,7 +239,7 @@ def test_retry_missing_or_changed_original_pixels_rejected(source, corrupt):
 def test_retry_connection_change_after_enqueue_never_posts(source):
     _, repo, _, _, calls = source
     created = post(source).json()['job']
-    OpenAICompatibleConfig(library_path=repo.library).save({'base_url': 'http://127.0.0.1:3/v1'}, profile_id='mock-b')
+    OpenAICompatibleConfig(library_path=repo.library).save({'base_url': 'http://127.0.0.1:3/v1', 'api_key': 'qa-key-b'}, profile_id='mock-b')
     with pytest.raises(AgentError, match='连接已改变'):
         _run_provider_job(repo.library, created['id'], 'openai_compatible')
     failed = repo.jobs.get_job(created['id'])
@@ -336,7 +336,7 @@ def test_retry_success_duplicate_dispatch_never_posts_twice(source):
     _, repo, _, _, calls = source
     first = post(source).json()['job']
     assert _run_provider_job(repo.library, first['id'], 'openai_compatible').status == 'succeeded'
-    OpenAICompatibleConfig(library_path=repo.library).save({'base_url': 'http://127.0.0.1:3/v1'}, profile_id='mock-b')
+    OpenAICompatibleConfig(library_path=repo.library).save({'base_url': 'http://127.0.0.1:3/v1', 'api_key': 'qa-key-b'}, profile_id='mock-b')
     assert _run_provider_job(repo.library, first['id'], 'openai_compatible').status == 'succeeded'
     assert len(calls) == 1
 
