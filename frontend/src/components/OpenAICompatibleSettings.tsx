@@ -160,9 +160,13 @@ export default function OpenAICompatibleSettings({ onSaved, uiLanguage, isDefaul
       // Refresh status independently: a refresh failure must not report a successful save as failed.
       await onSaved().catch(() => undefined);
       return true;
-    } catch {
+    } catch (error) {
       // Never display arbitrary service responses, which may contain credentials.
-      if (request === epoch.current) setMessage(chinese ? '暂时无法确认操作结果。请重新读取列表核对后再操作。' : 'Could not confirm the result. Reload the profile list before trying again.');
+      // Only this fixed local validation message is recognized and translated.
+      const keyRequired = error instanceof Error && error.message.startsWith('Enter the API key again when changing the Base URL');
+      if (request === epoch.current) setMessage(keyRequired
+        ? (chinese ? '更换 Base URL 时请重新输入 API Key。已保存的密钥不会发送到新地址。' : 'Enter the API key again when changing the Base URL. The saved key is not sent to a new address.')
+        : (chinese ? '暂时无法确认操作结果。请重新读取列表核对后再操作。' : 'Could not confirm the result. Reload the profile list before trying again.'));
     } finally {
       if (request === epoch.current) { setApiKey(''); setProxyUrl(''); inFlight.current = false; setBusy(false); }
     }

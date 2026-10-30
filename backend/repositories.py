@@ -5,12 +5,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from contextlib import suppress
 from .db import connect, init_db
+from .config import resolve_library_storage_path
 from .schemas import ClusterRecord, ImageRecord, ItemBatchRequest, ItemBatchResult, ItemCreate, ItemDetail, ItemImagesUpdate, ItemList, ItemSummary, ItemUpdate, PromptIn, PromptRecord, TagRecord
 from .services.credential_safety import sanitize_structured_credentials
 from .services.search_query import parse_item_search_query
 from .services.text_normalize import to_traditional
 
 TEMPLATE_TAG_NAME = "template"
+IMAGE_MEDIA_ROOTS = ("originals", "thumbs", "previews")
 _PROMPT_TEMPLATE_RE = re.compile(r"{{([^{}]*)}}")
 
 
@@ -333,25 +335,37 @@ class ItemRepository:
         return self.update_item(item_id, ItemUpdate(archived=archived))
 
     def _safe_library_file(self, rel_path: str | None) -> Path | None:
-        if not rel_path:
+        # Image rows may only own files in the library media roots. Never unlink
+        # the database, backups or any other library file named by a stored path.
+        if not rel_path or Path(rel_path).parts[:1] not in {(root,) for root in IMAGE_MEDIA_ROOTS}:
             return None
-        candidate = (self.library_path / rel_path).resolve()
-        library = self.library_path.resolve()
         try:
-            if not candidate.is_relative_to(library):
-                return None
-        except AttributeError:
-            if library not in candidate.parents and candidate != library:
-                return None
-        return candidate
+            return resolve_library_storage_path(self.library_path, rel_path)
+        except ValueError:
+            return None
 
     def _remove_unreferenced_media_files(self, paths: set[str]) -> None:
-        for rel_path in sorted(path for path in paths if path):
-            file_path = self._safe_library_file(rel_path)
-            if not file_path or not file_path.is_file():
-                continue
-            with suppress(OSError):
-                file_path.unlink()
+        paths = {path for path in paths if path}
+        if not paths:
+            return
+        # Media is content-addressed and shared. Re-check references under the
+        # write lock, so a concurrent upload of the same bytes keeps its file.
+        with connect(self.library_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            for rel_path in sorted(paths):
+                if conn.execute(
+                    """SELECT 1 FROM images
+                       WHERE original_path=? OR thumb_path=? OR preview_path=?
+                       LIMIT 1""",
+                    (rel_path, rel_path, rel_path),
+                ).fetchone() is not None:
+                    continue
+                file_path = self._safe_library_file(rel_path)
+                if not file_path or not file_path.is_file():
+                    continue
+                with suppress(OSError):
+                    file_path.unlink()
+            conn.commit()
 
     def delete_item(self, item_id: str) -> ItemDetail:
         # Keep rows, relationships and media intact until an explicit purge.
@@ -424,10 +438,20 @@ class ItemRepository:
         return self._image_by_id(iid)
 
     def add_image_in_transaction(self, conn, item_id: str, image: StoredImageInput) -> str:
+        if not conn.in_transaction:
+            # Take the write lock before checking files, so cleanup cannot remove
+            # a shared content-addressed original between the check and INSERT.
+            conn.execute("BEGIN IMMEDIATE")
         if conn.execute("SELECT 1 FROM items WHERE id=? AND deleted_at IS NULL", (item_id,)).fetchone() is None:
             raise KeyError(item_id)
         if image.role not in {"result_image", "reference_image"}:
             raise ValueError("Invalid image role")
+        for path in (image.original_path, image.thumb_path, image.preview_path):
+            if path is not None and self._safe_library_file(path) is None:
+                raise ValueError("Image path must be inside the library media folders")
+        original = self._safe_library_file(image.original_path)
+        if image.file_sha256 and not original.is_file():
+            raise ValueError("Image file is missing; upload the image again")
         iid = new_id("img")
         ts = now()
         order = conn.execute("SELECT COALESCE(MAX(sort_order),-1)+1 FROM images WHERE item_id=?", (item_id,)).fetchone()[0]

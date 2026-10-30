@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
-from backend.services.openai_compatible import OpenAICompatibleConfig, OpenAICompatibleError, ModelCatalogProfileNotFound
+from backend.services.openai_compatible import OpenAICompatibleApiKeyRequired, OpenAICompatibleConfig, OpenAICompatibleError, ModelCatalogProfileNotFound
 
 from backend.services.openai_codex_native import (
     CodexDeviceCodeFlow,
@@ -22,6 +22,7 @@ from backend.services.xai_grok_oauth import (
 )
 
 router = APIRouter(prefix="/generation-providers", tags=["generation-providers"])
+API_KEY_REQUIRED_DETAIL = "Enter the API key again when changing the Base URL. The saved key is not sent to a new address."
 
 
 class CodexNativePollRequest(BaseModel):
@@ -91,6 +92,8 @@ async def save_openai_compatible_config(request: Request):
         store = OpenAICompatibleConfig(library_path=request.app.state.library_path)
         store.save(payload)
         return store.public()
+    except OpenAICompatibleApiKeyRequired:
+        raise HTTPException(status_code=422, detail=API_KEY_REQUIRED_DETAIL) from None
     except (ValueError, TypeError, OSError, OpenAICompatibleError):
         # Never echo submitted credentials or exceptions containing a request body.
         raise HTTPException(status_code=400, detail="Invalid compatible image provider configuration. Check the URL, model and timeout.") from None
@@ -157,6 +160,8 @@ async def save_openai_compatible_profile(profile_id: str, request: Request):
         store = OpenAICompatibleConfig(library_path=request.app.state.library_path)
         store.save(payload, profile_id=profile_id)
         return store.public_profiles()
+    except OpenAICompatibleApiKeyRequired:
+        raise HTTPException(status_code=422, detail=API_KEY_REQUIRED_DETAIL) from None
     except (ValueError, TypeError, OSError, OpenAICompatibleError):
         raise HTTPException(status_code=400, detail="Invalid third-party API profile. Check the name, URL and timeout.") from None
 

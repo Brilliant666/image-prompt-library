@@ -127,7 +127,7 @@ def test_selecting_images_does_not_grant_authorization_or_reset_quota(repo):
 
 
 @pytest.mark.parametrize("change", [{"model": "gpt-image-changed"}, {"api_key": "synthetic-rotated"},
-                                    {"base_url": "http://127.0.0.1:2/v1"}])
+                                    {"base_url": "http://127.0.0.1:2/v1", "api_key": "synthetic-image_b"}])
 def test_changed_selected_connection_invalidates_frozen_profile(repo, change):
     repo.create_round("conversation", body(repo, selection={"profileId": "image_b", "model": ""}))
     OpenAICompatibleConfig(library_path=repo.library).save(change, profile_id="image_b")

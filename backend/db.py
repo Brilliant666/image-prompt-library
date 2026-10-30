@@ -3,12 +3,15 @@ from pathlib import Path
 from .config import resolve_library_path
 
 MIGRATIONS = ["001_initial.sql", "002_image_roles.sql", "003_image_role_check.sql", "004_prompt_provenance.sql", "005_cluster_names.sql", "006_import_drafts.sql", "007_generation_jobs.sql", "008_generation_job_cancelled_at.sql", "009_generation_sets.sql", "010_generation_jobs_source_created.sql", "011_image_generation_provenance.sql", "012_capture_requests.sql", "013_capture_organizer.sql", "014_agent_workspaces.sql", "015_generation_reaccept.sql", "016_gallery_title_jobs.sql", "017_library_trash.sql", "018_agent_frozen_sources.sql", "019_agent_editing_tasks.sql"]
+# Generation, Agent and capture workers write concurrently with request handlers.
+# Wait for a short writer instead of failing a paid result with "database is locked".
+BUSY_TIMEOUT_SECONDS = 15
 
 def get_db_path(library_path=None) -> Path:
     return resolve_library_path(library_path) / "db.sqlite"
 
 def connect(library_path=None) -> sqlite3.Connection:
-    conn = sqlite3.connect(get_db_path(library_path))
+    conn = sqlite3.connect(get_db_path(library_path), timeout=BUSY_TIMEOUT_SECONDS)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
@@ -17,6 +20,14 @@ def init_db(library_path=None) -> Path:
     library = resolve_library_path(library_path)
     db_path = library / "db.sqlite"
     with connect(library) as conn:
+        # WAL is persistent in the database file. Readers no longer block the
+        # single writer, and backups already use the SQLite online backup API.
+        # If another connection prevents the switch, the next startup retries.
+        if conn.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal":
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+            except sqlite3.OperationalError:
+                pass
         conn.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)")
         done = {r[0] for r in conn.execute("SELECT version FROM schema_migrations")}
         for migration in MIGRATIONS:

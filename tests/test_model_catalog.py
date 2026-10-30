@@ -54,7 +54,7 @@ def success(config, ids=("discovered/first",)):
     ("https://models.invalid/", "custom", "/models"),
 ])
 def test_one_get_uses_saved_url_mode_and_key_without_mutating_config(config, url, mode, expected):
-    config.save({"base_url": url, "base_url_mode": mode}, profile_id="one")
+    config.save({"base_url": url, "base_url_mode": mode, "api_key": "private-fixture-key"}, profile_id="one")
     before = config.path.read_bytes()
     catalog, calls = refresh(config, lambda request: httpx.Response(200, json={"data": [{"id": "vendor/model@2026"}]}))
     assert calls[0].url.path == expected
@@ -174,7 +174,7 @@ def test_slow_chunks_obey_elapsed_deadline(config, monkeypatch):
     assert catalog["error"] == ERRORS["timeout"]
 
 
-@pytest.mark.parametrize("change", [{"api_key": "replacement-fixture-key"}, {"base_url": "https://other.invalid"}, {"base_url_mode": "custom"}])
+@pytest.mark.parametrize("change", [{"api_key": "replacement-fixture-key"}, {"base_url": "https://other.invalid", "api_key": "private-fixture-key"}, {"base_url_mode": "custom"}])
 def test_connection_change_never_exposes_previous_provider_catalog(config, change):
     success(config)
     config.save(change, profile_id="one")
