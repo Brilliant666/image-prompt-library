@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import ts from 'typescript';
+import { localRecoveryDependencies } from './helpers/local-result-recovery.mjs';
 import React from 'react';
 import * as jsxRuntime from 'react/jsx-runtime';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -17,7 +18,7 @@ async function compile(path) {
 function instantiate(js, deps, globals = {}) {
   const module = { exports: {} };
   new Function('require', 'module', 'exports', ...Object.keys(globals), js)(name => {
-    assert.ok(name in deps, `unmocked dependency: ${name}`); return deps[name];
+    if (name in localRecoveryDependencies) return localRecoveryDependencies[name]; assert.ok(name in deps, `unmocked dependency: ${name}`); return deps[name];
   }, module, module.exports, ...Object.values(globals));
   return module.exports;
 }
@@ -178,7 +179,7 @@ function nodes(node) { return !node || typeof node !== 'object' ? [] : [node, ..
 function deferred() { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; }
 function harness(t, options = {}) {
   const slots = [], effects = [], timers = new Map(), calls = [], listeners = new Map(), scrollFrames = new Map(), scrollObservers = [];
-  const stops = [], resumes = [], jobsChanged = [];
+  const stops = [], resumes = [], jobsChanged = [], localRecoveries = [], localRecoveryReads = [];
   const submissions = [], creations = [], requestReads = [], watchers = [], profileChanges = [], panelFocusCalls = [], settingsOpens = [], sharedChanges = [];
   const jobReads = [], jobReplies = [], conversationReads = [], conversationUpdates = [], imageDecodes = [], taskUpdates = [], uploads = [], referenceReads = [];
   const root = { inert: false };
@@ -214,6 +215,8 @@ function harness(t, options = {}) {
   const agentApi = {
     stop(id) { const reply = deferred(); stops.push({ id, ...reply }); return reply.promise; },
     resume(id, resumeId) { const reply = deferred(); resumes.push({ id, resumeId, ...reply }); return reply.promise; },
+    recoverResults(id) { localRecoveries.push(id); return options.recoverResults(id); },
+    localResultRecovery(id, signal, cursor) { localRecoveryReads.push({ id, signal, cursor }); return options.localResultRecovery?.(id, signal, cursor) ?? Promise.resolve({ requestId: id, marker: 'validated', state: 'pending', canRecover: true, message: '图片已取得，本地保存记录待恢复。', complete: true, nextCursor: null, foundJobIds: ['retained'], registeredJobIds: [], blocked: false }); },
     deleteConversation: async id => options.deleteConversation?.(id),
     upload: async file => { uploads.push(file); return options.upload?.(file) ?? { uploadId: `restored-${uploads.length}`, image: { status: 'available', url: `http://isolated.test/restored-${uploads.length}.png` } }; },
     updateEditingTask: async (id, body) => { taskUpdates.push({ id, body }); return options.updateEditingTask?.(id, body) ?? { ...snapshot, revision: snapshot.revision + 1, editingTask: body.task }; },
@@ -277,7 +280,7 @@ function harness(t, options = {}) {
   const close = async () => { find('button', p => p['aria-label'] === '关闭 Agent 面板')[0].onClick(); await flush(); };
   const unmount = () => { if (unmounted) return; unmounted = true; slots.forEach(slot => slot?.cleanup?.()); };
   render(); t.after(unmount);
-  return { stops, resumes, jobsChanged, calls, find, open, close, root, profileChanges, panelFocusCalls, settingsOpens, sharedChanges, flush, unmount, submissions, creations, requestReads, watchers, snapshot, storage, AgentApiError, inputPreferences, jobReads, conversationReads, conversationUpdates, imageDecodes, taskUpdates, uploads, referenceReads, scrollObservers, window: globalMocks.window,
+  return { stops, resumes, jobsChanged, localRecoveries, localRecoveryReads, calls, find, open, close, root, profileChanges, panelFocusCalls, settingsOpens, sharedChanges, flush, unmount, submissions, creations, requestReads, watchers, snapshot, storage, AgentApiError, inputPreferences, jobReads, conversationReads, conversationUpdates, imageDecodes, taskUpdates, uploads, referenceReads, scrollObservers, window: globalMocks.window,
     updateProps(next) { props = { ...props, ...next }; render(); }, queueJobRead() { const reply = deferred(); jobReplies.push(reply); return reply; },
     resultCard(index = 0) { const card = nodes(tree).filter(node => typeof node.type === 'function' && node.type.name === 'ResultCard')[index]; assert.ok(card, 'actual result card should be rendered'); const savedCursor = cursor; cursor = slots.length; const content = card.type(card.props); cursor = savedCursor; return nodes(content); },
     setConfig(value) { config = { ...config, ...value }; }, dispatch(name) { globalMocks.window.dispatchEvent({ type: name }); }, show() { active = true; render(); }, get late() { return late; }, get pendingTimers() { return timers.size; }, get configReads() { return configReads; }, hide() { active = false; render(); } };
@@ -1332,6 +1335,50 @@ async function configureImages(h) {
 }
 const completedJob = (id, metadata = {}) => ({ id, status: 'succeeded', provider: 'openai_compatible', model: 'gpt-image-result', result_path: `http://isolated.test/${id}.png`, metadata, parameters: {}, accepted_image_id: null });
 const reference = id => ({ reference: { kind: 'upload', uploadId: id }, url: `http://isolated.test/${id}.png`, label: `${id}.png` });
+
+test('actual workspace local recovery refreshes the original result without touching the next draft or ordered attachments', async t => {
+  const data = displaySnapshot('failed'); data.revision = 1;
+  const original = { id: 'retained-paid-job', provider: 'openai_compatible', status: 'failed', prompt_text: 'Original executed prompt',
+    metadata: { local_result_recovery: { state: 'pending', message: '图片已取得，本地保存记录待恢复。', can_recover: true } } };
+  data.jobs = [original]; data.images = [];
+  data.conversation.rounds[0].outputTaskIds = [original.id];
+  const restored = { ...original, status: 'succeeded', result_path: `generation-results/${original.id}/final.png`, metadata: {} };
+  let recovered = false;
+  const h = harness(t, { snapshot: data, draft: { text: '  Next unsent draft\n\nKeep whitespace\t ', refs: [reference('one'), reference('two')], params },
+    conversation: async () => recovered ? { ...data, revision: 2, jobs: [restored] } : data });
+  await h.flush();
+  const before = structuredClone(savedDraft(h));
+  const control = h.resultCard().find(node => node.type === 'local-result-recovery');
+  assert.ok(control); recovered = true; control.props.onRecovered(restored); await h.flush();
+  assert.deepEqual(savedDraft(h), before);
+  assert.equal(h.find('textarea')[0].value, before.text);
+  assert.ok(h.resultCard().some(node => node.props?.['aria-label'] === '查看生成结果'));
+  assert.equal(h.submissions.length, 0); assert.equal(h.creations.length, 0); assert.equal(h.taskUpdates.length, 0);
+});
+
+test('Native final retained before a job INSERT can recover from the original request without text retry, resume or draft loss', async t => {
+  const pending=deferred();
+  const data=displaySnapshot('failed',{error:{code:'local_result_pending',message:'图片已取得，本地保存记录待恢复。'},canResume:true});
+  data.revision=1;data.images=[];data.jobs=[];data.conversation.rounds[0].error='图片已取得，本地保存记录待恢复。';
+  const h=harness(t,{snapshot:data,draft:{text:'  Unsent next prompt\n\nKeep me\t ',refs:[reference('one'),reference('two')],params},recoverResults:()=>pending.promise});await h.flush();
+  const before=structuredClone(savedDraft(h));const button=h.find('button',p=>p['aria-label']==='恢复本轮本地结果')[0];assert.ok(button);
+  assert.equal(h.find('button',p=>p['aria-label']==='重试回答').length,0);assert.equal(h.find('button',p=>p['aria-label']==='继续已确认安全的步骤').length,0);
+  button.onClick();button.onClick();await h.flush();assert.deepEqual(h.localRecoveries,['request-current']);
+  const restored=structuredClone(data);restored.revision=2;restored.request.state='completed';restored.request.error=null;restored.request.canResume=false;
+  restored.conversation.rounds[0].error=null;restored.conversation.rounds[0].status='done';restored.conversation.rounds[0].outputTaskIds=['native-retained'];
+  restored.jobs=[{id:'native-retained',provider:'agent_native',status:'succeeded',result_path:'generation-results/native-retained/result.png',prompt_text:'Exact executed prompt'}];
+  pending.resolve(restored);await h.flush();assert.deepEqual(savedDraft(h),before);assert.equal(h.find('textarea')[0].value,before.text);
+  assert.equal(h.find('button',p=>p['aria-label']==='恢复本轮本地结果').length,0);assert.ok(h.resultCard().some(node=>node.props?.['aria-label']==='查看生成结果'));
+  assert.deepEqual(h.submissions,[]);assert.deepEqual(h.resumes,[]);assert.deepEqual(h.creations,[]);assert.deepEqual(h.taskUpdates,[]);
+});
+
+test('a failed request-level local recovery retains its error and permits only another explicit local check', async t => {
+  const data=displaySnapshot('failed',{error:{code:'local_result_pending',message:'图片已取得，本地保存记录待恢复。'}});data.revision=1;data.jobs=[];data.images=[];
+  let attempts=0;const h=harness(t,{snapshot:data,recoverResults:async()=>{attempts++;throw Error('本地结果仍需核对；不会重新生成。');}});await h.flush();
+  h.find('button',p=>p['aria-label']==='恢复本轮本地结果')[0].onClick();await h.flush();assert.equal(attempts,1);
+  assert.ok(h.find('p',p=>p.role==='alert').some(p=>JSON.stringify(p.children).includes('本地结果仍需核对')));
+  assert.ok(h.find('button',p=>p['aria-label']==='恢复本轮本地结果')[0]);assert.deepEqual(h.submissions,[]);assert.deepEqual(h.resumes,[]);
+});
 const allDrafts = h => JSON.parse(h.storage.get('ipl.agent.drafts.v1'));
 
 test('explicit image mode survives accepted and reconciled sends, while search stays single-request and off revokes images', async t => {
@@ -2066,4 +2113,229 @@ test('a real revision conflict refreshes only through GET and requires another e
   h.find('button', p => p['aria-label'] === '发送 Agent 消息')[0].onClick(); await h.flush();
   assert.equal(h.submissions.length, 2); assert.equal(h.submissions[1].payload.expectedRevision, 9); assert.equal(h.submissions[1].payload.parentRoundId, 'new-selected-branch');
   assert.equal(h.submissions[1].payload.prompt, before.text); assert.deepEqual(h.submissions[1].payload.refs, before.refs.map(choice => choice.reference));
+});
+
+
+test('late Native local-result receipt reloads the current branch instead of installing an older request', async t => {
+  const pending = deferred();
+  const data = displaySnapshot('failed', { error: { code: 'local_result_pending', message: '图片已取得，本地保存记录待恢复。' } });
+  data.revision = 1; data.jobs = []; data.images = [];
+  let visible = data;
+  const h = harness(t, { snapshot: data,
+    draft: { text: '  Keep the next branch draft\n\nUnchanged\t ', refs: [reference('first'), reference('second')], params },
+    recoverResults: () => pending.promise, conversation: async () => visible });
+  await h.flush(); const before = structuredClone(savedDraft(h));
+  h.find('button', p => p['aria-label'] === '恢复本轮本地结果')[0].onClick(); await h.flush();
+  const newer = { ...structuredClone(data.conversation.rounds[0]), id: 'r2', requestId: 'request-new-branch',
+    parentRoundId: 'r1', index: 2, status: 'running', prompt: 'Already running on the newer branch', error: null };
+  visible = { ...structuredClone(data), revision: 3,
+    conversation: { ...structuredClone(data.conversation), activeRoundId: newer.id, rounds: [...data.conversation.rounds, newer] },
+    request: { ...structuredClone(data.request), id: newer.requestId, roundId: newer.id, state: 'running', error: null, canResume: false } };
+  const oldReceipt = { ...structuredClone(visible), revision: 2,
+    request: { ...structuredClone(data.request), state: 'failed', error: null, canResume: false } };
+  const reads = h.conversationReads.length;
+  pending.resolve(oldReceipt); await h.flush();
+  assert.equal(h.conversationReads.length, reads + 1, 'the request-specific receipt must reload the selected branch with a GET');
+  assert.equal(h.watchers.at(-1)?.id, newer.requestId, 'the newer branch request remains the observed in-flight request');
+  assert.deepEqual(savedDraft(h), before); assert.equal(h.find('textarea')[0].value, before.text);
+  assert.deepEqual(h.localRecoveries, ['request-current']);
+  assert.deepEqual(h.submissions, []); assert.deepEqual(h.resumes, []); assert.deepEqual(h.creations, []); assert.deepEqual(h.taskUpdates, []);
+});
+
+
+test('historical Native result recovery survives a later accepted conversation round without replacing its request or next draft', async t => {
+  const pending = deferred();
+  const first = displaySnapshot('failed', { error: { code: 'local_result_pending', message: '图片已取得，本地保存记录待恢复。' } });
+  first.revision = 1; first.jobs = []; first.images = [];
+  first.conversation.rounds[0].localRecovery = { requestId: 'request-current', marker: 'first-pending', state: 'check_required', canRecover: false, message: '请检查原请求的本地结果。' };
+  let visible = first;
+  const h = harness(t, { snapshot: first, draft: { text: 'Send second normal message', refs: [], params },
+    conversation: async () => visible, recoverResults: () => pending.promise });
+  await h.flush();
+  h.find('button', p => p['aria-label'] === '发送 Agent 消息')[0].onClick(); await h.flush();
+  assert.equal(h.submissions.length, 1);
+  const secondRound = { ...structuredClone(first.conversation.rounds[0]), id: 'r2', requestId: h.submissions[0].payload.requestId,
+    parentRoundId: 'r1', index: 2, prompt: 'Send second normal message', status: 'done', localRecovery: undefined };
+  visible = { ...structuredClone(first), revision: 3,
+    conversation: { ...structuredClone(first.conversation), activeRoundId: 'r2', rounds: [...first.conversation.rounds, secondRound],
+      messages: [...first.conversation.messages, { id: 'a2', role: 'assistant', roundId: 'r2', content: 'Second normal answer' }] },
+    request: { ...structuredClone(first.request), id: secondRound.requestId, roundId: 'r2', state: 'completed', error: null } };
+  h.submissions[0].resolve(visible); await h.flush();
+  const button = h.find('button', p => p['aria-label'] === '恢复本轮本地结果')[0];
+  assert.ok(button, 'the original retained final stays recoverable after the current request moves to round B');
+  assert.deepEqual(h.localRecoveryReads.map(read => read.id), ['request-current'], 'one capability GET per stable historical hint, never one per token or render');
+  h.find('textarea')[0].onChange({ target: { value: '  Next unsent draft\n\nPreserve me\t ', selectionStart: 38 } }); await h.flush();
+  await h.open('添加图片或引用'); h.find('button', p => p.title === '从 Library 或画廊选择图片')[0].onClick(); await h.flush();
+  h.find('reference-picker')[0].onSelect([reference('next-one'), reference('next-two')]); await h.flush();
+  const before = structuredClone(savedDraft(h));
+  button.onClick(); button.onClick(); await h.flush(); assert.deepEqual(h.localRecoveries, ['request-current']);
+  const restored = { id: 'original-native-final', status: 'succeeded', provider: 'agent_native', prompt_text: 'Original execution Prompt', result_path: 'generation-results/original-native-final/final.png', metadata: {}, parameters: {} };
+  visible = { ...structuredClone(visible), revision: 4, jobs: [restored] };
+  visible.conversation.rounds[0].outputTaskIds = [restored.id];
+  visible.conversation.rounds[0].localRecovery = { ...first.conversation.rounds[0].localRecovery, marker: 'first-recovered', state: 'recovered', canRecover: false, message: '原结果已登记。' };
+  pending.resolve({ ...structuredClone(visible), request: { ...structuredClone(first.request), error: null } }); await h.flush();
+  assert.deepEqual(savedDraft(h), before); assert.equal(h.find('textarea')[0].value, before.text);
+  assert.equal(h.find('button', p => p['aria-label'] === '恢复本轮本地结果').length, 0);
+  assert.equal(h.submissions.length, 1); assert.deepEqual(h.resumes, []); assert.deepEqual(h.creations, []); assert.deepEqual(h.taskUpdates, []);
+  assert.ok(h.find('article', p => p['data-agent-round'] === 'r2').length, 'the newer branch remains selected');
+});
+
+function requestRecoverySnapshot() {
+  const data = displaySnapshot('failed', { error: { code: 'local_result_pending', message: '旧的本地结果待恢复提示。' } });
+  data.revision = 1; data.jobs = []; data.images = [];
+  data.conversation.rounds[0].localRecovery = { requestId: 'request-current', marker: 'stable-hint', state: 'check_required', canRecover: false, message: '请检查原结果。' };
+  return data;
+}
+function recoveryCapability(state = 'pending', overrides = {}) {
+  return { requestId: 'request-current', marker: 'server-version', state, canRecover: state === 'pending', message: `本地能力：${state}`,
+    complete: true, nextCursor: null, foundJobIds: state === 'pending' ? ['retained-native'] : [],
+    registeredJobIds: state === 'recovered' ? ['retained-native'] : [], blocked: state === 'blocked', ...overrides };
+}
+
+for (const state of ['blocked', 'stopped', 'deleted', 'unavailable', 'recovered']) test(`historical pending error is not a permanent recovery permission when actual capability is ${state}`, async t => {
+  const data = requestRecoverySnapshot();
+  const h = harness(t, { snapshot: data, draft: { text: '  Keep draft\n\n', refs: [reference('one'), reference('two')], params },
+    localResultRecovery: async () => recoveryCapability(state) });
+  await h.flush(); const before = structuredClone(savedDraft(h));
+  assert.deepEqual(h.localRecoveryReads.map(read => read.id), ['request-current']);
+  assert.equal(h.find('button', p => p['aria-label'] === '恢复本轮本地结果').length, 0);
+  if (state !== 'recovered') assert.match(JSON.stringify(h.find('section', p => p['aria-label'] === '图片结果待本地恢复')), new RegExp(`本地能力：${state}`));
+  assert.deepEqual(savedDraft(h), before); assert.deepEqual(h.localRecoveries, []); assert.deepEqual(h.submissions, []); assert.deepEqual(h.resumes, []);
+});
+
+test('an inconsistent recovery capability identity cannot enable historical result registration', async t => {
+  const h = harness(t, { snapshot: requestRecoverySnapshot(), localResultRecovery: async () => recoveryCapability('pending', { requestId: 'another-request' }) });
+  await h.flush();
+  assert.equal(h.find('button', p => p['aria-label'] === '恢复本轮本地结果').length, 0);
+  assert.match(JSON.stringify(h.find('section', p => p['aria-label'] === '图片结果待本地恢复')), /回执身份或格式不一致/);
+  assert.deepEqual(h.localRecoveries, []); assert.deepEqual(h.submissions, []); assert.deepEqual(h.resumes, []);
+});
+
+test('capability pagination preserves an earlier retained final when the last page contains no matching records', async t => {
+  const h = harness(t, { snapshot: requestRecoverySnapshot(), localResultRecovery: async (id, signal, cursor) => !cursor
+    ? recoveryCapability('checking', { canRecover: false, complete: false, nextCursor: 'after-first-page', foundJobIds: ['earlier-final'] })
+    : recoveryCapability('unavailable', { expectsLocalResult: true }) });
+  await h.flush();
+  assert.deepEqual(h.localRecoveryReads.map(read => read.cursor), [undefined, 'after-first-page']);
+  assert.ok(h.find('button', p => p['aria-label'] === '恢复本轮本地结果')[0]);
+  assert.deepEqual(h.localRecoveries, []); assert.deepEqual(h.submissions, []); assert.deepEqual(h.resumes, []);
+});
+
+test('capability pagination keeps an earlier conflict even when its final page reports a registered result; focus starts a fresh check', async t => {
+  let repairedElsewhere = false;
+  const h = harness(t, { snapshot: requestRecoverySnapshot(), localResultRecovery: async (id, signal, cursor) => repairedElsewhere
+    ? recoveryCapability('recovered', { marker: 'repaired-version' }) : !cursor
+      ? recoveryCapability('checking', { canRecover: false, complete: false, nextCursor: 'conflicting-page', blocked: true })
+      : recoveryCapability('recovered') });
+  await h.flush();
+  assert.equal(h.find('button', p => p['aria-label'] === '恢复本轮本地结果').length, 0);
+  assert.ok(h.find('section', p => p['aria-label'] === '图片结果待本地恢复')[0]);
+  repairedElsewhere = true; h.dispatch('focus'); await h.flush();
+  assert.equal(h.localRecoveryReads.at(-1).cursor, undefined, 'focus must not retain a previous scan conflict or cursor');
+  assert.equal(h.find('section', p => p['aria-label'] === '图片结果待本地恢复').length, 0);
+  assert.deepEqual(h.localRecoveries, []); assert.deepEqual(h.submissions, []); assert.deepEqual(h.resumes, []);
+});
+
+test('an unfinished eight-page scan stays read only until the explicit continuation completes the same request', async t => {
+  const h = harness(t, { snapshot: requestRecoverySnapshot(), localResultRecovery: async (id, signal, cursor) => {
+    const page = cursor ? Number(cursor) : 0;
+    return page < 8 ? recoveryCapability('checking', { canRecover: false, complete: false, nextCursor: String(page + 1), foundJobIds: page === 0 ? ['first-page-final'] : [] }) : recoveryCapability('unavailable');
+  } });
+  await h.flush();
+  assert.equal(h.localRecoveryReads.length, 8); assert.equal(h.find('button', p => p['aria-label'] === '恢复本轮本地结果').length, 0);
+  const continuation = h.find('button', p => p['aria-label'] === '检查本轮本地结果')[0]; assert.equal(continuation.disabled, false);
+  assert.equal(continuation.children, '继续检查本地结果'); continuation.onClick(); continuation.onClick(); await h.flush();
+  assert.equal(h.localRecoveryReads.length, 9); assert.equal(h.localRecoveryReads.at(-1).cursor, '8');
+  assert.ok(h.find('button', p => p['aria-label'] === '恢复本轮本地结果')[0]);
+  assert.deepEqual(h.localRecoveries, []); assert.deepEqual(h.submissions, []); assert.deepEqual(h.resumes, []);
+});
+
+test('a stopped terminal on a newer scan version takes precedence over earlier pending candidates', async t => {
+  const h = harness(t, { snapshot: requestRecoverySnapshot(), localResultRecovery: async (id, signal, cursor) => !cursor
+    ? recoveryCapability('checking', { canRecover: false, complete: false, nextCursor: 'stop-page', foundJobIds: ['earlier-final'] })
+    : recoveryCapability('stopped', { marker: 'stopped-new-version' }) });
+  await h.flush(); assert.equal(h.find('button', p => p['aria-label'] === '恢复本轮本地结果').length, 0);
+  assert.match(JSON.stringify(h.find('section', p => p['aria-label'] === '图片结果待本地恢复')), /本地能力：stopped/);
+  assert.deepEqual(h.localRecoveries, []); assert.deepEqual(h.submissions, []); assert.deepEqual(h.resumes, []);
+});
+
+test('focus rechecks current recovery permission and a captured old button cannot register a now-stopped request', async t => {
+  let stopped = false;
+  const h = harness(t, { snapshot: requestRecoverySnapshot(), localResultRecovery: async () => recoveryCapability(stopped ? 'stopped' : 'pending') });
+  await h.flush(); const oldButton = h.find('button', p => p['aria-label'] === '恢复本轮本地结果')[0]; assert.ok(oldButton);
+  stopped = true; h.dispatch('focus'); await h.flush(); oldButton.onClick(); await h.flush();
+  assert.equal(h.localRecoveryReads.length, 2); assert.deepEqual(h.localRecoveries, []);
+  assert.equal(h.find('button', p => p['aria-label'] === '恢复本轮本地结果').length, 0); assert.deepEqual(h.submissions, []); assert.deepEqual(h.resumes, []);
+});
+
+test('streaming a newer round does not rescan a stable historical capability; a changed hint refreshes it once', async t => {
+  const data = requestRecoverySnapshot();
+  const newer = { ...structuredClone(data.conversation.rounds[0]), id: 'r2', requestId: 'running-newer', parentRoundId: 'r1', index: 2, status: 'running', localRecovery: undefined };
+  data.request = { ...data.request, id: newer.requestId, roundId: newer.id, state: 'running', error: null };
+  data.conversation.activeRoundId = newer.id; data.conversation.rounds.push(newer);
+  data.conversation.messages.push({ id: 'a2', roundId: newer.id, role: 'assistant', content: '' });
+  const h = harness(t, { snapshot: data }); await h.flush(); assert.equal(h.localRecoveryReads.length, 1);
+  for (let version = 2; version < 7; version++) {
+    const next = structuredClone(data); next.revision = version; next.conversation.messages.at(-1).content = 'word '.repeat(version);
+    h.watchers.at(-1).next(next); await h.flush();
+  }
+  assert.equal(h.localRecoveryReads.length, 1, 'token updates must not run local receipt scans');
+  const changed = structuredClone(data); changed.revision = 7; changed.conversation.rounds[0].localRecovery.marker = 'changed-source-hint';
+  h.watchers.at(-1).next(changed); await h.flush(); assert.equal(h.localRecoveryReads.length, 2);
+  assert.deepEqual(h.submissions, []); assert.deepEqual(h.resumes, []);
+});
+
+for (const mode of ['hide', 'switch', 'unmount']) test(`late capability receipt after ${mode} cannot enable recovery in a different lifecycle`, async t => {
+  const pending = deferred();
+  const h = harness(t, { snapshot: requestRecoverySnapshot(), localResultRecovery: () => pending.promise,
+    snapshots: { next: { revision: 1, conversation: { id: 'next', title: 'Other', rounds: [], messages: [] }, request: null, jobs: [], images: [] } } });
+  await h.flush(); const before = structuredClone(savedDraft(h)); assert.equal(h.localRecoveryReads.length, 1);
+  if (mode === 'hide') h.hide();
+  else if (mode === 'unmount') h.unmount();
+  else { h.calls[0].resolve(result(['next'])); await h.flush(); h.find('button', p => p.className === 'agent-conversation-link')[0].onClick(); }
+  await h.flush(); assert.equal(h.localRecoveryReads[0].signal.aborted, true);
+  pending.resolve(recoveryCapability('pending')); await h.flush();
+  assert.equal(h.find('button', p => p['aria-label'] === '恢复本轮本地结果').length, 0);
+  assert.deepEqual(allDrafts(h).current, before); assert.equal(h.late, 0); assert.deepEqual(h.localRecoveries, []); assert.deepEqual(h.submissions, []); assert.deepEqual(h.resumes, []);
+});
+
+test('a lost local registration response is resolved by a read-only capability check without replaying POST', async t => {
+  let registered = false;
+  const h = harness(t, { snapshot: requestRecoverySnapshot(), localResultRecovery: async () => recoveryCapability(registered ? 'recovered' : 'pending'),
+    recoverResults: async () => { registered = true; throw Error('Synthetic response lost after local commit'); } });
+  await h.flush(); const before = structuredClone(savedDraft(h));
+  h.find('button', p => p['aria-label'] === '恢复本轮本地结果')[0].onClick(); await h.flush();
+  assert.deepEqual(h.localRecoveries, ['request-current']); assert.equal(h.localRecoveryReads.length, 2);
+  assert.equal(h.find('button', p => p['aria-label'] === '恢复本轮本地结果').length, 0); assert.deepEqual(savedDraft(h), before);
+  assert.deepEqual(h.submissions, []); assert.deepEqual(h.resumes, []);
+});
+
+test('a late focus GET cannot reopen a successfully recovered result', async t => {
+  const registration = deferred(), staleCheck = deferred(); let checks = 0;
+  const data = requestRecoverySnapshot();
+  const h = harness(t, { snapshot: data, localResultRecovery: () => ++checks === 1 ? Promise.resolve(recoveryCapability('pending')) : staleCheck.promise,
+    recoverResults: () => registration.promise });
+  await h.flush(); h.find('button', p => p['aria-label'] === '恢复本轮本地结果')[0].onClick(); await h.flush(); h.dispatch('focus'); await h.flush();
+  const restored = structuredClone(data); restored.revision = 2; restored.request.error = null;
+  restored.conversation.rounds[0].localRecovery = { ...restored.conversation.rounds[0].localRecovery, state: 'recovered', marker: 'recovered-hint' };
+  registration.resolve(restored); await h.flush(); staleCheck.resolve(recoveryCapability('pending')); await h.flush();
+  assert.equal(h.localRecoveryReads[1].signal.aborted, true); assert.equal(h.find('button', p => p['aria-label'] === '恢复本轮本地结果').length, 0);
+  assert.deepEqual(h.localRecoveries, ['request-current']); assert.deepEqual(h.submissions, []); assert.deepEqual(h.resumes, []);
+});
+
+test('a second tab refreshes a historical recovered result without issuing its own registration or model request', async t => {
+  let registered = false; const data = requestRecoverySnapshot();
+  const read = async () => recoveryCapability(registered ? 'recovered' : 'pending');
+  const a = harness(t, { snapshot: data, localResultRecovery: read, recoverResults: async () => {
+    registered = true; const value = structuredClone(data); value.revision = 2; value.request.error = null;
+    value.conversation.rounds[0].localRecovery = { ...value.conversation.rounds[0].localRecovery, marker: 'recovered', state: 'recovered' }; return value;
+  } });
+  const b = harness(t, { snapshot: structuredClone(data), localResultRecovery: read }); await a.flush(); await b.flush();
+  const before = structuredClone(savedDraft(b));
+  a.find('button', p => p['aria-label'] === '恢复本轮本地结果')[0].onClick(); await a.flush();
+  b.dispatch('focus'); await b.flush();
+  assert.equal(b.find('button', p => p['aria-label'] === '恢复本轮本地结果').length, 0); assert.deepEqual(savedDraft(b), before);
+  assert.deepEqual(a.localRecoveries, ['request-current']); assert.deepEqual(b.localRecoveries, []); assert.deepEqual(b.submissions, []); assert.deepEqual(b.resumes, []);
+  const refreshed = harness(t, { snapshot: structuredClone(data), localResultRecovery: read }); await refreshed.flush();
+  assert.equal(refreshed.find('button', p => p['aria-label'] === '恢复本轮本地结果').length, 0); assert.equal(refreshed.localRecoveryReads.length, 1);
 });

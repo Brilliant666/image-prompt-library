@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import ts from 'typescript';
+import { localRecoveryDependencies } from './helpers/local-result-recovery.mjs';
 
 const sourceUrl = new URL('../frontend/src/components/GenerationQueueDrawer.tsx', import.meta.url);
 const compile = source => ts.transpileModule(source, {
@@ -93,7 +94,7 @@ function harness(t, apiOverrides = {}, propOverrides = {}, environment = {}) {
   };
   const module = { exports: {} };
   new Function('require', 'module', 'exports', 'window', 'document', componentJs)(
-    name => { assert.ok(name in deps, `Unexpected dependency ${name}`); return deps[name]; },
+    name => { if (name in localRecoveryDependencies) return localRecoveryDependencies[name]; assert.ok(name in deps, `Unexpected dependency ${name}`); return deps[name]; },
     module, module.exports, window, undefined,
   );
   const props = {
@@ -144,6 +145,21 @@ test('closed summary never becomes a one-row detail page; opening waits for the 
   h.calls.at(-1).resolve(result([job('latest-detail')]));
   await h.flush();
   assert.equal(h.rows().length, 1, 'a completed detail read remains authoritative');
+});
+
+test('actual queue shows local registration recovery and refreshes the same job without offering paid failure retry', async t => {
+  let paid = 0;
+  const pending = job('paid-retained', { status: 'failed', metadata: { local_result_recovery: {
+    state: 'pending', message: '图片已取得，本地保存记录待恢复。', can_recover: true } } });
+  const h = harness(t, { retryGenerationJob: async () => { paid++; throw Error('No paid retry'); } });
+  h.calls[0].resolve(result([pending])); await h.flush(); h.open(); await h.flush();
+  h.calls.at(-1).resolve(result([pending])); await h.flush();
+  assert.equal(h.button('queueRetryFailed'), undefined);
+  const control = h.node((props, type) => type === 'local-result-recovery'); assert.ok(control);
+  const restored = { ...pending, status: 'succeeded', result_path: 'generation-results/paid-retained/final.png', metadata: {} };
+  control.onRecovered(restored); await h.flush();
+  h.calls.at(-1).resolve(result([restored])); await h.flush();
+  assert.equal(h.node((props, type) => type === 'local-result-recovery'), undefined); assert.equal(paid, 0);
 });
 
 test('close/reopen and unmount invalidate late responses without losing the detail cache', async t => {
@@ -475,3 +491,62 @@ for (const mutation of mutations) for (const succeeds of [true, false]) {
     }
   });
 }
+
+
+test('queue labels blocked retained evidence as unverified without offering a paid retry', async t => {
+  let paid = 0;
+  const blocked = job('blocked-retained', { status: 'cancelled', metadata: { local_result_recovery: {
+    state: 'blocked', message: '本地恢复证据尚未通过核验；请检查原任务。', can_recover: false } } });
+  const h = harness(t, { retryGenerationJob: async () => { paid++; throw Error('No paid retry'); } });
+  h.calls[0].resolve(result([blocked])); await h.flush(); h.open(); await h.flush();
+  h.calls.at(-1).resolve(result([blocked])); await h.flush();
+  assert.equal(h.node((props, type) => type === 'b' && props.children === '本地结果需核对')?.children, '本地结果需核对');
+  assert.equal(h.node((props, type) => type === 'b' && props.children === '图片已取得 · 待恢复'), undefined);
+  assert.equal(h.button('queueRetryFailed'), undefined); assert.equal(paid, 0);
+  assert.equal(h.node((props, type) => type === 'local-result-recovery').job, blocked);
+});
+
+
+for (const state of ['pending', 'blocked']) test(`raw running ${state} evidence remains visible in the local recovery section without paid retry`, async t => {
+  let paid = 0;
+  const retained = job(`raw-running-${state}`, { status: 'running', metadata: { local_result_recovery: {
+    state, message: state === 'pending' ? '图片已取得，本地保存记录待恢复。' : '本地证据需核对。', can_recover: state === 'pending' } } });
+  const h = harness(t, { retryGenerationJob: async () => { paid++; throw Error('No paid retry'); } });
+  h.calls[0].resolve(result([retained])); await h.flush(); h.open(); await h.flush();
+  h.calls.at(-1).resolve(result([retained])); await h.flush();
+  const control = h.node((props, type) => type === 'local-result-recovery');
+  assert.ok(control, 'raw running local evidence must not fall between the active and failed sections');
+  assert.equal(h.node((props, type) => type === 'h3' && props.children === '本地结果待恢复／需核对')?.children, '本地结果待恢复／需核对');
+  assert.equal(control.job.id, retained.id); assert.equal(control.job.metadata.local_result_recovery.can_recover, state === 'pending');
+  assert.equal(h.rows().length, 1, 'the original task appears once');
+  assert.equal(h.button('queueRetryFailed'), undefined); assert.equal(h.button('queueStopSaving'), undefined); assert.equal(h.button('queueMarkFailed'), undefined); assert.equal(paid, 0);
+  if (state === 'pending') {
+    const restored = { ...retained, status: 'succeeded', result_path: `generation-results/${retained.id}/final.png`, metadata: {} };
+    control.onRecovered(restored); await h.flush(); h.calls.at(-1).resolve(result([restored])); await h.flush();
+    assert.equal(h.node((props, type) => type === 'local-result-recovery'), undefined);
+    assert.ok(h.node((props, type) => type === 'article' && props.className?.includes('status-succeeded')));
+    assert.equal(h.node((props, type) => type === 'h3' && props.children === '本地结果待恢复／需核对'), undefined);
+    assert.equal(paid, 0);
+  }
+});
+
+
+for (const state of ['pending', 'blocked']) test(`a mixed batch retains exactly one local recovery action for its ${state} running member`, async t => {
+  const retained = job(`batch-${state}`, { status: 'running', generation_group_id: 'batch', generation_group_index: 1, generation_group_size: 2,
+    metadata: { local_result_recovery: { state, message: '本地结果需核对。', can_recover: state === 'pending' } } });
+  const other = job('other-member', { status: 'accepted', generation_group_id: 'batch', generation_group_index: 2, generation_group_size: 2 });
+  const changes = []; let paid = 0;
+  const h = harness(t, { retryGenerationJob: async () => { paid++; } }, { onChanged: value => changes.push(value) });
+  h.calls[0].resolve(result([retained, other])); await h.flush(); h.open(); await h.flush();
+  h.calls.at(-1).resolve(result([retained, other])); await h.flush();
+  assert.ok(h.button('queueOpenBatch'), 'the original mixed batch remains accessible');
+  const control = h.node((props, type) => type === 'local-result-recovery'); assert.equal(control.job.id, retained.id);
+  assert.equal(h.rows().length, 1, 'the retained member has one local row outside its aggregate batch summary');
+  assert.equal(h.button('queueRetryFailed'), undefined); assert.equal(h.button('queueMarkFailed'), undefined); assert.equal(paid, 0);
+  if (state === 'pending') {
+    const restored = { ...retained, status: 'succeeded', result_path: `generation-results/${retained.id}/final.png`, metadata: {} };
+    control.onRecovered(restored); await h.flush(); h.calls.at(-1).resolve(result([restored, other])); await h.flush();
+    assert.deepEqual(changes.map(value => value.id), [retained.id]); assert.equal(h.node((props, type) => type === 'local-result-recovery'), undefined);
+    assert.ok(h.button('queueOpenBatch')); assert.equal(paid, 0);
+  }
+});

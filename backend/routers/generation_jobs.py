@@ -1,4 +1,5 @@
 import json
+import sqlite3
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from PIL import UnidentifiedImageError
@@ -327,6 +328,19 @@ def discard_generation_job(job_id: str, request: Request):
         raise HTTPException(status_code=404) from exc
     except GenerationJobConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/{job_id}/recover-result", response_model=GenerationJobRecord)
+def recover_generation_job_result(job_id: str, request: Request):
+    """Only register already obtained bytes; never dispatch a provider request."""
+    try:
+        return _sanitize_generation_job_record(repo(request).recover_local_result(job_id))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Generation task not found") from exc
+    except GenerationJobConflict as exc:
+        raise HTTPException(status_code=409, detail=sanitize_generation_error(str(exc))) from None
+    except (sqlite3.Error, OSError):
+        raise HTTPException(status_code=503, detail="Local result registration is still unavailable. The saved result was retained; no new image request was sent.") from None
 
 
 @router.post("/{job_id}/retry", response_model=GenerationJobRecord)

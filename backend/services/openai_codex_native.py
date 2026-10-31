@@ -729,13 +729,8 @@ class OpenAICodexNativeProvider:
                 try:
                     repo = GenerationJobRepository(library_path)
                     job = repo.get_job(job_id)
-                    if job.provider == PROVIDER_ID and job.status in {"queued", "failed"}:
-                        try:
-                            job = repo.mark_running(job_id)
-                        except GenerationJobConflict:
-                            job = repo.get_job(job_id)
-                    if job.provider == PROVIDER_ID and job.status not in {"succeeded", "accepted", "discarded", "cancelled"}:
-                        repo.mark_failed(job_id, safe_error)
+                    if job.provider == PROVIDER_ID and job.status == 'queued' and job.started_at is None:
+                        repo.mark_preflight_failed(job_id, safe_error)
                 except (GenerationJobConflict, KeyError, OSError):
                     pass
             raise CodexNativeAuthError(safe_error) from exc
@@ -815,8 +810,10 @@ class OpenAICodexNativeProvider:
                 "mode": "image_edit" if input_images else "text_to_image",
                 "input_image_count": len(input_images),
             }
-            return repo.stage_result(job_id, image_bytes, "openai-codex-native.png", metadata)
+            return repo.stage_result(job_id, image_bytes, "openai-codex-native.png", metadata, job_snapshot=job)
         except GenerationJobConflict as exc:
+            if isinstance(repo.local_result_recovery(job_id), dict):
+                return repo.get_job(job_id)
             repo.mark_failed(job_id, str(exc))
             raise
         except CodexNativeRateLimitError as exc:
@@ -827,6 +824,8 @@ class OpenAICodexNativeProvider:
                 retry_after_seconds=exc.retry_after_seconds,
             ) from exc
         except Exception as exc:
+            if isinstance(repo.local_result_recovery(job_id), dict):
+                return repo.get_job(job_id)
             failed = repo.mark_failed(job_id, str(exc))
             raise CodexNativeAuthError(failed.error or "Codex native generation failed") from exc
 

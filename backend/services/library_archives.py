@@ -25,6 +25,7 @@ from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Iterator
+from types import SimpleNamespace
 
 from backend import config, db
 from backend.services.generation_jobs import sanitize_generation_error, sanitize_generation_parameters
@@ -308,7 +309,17 @@ def _iter_payload_files(library: Path) -> list[tuple[str, Path, int, str]]:
         raise _error(f"Active library database does not exist: {db_path}")
     if _is_reparse_or_link(db_path):
         raise _error("Active library database must not be a symlink/reparse point")
-    add_file("db.sqlite", db_path)
+    # A valid WAL checkpoint can change the main database's physical bytes
+    # without changing any committed data. Enumerate only its safe identity and
+    # estimated size here; the SQLite online backup below produces the actual
+    # consistent payload, whose complete hash is used by the manifest.
+    handle, opened = _open_regular_source(db_path)
+    handle.close()
+    if opened.st_size > MAX_FILE_SIZE:
+        raise _error("Library database exceeds the per-file size limit")
+    entries.append(("db.sqlite", db_path, opened.st_size, ""))
+    seen_case.add(_collision_key("db.sqlite"))
+    total += opened.st_size
 
     def walk(root: Path, rel_root: str) -> None:
         if not root.exists():
@@ -446,6 +457,7 @@ def _validate_database(path: Path, *, library: Path | None = None) -> list[str]:
         _validate_no_stored_credentials(conn)
         if library is not None:
             _validate_referenced_paths(conn, library)
+            _validate_result_recovery_records(conn, library)
         return ledger
     except LibraryArchiveError:
         raise
@@ -454,6 +466,46 @@ def _validate_database(path: Path, *, library: Path | None = None) -> list[str]:
     finally:
         if conn is not None:
             conn.close()
+
+
+def _validate_result_recovery_records(conn: sqlite3.Connection, library: Path) -> None:
+    """Retain safe recovery evidence without trusting arbitrary sidecar JSON.
+
+    Inspect frozen job identity directly; constructing a live repository here
+    would initialize the database while an archive is being verified. User
+    cancellation is deliberately not an archive error or permission to revive.
+    """
+    from backend.services.generation_result_recovery import RECEIPT_NAME, validate_receipt
+
+    root = library / "generation-results"
+    for receipt in root.glob("*/" + RECEIPT_NAME):
+        try:
+            cursor = conn.execute("SELECT * FROM generation_jobs WHERE id=?", (receipt.parent.name,))
+            row = cursor.fetchone()
+            if row is None:
+                raise ValueError("Missing original job")
+            data = dict(zip((column[0] for column in cursor.description), row))
+            for key in ("parameters", "metadata"):
+                data[key] = json.loads(data.get(key) or "{}")
+                if not isinstance(data[key], dict):
+                    raise ValueError("Invalid job metadata")
+            data["reference_image_ids"] = json.loads(data.get("reference_image_ids") or "[]")
+            if not isinstance(data["reference_image_ids"], list):
+                raise ValueError("Invalid reference identity")
+            validate_receipt(library, SimpleNamespace(**data))
+        except (OSError, ValueError, TypeError, sqlite3.Error):
+            raise _error("Library contains an invalid local result recovery record; preserve its files and check the original task before backing up") from None
+    from backend.services.agent_native_result_recovery import NATIVE_RECEIPT_NAME, validate_native_receipt
+    previous_factory = conn.row_factory
+    try:
+        conn.row_factory = sqlite3.Row
+        for receipt in root.glob("*/" + NATIVE_RECEIPT_NAME):
+            try:
+                validate_native_receipt(library, receipt.parent.name, connection=conn)
+            except (OSError, ValueError, TypeError, KeyError, sqlite3.Error):
+                raise _error("Library contains an invalid Native result recovery record; preserve its files and check the original request before backing up") from None
+    finally:
+        conn.row_factory = previous_factory
 
 
 def _validate_no_stored_credentials(conn: sqlite3.Connection) -> None:

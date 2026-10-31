@@ -75,6 +75,15 @@ export interface AgentExecution {
     connectionMs?: number | null; tlsMs?: number | null; uploadMs?: number | null; waitHeadersMs?: number | null; requestBytes?: number | null;
   }>;
 }
+export interface AgentLocalResultRecoveryHint {
+  requestId: string; marker: string;
+  state: 'check_required' | 'checking' | 'pending' | 'blocked' | 'recovered' | 'stopped' | 'deleted' | 'unavailable';
+  canRecover: boolean; message: string;
+}
+export interface AgentLocalResultRecovery extends AgentLocalResultRecoveryHint {
+  complete: boolean; nextCursor: string | null; foundJobIds: string[]; registeredJobIds: string[];
+  blocked: boolean; expectsLocalResult?: boolean;
+}
 export interface AgentRound {
   id: string; index: number; parentRoundId: string | null; userMessageId: string; assistantMessageId?: string;
   prompt: string; inputImageIds: string[]; taskImageIds?: string[]; maskTargetImageId: string | null; maskImageId: string | null;
@@ -93,6 +102,7 @@ export interface AgentRound {
   branchTaskRevision?: number;
   kind?: 'prompt_execution';
   directRecipe?: AgentDirectRecipe;
+  localRecovery?: AgentLocalResultRecoveryHint;
 }
 export interface AgentPromptExecutionInput {
   requestId: string; expectedRevision: number; branchRoundId: string | null;
@@ -318,6 +328,8 @@ export const agentApi = {
   request: (id: string, signal?: AbortSignal) => request<AgentSnapshot>(`/requests/${encodeURIComponent(id)}`, { signal }),
   stop: (id: string) => request<AgentSnapshot>(`/requests/${encodeURIComponent(id)}/stop`, { method: 'POST', body: '{}' }),
   resume: (id: string, resumeId: string) => request<AgentSnapshot>(`/requests/${encodeURIComponent(id)}/resume`, { method: 'POST', body: JSON.stringify({ resumeId }) }),
+  localResultRecovery: (id: string, signal?: AbortSignal, cursor?: string) => request<AgentLocalResultRecovery>(`/requests/${encodeURIComponent(id)}/local-result-recovery${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`, { signal }),
+  recoverResults: (id: string) => request<AgentSnapshot>(`/requests/${encodeURIComponent(id)}/recover-results`, { method: 'POST' }),
   upload: (file: File, kind: 'reference' | 'mask' = 'reference') => {
     const body = new FormData(); body.append('file', file); body.append('kind', kind);
     return request<{ uploadId: string; image: AgentImage }>('/uploads', { method: 'POST', body });

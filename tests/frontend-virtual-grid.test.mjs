@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import ts from 'typescript';
+import { localRecoveryDependencies } from './helpers/local-result-recovery.mjs';
 
 async function compile(path) {
   const source = await readFile(new URL(path, import.meta.url), 'utf8');
@@ -10,7 +11,7 @@ async function compile(path) {
 function evaluate(js, dependencies) {
   const module = { exports: {} };
   new Function('require', 'module', 'exports', js)(name => {
-    assert.ok(name in dependencies, `unmocked dependency: ${name}`);
+    if (name in localRecoveryDependencies) return localRecoveryDependencies[name]; assert.ok(name in dependencies, `unmocked dependency: ${name}`);
     return dependencies[name];
   }, module, module.exports);
   return module.exports;
@@ -173,4 +174,29 @@ test('TaskGrid passes the supplied scrollRef to virtualization while retaining g
   tree.props.onPointerDown({ button: 0, target: { closest: () => null }, clientX: 21, clientY: 123, currentTarget: grid, pointerId: 1 });
   tree.props.onPointerMove({ clientX: 100, clientY: 150, currentTarget: grid });
   assert.deepEqual([...selections[0]], ['job-12']);
+});
+
+
+test('TaskGrid labels blocked evidence as requiring verification and keeps ordinary reuse disabled', () => {
+  const jsx = (type, props) => ({ type, props });
+  const dependencies = {
+    react: { useRef: value => ({ current: value }), useState: value => [value, () => {}], useEffect: () => {} },
+    'react/jsx-runtime': { jsx, jsxs: jsx }, 'lucide-react': new Proxy({}, { get: (_, key) => key }),
+    '../../api/client': { mediaUrl: path => path }, '../../utils/playground/virtualGrid': gridMath,
+    '../../utils/playground/useVirtualGrid': { useVirtualGrid: () => ({ startIndex: 0, endIndex: 1, paddingTop: 0, paddingBottom: 0, metricsRef: { current: {} } }) },
+    '../../utils/galleryRecipe': { galleryJobPrompt: job => job.prompt_text, galleryStatus: {} }, '../../utils/clipboard': {},
+    '../../utils/galleryCardMeta': { galleryImageDimensions: () => undefined, galleryTaskElapsed: () => undefined },
+    '../../utils/agentGalleryBridge': { agentJobSource: () => undefined },
+  };
+  let reused = 0;
+  const blocked = { id: 'blocked', status: 'running', prompt_text: 'Original', parameters: {}, metadata: {
+    local_result_recovery: { state: 'blocked', message: '本地证据需核对。', can_recover: false } } };
+  const TaskGrid = evaluate(taskGridJs, dependencies).default;
+  const tree = TaskGrid({ jobs: [blocked], selected: new Set(), onReuse: () => reused++ });
+  function descendants(node) { return !node || typeof node !== 'object' ? [] : [node, ...[node.props?.children].flat(Infinity).flatMap(descendants)]; }
+  const nodes = descendants(tree);
+  assert.match(JSON.stringify(tree), /本地结果需核对/); assert.doesNotMatch(JSON.stringify(tree), /图片已取得|本地记录待恢复/);
+  const reuse = nodes.find(node => node.type === 'button' && node.props['aria-label'] === '恢复完整配方').props;
+  assert.equal(reuse.disabled, true); reuse.onClick(); assert.equal(reused, 0);
+  assert.equal(nodes.find(node => node.type === 'local-result-recovery').props.job, blocked);
 });

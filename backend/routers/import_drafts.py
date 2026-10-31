@@ -39,6 +39,8 @@ def ingest_repository(payload: RepositoryIngestRequest, request: Request):
         return ingest_repository_to_drafts(payload, request.app.state.library_path)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ImportDraftConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/{draft_id}", response_model=ImportDraftRecord)

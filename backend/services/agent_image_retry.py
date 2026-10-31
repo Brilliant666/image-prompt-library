@@ -87,6 +87,8 @@ class AgentImageRetryRepository:
         return {'retryId': retry_id, 'sourceJobId': link['sourceJobId'], 'job': job}
 
     def _terminal(self, job, *, require_asset=False):
+        if self.jobs.local_result_recovery(job.id) is not None:
+            raise AgentError('local_result_pending', '图片已取得，本地保存记录待恢复；请恢复原结果，不要重新生成。')
         if job.status == 'failed':
             _known_failure(job)
         elif job.status in {'succeeded', 'accepted'}:
@@ -425,7 +427,6 @@ def _run_native_retry(library, job, profile):
                     raise AgentError('upstream_error', f'原生图片接口返回 HTTP {response.status_code}。', diagnostics=safe_http_failure(response))
                 payload = read_native_response(response, check_owner)
                 provider_ms = timing.elapsed(provider_started)
-        jobs.record_execution(job.id, phase='processing_results', providerMs=provider_ms)
         result_started = timing.monotonic()
         images = [item for item in payload.get('output', []) if isinstance(item, dict) and item.get('type') == 'image_generation_call']
         if len(images) == 1 and images[0].get('status') == 'failed':
@@ -453,15 +454,17 @@ def _run_native_retry(library, job, profile):
                 extension = {'PNG': 'png', 'JPEG': 'jpg', 'WEBP': 'webp'}.get(image.format, 'png')
         except (ValueError, OSError):
             raise AgentError('upstream_error', '原生图片结果无法解码。') from None
-        check_owner()
         revised = redact(images[0].get('revised_prompt'), [profile['api_key']])
         jobs.stage_result(job.id, data, 'native.' + extension, {'provider': 'agent_native_batch',
             'requested': {k: v for k, v in image_tool.items() if k not in {'type', 'action', 'input_image_mask'}},
             'response': {'response_id': redact(payload.get('id'), [profile['api_key']]),
-                         **({'revised_prompt': revised} if isinstance(revised, str) and revised.strip() else {})}})
+                         **({'revised_prompt': revised} if isinstance(revised, str) and revised.strip() else {})}}, job_snapshot=job)
+        jobs.record_execution(job.id, phase='processing_results', providerMs=provider_ms)
         jobs.record_execution(job.id, phase='completed', resultWriteMs=timing.elapsed(result_started))
         return jobs.get_job(job.id)
     except Exception as exc:
+        if jobs.local_result_recovery(job.id) is not None:
+            return jobs.get_job(job.id)
         if claimed and jobs.get_job(job.id).status == 'running':
             diagnostics = exception_diagnostics(exc) if provider_started is not None else safe_diagnostics({'category': 'local_validation'})
             measurements = {'providerMs': provider_ms if provider_ms is not None else timing.elapsed(provider_started)} if provider_started is not None else {'preparationMs': timing.elapsed(started)}

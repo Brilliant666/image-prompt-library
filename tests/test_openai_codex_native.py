@@ -1256,7 +1256,7 @@ def test_codex_native_rejects_invalid_data_url_before_provider_call(tmp_path, mo
     assert "input image" in failed["error"].lower()
 
 
-def test_codex_native_marks_failed_when_stage_result_rejects_unsafe_result_root(tmp_path, monkeypatch):
+def _unsafe_codex_result_root(tmp_path, monkeypatch, *, junction=False, attempt=True):
     auth_path = tmp_path / "auth" / "auth.json"
     monkeypatch.setenv("IMAGE_PROMPT_LIBRARY_AUTH_PATH", str(auth_path))
     monkeypatch.setattr("backend.routers.generation_jobs.enqueue_generation_jobs", lambda *args, **kwargs: None)
@@ -1266,7 +1266,9 @@ def test_codex_native_marks_failed_when_stage_result_rejects_unsafe_result_root(
 
     CodexNativeAuthStore().save_tokens({"access_token": fake_jwt(), "refresh_token": "***"})
 
+    provider_calls = []
     def collect(self, prompt, *, size, quality, image_model, input_images=None):
+        provider_calls.append(prompt)
         return base64.b64encode(png_bytes()).decode(), {}
 
     monkeypatch.setattr(openai_codex_native.OpenAICodexNativeProvider, "_collect_image", collect)
@@ -1282,13 +1284,22 @@ def test_codex_native_marks_failed_when_stage_result_rejects_unsafe_result_root(
     }).json()
     wrong_results = tmp_path / "library" / "wrong-results"
     wrong_results.mkdir()
-    try:
-        (tmp_path / "library" / "generation-results").symlink_to(wrong_results, target_is_directory=True)
-    except OSError as exc:
-        if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
-            pytest.skip("Windows symlink privilege is unavailable")
-        raise
+    linked_root = tmp_path / 'library' / 'generation-results'
+    if junction:
+        import subprocess
+        subprocess.run(['cmd','/c','mklink','/J',str(linked_root),str(wrong_results)],check=True,capture_output=True)
+        assert linked_root.lstat().st_file_attributes & 0x400
+    else:
+        try:
+            linked_root.symlink_to(wrong_results, target_is_directory=True)
+        except OSError as exc:
+            if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
+                pytest.skip("Windows symlink privilege is unavailable")
+            raise
 
+    case = c, job, linked_root, wrong_results, provider_calls
+    if not attempt:
+        return case
     response = c.post(f"/api/generation-jobs/{job['id']}/run")
 
     assert response.status_code == 409
@@ -1298,6 +1309,92 @@ def test_codex_native_marks_failed_when_stage_result_rejects_unsafe_result_root(
     assert failed["started_at"] is not None
     assert failed["completed_at"] is not None
     assert "path" in failed["error"].lower()
+    assert provider_calls == []
+    assert 'local_result_recovery' not in failed['metadata']
+    return case
+
+
+def test_codex_native_marks_failed_when_stage_result_rejects_unsafe_result_root(tmp_path, monkeypatch):
+    _unsafe_codex_result_root(tmp_path,monkeypatch)
+
+
+@pytest.mark.skipif(os.name != 'nt',reason='Windows junction validation runs on Windows')
+def test_codex_native_rejects_real_result_root_junction_before_provider_call(tmp_path,monkeypatch):
+    _unsafe_codex_result_root(tmp_path,monkeypatch,junction=True)
+
+
+def _remove_test_directory_link(path):
+    if path.is_symlink():
+        path.unlink()
+    else:
+        # Windows rmdir removes this test's junction itself, not its target.
+        path.rmdir()
+
+
+def test_codex_native_preflight_failure_can_run_after_storage_is_fixed(tmp_path,monkeypatch):
+    c,job,root,wrong,calls = _unsafe_codex_result_root(tmp_path,monkeypatch,junction=os.name == 'nt')
+    _remove_test_directory_link(root)
+    root.mkdir()
+    response = c.post(f"/api/generation-jobs/{job['id']}/run")
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result['status'] == 'succeeded' and len(calls) == 1
+    assert '_generation_preflight_failed' not in result['metadata']
+    assert (root.parent/result['result_path']).read_bytes() == png_bytes()
+    assert list(wrong.iterdir()) == []
+
+
+def test_codex_native_obtained_result_with_redirected_root_blocks_paid_replay(tmp_path,monkeypatch):
+    from backend.services.generation_jobs import GenerationJobRepository
+    from test_generation_result_recovery import fail_result_database
+    c,job,root,wrong,calls = _unsafe_codex_result_root(tmp_path,monkeypatch,junction=os.name == 'nt')
+    _remove_test_directory_link(root)
+    root.mkdir()
+    with fail_result_database(monkeypatch,'update'):
+        response = c.post(f"/api/generation-jobs/{job['id']}/run")
+    assert response.status_code == 200 and response.json()['status'] == 'running'
+    assert len(calls) == 1
+    kept = root.with_name('kept-final-results')
+    root.rename(kept)
+    if os.name == 'nt':
+        subprocess.run(['cmd','/c','mklink','/J',str(root),str(wrong)],check=True,capture_output=True)
+    else:
+        root.symlink_to(wrong,target_is_directory=True)
+    repo = GenerationJobRepository(root.parent)
+    state = repo.local_result_recovery(job['id'])
+    assert state['state'] == 'blocked' and not state['can_recover']
+    for _ in range(2):
+        assert c.post(f"/api/generation-jobs/{job['id']}/run").status_code == 409
+        assert c.post(f"/api/generation-jobs/{job['id']}/retry").status_code == 409
+    assert len(calls) == 1 and repo.get_job(job['id']).status == 'running'
+    assert (kept/job['id']/'local-result.json').is_file()
+    assert next((kept/job['id']).glob('result-*')).read_bytes() == png_bytes()
+    assert list(wrong.iterdir()) == []
+
+
+def test_codex_native_queued_unsafe_root_is_dispatched_only_to_rejecting_preflight(tmp_path,monkeypatch):
+    from concurrent.futures import Future
+    from backend.services import generation_queue as queue
+    from backend.services.generation_jobs import GenerationJobRepository
+    c,job,root,wrong,calls = _unsafe_codex_result_root(tmp_path,monkeypatch,junction=os.name == 'nt',attempt=False)
+    monkeypatch.setattr(queue,'_active',set())
+    monkeypatch.setattr(queue,'_active_providers',{})
+    monkeypatch.setattr(queue,'_futures',{})
+    monkeypatch.setattr(queue,'_closing',set())
+    monkeypatch.setattr(queue,'_continue_automated_generation_queues',lambda *args,**kwargs:None)
+    dispatched = []
+    class SynchronousExecutor:
+        def submit(self,function,*args):
+            dispatched.append(args[1])
+            result = Future()
+            result.set_result(function(*args))
+            return result
+    monkeypatch.setattr(queue,'_executor',SynchronousExecutor())
+    queue.enqueue_generation_jobs(root.parent,provider=job['provider'])
+    final = GenerationJobRepository(root.parent).get_job(job['id'])
+    assert dispatched == [job['id']] and calls == []
+    assert final.status == 'failed' and 'local_result_recovery' not in final.metadata
+    assert list(wrong.iterdir()) == []
 
 
 def test_codex_native_rejects_legacy_unsafe_result_path_before_provider_call(tmp_path, monkeypatch):

@@ -67,7 +67,10 @@ def test_import_draft_can_be_staged_previewed_and_accepted(tmp_path):
     assert prompts["zh_hant"]["provenance"]["kind"] == "conversion"
     assert accepted["item"]["source_url"] == draft_payload()["source_url"]
 
-    assert c.post(f"/api/import-drafts/{staged['id']}/accept").status_code == 409
+    replay = c.post(f"/api/import-drafts/{staged['id']}/accept")
+    assert replay.status_code == 200
+    assert replay.json()["item"]["id"] == accepted["item"]["id"]
+    assert c.get("/api/items").json()["total"] == 1
 
 
 def test_import_draft_marks_duplicate_by_source_url_and_accept_rejects_it(tmp_path):

@@ -8,9 +8,11 @@ import { providerPauseSeconds } from '../utils/generationSets';
 import { mapGenerationRetryJob, rememberGenerationReviewOpenContext, resolveGenerationRetryGroup } from '../utils/generationSiblings';
 import { readGenerationQueueHistory, saveGenerationQueueHistory, clearGenerationQueueHistory, beginGenerationQueueMutation, generationQueueMutationPending, subscribeGenerationQueueMutation } from '../utils/generationQueueHistory';
 import type { Translator } from '../utils/i18n';
+import LocalResultRecovery from './LocalResultRecovery';
+import { localResultRecovery, localResultRecoveryLabel } from '../utils/localResultRecovery';
 
 function isActive(job: GenerationJobRecord) {
-  return job.status === 'queued' || job.status === 'running';
+  return !localResultRecovery(job) && (job.status === 'queued' || job.status === 'running');
 }
 
 function hasDisplayableResult(job: GenerationJobRecord) {
@@ -18,6 +20,7 @@ function hasDisplayableResult(job: GenerationJobRecord) {
 }
 
 function statusIcon(job: GenerationJobRecord) {
+  if (localResultRecovery(job)) return <History size={16} />;
   if (isActive(job)) return <Clock3 size={16} />;
   if (job.status === 'succeeded') return <ImagePlus size={16} />;
   if (job.status === 'failed') return <XCircle size={16} />;
@@ -25,6 +28,8 @@ function statusIcon(job: GenerationJobRecord) {
 }
 
 function statusLabel(job: GenerationJobRecord, t: Translator, isUsedAsGenerationReference = false) {
+  const recoveryLabel = localResultRecoveryLabel(job);
+  if (recoveryLabel) return recoveryLabel;
   if (job.status === 'queued') return t('queueQueued');
   if (job.status === 'running') return t('queueRunning');
   if (job.status === 'succeeded') return isUsedAsGenerationReference ? t('queueUsedAsReference') : t('queueReady');
@@ -223,7 +228,7 @@ function retriedByJobId(job: GenerationJobRecord) {
 }
 
 function canRetryFailedJob(job: GenerationJobRecord) {
-  return job.status === 'failed' && !retriedByJobId(job);
+  return job.status === 'failed' && !retriedByJobId(job) && !localResultRecovery(job);
 }
 
 function canDiscardTransientResult(job: GenerationJobRecord) {
@@ -253,7 +258,7 @@ function jobModel(job: GenerationJobRecord) {
 }
 
 function isStaleRunningJob(job: GenerationJobRecord) {
-  if (job.status !== 'running') return false;
+  if (job.status !== 'running' || localResultRecovery(job)) return false;
   const started = Date.parse(job.started_at || job.updated_at || job.created_at);
   return Number.isFinite(started) && Date.now() - started > STALE_RUNNING_JOB_MS;
 }
@@ -730,6 +735,7 @@ export default function GenerationQueueDrawer({
   };
 
   const renderFailedJob = (job: GenerationJobRecord) => {
+    if (localResultRecovery(job)) return <article className="generation-queue-failure" key={job.id}><LocalResultRecovery job={job} onRecovered={recovered => { clearGenerationQueueHistory(libraryScope); setJobs(current => current.map(row => row.id === recovered.id ? recovered : row)); onChanged?.(recovered); void refresh(); }}/><button type="button" onClick={() => onOpenJob(job)}>查看原任务</button></article>;
      const failure = generationFailure(job, t);
      const moderationGuidance = generationModerationGuidance(job, t);
     const retryId = retriedByJobId(job);
@@ -794,12 +800,13 @@ export default function GenerationQueueDrawer({
     .filter(entry => entry.seconds > 0);
 
   const sections = [
+    { key: 'local-recovery', title: '本地结果待恢复／需核对', jobs: jobs.filter(job => Boolean(localResultRecovery(job))) },
     { key: 'active', title: t('queueInProgress'), jobs: jobs.filter(job => !groupedJobIds.has(job.id) && isActive(job)) },
-    { key: 'ready', title: t('queueReadyForReview'), jobs: jobs.filter(job => !groupedJobIds.has(job.id) && job.status === 'succeeded') },
-    { key: 'failed', title: t('queueNeedsAttention'), jobs: jobs.filter(job => !groupedJobIds.has(job.id) && job.status === 'failed') },
+    { key: 'ready', title: t('queueReadyForReview'), jobs: jobs.filter(job => !groupedJobIds.has(job.id) && !localResultRecovery(job) && job.status === 'succeeded') },
+    { key: 'failed', title: t('queueNeedsAttention'), jobs: jobs.filter(job => !groupedJobIds.has(job.id) && !localResultRecovery(job) && job.status === 'failed') },
     // A cleared batch slot is absent from the gallery, so keep its own history
     // entry available even when the batch also has a summary card.
-    { key: 'recent', title: t('queueRecent'), jobs: jobs.filter(job => job.status === 'discarded' || (!groupedJobIds.has(job.id) && ['accepted', 'cancelled'].includes(job.status))) },
+    { key: 'recent', title: t('queueRecent'), jobs: jobs.filter(job => !localResultRecovery(job) && (job.status === 'discarded' || (!groupedJobIds.has(job.id) && ['accepted', 'cancelled'].includes(job.status)))) },
   ];
   const visibleSections = sections.filter(section => section.jobs.length > 0);
   const hasHistoricalActivity = jobTotal > 0 || Object.values(statusCounts || {}).some(count => Number(count) > 0);
@@ -984,6 +991,7 @@ export default function GenerationQueueDrawer({
                     </button>
                     <span className="generation-queue-row-actions">
                       <b>{statusLabel(job, t, isUsedAsGenerationReference(job, jobs))}</b>
+                      {localResultRecovery(job) && <LocalResultRecovery job={job} onRecovered={recovered => { clearGenerationQueueHistory(libraryScope); setJobs(current => current.map(row => row.id === recovered.id ? recovered : row)); onChanged?.(recovered); void refresh(); }}/>}
                       {job.status === 'discarded' && <em className="generation-cancel-copy">{t('queueRecordRetained')}</em>}
                        {isStaleRunningJob(job) && <em className="generation-stale-copy">{t('generationStalled')}</em>}
                       {isActive(job) && (

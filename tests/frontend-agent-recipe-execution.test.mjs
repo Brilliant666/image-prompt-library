@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import ts from 'typescript';
+import { localRecoveryDependencies } from './helpers/local-result-recovery.mjs';
 
 const compile = async path => ts.transpileModule(await readFile(new URL(path, import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
-function evaluate(js, dependencies, globals = {}) { const module = { exports: {} }; new Function('require', 'module', 'exports', ...Object.keys(globals), js)(name => { assert.ok(name in dependencies, `unmocked dependency: ${name}`); return dependencies[name]; }, module, module.exports, ...Object.values(globals)); return module.exports; }
+function evaluate(js, dependencies, globals = {}) { const module = { exports: {} }; new Function('require', 'module', 'exports', ...Object.keys(globals), js)(name => { if (name in localRecoveryDependencies) return localRecoveryDependencies[name]; assert.ok(name in dependencies, `unmocked dependency: ${name}`); return dependencies[name]; }, module, module.exports, ...Object.values(globals)); return module.exports; }
 const utility = async path => evaluate(await compile(`../frontend/src/utils/${path}.ts`), {});
 const workspaceJs = await compile('../frontend/src/components/agent/AgentWorkspace.tsx'), runStateJs = await compile('../frontend/src/components/agent/useAgentRunState.ts'), submissionJs = await compile('../frontend/src/utils/playground/agentSubmission.ts');
 const references = await utility('playground/agentImageReferences'), conversation = await utility('playground/agentConversationState'), blocks = await utility('playground/agentAssistantBlocks'), compatible = await utility('compatibleRecipe'), bridge = await utility('agentGalleryBridge'), inputPreferences = await utility('agentInputPreferences');

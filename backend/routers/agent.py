@@ -1,4 +1,5 @@
 import asyncio
+import sqlite3
 import time
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
@@ -182,6 +183,26 @@ async def get_request_events(request_id: str, request: Request):
     return StreamingResponse(progress_events(request, repository, request_id, token, snapshot, structure),
                              media_type="text/event-stream",
                              headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
+
+@router.get("/requests/{request_id}/local-result-recovery")
+def get_local_result_recovery(request_id: str, request: Request, cursor: str | None = Query(default=None, max_length=160)):
+    try:
+        value = repo(request).local_result_recovery_status(request_id, cursor=cursor)
+        return JSONResponse(value, headers={'Cache-Control': 'no-store'})
+    except (sqlite3.Error, OSError):
+        raise AgentError('local_result_pending', '本地登记暂时不可用；原图片已保留，不会重新请求供应商。', 503) from None
+    except ValueError:
+        raise AgentError('local_result_scan_invalid', '本地检查位置无效；请重新检查原结果。', 400) from None
+
+
+@router.post("/requests/{request_id}/recover-results")
+def recover_request_results(request_id: str, request: Request):
+    """Restore this request's obtained images without resuming model execution."""
+    try:
+        return repo(request).recover_request_results(request_id)
+    except (sqlite3.Error, OSError):
+        raise AgentError('local_result_pending', '本地登记暂时不可用；原图片已保留，不会重新请求供应商。', 503) from None
 
 
 @router.post("/requests/{request_id}/stop")

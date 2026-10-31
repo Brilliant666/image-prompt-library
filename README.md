@@ -58,6 +58,11 @@ Enter a prompt in **Gallery**, select a provider/model and optionally add refere
 
 History initially loads 48 results and defaults to **All states**. Narrow it to **In progress**, **Success**, **Accepted** or **Failed**; the browser remembers your choice, and Success includes saved results. Cleared results are hidden from Gallery pages and counts, while their task records and original requests remain in execution history. Keyword search covers loaded pages, with **Load more** for older history. A tab-local metadata cache can show the previous list during refresh for up to 30 minutes. It holds no image bytes or credentials and cannot submit a request by itself.
 
+If a completed image is retained but its local database registration fails, use
+**Restore local result** on the original task rather than paying for generation
+again. Import acceptance validates all staged images and commits the complete
+asset atomically. See [local recovery and import safety](docs/LOCAL_RESULT_RECOVERY.md).
+
 ### 💬 Work with Agent
 
 Agent keeps conversations, message branches and image references on the local server. Edit or regenerate a message to create a branch while retaining the earlier one. Search saved conversations, reuse generated images as references, and return from an output to its source conversation.
