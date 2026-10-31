@@ -970,6 +970,94 @@ class AgentRepository:
         from backend.services.agent_recipe_execution import create_execution
         return create_execution(self, cid, body)
 
+    @staticmethod
+    def _local_recovery_hint(round_data, own, jobs):
+        """Cheap round-owned hint, not permission to adopt a local file."""
+        if not own:
+            return None
+        error = own.get('error') or {}
+        marker = round_data.get('localResultRecovery') or {}
+        outputs = [jobs[jid] for jid in round_data.get('outputTaskIds', []) if jid in jobs]
+        if (error.get('code') != 'local_result_pending' and not marker
+                and not any(job.get('metadata', {}).get('local_result_recovery') for job in outputs)):
+            return None
+        stopped = own.get('stop_requested') or own.get('state') == 'stopped'
+        state = 'stopped' if stopped else 'recovered' if marker.get('state') == 'recovered' else 'check_required'
+        version = fingerprint([own['id'], own.get('updated_at'), own.get('state'),
+            error.get('code'), marker, [(job['id'], job['status'], job.get('updated_at')) for job in outputs]])
+        return {'requestId': own['id'], 'marker': version, 'state': state, 'canRecover': False,
+                'complete': state != 'check_required', 'nextCursor': None,
+                'message': '本轮已停止；保留的结果不会覆盖已提交操作。' if stopped else
+                           '本轮本地结果已恢复。' if state == 'recovered' else '正在核对本轮保留的本地结果。'}
+
+    def local_result_recovery_status(self, request_id, *, cursor=None):
+        """Read one bounded page on demand; never scan during token projection."""
+        from backend.services.agent_native_result_recovery import native_receipts_for_request
+        with connect(self.library) as conn:
+            row = conn.execute('''SELECT r.updated_at,r.state,r.stop_requested,a.deleted AS round_deleted,
+                c.deleted AS conversation_deleted FROM agent_requests r
+                JOIN agent_rounds a ON a.id=r.round_id JOIN agent_conversations c ON c.id=r.conversation_id
+                WHERE r.id=?''', (request_id,)).fetchone()
+        view = {'requestId': request_id, 'marker': str(row['updated_at']) if row else 'missing',
+                'state': 'unavailable', 'canRecover': False, 'message': '原请求不可用。',
+                'complete': True, 'nextCursor': None, 'foundJobIds': [], 'registeredJobIds': [], 'blocked': False}
+        if row is None:
+            return view
+        if row['round_deleted'] or row['conversation_deleted']:
+            return {**view, 'state': 'deleted', 'message': '原轮次或会话已删除；不会恢复其图片。'}
+        if row['stop_requested'] or row['state'] == 'stopped':
+            return {**view, 'state': 'stopped', 'message': '本轮已停止；保留的图片不会覆盖已提交操作。'}
+        if row['state'] in ACTIVE_STATES:
+            return {**view, 'message': '原请求仍在处理，请等待结束后检查本地结果。'}
+        request = self.request(request_id)
+        with connect(self.library) as conn:
+            linked = [entry[0] for entry in conn.execute('SELECT job_id FROM agent_tool_jobs WHERE request_id=?', (request_id,))]
+        native = native_receipts_for_request(self.jobs, request_id, cursor=cursor)
+        found, registered, blocked = [], [], bool(native['blocked'])
+        candidates = list(dict.fromkeys([*(linked if cursor is None else []), *native['job_ids']]))
+        for jid in candidates:
+            try:
+                try:
+                    job = self.jobs.get_job(jid)
+                except KeyError:
+                    if jid in native['job_ids']:
+                        found.append(jid)
+                        continue
+                    raise
+                if job.status in {'cancelled', 'discarded'} or job.edited_prompt_text is not None:
+                    blocked = True
+                elif job.status in {'succeeded', 'accepted'} and job.result_path:
+                    self.jobs._prepare_result_image(job)
+                    registered.append(jid)
+                elif jid in native['job_ids']:
+                    link = job.metadata.get('agent', {})
+                    if (link.get('requestId') != request_id or job.provider != 'agent_native'
+                            or job.metadata.get('retried_by_generation_job_id')
+                            or job.metadata.get('_generation_accept_claim')):
+                        blocked = True
+                    else:
+                        found.append(jid)
+                else:
+                    status = self.jobs.local_result_recovery(jid)
+                    if status and status['can_recover']:
+                        found.append(jid)
+                    else:
+                        blocked = True
+            except (OSError, ValueError, KeyError):
+                blocked = True
+        complete = native['complete']
+        state = 'checking' if not complete else 'blocked' if blocked else 'pending' if found else 'recovered' if registered else 'unavailable'
+        # The client aggregates page results. An empty final page is not proof
+        # that earlier pages contained no results, damaged records or conflicts.
+        return {**view, 'state': state, 'canRecover': complete and bool(found) and not blocked,
+                'message': '本地结果仍在检查中。' if not complete else
+                           '本地结果需核对；文件已保留，不会重新生成。' if blocked else
+                           '图片已取得，可恢复本轮本地结果。' if found else
+                           '本轮本地结果已登记。' if registered else '未找到可核验的本地结果；不会重新生成。',
+                'complete': complete, 'nextCursor': native['next_cursor'], 'foundJobIds': found,
+                'registeredJobIds': registered, 'blocked': blocked,
+                'expectsLocalResult': (request.get('error') or {}).get('code') == 'local_result_pending'}
+
     def recover_request_results(self, request_id):
         """Repair only this request's retained finals, never resume its model."""
         from backend.services.agent_native_result_recovery import native_receipts_for_request
@@ -984,7 +1072,19 @@ class AgentRepository:
             if not visible:
                 raise AgentError('not_found','原轮次已删除，不能自动恢复其结果。',404)
             linked = [row[0] for row in conn.execute('SELECT job_id FROM agent_tool_jobs WHERE request_id=?',(request_id,))]
-        native = native_receipts_for_request(self.jobs,request_id)
+        native = {'job_ids': [], 'blocked': False}
+        cursor = None
+        for _ in range(4096):
+            page = native_receipts_for_request(self.jobs, request_id, cursor=cursor)
+            native['job_ids'].extend(page['job_ids'])
+            native['blocked'] = native['blocked'] or page['blocked']
+            if page['complete']:
+                break
+            if not page['next_cursor'] or page['next_cursor'] == cursor:
+                raise AgentError('local_result_scan_incomplete', '本地记录检查尚未完成；文件已保留，不会重新生成。')
+            cursor = page['next_cursor']
+        else:
+            raise AgentError('local_result_scan_incomplete', '本地记录检查尚未完成；请继续检查原结果，不会重新生成。')
         recovered, blocked = [], bool(native['blocked'])
         candidates = list(dict.fromkeys([*linked,*native['job_ids']]))
         for jid in candidates:
@@ -1399,7 +1499,7 @@ class AgentRepository:
             # Read historical identities from their own request, never today's
             # profile. Older requests do not claim a provider name was recorded.
             historical_requests = {row['id']: {**dict(row), 'body': json.loads(row['body']), 'error': json.loads(row['error']) if row['error'] else None}
-                                   for row in conn.execute('SELECT id,state,upstream_outcome,body,error,frozen FROM agent_requests WHERE conversation_id=?', (cid,))}
+                                   for row in conn.execute('SELECT id,state,stop_requested,updated_at,upstream_outcome,body,error,frozen FROM agent_requests WHERE conversation_id=?', (cid,))}
             completed_text = {row[0] for row in conn.execute("SELECT DISTINCT s.request_id FROM agent_steps s JOIN agent_requests r ON r.id=s.request_id WHERE r.conversation_id=? AND s.state='completed'", (cid,))}
             frozen_configs = {rid: json.loads(row['frozen']) for rid, row in historical_requests.items()}
             task = editing.current_task(conversation, rounds, conversation['active_round_id'])
@@ -1438,6 +1538,7 @@ class AgentRepository:
                     pass
                 assets["output_" + jid] = self.image("output_" + jid)
             own_request = historical_requests.get(r['requestId'])
+            r['localRecovery'] = self._local_recovery_hint(r, own_request, jobs)
             r['resultSummary'] = timing.result_summary(r, own_request, jobs, r['requestId'] in completed_text)
             r['execution'] = r.get('execution')
             r.pop('skillPreloads', None)  # Public details expose attribution, not repeated guidance bodies.

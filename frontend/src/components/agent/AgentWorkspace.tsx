@@ -11,7 +11,7 @@ import { useAgentConversations } from './useAgentConversations';
 import { useAgentScroll } from './useAgentScroll';
 import { useAgentRunState, type AgentSubmissionBoundary } from './useAgentRunState';
 import { api, mediaUrl } from '../../api/client';
-import { AgentApiError, agentApi, getAgentConfig, type AgentConfigResponse, type AgentImage, type AgentImageRetryReceipt, type AgentRound, type AgentRoundCreate, type AgentSnapshot, type AgentTaskContextOperation, type AgentPromptExecutionInput } from '../../api/agentClient';
+import { AgentApiError, agentApi, getAgentConfig, type AgentConfigResponse, type AgentImage, type AgentImageRetryReceipt, type AgentRound, type AgentRoundCreate, type AgentSnapshot, type AgentTaskContextOperation, type AgentPromptExecutionInput, type AgentLocalResultRecoveryHint, type AgentLocalResultRecovery } from '../../api/agentClient';
 import type { GenerationJobRecord } from '../../types';
 import { getActiveAgentRounds, getAgentBranchLeafId, getAgentRoundPath, getAgentSiblingRounds } from '../../utils/playground/agentConversationState';
 import { agentPhaseLabels, getAgentAssistantBlocks, getAgentImageProgress, getAgentJobFailure, getAgentRequestFailure, getAgentRoundStatus, getAgentRoundSummary, getAgentToolLabel, isAgentImageTool, isAgentRequestActive } from '../../utils/playground/agentAssistantBlocks';
@@ -178,6 +178,10 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
   const promptExecutionAlive = useRef(true);
   const directPostLock = useRef(false);
   const localRecoveryLocks = useRef(new Set<string>()), localRecoveryAlive = useRef(true);
+  const localRecoveryChecks = useRef(new Map<string, { conversationId: string; hintMarker: string; value: AgentLocalResultRecovery }>());
+  const localRecoveryReaders = useRef(new Map<string, { conversationId: string; controller: AbortController }>());
+  const localRecoveryVisible = useRef(active); localRecoveryVisible.current = active;
+  const [, refreshLocalRecovery] = useState(0);
   const [recoveringRequestId, setRecoveringRequestId] = useState<string | null>(null);
   useEffect(() => { localRecoveryAlive.current = true; return () => { localRecoveryAlive.current = false; }; }, []);
   const checkedPromptExecutions = useRef(new Set<string>());
@@ -239,6 +243,43 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
   const scrollToLatest = useAgentScroll({ containerRef: scroll, contentRef: scrollContent, active, conversationId: activeId, ready: Boolean(current) && !conversationLoading && !conversationLoadError, revision: current?.revision, focusRoundId, onFocusResolved: () => setFocusRoundId(undefined) });
   const conversationUnavailable = Boolean(activeId && !current);
   const rounds = useMemo(() => current ? getActiveAgentRounds(current.conversation) : [], [current]);
+  const localRecoveryHints = useMemo(() => rounds.flatMap(round => {
+    const own = current?.request?.roundId === round.id ? current.request : null;
+    const hint = round.localRecovery || (own?.error?.code === 'local_result_pending' ? {
+      requestId: round.requestId, marker: `legacy:${round.requestId}:${round.status}:${own.error.code}`,
+      state: 'check_required' as const, canRecover: false, message: own.error.message,
+    } : undefined);
+    return hint && hint.requestId === round.requestId ? [{ roundId: round.id, hint }] : [];
+  }), [rounds, current?.request?.id, current?.request?.error?.code, current?.request?.error?.message]);
+  const localRecoveryHintKey = useMemo(() => JSON.stringify(localRecoveryHints.map(({ hint }) => [hint.requestId, hint.marker, hint.state])), [localRecoveryHints]);
+  const localRecoveryHintByRound = useMemo(() => new Map(localRecoveryHints.map(({ roundId, hint }) => [roundId, hint])), [localRecoveryHints]);
+  useEffect(() => {
+    if (!active || !activeId) return;
+    for (const { hint } of localRecoveryHints) {
+      const cached = localRecoveryChecks.current.get(hint.requestId);
+      if (cached?.conversationId === activeId && cached.hintMarker === hint.marker) continue;
+      if (['recovered', 'stopped', 'deleted'].includes(hint.state)) {
+        publishLocalRecovery(activeId, hint, { ...hint, complete: true, nextCursor: null, foundJobIds: [], registeredJobIds: [], blocked: false });
+      } else void checkLocalRecovery(hint, activeId);
+    }
+    const recheck = () => {
+      if (document.visibilityState === 'hidden') return;
+      for (const { hint } of localRecoveryHints) {
+        const cached = localRecoveryChecks.current.get(hint.requestId);
+        if (cached && ['pending', 'checking', 'blocked', 'check_required'].includes(cached.value.state)) void checkLocalRecovery(hint, activeId);
+      }
+    };
+    window.addEventListener('focus', recheck);
+    document.addEventListener?.('visibilitychange', recheck);
+    return () => {
+      window.removeEventListener('focus', recheck);
+      document.removeEventListener?.('visibilitychange', recheck);
+      for (const [id, reader] of localRecoveryReaders.current) if (reader.conversationId === activeId) {
+        reader.controller.abort(); localRecoveryReaders.current.delete(id);
+        localRecoveryChecks.current.delete(id);
+      }
+    };
+  }, [active, activeId, localRecoveryHintKey]);
   const draftLocked = busy || Boolean(uncertain || pendingPromptExecution);
   const inputLimit = config?.capabilities.maxInputImages ?? 4;
   const imageProfile = config?.profiles.find(profile => profile.id === (config.config.apiConfigMode === 'hybrid' ? draft.imageConfig?.profileId || config.config.imageProfileId : config.config.apiConfigMode === 'off' ? activeProfileId : config.config.textProfileId));
@@ -824,19 +865,78 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
     });
     if (result && activeIdRef.current === conversation.conversation.id) scrollToLatest();
   }
+  function publishLocalRecovery(conversationId: string, hint: AgentLocalResultRecoveryHint, value: AgentLocalResultRecovery) {
+    if (!localRecoveryAlive.current || activeIdRef.current !== conversationId) return;
+    localRecoveryChecks.current.set(hint.requestId, { conversationId, hintMarker: hint.marker, value });
+    if (localRecoveryVisible.current) refreshLocalRecovery(version => version + 1);
+  }
+  async function checkLocalRecovery(hint: AgentLocalResultRecoveryHint, conversationId: string, continueScan = false) {
+    if (localRecoveryReaders.current.has(hint.requestId) || !localRecoveryAlive.current || activeIdRef.current !== conversationId) return;
+    const previous = continueScan ? localRecoveryChecks.current.get(hint.requestId)?.value : undefined;
+    const controller = new AbortController();
+    localRecoveryReaders.current.set(hint.requestId, { conversationId, controller });
+    const found = new Set(previous?.foundJobIds || []), registered = new Set(previous?.registeredJobIds || []);
+    let blocked = previous?.blocked || false, expects = previous?.expectsLocalResult || false;
+    let cursor = previous?.nextCursor || undefined, marker: string | undefined = previous?.marker;
+    let pendingMessage = previous?.state === 'pending' ? previous.message : '', blockedMessage = previous?.state === 'blocked' ? previous.message : '';
+    const live = () => !controller.signal.aborted && localRecoveryAlive.current && activeIdRef.current === conversationId;
+    const view = (value: AgentLocalResultRecovery) => { if (live()) publishLocalRecovery(conversationId, hint, value); };
+    view({ ...hint, state: 'checking', canRecover: false, message: '正在核对本地结果…', complete: false, nextCursor: cursor || null, foundJobIds: [...found], registeredJobIds: [...registered], blocked });
+    try {
+      const visited = new Set<string>();
+      for (let page = 0; page < 8; page++) {
+        const value = await agentApi.localResultRecovery(hint.requestId, controller.signal, cursor);
+        if (!live()) return;
+        if (value.requestId !== hint.requestId || typeof value.marker !== 'string' || typeof value.complete !== 'boolean'
+            || !Array.isArray(value.foundJobIds) || !Array.isArray(value.registeredJobIds)) throw new Error('本地结果回执身份或格式不一致；请重新检查原请求。');
+        if (value.state === 'stopped' || value.state === 'deleted') { view(value); return; }
+        if (marker !== undefined && marker !== value.marker) throw new Error('本地结果已改变；请重新检查原请求。');
+        marker = value.marker;
+        value.foundJobIds.forEach(id => { if (typeof id === 'string') found.add(id); });
+        value.registeredJobIds.forEach(id => { if (typeof id === 'string') registered.add(id); });
+        blocked ||= value.blocked || value.state === 'blocked'; expects ||= value.expectsLocalResult || false;
+        if (value.state === 'pending') pendingMessage = value.message;
+        if (value.state === 'blocked') blockedMessage = value.message;
+        if (value.complete) {
+          const state = blocked ? 'blocked' : found.size ? 'pending' : registered.size ? 'recovered' : expects ? 'blocked' : 'unavailable';
+          view({ ...value, state, canRecover: state === 'pending', nextCursor: null,
+            foundJobIds: [...found], registeredJobIds: [...registered], blocked: state === 'blocked', expectsLocalResult: expects,
+            message: state === 'pending' ? pendingMessage || '图片已取得，可恢复本轮本地结果。' : state === 'blocked' ? blockedMessage || '本地结果需核对；保留的文件暂不能自动恢复。' : state === 'recovered' ? '本轮本地结果已登记。' : value.message });
+          return;
+        }
+        if (!value.nextCursor || visited.has(value.nextCursor) || value.nextCursor === cursor) throw new Error('本地记录检查尚未完成；请重新检查原请求。');
+        visited.add(value.nextCursor); cursor = value.nextCursor;
+        if (page === 7) view({ ...value, state: 'checking', canRecover: false, message: '本地记录较多，检查尚未完成。',
+          nextCursor: cursor, foundJobIds: [...found], registeredJobIds: [...registered], blocked, expectsLocalResult: expects });
+      }
+    } catch (reason) {
+      if (live()) view({ ...hint, state: 'check_required', canRecover: false, message: errorText(reason), complete: false,
+        nextCursor: null, foundJobIds: [], registeredJobIds: [], blocked: false });
+    } finally {
+      if (localRecoveryReaders.current.get(hint.requestId)?.controller === controller) localRecoveryReaders.current.delete(hint.requestId);
+    }
+  }
   async function recoverRequestResults(requestId: string, conversationId: string) {
+    const checked = localRecoveryChecks.current.get(requestId);
+    if (!checked || checked.conversationId !== conversationId || checked.value.state !== 'pending' || !checked.value.complete || !checked.value.canRecover) return;
     if (localRecoveryLocks.current.has(requestId)) return;
     localRecoveryLocks.current.add(requestId); setRecoveringRequestId(requestId); setError('');
     try {
       const value = await agentApi.recoverResults(requestId);
       if (value.conversation.id !== conversationId || value.request?.id !== requestId) throw new Error('对话已改变；原结果已保留，请重新查看原请求。');
       if (localRecoveryAlive.current && activeIdRef.current === conversationId) {
+        localRecoveryReaders.current.get(requestId)?.controller.abort(); localRecoveryReaders.current.delete(requestId);
+        publishLocalRecovery(conversationId, { requestId, marker: checked.hintMarker, state: 'recovered', canRecover: false, message: '本轮本地结果已登记。' }, { ...checked.value, state: 'recovered', canRecover: false, complete: true, nextCursor: null, message: '本轮本地结果已登记。' });
+        if (!localRecoveryVisible.current) return;
         onJobsChanged?.();
         if (value.request.roundId !== value.conversation.activeRoundId) { reloadConversation(); return; }
         applySnapshot(value);
       }
     } catch (reason) {
-      if (localRecoveryAlive.current && activeIdRef.current === conversationId) setError(errorText(reason));
+      if (localRecoveryAlive.current && localRecoveryVisible.current && activeIdRef.current === conversationId) {
+        setError(errorText(reason));
+        void checkLocalRecovery({ requestId, marker: checked.hintMarker, state: 'check_required', canRecover: false, message: '请检查原请求的本地结果。' }, conversationId);
+      }
     } finally {
       localRecoveryLocks.current.delete(requestId);
       if (localRecoveryAlive.current) setRecoveringRequestId(value => value === requestId ? null : value);
@@ -1004,7 +1104,10 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
           const outcome = getAgentRoundStatus(round, summary);
           const imageProgress = getAgentImageProgress(round, current!.jobs, current!.request);
           const requestFailure = getAgentRequestFailure(round, current!.request);
-          const localRequestRecovery = current!.request?.roundId === round.id && current!.request.error?.code === 'local_result_pending';
+          const localHint = localRecoveryHintByRound.get(round.id);
+          const localChecked = localRecoveryChecks.current.get(round.requestId);
+          const localCapability = localHint && localChecked?.hintMarker === localHint.marker ? localChecked.value : localHint;
+          const localRequestRecovery = Boolean(localHint);
           const hasImageWork = summary.imageJobsCreated > 0 || blocks.some(block => block.type === 'tool' && isAgentImageTool(block.name));
           const requestAttention = Boolean(round.error) || ['stopped', 'stop_requested', 'failed', 'interrupted'].includes(summary.requestState);
           const showOutcome = !imageProgress && (summary.outcomeUnknown || requestAttention || !hasImageWork && round.status === 'running');
@@ -1033,7 +1136,10 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
                 const label = agentPhaseLabels[block.state || ''] || statusText[block.state || ''] || (block.state === 'in_progress' ? '进行中' : '工具调用');
                 return <div key={block.key} className="agent-tool-status"><span>{getAgentToolLabel(block.name)}</span><small>{label}</small></div>;
               })}
-              {localRequestRecovery && <section className="agent-result-card agent-result-card-terminal" aria-label="图片结果待本地恢复"><p>{current!.request!.error!.message}</p><button type="button" aria-label="恢复本轮本地结果" title="仅恢复本轮已经取得的图片，不调用模型或重新生图" disabled={recoveringRequestId === round.requestId} onClick={() => void recoverRequestResults(round.requestId, current!.conversation.id)}>{recoveringRequestId === round.requestId ? '正在恢复本地结果…' : '恢复本地结果'}</button></section>}
+              {localRequestRecovery && localCapability?.state !== 'recovered' && <section className="agent-result-card agent-result-card-terminal" aria-label="图片结果待本地恢复"><p>{localCapability?.message}</p>
+                {localCapability?.state === 'pending' && localCapability.canRecover && <button type="button" aria-label="恢复本轮本地结果" title="仅恢复本轮已经取得的图片，不调用模型或重新生图" disabled={recoveringRequestId === round.requestId} onClick={() => void recoverRequestResults(round.requestId, current!.conversation.id)}>{recoveringRequestId === round.requestId ? '正在恢复本地结果…' : '恢复本地结果'}</button>}
+                {localHint && !['stopped', 'deleted', 'recovered'].includes(localCapability?.state || '') && <button type="button" aria-label="检查本轮本地结果" disabled={localCapability?.state === 'checking' && !('nextCursor' in localCapability && localCapability.nextCursor)} onClick={() => void checkLocalRecovery(localHint, current!.conversation.id, localCapability?.state === 'checking')}>{localCapability?.state === 'checking' ? '继续检查本地结果' : '重新检查本地结果'}</button>}
+              </section>}
               {!localRequestRecovery && requestFailure && <RequestFailureCard key={round.requestId} requestId={round.requestId} failure={requestFailure} copyEnabled={active} onError={setError} onDetails={button => openPanel('details', button, round.id)} retry={<button type="button" aria-label="重试回答" title="重新请求文字回答，保留当前草稿" disabled={inFlight || busy || Boolean(uncertain) || uploading || handoffBusy} onClick={() => void retryText(round)}><RotateCcw size={15} />重试回答</button>} />}
               {!imageProgressShown && takeImageProgress(`${round.id}:progress`)}
               {!localRequestRecovery && !requestFailure && showOutcome && <p className="agent-round-outcome" role="status">{summary.imageJobsSucceeded > 0 && requestAttention ? '已保留成功图片；后续请求未正常完成，请查看回答详情。' : outcome}</p>}

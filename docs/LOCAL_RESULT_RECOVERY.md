@@ -35,7 +35,33 @@ also retains the exact execution Prompt and required reference identities so the
 original job and Agent mapping can be materialized locally. Validation ties it to
 the original frozen, authorized request; it never adopts another request's result.
 Use the original Agent request's local recovery action when no result card could
-be created. This does not repeat Responses or continue the model loop.
+be created. The action belongs to that historical round, so finishing a newer
+round does not remove it. Opening a conversation projects a cheap database hint;
+an on-demand, uncached capability check verifies the retained evidence before
+showing an enabled recovery action. It distinguishes pending, recovered, stopped,
+deleted and blocked results. Token updates do not scan receipt files or decode
+images. Restoring an older round refreshes the current conversation without
+selecting the older branch or changing a new request, draft or attachments.
+This does not repeat Responses or continue the model loop.
+
+Receipt discovery reads at most 100 receipt headers per page, with explicit
+`complete` and `nextCursor` results. A page containing only unrelated requests is
+not evidence that the requested result is absent. Request recovery continues
+through pages and validates every matching receipt against the frozen request,
+including Native results whose first job insertion failed. It stops with an
+explicit incomplete-check error after 4096 pages rather than claiming absence.
+The browser checks up to eight pages per interaction and offers continuation if
+more remain; it enables recovery only after that scan completes.
+
+Startup recovery advances a small, restart-safe scan position before attempting
+a page. Corrupt or conflicting evidence is retained and cannot permanently pin
+later records behind the first batch. New directories preceding the position
+are visited on the next scan cycle. The position file is only a rebuildable hint:
+it grants no recovery permission, contains no image or provider data, and its
+write failure is reported while in-process progress continues. Names and metadata
+are enumerated to select a page with bounded memory; this is not a constant-time
+filesystem index. All result ownership, path, full-hash and image checks remain
+mandatory.
 
 After a same-result database commit the receipt can be removed. A crash before
 receipt removal is safe: repeated recovery finds the same successful task and

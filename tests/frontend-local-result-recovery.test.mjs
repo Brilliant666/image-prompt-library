@@ -88,3 +88,15 @@ test('the actual Agent adapter recovers the original request without calling res
   await client.agentApi.recoverResults('original/request');assert.equal(calls.length,1);
   assert.equal(calls[0].url,'/api/agent/requests/original%2Frequest/recover-results');assert.equal(calls[0].init.method,'POST');assert.equal(calls[0].init.body,undefined);
 });
+
+
+test('request-level local recovery capability uses a read-only encoded paginated endpoint', async () => {
+  const source = await readFile(new URL('../frontend/src/api/agentClient.ts', import.meta.url), 'utf8');
+  const calls = [], controller = new AbortController();
+  const client = evaluate(source, { './agentProgress': {} }, { fetch: async (url, init) => {
+    calls.push({ url, init }); return { ok: true, json: async () => ({ requestId: 'original/request', state: 'checking' }) };
+  } });
+  await client.agentApi.localResultRecovery('original/request', controller.signal, 'opaque cursor/2?');
+  assert.equal(calls.length, 1); assert.equal(calls[0].url, '/api/agent/requests/original%2Frequest/local-result-recovery?cursor=opaque%20cursor%2F2%3F');
+  assert.equal(calls[0].init.method || 'GET', 'GET'); assert.equal(calls[0].init.body, undefined); assert.ok(calls[0].init.signal);
+});

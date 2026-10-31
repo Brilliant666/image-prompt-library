@@ -14,7 +14,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from contextlib import nullcontext, suppress
 from io import BytesIO
-from itertools import islice
 from threading import RLock
 
 from PIL import Image, UnidentifiedImageError
@@ -1297,14 +1296,17 @@ class GenerationJobRepository:
 
     def recover_local_results(self, *, provider: str | None = None, limit: int = 100) -> dict:
         from backend.services.generation_result_recovery import RECEIPT_NAME
-        from backend.services.agent_native_result_recovery import recover_native_results
+        from backend.services.agent_native_result_recovery import recover_native_results, next_recovery_scan_batch
         result = recover_native_results(self,provider=provider,limit=limit)
         root = self.library_path / GENERATION_RESULT_ROOT
         if not root.is_dir():
             return result
         # Only explicit receipts are considered. Never claim orphan images by
         # their filenames or scan/rewrite the user's historical assets.
-        for receipt in islice(root.glob('*/' + RECEIPT_NAME),max(0,min(limit,1000))):
+        page = next_recovery_scan_batch(self.library_path,RECEIPT_NAME,provider=provider,limit=limit)
+        if page['scan_warning']:
+            result['scan_warning'] = True
+        for receipt in page['paths']:
             job_id = receipt.parent.name
             try:
                 job = self.get_job(job_id)
