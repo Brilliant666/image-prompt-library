@@ -343,3 +343,105 @@ def test_budget_is_rechecked_after_lock_acquisition_even_on_cache_hit(monkeypatc
 def test_invalid_or_exhausted_budget_never_queries(timeout):
     with pytest.raises(direct.DirectRouteError, match="跟随环境"):
         direct.direct_local_address("https://synthetic.example.invalid", timeout=timeout)
+
+
+def test_wmi_inventory_failure_uses_native_evidence_and_binds_before_connect(monkeypatch):
+    from backend.services import api_network
+    calls, connections, clock = [], [], [100.0]
+    monkeypatch.setattr(direct.time, 'monotonic', lambda: clock[0])
+    def query(args, **kwargs):
+        calls.append((args, kwargs))
+        clock[0] += 0.1
+        payload = inventory() if len(calls) == 2 else {
+            'targetAddresses': ['93.184.216.34'], 'inventoryAvailable': False}
+        return SimpleNamespace(returncode=0, stdout=json.dumps(payload).encode())
+    monkeypatch.setattr(direct.subprocess, 'run', query)
+    class Backend:
+        def connect_tcp(self, host, port, **options):
+            connections.append(options)
+            return 'stream'
+    assert api_network._DirectBackend(Backend()).connect_tcp('synthetic.example.invalid', 443, timeout=3) == 'stream'
+    assert len(calls) == 2 and len(connections) == 1
+    assert connections[0]['local_address'] == '192.168.20.50'
+    args, options = calls[1]
+    assert args[1:3] == ['-I', '-B']
+    assert json.loads(args[-1]) == ['93.184.216.34']
+    assert options['timeout'] < calls[0][1]['timeout']
+    assert options['creationflags'] & 0x08000000 and not options.get('shell')
+
+
+def test_native_inventory_fallback_shares_the_original_total_deadline(monkeypatch):
+    clock, calls = [100.0], []
+    monkeypatch.setattr(direct.time, 'monotonic', lambda: clock[0])
+    def query(args, **kwargs):
+        calls.append(kwargs['timeout'])
+        clock[0] += 0.3
+        payload = inventory() if len(calls) == 2 else {
+            'targetAddresses': ['93.184.216.34'], 'inventoryAvailable': False}
+        return SimpleNamespace(returncode=0, stdout=json.dumps(payload).encode())
+    monkeypatch.setattr(direct.subprocess, 'run', query)
+    with pytest.raises(direct.DirectRouteError):
+        direct.direct_local_address('https://synthetic.example.invalid', timeout=0.5)
+    assert calls == pytest.approx([0.5, 0.2]) and not direct._cache
+
+
+@pytest.mark.parametrize('native', [
+    {**inventory(), 'inventoryAvailable': False},
+    inventory(['198.18.0.1']),
+    {**inventory(), 'adapters': []},
+    {**inventory(), 'targetAddresses': ['8.8.8.8']},
+])
+def test_native_fallback_cannot_relax_validation_or_change_dns(monkeypatch, native):
+    calls = []
+    def query(args, **kwargs):
+        calls.append(args)
+        value = native if len(calls) == 2 else {'targetAddresses': ['93.184.216.34'], 'inventoryAvailable': False}
+        return SimpleNamespace(returncode=0, stdout=json.dumps(value).encode())
+    monkeypatch.setattr(direct.subprocess, 'run', query)
+    with pytest.raises(direct.DirectRouteError):
+        direct.direct_local_address('https://synthetic.example.invalid')
+    assert len(calls) == 2 and not direct._cache
+
+
+@pytest.mark.parametrize('targets', [['198.18.0.1'], ['93.184.216.34', '10.0.0.1'], []])
+def test_invalid_dns_does_not_start_native_inventory_fallback(monkeypatch, targets):
+    calls = stub_query(monkeypatch, {'targetAddresses': targets, 'inventoryAvailable': False})
+    with pytest.raises(direct.DirectRouteError):
+        direct.direct_local_address('https://synthetic.example.invalid')
+    assert len(calls) == 1
+
+
+def test_verified_but_ambiguous_wmi_routes_do_not_trigger_fallback(monkeypatch):
+    value = inventory()
+    second_interface(value, metric=30)
+    calls = stub_query(monkeypatch, value)
+    with pytest.raises(direct.DirectRouteError):
+        direct.direct_local_address('https://synthetic.example.invalid')
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize('failure', [
+    subprocess.TimeoutExpired('native-helper', 1),
+    SimpleNamespace(returncode=1, stdout=b'', stderr=b'private error'),
+    SimpleNamespace(returncode=0, stdout=b'private bad JSON'),
+    SimpleNamespace(returncode=0, stdout=b'x' * (512 * 1024 + 1)),
+])
+def test_failed_native_fallback_does_not_connect_cache_or_retry(monkeypatch, failure):
+    from backend.services import api_network
+    calls = []
+    def query(args, **kwargs):
+        calls.append(args)
+        if len(calls) == 1:
+            return SimpleNamespace(returncode=0, stdout=json.dumps({
+                'targetAddresses': ['93.184.216.34'], 'inventoryAvailable': False}).encode())
+        if isinstance(failure, Exception):
+            raise failure
+        return failure
+    class Backend:
+        def connect_tcp(self, *args, **kwargs):
+            pytest.fail('Unverified route must never open a socket')
+    monkeypatch.setattr(direct.subprocess, 'run', query)
+    with pytest.raises(api_network.ApiNetworkError) as caught:
+        api_network._DirectBackend(Backend()).connect_tcp('synthetic.example.invalid', 443, timeout=3)
+    assert str(caught.value) == direct._NO_ROUTE
+    assert len(calls) == 2 and not direct._cache
