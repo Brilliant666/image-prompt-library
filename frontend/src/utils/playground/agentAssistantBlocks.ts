@@ -16,8 +16,34 @@ export function getAgentToolLabel(name: string): string {
   const labels: Record<string, string> = {
     generate_image: '生成图片', generate_image_batch: '生成图片', image_generation: '生成图片',
     continue_generation: '继续生成图片', web_search: '网络搜索', read_agent_skill: '读取创作技能',
+    read_task_history: '读取相关对话', update_task_context: '整理创作要求', select_image_references: '确认参考图片',
   };
   return labels[name] || '执行工具';
+}
+
+const internalToolNames = new Set(['read_task_history', 'update_task_context', 'select_image_references', 'read_agent_skill']);
+export const isAgentInternalTool = (name: string) => internalToolNames.has(name);
+export function getAgentInternalToolStatus(state?: string): string {
+  return ({ completed: '已完成', failed: '执行失败', unknown: '结果未知', stopped: '已停止', cancelled: '已停止' } as Record<string, string>)[state || ''] || '进行中';
+}
+
+function internalToolState(item: AgentOutputItem, receipt: AgentOutputItem | undefined, roundState: string | undefined): string {
+  // A model's function_call.completed only finishes its arguments. Local
+  // execution succeeds only after a matching, readable application receipt.
+  if (receipt) {
+    try {
+      const raw = (receipt as AgentOutputItem & { output?: unknown }).output;
+      const result = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      if (!result || typeof result !== 'object' || Array.isArray(result)) return 'unknown';
+      if (result.status === 'unknown' || result.outcomeUnknown === true) return 'unknown';
+      if (result.status === 'stopped' || result.status === 'cancelled') return 'stopped';
+      if (result.error || result.success === false || ['error', 'failed'].includes(result.status)) return 'failed';
+      return 'completed';
+    } catch { return 'unknown'; }
+  }
+  if (['failed', 'unknown', 'stopped', 'cancelled'].includes(item.status || '')) return item.status!;
+  if (roundState === 'stopped') return 'stopped';
+  return roundState === 'running' ? 'in_progress' : 'unknown';
 }
 
 function matchesCall(task: GenerationJobRecord, item: AgentOutputItem) {
@@ -233,12 +259,12 @@ export function getAgentAssistantBlocks(round: AgentRound, tasks: GenerationJobR
     const id = item.call_id || item.id || `call-${index}`;
     if (calls.has(id)) continue;
     calls.add(id);
-    const skillCompleted = item.name === 'read_agent_skill' && output.some(result => result.type === 'function_call_output' && result.call_id === id);
     const matchingSlots = slots.filter(slot => slot.task && matchesCall(slot.task, item));
     const name = item.type === 'web_search_call' ? 'web_search' : item.name || 'image_generation';
     const state = imageJobToolNames.has(name)
       ? imageToolState(matchingSlots.flatMap(slot => slot.task ? [slot.task] : []), slots.some(slot => !slot.task), round.status === 'running')
-      : skillCompleted ? 'completed' : item.status;
+      : isAgentInternalTool(name) ? internalToolState(item,
+        output.find(result => result.type === 'function_call_output' && result.call_id === id), round.status) : item.status;
     blocks.push({ type: 'tool', key: `tool:${id}`, callId: id, name, state });
     // A missing slot retains its place before the next still-identifiable call.
     const firstIndex = matchingSlots.length ? slots.indexOf(matchingSlots[0]) : -1;

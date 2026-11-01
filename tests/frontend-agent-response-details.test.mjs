@@ -57,6 +57,19 @@ test('context diagnostics come from the persisted backend receipt inside optiona
   assert.doesNotMatch(legacy, /上下文回执|任务来源|请求附图次数/);
 });
 
+test('successful and failed internal steps remain in optional details without raw arguments or receipts', () => {
+  const html = render(undefined, { round: { id: 'steps', requestId: 'steps', status: 'done', outputTaskIds: [], responseOutput: [
+    { type: 'function_call', call_id: 'history', name: 'read_task_history', status: 'completed', arguments: '{"private":"DO_NOT_RENDER_ARGUMENTS"}' },
+    { type: 'function_call_output', call_id: 'history', output: '{"history":[],"private":"DO_NOT_RENDER_RECEIPT"}' },
+    { type: 'function_call', call_id: 'update', name: 'update_task_context', status: 'completed' },
+    { type: 'function_call_output', call_id: 'update', output: '{"error":"DO_NOT_RENDER_ERROR"}' },
+  ] } });
+  assert.doesNotMatch(html.split('<details')[0], /内部步骤|读取相关对话|整理创作要求/);
+  assert.match(html, /内部步骤/); assert.match(html, /读取相关对话.*已完成/);
+  assert.match(html, /整理创作要求.*执行失败/);
+  assert.doesNotMatch(html, /DO_NOT_RENDER|<details[^>]* open/);
+});
+
 test('legacy and missing metadata render no empty sections or invented zero counts', () => {
   assert.equal(render(undefined), '');
   assert.equal(render(details()), '');

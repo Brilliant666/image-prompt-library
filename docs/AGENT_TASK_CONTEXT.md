@@ -10,6 +10,19 @@ classification or bookkeeping model request. A sole new reference can identify
 the analysis object without a manual "main image" action; it does not prove that
 older images or constraints are irrelevant.
 
+A single verified successful image from the preceding turn becomes the working
+image for the next automatic turn in that task. Its original reference and
+executed Prompt remain unchanged. The binding is frozen before the answer, so
+editing or regenerating that turn reuses its original input, not its new output.
+Multiple results remain candidates; the normal answer selects the intended
+image or asks briefly. Explicit references, new attachments, manual choices and
+masks take priority. Failed, unknown, stopped or cleaned results are not adopted.
+No extra classification request or generation authorization is introduced.
+
+Successful internal history/skill reads and task updates are recorded in answer
+details instead of permanent tool-status bars. Relevant in-progress, failed,
+unknown and stopped operations remain visible.
+
 First binding is distinct from replacing an existing image: greeting the
 assistant before uploading the first image does not create an unresolved old
 image. Validated reference selections, including the selection attached to a

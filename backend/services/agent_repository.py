@@ -1,6 +1,7 @@
 """Durable Agent conversations, frozen requests and references in the main library."""
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
@@ -878,6 +879,24 @@ class AgentRepository:
         checked_context = task_state.current(conversation, rounds, branches.source_branch(body))
         self._check_task_revision(checked_context, body.taskRevision)
         inherited_task, inherited_context = branches.submission_seed(conversation, rounds, body, original_request)
+        manual_branch = editing.branch_key(body.parentRoundId) in json.loads(conversation['editing_tasks'])
+        explicit_locator = bool(editing._TAG.search(body.prompt) or editing._ROUND.search(body.prompt)
+                                or editing._CURRENT.search(body.prompt) or re.search(r'第\s*\d+\s*轮', body.prompt))
+        if (body.origin == 'send' and body.contextScope == 'task' and not inputs and not body.mask
+                and not explicit_locator and not manual_branch and not editing.task_boundary(body.prompt)
+                and not (inherited_context or {}).get('targetExplicit')
+                and not (inherited_context or {}).get('pendingUserTask')):
+            if inherited_context:
+                # Resolve existing, locally proven role receipts against their
+                # original binding before advancing to its derived result.
+                inherited_context = task_state.reconcile(copy.deepcopy(inherited_context),
+                    history=self._task_history_role_evidence(history, inherited_context))
+            inherited_task = editing.working_result_task(self, inherited_task, inherited_context, history)
+            if inherited_context and inherited_task and inherited_task.get('workingResult'):
+                # Freeze the chosen pre-answer working binding, not the source
+                # answer's later model updates, into edit/regenerate seeds too.
+                inherited_context = dict(inherited_context, target=inherited_task.get('target'),
+                                         auxiliaries=inherited_task.get('auxiliaries', []))
         frozen_task_input = branches.input_state(inherited_task, inherited_context)
         pending_selection = bool(inherited_context and inherited_context.get('pendingUserTask') and inherited_task)
         if pending_selection or inherited_context and inherited_context.get('targetExplicit') and inputs and not editing.task_boundary(body.prompt):

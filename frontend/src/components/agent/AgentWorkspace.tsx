@@ -14,7 +14,7 @@ import { api, mediaUrl } from '../../api/client';
 import { AgentApiError, agentApi, getAgentConfig, type AgentConfigResponse, type AgentImage, type AgentImageRetryReceipt, type AgentRound, type AgentRoundCreate, type AgentSnapshot, type AgentTaskContextOperation, type AgentPromptExecutionInput, type AgentLocalResultRecoveryHint, type AgentLocalResultRecovery } from '../../api/agentClient';
 import type { GenerationJobRecord } from '../../types';
 import { getActiveAgentRounds, getAgentBranchLeafId, getAgentRoundPath, getAgentSiblingRounds } from '../../utils/playground/agentConversationState';
-import { agentPhaseLabels, getAgentAssistantBlocks, getAgentImageProgress, getAgentJobFailure, getAgentRequestFailure, getAgentRoundStatus, getAgentRoundSummary, getAgentToolLabel, isAgentImageTool, isAgentRequestActive } from '../../utils/playground/agentAssistantBlocks';
+import { agentPhaseLabels, getAgentAssistantBlocks, getAgentImageProgress, getAgentJobFailure, getAgentRequestFailure, getAgentRoundStatus, getAgentRoundSummary, getAgentToolLabel, getAgentInternalToolStatus, isAgentInternalTool, isAgentImageTool, isAgentRequestActive } from '../../utils/playground/agentAssistantBlocks';
 import { insertMention, referenceKey, resolveAgentPromptImageReferences, type ReferenceChoice } from '../../utils/playground/agentImageReferences';
 import { AGENT_DRAFT_KEY, AGENT_IMAGE_MODE_PREFIX, AGENT_PROMPT_EXECUTIONS_KEY, acknowledgeAgentDraft, clearPendingPromptExecution, draftFromPendingAgentSubmission, readAgentDrafts, readAgentImageMode, readPendingAgentSubmissions, readPendingPromptExecutions, saveAgentImageMode, savePendingPromptExecution, shouldSubmitAgentOnKey, type AgentDraft, type PendingAgentSubmission, type PendingPromptExecution } from '../../utils/playground/agentSubmission';
 import { resolveAuto4k } from '../../utils/compatibleRecipe';
@@ -1133,6 +1133,12 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
                 if (block.type === 'image-task') return <div key={block.key}>{takeImageProgress(`${block.key}:progress`)}{renderResult(block.task)}</div>;
                 if (block.type === 'deleted-image-task') return <div key={block.key}>{takeImageProgress(`${block.key}:progress`)}<p className="agent-missing-image">原图片任务已不可用，保留引用位置。</p></div>;
                 if (isAgentImageTool(block.name)) return takeImageProgress(block.key);
+                if (isAgentInternalTool(block.name)) {
+                  if (block.state === 'completed') return null;
+                  const label = getAgentInternalToolStatus(block.state);
+                  if (label === '进行中') return <p key={block.key} className="agent-live-progress"><LoaderCircle size={14} className="spin" aria-hidden="true" />{getAgentToolLabel(block.name)}…</p>;
+                  return <div key={block.key} className="agent-tool-status"><span>{getAgentToolLabel(block.name)}</span><small>{label}</small></div>;
+                }
                 const label = agentPhaseLabels[block.state || ''] || statusText[block.state || ''] || (block.state === 'in_progress' ? '进行中' : '工具调用');
                 return <div key={block.key} className="agent-tool-status"><span>{getAgentToolLabel(block.name)}</span><small>{label}</small></div>;
               })}

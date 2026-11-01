@@ -120,6 +120,23 @@ test('read-only skill progress completes only after a matching local tool receip
   assert.ok(!blocks.some(block => block.type === 'image-task'));
 });
 
+test('internal function progress trusts matched execution receipts, not model argument completion', () => {
+  const call = { type: 'function_call', call_id: 'history', name: 'read_task_history', status: 'completed' };
+  const data = { ...round('history'), status: 'running', responseOutput: [call] };
+  assert.notEqual(response.getAgentAssistantBlocks(data, [], '')[0].state, 'completed');
+  const receipt = { type: 'function_call_output', call_id: 'history', output: JSON.stringify({ history: [] }) };
+  data.responseOutput.push(receipt);
+  assert.equal(response.getAgentAssistantBlocks(data, [], '')[0].state, 'completed');
+  receipt.output = JSON.stringify({ error: 'The requested history is missing.' });
+  assert.equal(response.getAgentAssistantBlocks(data, [], '')[0].state, 'failed');
+  receipt.output = '{unfinished';
+  assert.equal(response.getAgentAssistantBlocks(data, [], '')[0].state, 'unknown');
+  receipt.output = JSON.stringify({ status: 'stopped' });
+  assert.equal(response.getAgentAssistantBlocks(data, [], '')[0].state, 'stopped');
+  data.responseOutput.pop(); data.status = 'stopped';
+  assert.equal(response.getAgentAssistantBlocks(data, [], '')[0].state, 'stopped');
+});
+
 test('replayed message snapshots replace partial text in place instead of duplicating it', () => {
   const data = { ...round('r'), responseOutput: [
     { type: 'message', id: 'same', content: [{ type: 'output_text', text: 'Partial' }] },
