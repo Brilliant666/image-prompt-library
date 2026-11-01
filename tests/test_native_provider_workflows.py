@@ -172,3 +172,46 @@ def test_new_protocol_profile_round_trip_through_http_does_not_generate(repo):
     assert saved['protocol'] == 'gemini_native' and saved['model'] == 'manual-native-alias'
     assert saved['api_key_present'] and 'only-test-key' not in response.text
     assert repo.jobs.list_jobs().total == 0
+
+
+@pytest.mark.parametrize('source_protocol,target_protocol', [
+    ('gemini_native', 'seedream_native'), ('seedream_native', 'gemini_native'),
+])
+def test_explicit_cross_protocol_retry_reuses_confirmed_prompt_and_pixels_without_text_planning(repo, monkeypatch, source_protocol, target_protocol):
+    from backend.services.agent_image_retry import AgentImageRetryRepository, AgentImageRetryCreate, run_agent_image_retry
+    store = configure_native(repo, source_protocol)
+    value, _ = prepare(repo, refs=2)
+    value['params'] = {'size': 'auto', 'quality': 'auto', 'output_format': 'auto', 'provider_options': {}}
+    calls = []
+    def handler(request):
+        calls.append(request)
+        assert '/responses' not in request.url.path
+        if len(calls) == 1:
+            return httpx.Response(403, json={'error': {'code': 'synthetic_quota', 'message': 'Synthetic denied request'}})
+        payload = json.loads(request.content)
+        prompt = payload['contents'][0]['parts'][0]['text'] if target_protocol == 'gemini_native' else payload['prompt']
+        assert prompt == EXACT
+        assert wire_pixels(target_protocol, payload) == [image_bytes('red'), image_bytes('blue')]
+        return httpx.Response(200, json=image_response(target_protocol))
+    monkeypatch.setattr(httpx, 'HTTPTransport', lambda **kwargs: httpx.MockTransport(handler))
+    repo.create_prompt_execution('conversation', AgentPromptExecutionCreate.model_validate(value))
+    execution.run_request(repo.library, 'direct')
+    source_id = repo.request('direct')['round']['outputTaskIds'][0]
+    assert repo.jobs.get_job(source_id).status == 'failed' and len(calls) == 1
+    target_model = 'gemini-nano-banana-2.1' if target_protocol == 'gemini_native' else 'doubao-seedream-5-0-lite-260128'
+    store.save({'protocol': target_protocol, 'base_url': 'http://127.0.0.1:1',
+                'api_key': 'synthetic-retry-only-key', 'model': target_model}, profile_id='retry_native')
+    retry = AgentImageRetryCreate.model_validate({'retryId': 'explicit-native-retry',
+        'conversationId': 'conversation', 'configRevision': repo.config()['revision'],
+        'imageConfig': {'profileId': 'retry_native', 'model': target_model},
+        'params': {'size': 'auto', 'quality': 'auto', 'output_format': 'auto', 'provider_options': {}},
+        'confirmed': True})
+    retries = AgentImageRetryRepository(repo.library)
+    receipt, created = retries.create(source_id, retry)
+    assert created
+    result = run_agent_image_retry(repo.library, receipt['job'].id)
+    assert result.status == 'succeeded' and result.parameters['protocol'] == target_protocol
+    assert not retries.create(source_id, retry)[1]
+    assert run_agent_image_retry(repo.library, result.id).id == result.id
+    assert len(calls) == 2 and repo.jobs.get_job(source_id).status == 'failed'
+    assert repo.request('direct')['usage']['responseStepsStarted'] == 0
