@@ -144,13 +144,13 @@ class ModelCatalogCache:
 
     def _document(self):
         if not self.path.exists():
-            return {"version": 1, "profiles": {}}
+            return {"version": 2, "profiles": {}}
         with self.path.open("rb") as stream:
             raw = stream.read(MAX_CACHE_BYTES + 1)
         if len(raw) > MAX_CACHE_BYTES:
             raise ValueError()
         document = json.loads(raw)
-        if not isinstance(document, dict) or document.get("version") != 1 or not isinstance(document.get("profiles"), dict):
+        if not isinstance(document, dict) or document.get("version") not in (1, 2) or not isinstance(document.get("profiles"), dict):
             raise ValueError()
         return document
 
@@ -189,7 +189,8 @@ class ModelCatalogCache:
         try:
             document = self._document()
         except (OSError, ValueError, TypeError, RecursionError):
-            document = {"version": 1, "profiles": {}}
+            document = {"version": 2, "profiles": {}}
+        document["version"] = 2
         # Never retain deleted profiles or prior connections in the disposable cache.
         document["profiles"] = {key: value for key, value in document["profiles"].items() if key in profile_ids}
         document["profiles"][profile_id] = {"fingerprint": fingerprint, "catalog": catalog}
