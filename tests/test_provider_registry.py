@@ -38,13 +38,15 @@ def test_registered_executors_preserve_oauth_and_native_types():
     from backend.services.openai_codex_native import OpenAICodexNativeProvider
     from backend.services.xai_grok_oauth import XaiGrokOAuthProvider
     from backend.services.agent_execution import NativeAgentImageProvider
-    expected = {'openai_compatible': OpenAICompatibleProvider,
+    from backend.services.providers.job_runner import ApiProfileExecutor
+    expected = {'openai_compatible': ApiProfileExecutor,
                 'openai_codex_oauth_native': OpenAICodexNativeProvider,
                 'xai_grok_oauth': XaiGrokOAuthProvider,
                 'agent_native_batch': NativeAgentImageProvider}
     assert AUTOMATED_PROVIDER_IDS == frozenset(expected)
     for identity, cls in expected.items():
         assert type(_provider_for(identity)) is cls
+    assert {'gemini_native','seedream_native'}.isdisjoint(AUTOMATED_PROVIDER_IDS)
     assert registry.get_provider('xai_grok_oauth').image_factory is None
     assert registry.get_provider('openai_codex_oauth_native').legacy_executor
 
@@ -58,11 +60,17 @@ def test_unknown_or_non_api_protocol_is_not_inferred_or_replayed(profile):
 
 
 def test_profile_without_protocol_has_original_provider_and_no_write(config):
-    settings = config.read('test')
+    # Exercise a real pre-protocol document, not a newly saved v2 profile.
+    document = json.loads(config.path.read_text(encoding='utf-8'))
+    document['profiles']['test'].pop('protocol', None)
+    config.path.write_text(json.dumps(document), encoding='utf-8')
     before = config.path.read_bytes()
+    settings = config.read('test')
     provider = registry.image_provider_for_profile(settings, config=config)
     assert type(provider) is OpenAICompatibleProvider
-    assert config.path.read_bytes() == before and 'protocol' not in settings
+    assert config.path.read_bytes() == before
+    assert settings.get('protocol', 'openai_compatible') == 'openai_compatible'
+    assert 'protocol' not in json.loads(config.path.read_text(encoding='utf-8'))['profiles']['test']
     assert ModelCapabilities().image_generation is None
     assert ImageResult(b'image', 'image.png', {}) == (b'image', 'image.png', {})
 
