@@ -236,7 +236,11 @@ def test_frozen_agent_legacy_direct_identity_survives_defaults_but_not_network_c
     repo = AgentRepository(library)
     frozen = repo.request(body['requestId'])['frozen']
     if initial['network_mode'] == 'direct':
-        legacy = {k: v for k, v in store.read('mock').items() if k not in api_network.NETWORK_DEFAULTS}
+        # This receipt predates both network defaults and explicit protocols.
+        # read() now supplies protocol as a default, but an old wire identity
+        # must be reconstructed only from fields that existed in that version.
+        legacy = {k: v for k, v in store.read('mock').items()
+                  if k not in api_network.NETWORK_DEFAULTS and k != 'protocol'}
         frozen['_profileDigests']['mock'] = fingerprint(legacy)
     with connect(library) as conn:
         conn.execute('UPDATE agent_requests SET frozen=? WHERE id=?', (encoded(frozen), body['requestId']))
@@ -307,7 +311,7 @@ def test_explicit_retry_legacy_direct_digest_and_network_change_boundary(source,
     metadata = repo.jobs.get_job(job['id']).metadata
     if change != CHANGED_PROXY:
         metadata['agentRetry']['profileDigest'] = fingerprint({k: v for k, v in store.read('mock-b').items()
-                                                             if k not in api_network.NETWORK_DEFAULTS})
+                                                             if k not in api_network.NETWORK_DEFAULTS and k != 'protocol'})
     with connect(repo.library) as conn:
         conn.execute('UPDATE generation_jobs SET metadata=? WHERE id=?', (encoded(metadata), job['id']))
     store.save(change, profile_id='mock-b')
