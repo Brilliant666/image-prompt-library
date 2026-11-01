@@ -11,7 +11,9 @@ from PIL import Image
 
 from backend.config import resolve_library_storage_path
 
-MAX_IMAGE_PIXELS = 16_000_000
+# Bounded decode budget covering documented 4K wide/tall outputs (up to
+# 1536x12288). Originals are never resized; byte limits still apply separately.
+MAX_IMAGE_PIXELS = 20_000_000  # Exact 4K square; still a strict decoded-pixel budget.
 
 @dataclass
 class StoredImage:

@@ -13,6 +13,7 @@ from backend.main import create_app
 from backend.routers import agent as agent_router
 from backend.services.agent_repository import AgentError, AgentRepository
 from backend.services.generation_jobs import _validate_storeable_image_bytes, GenerationJobConflict
+from backend.services.image_store import MAX_IMAGE_PIXELS
 from test_agent_workspaces import isolated
 
 
@@ -63,8 +64,8 @@ def upload(client, raw, *, filename='synthetic.png', mime='image/png'):
 
 
 @pytest.mark.parametrize('raw,status,code', [
-    (header_only_pixels(5000, 4000), 413, 'image_pixel_limit_exceeded'),
-    (header_only_pixels(16_000_001, 1), 413, 'image_pixel_limit_exceeded'),
+    (header_only_pixels(5001, 4000), 413, 'image_pixel_limit_exceeded'),
+    (header_only_pixels(MAX_IMAGE_PIXELS + 1, 1), 413, 'image_pixel_limit_exceeded'),
     (header_only_pixels(20000, 10000), 413, 'image_safety_limit_exceeded'),
     (image_bytes('GIF'), 415, 'image_format_unsupported'),
     (b'not an image despite the png extension', 400, 'image_decode_failed'),
@@ -81,7 +82,7 @@ def test_invalid_uploads_have_precise_errors_and_create_no_assets(api, raw, stat
     assert detail['code'] == code
     assert '不是有效图片' not in detail['message']
     if code == 'image_pixel_limit_exceeded':
-        assert '16,000,000' in detail['message']
+        assert f'{MAX_IMAGE_PIXELS:,}' in detail['message']
     if code == 'image_safety_limit_exceeded':
         assert '20000' not in detail['message'] and '10000' not in detail['message']
     assert asset_counts(library) == before == (0, 0)
@@ -147,25 +148,25 @@ def test_supported_content_ignores_filename_and_mime_and_preserves_original(api,
 
 def test_actual_pixel_boundary_accepts_valid_original(api):
     client, library = api
-    raw = image_bytes(size=(4000, 4000))
+    raw = image_bytes(size=(5000, 4000))
     response = upload(client, raw)
     assert response.status_code == 200
     image = response.json()['image']
-    assert image['width'] * image['height'] == 16_000_000
+    assert image['width'] * image['height'] == MAX_IMAGE_PIXELS == 20_000_000
     assert (library/AgentRepository(library).asset(image['id'])['path']).read_bytes() == raw
 
 
 def test_shared_gallery_validator_preserves_classification_and_value_error_contract():
     with pytest.raises(GenerationJobConflict) as failure:
-        _validate_storeable_image_bytes(header_only_pixels(5000, 4000))
+        _validate_storeable_image_bytes(header_only_pixels(5001, 4000))
     assert isinstance(failure.value, ValueError)
     assert failure.value.code == 'image_pixel_limit_exceeded'
     assert failure.value.status == 413
-    assert '5000' in str(failure.value) and '4000' in str(failure.value)
+    assert '5001' in str(failure.value) and '4000' in str(failure.value)
 
 
 @pytest.mark.parametrize('raw,status,code', [
-    (header_only_pixels(5000, 4000), 413, 'image_pixel_limit_exceeded'),
+    (header_only_pixels(5001, 4000), 413, 'image_pixel_limit_exceeded'),
     (header_only_pixels(20000, 10000), 413, 'image_safety_limit_exceeded'),
     (b'broken synthetic image', 400, 'image_decode_failed'),
 ])
@@ -187,7 +188,7 @@ def test_gallery_reference_pixel_failure_keeps_same_code_and_creates_no_frozen_a
     repo = AgentRepository(library)
     job = repo.jobs.create_job(GenerationJobCreate(prompt_text='synthetic stored result'))
     job = repo.jobs.stage_result(job.id, image_bytes(), 'synthetic.png')
-    (library/job.result_path).write_bytes(header_only_pixels(5000, 4000))
+    (library/job.result_path).write_bytes(header_only_pixels(5001, 4000))
     with pytest.raises(AgentError) as failure:
         repo.resolve_ref({'kind': 'job', 'jobId': job.id})
     assert failure.value.code == 'image_pixel_limit_exceeded'

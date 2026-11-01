@@ -515,7 +515,7 @@ export default function AgentWorkspace({ active, onOpenSettings, onProfileChange
     if (sharedImages && onGalleryImageSettingsChange) {
       const base: GalleryImageSettings = galleryImageSettings || { provider: 'openai_compatible', profileId: config?.config.imageProfileId || '', model: imageModel, params: draft.params, count: 1 };
       onGalleryImageSettingsChange({ ...base, provider: 'openai_compatible',
-        ...(change.imageConfig ? { profileId: change.imageConfig.profileId || '', model: change.imageConfig.model, unavailable: undefined } : {}),
+        ...(change.imageConfig ? { profileId: change.imageConfig.profileId || '', model: change.imageConfig.model, unavailable: undefined, protocol: config?.profiles.find(profile=>profile.id===change.imageConfig?.profileId)?.protocol || 'openai_compatible' } : {}),
         ...(change.params ? { params: structuredClone(change.params) } : {}),
         ...('sizeMode' in change ? { sizeMode: change.sizeMode } : {}),
         ...(change.count ? { count: change.count } : {}),

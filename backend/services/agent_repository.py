@@ -45,7 +45,8 @@ def fingerprint(value):
 
 
 def profile_digest(profile):
-    return fingerprint({**{k: v for k, v in profile.items() if k not in NETWORK_DEFAULTS},
+    return fingerprint({**{k: v for k, v in profile.items() if k not in NETWORK_DEFAULTS
+                            and not (k == 'protocol' and v == 'openai_compatible')},
                         **network_identity(profile)})
 
 
@@ -58,7 +59,10 @@ class AgentError(ValueError):
 
 
 def public_profile_digest(profile):
-    return fingerprint({k: profile.get(k) for k in ("id", "base_url", "model", "timeout")})
+    values = {k: profile.get(k) for k in ("id", "base_url", "model", "timeout")}
+    if profile.get('protocol', 'openai_compatible') != 'openai_compatible':
+        values['protocol'] = profile['protocol']
+    return fingerprint(values)
 
 
 def safe_model_label(value, secrets=()):
@@ -692,6 +696,8 @@ class AgentRepository:
             text = store.read(text_id)
         except (ValueError, OpenAICompatibleError):
             raise AgentError("configuration_incomplete", "所选文本 API 配置不存在。", 400) from None
+        if text.get('protocol', 'openai_compatible') != 'openai_compatible':
+            raise AgentError('capability_unsupported', 'Agent 文字主控需要 OpenAI Responses 连接；原生 Gemini/Seedream 连接仅用于 Hybrid 图片。', 400)
         if not text["api_key"] or not text["base_url"]:
             raise AgentError("configuration_incomplete", "文本 API 配置不完整。", 400)
         auth = body.authorization
@@ -773,7 +779,13 @@ class AgentRepository:
             rounds = self._rounds(conn, cid)
         frozen = self.resolve_config(body)
         try:
-            normalize_image_parameters(body.params.model_dump(exclude_none=True), default_model=frozen["imageModel"] or "native-image-generation")
+            if frozen['apiConfigMode'] == 'hybrid' and body.authorization.allowImageGeneration:
+                from backend.services.providers.profiles import normalize_profile_parameters
+                image_settings = OpenAICompatibleConfig(library_path=self.library).read(frozen['imageProfileId'])
+                normalize_profile_parameters(body.params.model_dump(exclude_none=True), image_settings,
+                                             default_model=frozen['imageModel'])
+            else:
+                normalize_image_parameters(body.params.model_dump(exclude_none=True), default_model=frozen["imageModel"] or "native-image-generation")
         except OpenAICompatibleError as exc:
             raise AgentError("invalid_parameters", str(exc), 400) from None
         if not body.prompt.strip():

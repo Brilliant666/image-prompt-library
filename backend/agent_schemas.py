@@ -98,7 +98,8 @@ class AgentMask(AgentModel):
 class AgentParams(AgentModel):
     size: str = "1024x1024"
     quality: str = "auto"
-    output_format: Literal["png", "jpeg", "webp"] = "png"
+    output_format: Literal["auto", "png", "jpeg", "webp"] = "png"
+    provider_options: dict[str, str | int | bool] | None = None
     output_compression: int | None = Field(default=None, ge=0, le=100)
     moderation: str | None = None
     background: str | None = None

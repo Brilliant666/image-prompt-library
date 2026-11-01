@@ -46,8 +46,22 @@ def run_image_job(provider, library_path, job_id, *, provider_id, error_type,
         if not parameters.get("model"):
             raise error_type("This legacy job has no frozen request model; select a model and create a new task before generating")
         repo.record_execution(job_id, 'generating', preparationMs=(time.monotonic() - preparation_started) * 1000)
-        data, filename, metadata = provider.generate(prompt, parameters, inputs,
+        result = provider.generate(prompt, parameters, inputs,
             on_partial=lambda data, metadata: repo.stage_stream_preview(job_id, data, metadata))
+        from .adapters.native_images import UnexpectedFinalImages
+        if isinstance(result, UnexpectedFinalImages):
+            from backend.services.generation_result_recovery import job_directory, _image_details
+            from backend.services.image_store import _atomic_write_bytes
+            directory = job_directory(library_path, job_id)
+            directory.mkdir(parents=True, exist_ok=True)
+            for image in result.images:
+                checked = _image_details(image.data)
+                suffix = {'PNG': '.png', 'JPEG': '.jpg', 'WEBP': '.webp', 'GIF': '.gif'}[checked['format']]
+                _atomic_write_bytes(directory / ('result-' + checked['sha256'] + suffix), image.data)
+            # All obtained finals are retained, but a single authorized task
+            # cannot silently select one or turn into several paid tasks.
+            raise error_type('Unexpected image output count; obtained files are retained for local inspection')
+        data, filename, metadata = result
         metadata["source_job_id"] = job_id
         provider_ms = (metadata.get('request_diagnostics') or {}).get('provider_ms')
         if 'request_diagnostics' in metadata:
@@ -71,3 +85,22 @@ def run_image_job(provider, library_path, job_id, *, provider_id, error_type,
         raise error_type(message, diagnostics) from None
     repo.record_execution(job_id, 'completed', resultWriteMs=(time.monotonic() - write_started) * 1000)
     return repo.get_job(job_id)
+
+
+class ApiProfileExecutor:
+    """Select the protocol frozen in an existing API-key image task."""
+    def run_job(self, library_path, job_id):
+        from backend.services.openai_compatible import OpenAICompatibleConfig, OpenAICompatibleError
+        from .registry import image_provider_for_profile
+        from .errors import ProviderError
+        repo = GenerationJobRepository(library_path)
+        job = repo.get_job(job_id)
+        config = OpenAICompatibleConfig(library_path=library_path)
+        try:
+            provider = image_provider_for_profile({'protocol': job.parameters.get('protocol', 'openai_compatible')}, config=config)
+        except ProviderError:
+            if job.status == 'queued':
+                repo.mark_running(job_id, queued_only=True)
+                repo.mark_failed(job_id, 'Stored image protocol is not supported; no provider request was sent', diagnostics={'category': 'local_validation'})
+            raise OpenAICompatibleError('Stored image protocol is not supported') from None
+        return provider.run_job(library_path, job_id)

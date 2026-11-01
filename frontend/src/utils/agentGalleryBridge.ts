@@ -1,11 +1,12 @@
 import type { AgentImageParams } from '../api/agentClient';
-import type { GenerationJobRecord, GenerationSetCount } from '../types';
+import type { ApiProtocol, GenerationJobRecord, GenerationSetCount } from '../types';
 import type { GalleryDraft } from './galleryRecipe';
 
 // Shared pending image choices. Each workspace keeps its own prompt and images,
 // resolves automatic dimensions at send time, and freezes its submitted request.
 // Credentials and historical transport overrides never travel with these choices.
 export interface GalleryImageSettings {
+  protocol?: ApiProtocol;
   provider: string;
   profileId: string;
   model: string;
@@ -30,6 +31,8 @@ export function applyGalleryImageSettings(draft: GalleryDraft, settings: Gallery
     // Shared dimensions replace any historical prompt-injected ratio as well.
     aspectRatio: 'auto', aspectInjection: undefined, recipe: {
     model: settings.model, size: params.size, quality: params.quality,
+    ...(settings.protocol&&settings.protocol!=='openai_compatible'?{protocol:settings.protocol}:{}),
+    ...(params.provider_options?{provider_options:{...params.provider_options}}:{}),
     background: params.background || 'auto', output_format: params.output_format,
     ...(settings.sizeMode === 'auto4k' ? { size_mode: 'auto4k' as const } : {}),
     ...(params.output_format !== 'png' && params.output_compression != null ? { output_compression: params.output_compression } : {}),

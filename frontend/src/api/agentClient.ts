@@ -178,7 +178,8 @@ export interface AgentConversationSummary {
   roundCount: number; runningRequestId: string | null; revision: number;
 }
 export interface AgentImageParams {
-  size: string; quality: string; output_format: 'png' | 'jpeg' | 'webp';
+  provider_options?: Record<string,string|number|boolean>;
+  size: string; quality: string; output_format: 'auto' | 'png' | 'jpeg' | 'webp';
   output_compression?: number | null; moderation?: string; background?: string;
 }
 export interface AgentRoundCreate {

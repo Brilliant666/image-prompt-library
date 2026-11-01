@@ -74,6 +74,7 @@ function harness(t, name, props = {}, options = {}) {
     '../../hooks/useModalFocus': { useModalFocus: () => ({ containerRef: {}, handleModalKeyDown() {} }) },
     '../../utils/galleryHistory': { readGalleryFilter: () => '', saveGalleryFilter() {}, galleryFilterStatuses: () => '', readGalleryHistory: () => undefined, saveGalleryHistory() {}, clearGalleryHistory() {} },
     '../../utils/generationQueueHistory': { clearGenerationQueueHistory() {} }, '../../utils/generationSiblings': { mapGenerationRetryJob: value => value },
+    '../NativeImageParameters': { __esModule: true, default: 'NativeImageParameters' },
     fflate: {}, '../GenerationResultSummary': { GenerationResultSummary: 'GenerationResultSummary' },
     '../GenerationQueueDrawer': { __esModule: true, default: 'GenerationQueueDrawer', groupGenerationQueueJobs: () => [] },
     '../ToolbarSelect': { __esModule: true, default: 'ToolbarSelect' },

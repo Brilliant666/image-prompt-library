@@ -60,8 +60,14 @@ def create_execution(repo, cid, body):
     if history and history[-1].get('maskImageId'):
         raise AgentError('capability_unsupported', '直接执行暂不支持带蒙版配方；请使用原编辑流程。', 400)
     try:
-        parameters = normalize_image_parameters(body.params.model_dump(exclude_none=True),
-                                               default_model=frozen['imageModel'] or 'native-default')
+        if not native:
+            from backend.services.openai_compatible import OpenAICompatibleConfig
+            from backend.services.providers.profiles import normalize_profile_parameters
+            settings = OpenAICompatibleConfig(library_path=repo.library).read(frozen['imageProfileId'])
+            parameters = normalize_profile_parameters(body.params.model_dump(exclude_none=True), settings, frozen['imageModel'])
+        else:
+            parameters = normalize_image_parameters(body.params.model_dump(exclude_none=True),
+                                                   default_model=frozen['imageModel'] or 'native-default')
     except OpenAICompatibleError as exc:
         raise AgentError('invalid_parameters', str(exc), 400) from None
     references = []
@@ -298,13 +304,18 @@ class RecipeDispatchClient:
             if profile_digest(profile) != retry['profileDigest']:
                 raise AgentError('profile_changed', '本次重试配置已改变，未调用图片接口。')
         else:
-            repo.verified_profile(request, image=True)
+            profile = repo.verified_profile(request, image=True)
         expected = retry.get('confirmedRecipe', {}).get('recipeFingerprint') if retry else link.get('recipeFingerprint')
         if recipe.get('fingerprint') != expected or fingerprint({k: v for k, v in recipe.items() if k != 'fingerprint'}) != expected:
             raise AgentError('recipe_changed', '原配方来源已改变，未调用图片接口。', 400)
         payload = kwargs.get('data', kwargs.get('json', {}))
         inputs = [spec[1][1] for spec in kwargs.get('files', [])]
-        if payload.get('prompt') != recipe['prompt'] or len(inputs) != len(recipe['references']) or any(
+        actual_prompt = payload.get('prompt')
+        protocol_id = profile.get('protocol', 'openai_compatible')
+        if protocol_id != 'openai_compatible':
+            from backend.services.providers.native_wire import verify_recipe_wire
+            actual_prompt, inputs = verify_recipe_wire(profile, self.job, method, url, kwargs)
+        if actual_prompt != recipe['prompt'] or len(inputs) != len(recipe['references']) or any(
                 hashlib.sha256(data).hexdigest() != reference['sha256'] for data, reference in zip(inputs, recipe['references'])):
             raise AgentError('recipe_changed', '准备发送的 Prompt 或图片与已确认配方不同。', 400)
         record_recipe_dispatch(self.library, self.job)

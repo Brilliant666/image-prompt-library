@@ -33,7 +33,8 @@ class RetryParams(BaseModel):
     model_config = ConfigDict(extra='forbid')
     size: str
     quality: str
-    output_format: Literal['png', 'jpeg', 'webp']
+    output_format: Literal['auto', 'png', 'jpeg', 'webp']
+    provider_options: dict[str, str | int | bool] | None = None
     output_compression: int | None = Field(default=None, ge=0, le=100)
     moderation: Literal['auto', 'low'] | None = None
     background: Literal['auto', 'opaque', 'transparent'] | None = None

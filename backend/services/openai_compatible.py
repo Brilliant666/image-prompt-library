@@ -222,10 +222,12 @@ class OpenAICompatibleConfig:
     def _defaults():
         return {"display_name": "Third-party API", "base_url": "", "api_key": "", "model": "", "timeout": 300,
                 "models": [], "base_url_mode": "versioned", "stream": False, "partial_images": 0,
-                "response_format": "auto", **NETWORK_DEFAULTS}
+                "response_format": "auto", "protocol": "openai_compatible", **NETWORK_DEFAULTS}
 
     @staticmethod
     def _validate_options(value):
+        from backend.services.providers.profiles import protocol
+        selected_protocol = protocol(value)
         value.update(validate_network_settings(value))
         if not isinstance(value["models"], list) or len(value["models"]) > 100 or any(
             not isinstance(model, str) or not model.strip() or len(model.strip()) > 200 or
@@ -239,8 +241,11 @@ class OpenAICompatibleConfig:
             raise OpenAICompatibleError("Streaming must be true or false")
         if type(value["partial_images"]) is not int or not 0 <= value["partial_images"] <= 3:
             raise OpenAICompatibleError("Partial image count must be an integer from 0 to 3")
-        if value["response_format"] not in ("auto", "b64_json"):
-            raise OpenAICompatibleError("Response format must be auto or b64_json")
+        formats = ('auto', 'url', 'b64_json') if selected_protocol == 'seedream_native' else ('auto',) if selected_protocol == 'gemini_native' else ('auto', 'b64_json')
+        if value["response_format"] not in formats:
+            raise OpenAICompatibleError("Response format is not supported by the selected protocol")
+        if selected_protocol != 'openai_compatible' and (value['stream'] or value['partial_images']):
+            raise OpenAICompatibleError('Native image streaming is not yet enabled; disable stream and partial previews')
 
     def _document(self):
         try:
@@ -287,19 +292,21 @@ class OpenAICompatibleConfig:
         return {**document["profiles"][selected], "id": selected}
 
     def _public(self, value):
+        from backend.services.providers.native_params import protocol_capabilities
         catalog = self._cached_model_catalog(value)
         value = dict(value)
         present = bool(value.pop("api_key", ""))
         network = public_network_settings(value)
         value.pop("proxy_url", None)
         return {**value, "api_key_present": present, "configured": bool(value["base_url"] and present),
-                "model_catalog": catalog, **network}
+                "model_catalog": catalog, "image_capabilities": protocol_capabilities(value.get("protocol", "openai_compatible")), **network}
 
     def _cached_model_catalog(self, settings):
         if not settings["base_url"] or not settings["api_key"]:
             return empty_catalog()
         try:
-            root = normalize_base_url(settings["base_url"], settings["base_url_mode"])
+            from backend.services.providers.profiles import normalize_profile_url, protocol
+            root = normalize_profile_url(settings["base_url"], settings["base_url_mode"], protocol(settings))
         except OpenAICompatibleError:
             return empty_catalog()
         return ModelCatalogCache(self.path).read(
@@ -322,7 +329,8 @@ class OpenAICompatibleConfig:
             settings = self._catalog_profile(profile_id)
             if not settings["base_url"] or not settings["api_key"]:
                 return {**empty_catalog(), "error": CATALOG_ERRORS["not_configured"]}
-            root = normalize_base_url(settings["base_url"], settings["base_url_mode"])
+            from backend.services.providers.profiles import normalize_profile_url, protocol
+            root = normalize_profile_url(settings["base_url"], settings["base_url_mode"], protocol(settings))
             fingerprint = connection_fingerprint(settings, root)
             initial_stat = self.path.stat()
             revision = (initial_stat.st_mtime_ns, initial_stat.st_size, initial_stat.st_ino)
@@ -341,7 +349,7 @@ class OpenAICompatibleConfig:
             with _config_lock:
                 current = self._catalog_profile(profile_id)
                 current_stat = self.path.stat()
-                current_root = normalize_base_url(current["base_url"], current["base_url_mode"])
+                current_root = normalize_profile_url(current["base_url"], current["base_url_mode"], protocol(current))
                 if (revision != (current_stat.st_mtime_ns, current_stat.st_size, current_stat.st_ino)
                         or fingerprint != connection_fingerprint(current, current_root)):
                     return {**self._cached_model_catalog(current), "error": CATALOG_ERRORS["changed"]}
@@ -402,11 +410,12 @@ class OpenAICompatibleConfig:
             for field in ("display_name", "base_url", "model"):
                 if field in payload:
                     value[field] = str(payload[field] or "").strip()
-            for field in ("models", "base_url_mode", "stream", "partial_images", "response_format"):
+            for field in ("models", "base_url_mode", "stream", "partial_images", "response_format", "protocol"):
                 if field in payload:
                     value[field] = payload[field]
             self._validate_options(value)
-            value["base_url"] = normalize_base_url(value["base_url"], value["base_url_mode"])
+            from backend.services.providers.profiles import normalize_profile_url, protocol
+            value["base_url"] = normalize_profile_url(value["base_url"], value["base_url_mode"], protocol(value))
             if not value["display_name"]:
                 raise OpenAICompatibleError("Display name is required")
             try:
@@ -424,11 +433,11 @@ class OpenAICompatibleConfig:
                 # send it to a new endpoint unless the user enters it again.
                 previous = document["profiles"][profile_id]
                 try:
-                    previous_url = normalize_base_url(previous.get("base_url", ""), previous.get("base_url_mode", "versioned"))
+                    previous_url = normalize_profile_url(previous.get("base_url", ""), previous.get("base_url_mode", "versioned"), protocol(previous))
                 except OpenAICompatibleError:
                     previous_url = ""
-                if previous_url != value["base_url"]:
-                    raise OpenAICompatibleApiKeyRequired("Enter the API key again when changing the Base URL")
+                if previous_url != value["base_url"] or protocol(previous) != protocol(value):
+                    raise OpenAICompatibleApiKeyRequired("Enter the API key again when changing the Base URL or protocol")
             document["profiles"][profile_id] = value
             if document["default_profile_id"] is None or payload.get("make_default") is True:
                 document["default_profile_id"] = profile_id
@@ -496,7 +505,8 @@ class OpenAICompatibleConfig:
         try:
             value = self.public()
             if value["base_url"]:
-                normalize_base_url(value["base_url"], value["base_url_mode"])
+                from backend.services.providers.profiles import normalize_profile_url, protocol
+                normalize_profile_url(value["base_url"], value["base_url_mode"], protocol(value))
         except OpenAICompatibleError:
             broken = True
             value = {"display_name": "OpenAI compatible images", "api_key_present": False, "base_url": "", "model": ""}
@@ -507,7 +517,7 @@ class OpenAICompatibleConfig:
                 "status": "auth_error" if broken else ("ready" if ready else "login_required"), "message": "Provider configuration could not be read" if broken else ("Locally configured; live connectivity and image generation are not verified" if ready else "Configure image API settings first"),
                 "verification": {"configuration_complete": ready, "connectivity_verified": False, "image_generation_verified": False},
                 "can_generate": ready, "features": {"text_to_image": ready, "text_reference_to_image": ready, "image_edit": ready, "title_suggestion": False},
-                "max_input_images": MAX_INPUT_IMAGES, "image_models": list(dict.fromkeys(([value["model"]] if value["model"] else []) + value.get("models", []) + list(IMAGE_25_MODELS))),
+                "max_input_images": MAX_INPUT_IMAGES, "image_models": list(dict.fromkeys(([value["model"]] if value["model"] else []) + value.get("models", []) + (list(IMAGE_25_MODELS) if value.get("protocol", "openai_compatible") == "openai_compatible" else value.get("image_capabilities", {}).get("known_models", [])))),
                 "default_image_model": value["model"], "model": value["model"], "api_key_present": value["api_key_present"],
                 **(self.public_profiles() if not broken else {"profiles": [], "default_profile_id": None})}
 
@@ -573,6 +583,8 @@ class OpenAICompatibleProvider:
 
     def generate(self, prompt, parameters, input_images=None, on_partial=None):
         settings = self.config.read(parameters.get("compatible_profile_id"))
+        if settings.get('protocol', 'openai_compatible') != 'openai_compatible' or parameters.get('protocol', 'openai_compatible') != 'openai_compatible':
+            raise OpenAICompatibleError('The saved API protocol changed; create a new explicit request')
         if not settings["api_key"]:
             raise OpenAICompatibleError("Image API key is missing")
         from backend.services.providers.params import CanonicalImageRequest, OpenAIImageParamMapper

@@ -9,6 +9,41 @@ from .params import OpenAIImageParamMapper
 from .adapters.openai_compatible import OpenAIModelCatalog, ResponsesTextProvider, image_provider
 
 
+def _api_executor(**options):
+    from .job_runner import ApiProfileExecutor
+    return ApiProfileExecutor(**options)
+
+
+def _gemini_image(**options):
+    from .adapters.native_images import GeminiImageProvider
+    return GeminiImageProvider(**options)
+
+
+def _seedream_image(**options):
+    from .adapters.native_images import SeedreamImageProvider
+    return SeedreamImageProvider(**options)
+
+
+def _gemini_catalog():
+    from .adapters.native_catalogs import GeminiModelCatalog
+    return GeminiModelCatalog()
+
+
+def _seedream_catalog():
+    from .adapters.native_catalogs import SeedreamModelCatalog
+    return SeedreamModelCatalog()
+
+
+def _gemini_mapper():
+    from .native_params import GeminiParamMapper
+    return GeminiParamMapper()
+
+
+def _seedream_mapper():
+    from .native_params import SeedreamParamMapper
+    return SeedreamParamMapper()
+
+
 def _codex_executor(**options):
     from backend.services.openai_codex_native import OpenAICodexNativeProvider
     return OpenAICodexNativeProvider(**options)
@@ -27,9 +62,15 @@ def _native_batch_executor(**options):
 _DESCRIPTORS = MappingProxyType({
     'openai_compatible': ProviderDescriptor(
         'openai_compatible', 'OpenAI compatible', 'api_key',
-        executor_factory=image_provider, image_factory=image_provider,
+        executor_factory=_api_executor, image_factory=image_provider,
         catalog_factory=OpenAIModelCatalog, text_factory=ResponsesTextProvider,
         mapper_factory=OpenAIImageParamMapper),
+    'gemini_native': ProviderDescriptor(
+        'gemini_native', 'Gemini GenerateContent', 'api_key', image_factory=_gemini_image,
+        catalog_factory=_gemini_catalog, mapper_factory=_gemini_mapper),
+    'seedream_native': ProviderDescriptor(
+        'seedream_native', 'Seedream Images', 'api_key', image_factory=_seedream_image,
+        catalog_factory=_seedream_catalog, mapper_factory=_seedream_mapper),
     'openai_codex_oauth_native': ProviderDescriptor(
         'openai_codex_oauth_native', 'ChatGPT / Codex OAuth', 'codex_oauth_native',
         executor_factory=_codex_executor, legacy_executor=True),

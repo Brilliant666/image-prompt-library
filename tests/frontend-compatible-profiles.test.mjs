@@ -573,7 +573,9 @@ test('editing a named profile preserves the existing key and does not issue mode
   assert.equal(h.find('input', props => props.type === 'password').value, '');
   assert.ok(h.find('div', props => props.className === 'compatible-current-profile'));
   assert.equal(h.find('div', props => props.id === 'compatible-registered-profiles').hidden, undefined);
-  assert.equal(h.find('details'), undefined, 'selected profile sections are fully expanded');
+  assert.ok(h.find('details'), 'advanced connection options are available on demand');
+  assert.ok(h.find('input', props => props.type === 'url'), 'base URL remains editable without a model request');
+  assert.ok(h.find('select', props => props['aria-label'] === '接口协议'), 'protocol is an explicit connection setting');
   h.find('input', props => props.type === 'url').onChange({ target: { value: 'https://changed.example.test/v1' } }); await h.flush();
   h.find('form').onSubmit({ preventDefault() {} }); await h.flush();
   assert.equal(h.calls.length, 1); assert.equal(h.calls[0].id, 'a');

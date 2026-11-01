@@ -1,3 +1,5 @@
+export type ApiProtocol = 'openai_compatible' | 'gemini_native' | 'seedream_native';
+export interface ImageProtocolCapabilities { source: string; param_keys: string[]; max_input_images: number; stream: boolean; known_models?: string[]; output_formats?: string[]; aspect_ratios?: string[]; resolutions?: string[]; sizes?: string[] }
 export type ViewMode = 'explore' | 'cards' | 'gallery' | 'agent';
 export type AppearancePreset = 'pure_white' | 'gallery_vermilion' | 'pine_archive' | 'aubergine_ink';
 export type UploadImageRole = 'result_image' | 'reference_image';
@@ -6,7 +8,7 @@ export type AiProvider = TitleSuggestionProvider | 'openai_compatible';
 export type ApiNetworkMode = 'direct' | 'environment' | 'proxy';
 export interface ApiNetworkConfig { network_mode?: ApiNetworkMode; proxy_url_present?: boolean; proxy_endpoint?: string }
 export interface ApiNetworkUpdate { network_mode: ApiNetworkMode; proxy_url?: string; remove_proxy_url?: boolean }
-export interface OpenAICompatibleConfig extends ApiNetworkConfig { display_name: string; base_url: string; model: string; timeout: number; api_key_present: boolean; models?: string[]; base_url_mode?: 'versioned' | 'custom'; stream?: boolean; partial_images?: number; response_format?: 'auto' | 'b64_json' }
+export interface OpenAICompatibleConfig extends ApiNetworkConfig { protocol?: ApiProtocol; image_capabilities?: ImageProtocolCapabilities; display_name: string; base_url: string; model: string; timeout: number; api_key_present: boolean; models?: string[]; base_url_mode?: 'versioned' | 'custom'; stream?: boolean; partial_images?: number; response_format?: 'auto' | 'b64_json' | 'url' }
 export type OpenAICompatibleProfileSave = Omit<OpenAICompatibleConfig, 'api_key_present' | 'proxy_url_present' | 'proxy_endpoint'> & Partial<ApiNetworkUpdate> & { api_key?: string; make_default?: boolean };
 export interface CatalogModel { id: string; image_generation: boolean | null }
 export interface ModelCatalog { models: CatalogModel[]; fetched_at: string | null; checked_at: string | null; error: string | null }

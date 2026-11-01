@@ -41,6 +41,8 @@ def empty_catalog():
 def connection_fingerprint(settings, normalized_root):
     # The digest is private cache metadata, never a credential or a public field.
     value = [normalized_root, settings.get("base_url_mode", "versioned"), settings.get("api_key", "")]
+    if settings.get('protocol', 'openai_compatible') != 'openai_compatible':
+        value.append({'protocol': settings['protocol']})
     network = network_identity(settings)
     if network:
         value.append(network)

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Plus, Trash2, Server, Copy, GripVertical, ArrowUp, ArrowDown, RefreshCw, KeyRound } from 'lucide-react';
 import { api } from '../api/client';
 import { copyApiProfile, reorderApiProfiles } from '../api/profileActions';
-import type { ModelCatalog, OpenAICompatibleProfile, OpenAICompatibleProfiles, UiLanguage } from '../types';
+import type { ApiProtocol, ModelCatalog, OpenAICompatibleProfile, OpenAICompatibleProfiles, UiLanguage } from '../types';
 import { compatibleEndpointPreview, parseProfileModels, profileValidation } from '../utils/profileSettings';
 import { readGenerationPreference, resetGenerationPreference, updateRememberedModel } from '../utils/generationPreferences';
 import type { CompatibleRecipe } from '../utils/compatibleRecipe';
@@ -10,7 +10,14 @@ import { apiNetworkErrorMessage, apiNetworkIssue, apiNetworkMode, apiNetworkPayl
 import ApiNetworkSettings from './ApiNetworkSettings';
 import './OpenAICompatibleSettings.css';
 
-const newProfile = (): OpenAICompatibleProfile => ({ id: crypto.randomUUID(), display_name: '', base_url: '', model: '', models: [], base_url_mode: 'versioned', stream: false, partial_images: 0, response_format: 'auto', timeout: 300, api_key_present: false, configured: false, network_mode: 'direct' });
+const newProfile = (): OpenAICompatibleProfile => ({ id: crypto.randomUUID(), display_name: '', base_url: '', model: '', models: [], base_url_mode: 'versioned', stream: false, partial_images: 0, response_format: 'auto', timeout: 300, api_key_present: false, configured: false, network_mode: 'direct', protocol: 'openai_compatible' });
+const protocolLabels:Record<ApiProtocol,string>={openai_compatible:'OpenAI 兼容',gemini_native:'Gemini GenerateContent',seedream_native:'Seedream 图片 API'};
+const presets:Array<{id:string;name:string;mark:string;subtitle:string;protocol:ApiProtocol;url:string;model:string}>=[
+  {id:'openai',name:'OpenAI',mark:'O',subtitle:'Images · Responses',protocol:'openai_compatible',url:'https://api.openai.com/v1',model:''},
+  {id:'gemini',name:'Google Gemini',mark:'G',subtitle:'GenerateContent · API Key',protocol:'gemini_native',url:'https://generativelanguage.googleapis.com/v1beta',model:''},
+  {id:'seedream',name:'火山方舟 Seedream',mark:'S',subtitle:'图片生成 · API Key',protocol:'seedream_native',url:'https://ark.cn-beijing.volces.com/api/v3',model:''},
+  {id:'custom',name:'自定义中转',mark:'+',subtitle:'按服务文档选择协议',protocol:'openai_compatible',url:'',model:''},
+];
 const emptyCatalog = (): ModelCatalog => ({ models: [], fetched_at: null, checked_at: null, error: null });
 const catalogErrorReasons: Record<string, string> = {
   'Save an API URL and API key before refreshing models.': '请先保存接口地址和密钥。',
@@ -39,6 +46,7 @@ export default function OpenAICompatibleSettings({ onSaved, uiLanguage, isDefaul
   const [modelsText, setModelsText] = useState('');
   const [remembered, setRemembered] = useState<CompatibleRecipe>();
   const [resetPending, setResetPending] = useState(false);
+  const [presetId,setPresetId]=useState('custom');
   const [catalog, setCatalog] = useState<ModelCatalog>(emptyCatalog());
   const [catalogBusy, setCatalogBusy] = useState(false);
   const [showAllModels, setShowAllModels] = useState(false);
@@ -78,7 +86,7 @@ export default function OpenAICompatibleSettings({ onSaved, uiLanguage, isDefaul
     setDeletePending(false);
     setResetPending(false);
     setModelsText((profile.models || []).join('\n'));
-    try { setRemembered(readGenerationPreference(localStorage, profile.id, profile.model)); } catch { setRemembered(undefined); }
+    try { setRemembered(readGenerationPreference(localStorage, profile.id, profile.model,profile.protocol)); } catch { setRemembered(undefined); }
     if (profile.configured) void readCatalog(profile.id);
   };
   const load = () => {
@@ -165,7 +173,7 @@ export default function OpenAICompatibleSettings({ onSaved, uiLanguage, isDefaul
       // Only this fixed local validation message is recognized and translated.
       const keyRequired = error instanceof Error && error.message.startsWith('Enter the API key again when changing the Base URL');
       if (request === epoch.current) setMessage(keyRequired
-        ? (chinese ? '更换 Base URL 时请重新输入 API Key。已保存的密钥不会发送到新地址。' : 'Enter the API key again when changing the Base URL. The saved key is not sent to a new address.')
+        ? (chinese ? '更换 Base URL 或协议时请重新输入 API Key。已保存的密钥不会发送到新地址。' : 'Enter the API key again when changing the Base URL. The saved key is not sent to a new address.')
         : (chinese ? '暂时无法确认操作结果。请重新读取列表核对后再操作。' : 'Could not confirm the result. Reload the profile list before trying again.'));
     } finally {
       if (request === epoch.current) { setApiKey(''); setProxyUrl(''); inFlight.current = false; setBusy(false); }
@@ -184,13 +192,13 @@ export default function OpenAICompatibleSettings({ onSaved, uiLanguage, isDefaul
     const networkDraft = { proxyUrl, removeProxy };
     const networkIssue = apiNetworkIssue(networkMode, networkDraft, config.proxy_url_present === true);
     if (networkIssue) { setMessage(apiNetworkErrorMessage(networkIssue, uiLanguage)); return; }
-    const { id, api_key_present: _present, configured: _configured, model_catalog: _catalog, proxy_url_present: _proxyPresent, proxy_endpoint: _proxyEndpoint, ...fields } = config;
+    const { id, api_key_present: _present, configured: _configured, model_catalog: _catalog, proxy_url_present: _proxyPresent, proxy_endpoint: _proxyEndpoint, image_capabilities: _capabilities, ...fields } = config;
     catalogEpoch.current += 1;
     const previousModel = collection?.profiles.find(profile => profile.id === id)?.model || '';
     void mutate(() => api.saveOpenAICompatibleProfile(id, { ...fields, models, ...apiNetworkPayload(networkMode, networkDraft), ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}) }), id, value => {
       const saved = value.profiles.find(profile => profile.id === id);
       if (!saved || saved.model === previousModel) return;
-      try { updateRememberedModel(localStorage, id, saved.model); } catch { /* A saved profile still applies to the open composer if browser storage is unavailable. */ }
+      try { updateRememberedModel(localStorage, id, saved.model,saved.protocol); } catch { /* A saved profile still applies to the open composer if browser storage is unavailable. */ }
       window.dispatchEvent(new CustomEvent('ipl:profile-model-saved', { detail: { profileId: id, model: saved.model } }));
     }).then(saved => { if (saved && selectedProfile.current === id) void refreshCatalog(id, true); });
   };
@@ -219,14 +227,14 @@ export default function OpenAICompatibleSettings({ onSaved, uiLanguage, isDefaul
   const resetRecipe = () => {
     if (!config || dirty || busy) return;
     let reset = false;
-    try { reset = resetGenerationPreference(localStorage, config.id); } catch { /* Browser storage can be disabled. */ }
+    try { reset = resetGenerationPreference(localStorage, config.id,config.protocol); } catch { /* Browser storage can be disabled. */ }
     if (!reset) { setMessage(chinese ? '无法重置浏览器参数，请检查浏览器存储权限。' : 'Could not reset parameters. Check browser storage access.'); return; }
-    setRemembered(readGenerationPreference(localStorage, config.id, config.model));
+    setRemembered(readGenerationPreference(localStorage, config.id, config.model,config.protocol));
     setResetPending(false);
     window.dispatchEvent(new CustomEvent('ipl:generation-preference-reset', { detail: { profileId: config.id } }));
     setMessage(chinese ? '已重置此配置的本浏览器参数；提示词、参考图和已保存任务均保留。' : 'This profile’s browser parameters were reset. Prompts, references and saved tasks are unchanged.');
   };
-  const endpoints = config ? compatibleEndpointPreview(config.base_url, config.base_url_mode) : undefined;
+  const endpoints = config ? compatibleEndpointPreview(config.base_url, config.base_url_mode,config.protocol,config.model||'MODEL_ID') : undefined;
   const setDefault = async () => {
     if (!config || !stored || dirty || busy || !config.configured) return;
     if (config.id !== collection?.default_profile_id && !await mutate(() => api.defaultOpenAICompatibleProfile(config.id), config.id)) return;
@@ -235,12 +243,12 @@ export default function OpenAICompatibleSettings({ onSaved, uiLanguage, isDefaul
   };
 
   return <section className="provider-card compatible-provider-settings compatible-profiles">
-    <header><h4>{chinese ? 'OpenAI 兼容 API' : 'OpenAI-compatible API'}</h4>
-      <p className="muted">{chinese ? '「OpenAI 兼容」是接口类型；配置名称可按服务商或用途命名。每个配置独立保存地址、密钥、模型与超时。' : 'OpenAI-compatible is the API format. Name each connection by service or purpose; each profile keeps its own URL, key, model and timeout.'}</p></header>
+    <header><h4>{chinese ? 'API 连接' : 'API connections'}</h4>
+      <p className="muted">{chinese ? '按服务商或用途管理连接。每份配置独立保存协议、地址、密钥、模型与网络设置。' : 'Name connections by service or purpose. Each profile keeps its own protocol, URL, key, model and network settings.'}</p></header>
     {collection && <>
       <span className="compatible-current-label">{chinese ? '当前编辑配置' : 'Profile to edit'}</span>
       <div className="compatible-current-profile">
-        <Server size={18} aria-hidden="true" /><span><strong>{config?.display_name || (chinese ? '新配置' : 'New profile')}</strong><small>{config?.id === collection.default_profile_id ? (chinese ? '默认 API 配置' : 'Default API profile') : (chinese ? '独立连接配置' : 'Independent connection')}</small></span><b className="compatible-protocol-badge">OpenAI</b>
+        <Server size={18} aria-hidden="true" /><span><strong>{config?.display_name || (chinese ? '新配置' : 'New profile')}</strong><small>{config?.id === collection.default_profile_id ? (chinese ? '默认 API 配置' : 'Default API profile') : (chinese ? '独立连接配置' : 'Independent connection')}</small></span><b className="compatible-protocol-badge">{protocolLabels[config?.protocol || 'openai_compatible']}</b>
       </div>
       <div id="compatible-registered-profiles" className="compatible-profile-list" aria-label={chinese ? '已登记接口' : 'Registered APIs'}>
         {collection.profiles.map((profile, index) => <div key={profile.id} className={`compatible-profile-row${draggedId === profile.id ? ' dragging' : ''}`}
@@ -249,7 +257,7 @@ export default function OpenAICompatibleSettings({ onSaved, uiLanguage, isDefaul
           onDrop={event => { event.preventDefault(); if (draggedId) move(draggedId, profile.id); setDraggedId(undefined); }} onDragEnd={() => setDraggedId(undefined)}>
           <GripVertical className="compatible-profile-grip" size={16} aria-hidden="true" />
           <button type="button" className={config?.id === profile.id ? 'compatible-profile-option active' : 'compatible-profile-option'} aria-pressed={config?.id === profile.id} disabled={busy || dirty && config?.id !== profile.id} onClick={() => { if (!dirty) choose(profile); }}>
-            <Server size={16} aria-hidden="true" /><span><strong>{profile.display_name}<b className="compatible-protocol-badge">OpenAI</b></strong><small>{profile.id === collection.default_profile_id ? (chinese ? '默认 · ' : 'Default · ') : ''}{profile.configured ? (chinese ? '配置完整' : 'Configured') : (chinese ? '待完善' : 'Incomplete')}</small></span>
+            <Server size={16} aria-hidden="true" /><span><strong>{profile.display_name}<b className="compatible-protocol-badge">{protocolLabels[profile.protocol || 'openai_compatible']}</b></strong><small>{profile.id === collection.default_profile_id ? (chinese ? '默认 · ' : 'Default · ') : ''}{profile.configured ? (chinese ? '配置完整' : 'Configured') : (chinese ? '待完善' : 'Incomplete')}</small></span>
           </button>
           <div className="compatible-profile-order"><button type="button" aria-label={`${chinese ? '上移' : 'Move up'} ${profile.display_name}`} disabled={busy || dirty || index === 0} onClick={() => move(profile.id, collection.profiles[index - 1].id)}><ArrowUp size={14} /></button>
             <button type="button" aria-label={`${chinese ? '下移' : 'Move down'} ${profile.display_name}`} disabled={busy || dirty || index === collection.profiles.length - 1} onClick={() => move(profile.id, collection.profiles[index + 1].id)}><ArrowDown size={14} /></button></div>
@@ -261,44 +269,65 @@ export default function OpenAICompatibleSettings({ onSaved, uiLanguage, isDefaul
       </div>
       {dirty && <p className="settings-help">{chinese ? '当前有未保存更改；保存或放弃后可切换、复制及排序。' : 'Save or discard your changes before switching, duplicating or reordering.'}</p>}
     </>}
+    {config&&!stored&&<section className="provider-preset-picker" aria-label={chinese?'选择服务商预设':'Connection presets'}><header><h5>{chinese?'从一个连接开始':'Start with a connection'}</h5><p>{chinese?'预设只填写连接草稿；中转也可以使用原生协议。':'Presets only fill this draft. Relays may use native protocols too.'}</p></header><div className="provider-preset-grid">{presets.map(preset=><button type="button" key={preset.id} data-preset={preset.id} className={`provider-preset provider-preset-${preset.id}`} aria-pressed={presetId===preset.id} disabled={busy} onClick={()=>{setPresetId(preset.id);setApiKey('');setConfig(current=>current?{...current,display_name:current.display_name||preset.name,base_url:preset.url,model:preset.model,protocol:preset.protocol,base_url_mode:'versioned',stream:false,partial_images:0,response_format:'auto'}:current);}}><span className="provider-preset-mark" aria-hidden="true">{preset.mark}</span><strong>{preset.name}</strong><small>{preset.subtitle}</small></button>)}</div></section>}
     {config && <form className="compatible-profile-form" onSubmit={save} autoComplete="off">
       <fieldset disabled={busy}>
         <legend>{stored ? (chinese ? '连接信息' : 'Connection') : (chinese ? '新配置的连接信息' : 'New connection')}</legend>
+        <div className="provider-connection-grid">
         <label>{chinese ? '配置名称' : 'Profile name'}<input required maxLength={100} value={config.display_name} onChange={e => setConfig({ ...config, display_name: e.target.value })} placeholder={chinese ? '例如：我的图片服务' : 'For example: My image service'} /><small>{chinese ? '画廊、Agent 和历史记录通过此名称区分接口。' : 'Identifies this connection in Gallery, Agent and history.'}</small></label>
         <label>Base URL<input required type="url" spellCheck={false} value={config.base_url} onChange={e => setConfig({ ...config, base_url: e.target.value })} placeholder="https://api.example.com/v1" /><small>{chinese ? '填写接口根地址，不包含密钥或完整生图路径。下方显示实际请求地址。' : 'Enter the API root without credentials or a complete image endpoint. Actual request addresses are shown below.'}</small></label>
-        <label>{chinese ? '地址拼接方式' : 'Base URL mode'}<select aria-label={chinese ? '地址拼接方式' : 'Base URL mode'} value={config.base_url_mode || 'versioned'} onChange={e => setConfig({ ...config, base_url_mode: e.target.value as 'versioned' | 'custom' })}><option value="versioned">{chinese ? '标准 /v1（兼容已有配置）' : 'Standard /v1 (existing behavior)'}</option><option value="custom">{chinese ? '使用填写的根路径' : 'Use the exact base path'}</option></select><small>{chinese ? '标准方式统一补为一个 /v1；自定义方式不补 /v1。末尾斜杠不改变所选规则。' : 'Standard mode applies one /v1 suffix. Custom mode adds no /v1. A trailing slash does not change the selected rule.'}</small></label>
+
         <label>API Key<input type="password" autoComplete="new-password" spellCheck={false} value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder={config.api_key_present ? (chinese ? '已保存；留空保留此接口的密钥' : 'Saved; leave blank to keep this API key') : (chinese ? '输入此接口的 API Key' : 'Enter this API key')} /><small className="compatible-key-status"><KeyRound size={12} aria-hidden="true" />{config.api_key_present ? (chinese ? '密钥已保存在服务端，页面不会读取原值' : 'Key saved on the server; its value is never read by this page') : (chinese ? '尚未保存密钥' : 'No saved key')}</small></label>
-        <ApiNetworkSettings key={config.id} uiLanguage={uiLanguage} mode={apiNetworkMode(config.network_mode)}
-          proxyUrl={proxyUrl} proxyUrlPresent={config.proxy_url_present === true} proxyEndpoint={config.proxy_endpoint}
-          removeProxy={removeProxy} disabled={busy} onModeChange={mode => setConfig(current => current ? { ...current, network_mode: mode } : current)}
-          onProxyUrlChange={setProxyUrl} onRemoveProxyChange={setRemoveProxy} />
+        <label>{chinese?'接口协议':'API protocol'}<select aria-label={chinese?'接口协议':'API protocol'} value={config.protocol||'openai_compatible'} onChange={event=>setConfig({...config,protocol:event.target.value as ApiProtocol})}>{Object.entries(protocolLabels).map(([value,label])=><option key={value} value={value}>{label}</option>)}</select><small>{chinese?'由连接文档决定，不根据模型名猜测；修改协议需重新输入 Key。':'Selected from the connection documentation, never inferred from a model name. Changing protocol requires key re-entry.'}</small></label>
+        </div>
+
+        {config.protocol && config.protocol !== 'openai_compatible' && (config.stream || config.partial_images || config.protocol === 'gemini_native' && config.response_format !== 'auto') && <div role="alert" className="compatible-profile-confirm"><p>{chinese?'已有流式或结果返回设置不适用于所选原生协议。保存前请明确调整，尚未发送请求。':'Existing streaming/delivery options are not supported by this native adapter. Adjust them before saving; no request was sent.'}</p><button type="button" className="secondary" onClick={()=>setConfig({...config,stream:false,partial_images:0,response_format:'auto'})}>{chinese?'使用此协议的默认传输设置':'Use this protocol’s transport defaults'}</button></div>}
         <div className="compatible-request-settings">
-          <h5>{chinese ? '模型与请求' : 'Model and request'}</h5>
+          <h5>{chinese ? '默认模型' : 'Default model'}</h5>
+          <label>{chinese ? '默认图片模型（可选）' : 'Default image model (optional)'}<input list="compatible-known-models" value={config.model} spellCheck={false} onChange={e => setConfig({ ...config, model: e.target.value })} placeholder={chinese ? '填写此接口的默认模型 ID' : 'Default model ID for this API'} /><datalist id="compatible-known-models">{modelSuggestions.map(model => <option key={model} value={model} />)}</datalist><small>{chinese ? '填写接口支持的完整模型 ID，也可输入自定义名称。保存新的默认模型会同步本浏览器记忆；画廊仍可单独选择本次模型。Agent 模型在 Agent 配置中分别设置。' : 'Use an exact model ID supported by your service, including custom aliases. Saving a new default also updates this browser’s remembered model; Gallery can still choose a different model for a request. Agent models are configured separately.'}</small></label>
+          <details className="provider-advanced"><summary>{chinese?'模型清单与手动补充':'Catalog and manual models'}</summary>
           <section className="compatible-model-catalog" aria-label={chinese ? '接口模型清单' : 'API model catalog'}>
             <header><h5>{chinese ? '接口模型清单' : 'API model catalog'}</h5><button type="button" className="secondary" aria-label={chinese ? '刷新接口模型' : 'Refresh API models'} disabled={busy || dirty || !stored || !config.configured || catalogBusy} onClick={() => { if (!busy && !dirty && stored && config.configured && !catalogBusy) void refreshCatalog(config.id); }}><RefreshCw size={14} aria-hidden="true" />{catalogBusy ? (chinese ? '读取中…' : 'Loading…') : (chinese ? '刷新模型' : 'Refresh models')}</button></header>
-            <p>{chinese ? '保存配置后自动读取一次。清单使用服务端已保存的连接；能力标签来自接口声明，不代表已完成生图验证。' : 'Fetched once after saving. Uses the saved server connection. Capability labels come from the service and do not verify image generation.'}</p>
+            <p>{chinese ? (config.protocol==='seedream_native'?'这里是内置的官方文档参考清单，不是账号权限或连接测试。仍可手填模型或 Endpoint ID。':'保存配置后自动读取一次。清单使用服务端已保存的连接；能力标签来自接口声明或固定文档，不代表已完成生图验证。') : 'Fetched once after saving. Uses the saved server connection. Capability labels come from the service and do not verify image generation.'}</p>
             <div className="compatible-catalog-times">{catalog.fetched_at && <span>{chinese ? '上次成功：' : 'Last success: '}<time dateTime={catalog.fetched_at}>{timeLabel(catalog.fetched_at)}</time></span>}{catalog.checked_at && <span>{chinese ? '本次尝试：' : 'Last attempt: '}<time dateTime={catalog.checked_at}>{timeLabel(catalog.checked_at)}</time></span>}</div>
             {catalog.error && <div role="status" className="compatible-catalog-error">{catalog.models.length ? (chinese ? '模型清单刷新失败，保留上次成功清单。仍可手动填写模型。' : 'Refresh failed; the last successful catalog is retained. You can still enter a model manually.') : (chinese ? '暂未获取模型清单，仍可手动填写模型。' : 'No model catalog is available. You can still enter a model manually.')}{catalogErrorReason && <span>{catalogErrorReason}</span>}</div>}
             {catalog.models.length > 0 ? <><div className="compatible-catalog-filters"><button type="button" aria-pressed={!showAllModels} onClick={() => setShowAllModels(false)}>{chinese ? '图片 / 未知' : 'Image / unknown'}</button><button type="button" aria-label={chinese ? '显示全部接口模型' : 'Show all API models'} aria-pressed={showAllModels} onClick={() => setShowAllModels(true)}>{chinese ? `全部 (${catalog.models.length})` : `All (${catalog.models.length})`}</button></div><div className="compatible-catalog-list">{discoveredModels.map(model => <button type="button" key={model.id} data-catalog-model={model.id} aria-pressed={config.model === model.id} onClick={() => setConfig(current => current ? { ...current, model: model.id } : current)}><span>{model.id}</span><small className={model.image_generation === true ? 'is-image' : ''}>{model.image_generation === true ? (chinese ? '声明支持生图' : 'Image output declared') : model.image_generation === false ? (chinese ? '声明不支持生图' : 'No image output declared') : (chinese ? '能力未知' : 'Capability unknown')}</small></button>)}</div>{!discoveredModels.length && <p>{chinese ? '接口未声明图片模型，可查看全部模型或手动填写。' : 'No image-capable or unknown models were listed. View all models or enter one manually.'}</p>}</> : !catalogBusy && !catalog.error && <p>{stored ? (chinese ? '尚未读取模型清单，可刷新或手动填写。' : 'No catalog has been fetched. Refresh it or enter a model manually.') : (chinese ? '先保存连接后读取模型清单。' : 'Save this connection before fetching its models.')}</p>}
           </section>
           <label>{chinese ? '可用图片模型' : 'Available image models'}<textarea aria-label={chinese ? '可用图片模型' : 'Available image models'} rows={3} spellCheck={false} value={modelsText} onChange={e => setModelsText(e.target.value)} placeholder={chinese ? '手动补充模型 ID，每行一个' : 'Additional model IDs, one per line'} /><small>{chinese ? '手动补充清单，每行一个完整模型 ID，也可用逗号分隔。接口发现不会覆盖此列表或默认模型；画廊会合并显示。' : 'Add model IDs manually, one per line or separated by commas. Discovery never overwrites this list or the default model; Gallery combines the choices.'}</small></label>
-          <label>{chinese ? '默认图片模型（可选）' : 'Default image model (optional)'}<input list="compatible-known-models" value={config.model} spellCheck={false} onChange={e => setConfig({ ...config, model: e.target.value })} placeholder={chinese ? '填写此接口的默认模型 ID' : 'Default model ID for this API'} /><datalist id="compatible-known-models">{modelSuggestions.map(model => <option key={model} value={model} />)}</datalist><small>{chinese ? '填写接口支持的完整模型 ID，也可输入自定义名称。保存新的默认模型会同步本浏览器记忆；画廊仍可单独选择本次模型。Agent 模型在 Agent 配置中分别设置。' : 'Use an exact model ID supported by your service, including custom aliases. Saving a new default also updates this browser’s remembered model; Gallery can still choose a different model for a request. Agent models are configured separately.'}</small></label>
-          <label>{chinese ? '请求超时（秒）' : 'Request timeout (seconds)'}<input required type="number" min="1" max="1800" step="1" value={config.timeout} onChange={e => setConfig({ ...config, timeout: Number(e.target.value) })} /><small>{chinese ? '1–1800 秒。超时不会自动重新发送付费请求，也不代表上游已取消任务。' : '1–1800 seconds. A timeout does not automatically resubmit a paid request or confirm upstream cancellation.'}</small></label>
+          </details>
+
+
         </div>
+        <details className="provider-advanced provider-network"><summary>{chinese?'网络与连接':'Network and connection'}</summary>
+        <ApiNetworkSettings key={config.id} uiLanguage={uiLanguage} mode={apiNetworkMode(config.network_mode)}
+          proxyUrl={proxyUrl} proxyUrlPresent={config.proxy_url_present === true} proxyEndpoint={config.proxy_endpoint}
+          removeProxy={removeProxy} disabled={busy} onModeChange={mode => setConfig(current => current ? { ...current, network_mode: mode } : current)}
+          onProxyUrlChange={setProxyUrl} onRemoveProxyChange={setRemoveProxy} />
+          <label>{chinese ? '请求超时（秒）' : 'Request timeout (seconds)'}<input required type="number" min="1" max="1800" step="1" value={config.timeout} onChange={e => setConfig({ ...config, timeout: Number(e.target.value) })} /><small>{chinese ? '1–1800 秒。超时不会自动重新发送付费请求，也不代表上游已取消任务。' : '1–1800 seconds. A timeout does not automatically resubmit a paid request or confirm upstream cancellation.'}</small></label>
+        <label>{chinese ? '地址拼接方式' : 'Base URL mode'}<select aria-label={chinese ? '地址拼接方式' : 'Base URL mode'} value={config.base_url_mode || 'versioned'} onChange={e => setConfig({ ...config, base_url_mode: e.target.value as 'versioned' | 'custom' })}><option value="versioned">{chinese ? (config.protocol==='gemini_native'?'标准 Gemini 版本路径':config.protocol==='seedream_native'?'标准 /api/v3':'标准 /v1（兼容已有配置）') : 'Standard /v1 (existing behavior)'}</option><option value="custom">{chinese ? '使用填写的根路径' : 'Use the exact base path'}</option></select><small>{chinese ? '标准方式补齐当前协议的版本路径；自定义方式使用完整根路径。不会自动改用其他协议。' : 'Standard mode applies one /v1 suffix. Custom mode adds no /v1. A trailing slash does not change the selected rule.'}</small></label>
+        </details>
+        <details className="provider-advanced"><summary>{chinese?'高级传输选项':'Advanced transport'}</summary>
         <div className="compatible-request-settings compatible-transport-settings">
           <h5>{chinese ? '传输选项' : 'Transport options'}</h5>
+          {(config.protocol||'openai_compatible')==='openai_compatible'&&<>
           <label className="compatible-toggle"><span>{chinese ? '流式传输' : 'Streaming'}</span><input aria-label={chinese ? '流式传输' : 'Streaming'} type="checkbox" role="switch" checked={config.stream || false} onChange={e => setConfig({ ...config, stream: e.target.checked })} /><small>{chinese ? '需当前接口与模型支持。开启后按单图任务接收事件；中间预览只用于查看，最终文件以完成事件为准。' : 'Requires support from this service and model. Each image receives its own event stream. Partial previews are temporary; only completion produces the final file.'}</small></label>
           <label>{chinese ? '中间预览图数量' : 'Partial image count'}<select aria-label={chinese ? '中间预览图数量' : 'Partial image count'} disabled={!config.stream} value={config.partial_images || 0} onChange={e => setConfig({ ...config, partial_images: Number(e.target.value) })}>{[0, 1, 2, 3].map(count => <option key={count} value={count}>{count === 0 ? (chinese ? '0 · 不请求' : '0 · None') : count}</option>)}</select><small>{chinese ? '仅流式模式发送 partial_images（0–3）。服务可能返回更少预览；预览可能额外计费，不保证避免超时。' : 'Sends partial_images (0–3) only when streaming. Services may return fewer previews and charge for them; this does not guarantee avoiding timeouts.'}</small></label>
           <label className="compatible-toggle"><span>{chinese ? '返回 Base64 图片数据' : 'Request Base64 image data'}</span><input aria-label={chinese ? '返回 Base64 图片数据' : 'Request Base64 image data'} type="checkbox" role="switch" checked={config.response_format === 'b64_json'} onChange={e => setConfig({ ...config, response_format: e.target.checked ? 'b64_json' : 'auto' })} /><small>{chinese ? '开启后显式发送 response_format: b64_json；关闭时不发送。GPT Image 本身返回 Base64，此项用于需要显式指定的兼容网关，并非所有接口都接受。' : 'Explicitly sends response_format: b64_json when enabled; otherwise omitted. GPT Image already returns Base64. This is for gateways requiring the explicit field; not all endpoints accept it.'}</small></label>
+          </>}
+          {config.protocol==='gemini_native'&&<p className="settings-help">{chinese?'原生适配器使用非流式 GenerateContent，图片由 inlineData 返回；此处不提供不受支持的流式或 response_format。':'The native adapter uses non-streaming GenerateContent and inlineData results.'}</p>}
+          {config.protocol==='seedream_native'&&<label>{chinese?'生成结果返回方式':'Result delivery'}<select aria-label={chinese?'生成结果返回方式':'Result delivery'} value={config.response_format||'auto'} onChange={event=>setConfig({...config,response_format:event.target.value as 'auto'|'url'|'b64_json'})}><option value="auto">{chinese?'服务默认':'Service default'}</option><option value="b64_json">Base64</option><option value="url">URL</option></select><small>{chinese?'这是结果返回方式，不是输入图片上传方式。原生流式尚未启用。':'This controls returned results, not reference uploads. Native streaming is not enabled.'}</small></label>}
           <p className="muted">{chinese ? '透明背景使用 API 原生参数，在画廊「更多」中设置；这里不做本地去背景。Agent 文本及工具设置独立管理。' : 'Native API transparency is set under Gallery → More. No local background removal is applied here. Agent text and tools remain separately configured.'}</p>
         </div>
+        </details>
+        <details className="provider-advanced"><summary>{chinese?'接口路径与诊断':'Endpoints and diagnostics'}</summary>
         <section className="compatible-endpoints"><h5>{chinese ? 'API 路径与调用方式' : 'API paths and request modes'}</h5>
-          <p>{chinese ? '画廊使用 Images API；Agent 使用 Responses API。是否可用取决于当前接口与模型。' : 'Gallery uses the Images API; Agent uses the Responses API. Availability depends on this service and model.'}</p>
-          {endpoints ? <dl>{[[chinese ? '文生图' : 'Generate', endpoints.generate], [chinese ? '参考图 / 编辑' : 'Reference / edit', endpoints.edit], ['Agent', endpoints.responses]].map(([label, url]) => <div key={label}><dt>{label}</dt><dd><code>POST {url}</code></dd></div>)}</dl> : <p>{chinese ? '填写有效 Base URL 后显示实际请求路径。' : 'Enter a valid Base URL to preview request paths.'}</p>}
+          <p>{chinese ? (config.protocol&&config.protocol!=='openai_compatible'?'此连接提供原生图片能力，可用于画廊与 Agent Hybrid；文字主控仍使用独立 Responses 连接。':'画廊使用 Images API；Agent 使用 Responses API。是否可用取决于当前接口与模型。') : 'Gallery uses the Images API; Agent uses the Responses API. Availability depends on this service and model.'}</p>
+          {endpoints ? <dl>{[[chinese ? '文生图' : 'Generate', endpoints.generate], [chinese ? '参考图 / 编辑' : 'Reference / edit', endpoints.edit], ['Agent', endpoints.responses]].filter(([,url])=>url).map(([label, url]) => <div key={label}><dt>{label}</dt><dd><code>POST {url}</code></dd></div>)}</dl> : <p>{chinese ? '填写有效 Base URL 后显示实际请求路径。' : 'Enter a valid Base URL to preview request paths.'}</p>}
           <p>{chinese ? '多张生成由本地队列拆为单图任务；并发由现有队列统一管理，当前没有每配置的并发开关。' : 'Multiple images are queued as individual jobs. Concurrency is managed by the local queue; no per-profile concurrency setting is available.'}</p>
         </section>
+        </details>
         <p className="muted compatible-provider-note">{chinese ? '密钥仅存于服务端，不进入图库备份。保存后会读取模型清单，不发送生图请求；读取成功不代表已验证生图能力。' : 'Keys stay on the server, outside library backups. Saving reads the model list without generating images; a successful list request does not verify image generation.'}</p>
-        <div className="compatible-profile-actions">
+        <div className="compatible-profile-actions provider-save-bar">
           <button type="submit" className="primary">{chinese ? (busy ? '保存中…' : '保存配置') : (busy ? 'Saving…' : 'Save profile')}</button>
           {dirty && <button type="button" className="secondary" onClick={() => choose(storedProfile || newProfile())}>{chinese ? '放弃修改' : 'Discard changes'}</button>}
           {stored && (config.id !== collection?.default_profile_id || !isDefaultConnection) && <button type="button" className="secondary" disabled={dirty || !config.configured} onClick={() => void setDefault()}>{chinese ? '设为默认连接' : 'Use as default connection'}</button>}

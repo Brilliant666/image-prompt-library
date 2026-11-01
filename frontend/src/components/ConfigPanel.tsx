@@ -487,7 +487,7 @@ export default function ConfigPanel({
         <h3 id="config-providers-title">{en ? 'Connections and profiles' : '连接与配置'}</h3>
         <p className="muted">{en ? 'Choose a connection type, then manage its named profiles. API keys and account authorization are separate connection methods.' : '先区分连接方式，再管理各自的配置。API Key 接口与账号授权是不同的连接方式。'}</p>
         <div className="settings-connection-tabs" role="group" aria-label={en ? 'Connection settings' : '管理连接配置'}>
-          <button type="button" aria-pressed={connectionType === 'api'} className={connectionType === 'api' ? 'active' : ''} onClick={() => setConnectionType('api')}>{en ? 'API key profiles' : 'API Key 配置'}<small>OpenAI Compatible{defaultAiProvider === 'openai_compatible' && <b className="settings-default-badge">{en ? 'Default' : '当前默认'}</b>}</small></button>
+          <button type="button" aria-pressed={connectionType === 'api'} className={connectionType === 'api' ? 'active' : ''} onClick={() => setConnectionType('api')}>{en ? 'API key profiles' : 'API Key 配置'}<small>OpenAI / Gemini / Seedream{defaultAiProvider === 'openai_compatible' && <b className="settings-default-badge">{en ? 'Default' : '当前默认'}</b>}</small></button>
           <button type="button" aria-pressed={connectionType === 'account'} className={connectionType === 'account' ? 'active' : ''} onClick={() => setConnectionType('account')}>{en ? 'Account connections' : '账号连接'}<small>ChatGPT / Grok · OAuth{defaultAiProvider !== 'openai_compatible' && <b className="settings-default-badge">{en ? 'Default' : '当前默认'}</b>}</small></button>
         </div>
         <div hidden={connectionType !== 'api'}>
