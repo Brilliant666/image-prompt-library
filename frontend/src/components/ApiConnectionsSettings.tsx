@@ -4,7 +4,7 @@ import { apiConnections as connections } from '../api/client';
 import { copyApiProfile, reorderApiProfiles } from '../api/profileActions';
 import type { ApiConnectionProfile, ApiConnectionProfiles, ApiProtocol, CatalogModel, ConnectionModelDiscovery, ModelCatalog, UiLanguage } from '../types';
 import { connectionEndpointPreview, parseProfileModels, profileValidation } from '../utils/profileSettings';
-import { CONNECTION_TYPES, API_PROTOCOLS, applyConnectionType, connectionModels, connectionProtocolLabel, connectionTargetChanged, connectionUsage, connectionVersionLabel, discoveryMessage, modelCapabilityLabel, newConnectionProfile, type ConnectionType, type ModelFilter } from '../utils/connectionSettings';
+import { CONNECTION_TYPES, API_PROTOCOLS, applyConnectionType, connectionModels, connectionProtocolLabel, connectionTargetChanged, connectionUsage, connectionVersionLabel, discoveryMessage, canUseAsImageDefault, modelCapabilityLabel, newConnectionProfile, type ConnectionType, type ModelFilter } from '../utils/connectionSettings';
 import { readGenerationPreference, resetGenerationPreference, updateRememberedModel } from '../utils/generationPreferences';
 import type { CompatibleRecipe } from '../utils/compatibleRecipe';
 import { apiNetworkErrorMessage, apiNetworkIssue, apiNetworkMode, apiNetworkPayload } from '../utils/apiNetwork';
@@ -121,7 +121,7 @@ export default function ApiConnectionsSettings({ onSaved, uiLanguage, isDefaultC
     if(problem){setCatalogError(apiNetworkErrorMessage(problem,uiLanguage));return;}
     const controller=new AbortController();discoveryFlight.current=controller;
     const ticket=++catalogEpoch.current, id=config.id;
-    setCatalogBusy(true);setCatalogError('');setMessage('');
+    setCatalogBusy(true);setCatalogError('');setDiscovery(undefined);setMessage('');
     try{
       const value=await connections.discover({...(stored?{profile_id:id}:{}),protocol:selectedProtocol,base_url:config.base_url,
         base_url_mode:config.base_url_mode||'versioned',...(apiKey.trim()?{api_key:apiKey.trim()}:{}),
@@ -169,7 +169,7 @@ export default function ApiConnectionsSettings({ onSaved, uiLanguage, isDefaultC
       if(values.length>=100){setMessage(en?'At most 100 selected models.':'最多保存 100 个模型。');return;}
       setModelsText([...values,model.id].join('\n'));
     }
-    if(model.image_generation!==false) edit({model:model.id});
+    if(canUseAsImageDefault(model)) edit({model:model.id});
     else setMessage(en?'Added to available models. Select it in Agent text settings.':'已加入可用模型，可在 Agent 文字设置中选择。');
   };
   const move=(from:string,to:string)=>{
@@ -235,12 +235,12 @@ export default function ApiConnectionsSettings({ onSaved, uiLanguage, isDefaultC
           {targetChanged&&stored?.api_key_present&&!apiKey&&<p className="api-field-warning"><KeyRound size={13}/>{discoveryMessage('key_reentry_required',en)}</p>}
           <div className="api-discovery-action"><button type="button" className="primary" aria-label={en?'Discover models':'识别模型'} disabled={!canDiscover||catalogBusy} onClick={()=>void discover()}><RefreshCw size={15} className={catalogBusy?'spin':''}/>{catalogBusy?(en?'Reading models…':'正在读取…'):selectedProtocol==='seedream_native'?(en?'Load reference models':'查看参考模型'):(en?'Discover models':'识别模型')}</button><button type="button" className="api-link" onClick={()=>modelInput.current?.focus()}>{en?'Enter a model manually':'手动填写模型'}</button></div>
           <section className="api-models" aria-label={en?'Models':'模型清单'}>
-            <header><h5>{en?'Models':'模型'}</h5><small>{discovery?.source==='reference'||selectedProtocol==='seedream_native'&&catalog.models.length?(en?'Documentation reference · access not tested':'文档参考 · 未验证权限'):discovery?.connection_checked?(en?'Service list received · generation not tested':'已读取接口清单 · 未测试生成'):catalog.models.length?(en?'Saved catalog · not a live check':'已保存清单 · 非实时检查'):(en?'Discovery is optional':'可识别，也可手动填写')}</small></header>
+            <header><h5>{en?'Models':'模型'}</h5><small>{discovery?.source==='reference'||selectedProtocol==='seedream_native'&&catalog.models.length?(en?'Documentation reference · access not tested':'文档参考 · 未验证权限'):discovery?.connection_checked?(en?'Service list received · generation not tested':'已读取接口清单 · 未测试生成'):catalog.models.length?(en?'Retained list · not a current check':'保留清单 · 非本次验证'):(en?'Discovery is optional':'可识别，也可手动填写')}</small></header>
             {(catalogError||catalog.error)&&<p role="status" className="api-catalog-error">{catalogError||(en?'The saved catalog could not be verified. Discover again or enter a model manually.':'已保存清单暂不可核验，可重新识别或手动填写模型。')}</p>}
             {catalog.models.length>0&&<><input type="search" aria-label={en?'Search models':'搜索模型'} placeholder={en?'Search model IDs':'搜索模型 ID'} value={search} onChange={e=>setSearch(e.target.value)}/><div className="api-model-filters">{(['all','image','text','unknown'] as ModelFilter[]).map(value=><button key={value} type="button" aria-pressed={filter===value} onClick={()=>setFilter(value)}>{({all:en?'All':'全部',image:en?'Image':'图片',text:en?'Text':'文字',unknown:en?'Unknown':'待确认'})[value]}</button>)}</div>
               <div className="api-model-list">{visibleModels.map(model=><button key={model.id} type="button" data-catalog-model={model.id} aria-pressed={config.model===model.id||choices.includes(model.id)}
-                disabled={busy||model.image_generation===false&&(selectedProtocol!=='openai_compatible'||model.text_generation===false)} onClick={()=>selectModel(model)}>
-                <span><strong>{model.id}</strong><small>{modelCapabilityLabel(model,en)}{model.capability_source==='documentation'?(en?' · reference':' · 文档参考'):''}</small></span><span className="api-model-choice">{config.model===model.id?<><Check size={13}/>{en?'Image default':'图片默认'}</>:choices.includes(model.id)?<Check size={14}/>:model.image_generation===false?(en?'Add':'添加'):(en?'Use':'选择')}</span>
+                disabled={busy||!canUseAsImageDefault(model)&&(selectedProtocol!=='openai_compatible'||model.text_generation===false)} onClick={()=>selectModel(model)}>
+                <span><strong>{model.id}</strong><small>{modelCapabilityLabel(model,en)}{model.capability_source==='documentation'?(en?' · reference':' · 文档参考'):''}</small></span><span className="api-model-choice">{config.model===model.id?<><Check size={13}/>{en?'Image default':'图片默认'}</>:choices.includes(model.id)?<Check size={14}/>:!canUseAsImageDefault(model)?(en?'Add':'添加'):(en?'Use':'选择')}</span>
               </button>)}</div>{!visibleModels.length&&<p className="api-empty">{en?'No matching models.':'没有匹配的模型。'}</p>}</>}
             <label className="api-default-model">{en?'Default image model (optional)':'默认图片模型（可选）'}<input ref={modelInput} list="connection-known-models" aria-label={en?'Default image model':'默认图片模型'} value={config.model} onChange={e=>edit({model:e.target.value})} spellCheck={false} placeholder={en?'Select above or enter an exact ID':'从上方选择，或填写完整模型 ID'}/><datalist id="connection-known-models">{[...new Set([...choices,...catalog.models.map(m=>m.id)])].map(id=><option key={id} value={id}/>)}</datalist></label>
             {choices.length>0&&<div className="api-selected-models" aria-label={en?'Selected models':'已选择模型'}>{choices.map(id=><span key={id}>{id}<button type="button" aria-label={`${en?'Remove model':'移除模型'} ${id}`} onClick={()=>setModelsText(choices.filter(value=>value!==id).join('\n'))}>×</button></span>)}</div>}

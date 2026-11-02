@@ -42,6 +42,12 @@ export function connectionModels(models: CatalogModel[], search: string, filter:
     (filter==='all' || filter==='image' && model.image_generation===true || filter==='text' && model.text_generation===true ||
       filter==='unknown' && model.image_generation==null && model.text_generation==null));
 }
+/** A declared text model must not replace the image default without an image-output claim.
+ * Fully unknown/manual aliases remain selectable, not assumed to support images.
+ */
+export function canUseAsImageDefault(model: CatalogModel): boolean {
+  return model.image_generation === true || (model.image_generation == null && model.text_generation !== true);
+}
 export function modelCapabilityLabel(model: CatalogModel, en=false): string {
   if (model.image_generation===true && model.text_generation===true) return en?'Text + image output':'文字 + 图片输出';
   if (model.image_generation===true) return en?'Image output':'图片输出';

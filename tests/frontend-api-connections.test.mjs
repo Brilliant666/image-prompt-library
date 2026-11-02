@@ -207,3 +207,37 @@ test('effect cleanup and replay can reload without a stuck mutation lock or an o
  pending[0]({profiles:[{id:'old',display_name:'Old response',base_url:'https://old.invalid',timeout:300,api_key_present:false,configured:false,model:''}],default_profile_id:'old'});await h.flush();assert.equal(h.input('连接名称'),undefined);
  pending[1]({profiles:[],default_profile_id:null});await h.flush();assert.ok(h.text.includes('选择要连接的服务'));assert.ok(!h.text.includes('Old response'));assert.equal(h.button('添加连接').disabled,false);
 });
+
+
+test('a positive text claim with unknown image support never overwrites the image default',async t=>{
+ const textModel={id:'text-declared-image-unknown',text_generation:true,image_generation:null,capability_source:'api'};
+ const h=harness(t,{}, {catalog:{...catalog,models:[textModel]}});await h.flush();
+ const action=h.find('button',p=>p['data-catalog-model']===textModel.id);
+ action.onClick();await h.flush();
+ assert.equal(h.input('默认图片模型').value,'old-model');
+ assert.ok(text({props:action}).includes('添加'),'the visible action should describe adding a text model');
+ await h.submit();assert.equal(h.calls.save[0].payload.model,'old-model');
+ assert.deepEqual(h.calls.save[0].payload.models,[textModel.id]);
+ assert.equal(preferences.readGenerationPreference(h.storage,'a').model,'remembered');
+ assert.equal(h.events.filter(e=>e.type==='ipl:profile-model-saved').length,0);
+});
+
+test('explicit multimodal output and fully unknown aliases remain selectable image defaults',async t=>{
+ const both={id:'declared-both',text_generation:true,image_generation:true,capability_source:'api'};
+ const unknown={id:'manual-unknown',text_generation:null,image_generation:null,capability_source:'unknown'};
+ const h=harness(t,{}, {catalog:{...catalog,models:[both,unknown]}});await h.flush();
+ for(const entry of [both,unknown]){
+  h.find('button',p=>p['data-catalog-model']===entry.id).onClick();await h.flush();
+  assert.equal(h.input('默认图片模型').value,entry.id);
+ }
+ assert.equal(h.calls.discover.length,0);
+});
+
+test('a failed second discovery retains the list without presenting the previous success as current',async t=>{
+ let attempts=0;const h=harness(t,{discover:async()=>{attempts++;if(attempts===1)return result();throw Error('private-server-error');}});
+ await h.flush();await h.click('识别模型');assert.ok(h.text.includes('已读取接口清单'));
+ await h.click('识别模型');assert.deepEqual(ids(h),['chat','picture','mystery-image']);
+ assert.ok(!h.text.includes('已读取接口清单'),'the rejected check must invalidate its success label');
+ assert.ok(h.text.includes('无法连接'));assert.ok(!h.text.includes('private-server-error'));
+ assert.equal(h.calls.save.length,0);assert.equal(h.input('默认图片模型').value,'old-model');
+});
