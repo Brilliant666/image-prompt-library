@@ -133,7 +133,7 @@ test('profile copy and order send only identities to local routes and never retr
 
 const settingsSource = await readFile(new URL('../frontend/src/utils/profileSettings.ts', import.meta.url), 'utf8');
 const settingsJs = ts.transpileModule(settingsSource, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
-const { compatibleEndpointPreview, profileValidation, parseProfileModels, profileModelChoices } = await import(`data:text/javascript;base64,${Buffer.from(settingsJs).toString('base64')}`);
+const { compatibleEndpointPreview, profileValidation, parseProfileModels, profileModelChoices, profileModelInfo } = await import(`data:text/javascript;base64,${Buffer.from(settingsJs).toString('base64')}`);
 test('connection previews match the existing v1 contract and never expose credentials or accept image endpoints', () => {
   for (const base of ['https://api.example.test', 'https://api.example.test/', 'https://api.example.test/v1/', 'https://api.example.test/v1/v1']) {
     assert.deepEqual(compatibleEndpointPreview(base), { base: 'https://api.example.test/v1', generate: 'https://api.example.test/v1/images/generations', edit: 'https://api.example.test/v1/images/edits', responses: 'https://api.example.test/v1/responses' });
@@ -286,4 +286,24 @@ test('grouped workflow controls preserve other preferences when changing one opt
   const switches = nodes.filter(node => node.type === 'input'); assert.equal(switches.length, 3);
   switches.at(-1).props.onChange({ target: { checked: true } });
   assert.deepEqual(changes[1], { ...value, notifyOnCompletion: true });
+});
+
+test('explicit Muse roles supplement missing catalog metadata without inventing discovered models or timestamps',()=>{
+ const models=['muse-image','muse-spark','muse-video'],profile={service_preset:'muse',model:'muse-image',models,protocol:'openai_compatible'};
+ const before=structuredClone(profile);assert.deepEqual(profileModelChoices(profile,''),['muse-image']);
+ assert.deepEqual(profileModelChoices(profile,'muse-spark'),['muse-spark','muse-image']);
+ assert.equal(profileModelInfo(profile,'muse-image').image_generation,true);assert.equal(profileModelInfo(profile,'muse-spark').text_generation,true);
+ assert.equal(profileModelInfo(profile,'muse-video').image_generation,false);assert.equal(profileModelInfo(profile,'muse-video').text_generation,false);
+ assert.equal(profileModelInfo(profile,'muse-image').capability_source,'documentation');assert.deepEqual(profile,before);
+ assert.deepEqual(profileModelChoices({...profile,model:'',models:['muse-spark']},''),[],'documented roles never add an absent muse-image');
+ assert.equal(profileModelInfo({...profile,service_preset:'generic'},'muse-image'),undefined);
+ assert.deepEqual(profileModelChoices({...profile,service_preset:'generic'},''),models,'generic aliases retain unknown capabilities');
+});
+
+test('explicit catalog capabilities override Muse documentation and unknown fields can use documented roles',()=>{
+ const model={id:'muse-image',image_generation:false,text_generation:true,capability_source:'api'};
+ const profile={service_preset:'muse',model:'',models:['muse-image','muse-spark'],model_catalog:{models:[model,{id:'muse-spark',image_generation:null,text_generation:null,capability_source:'unknown'}],fetched_at:null}};
+ assert.equal(profileModelInfo(profile,'muse-image'),model);assert.deepEqual(profileModelChoices(profile,''),[]);
+ assert.deepEqual(profileModelInfo(profile,'muse-spark'),{id:'muse-spark',image_generation:false,text_generation:true,capability_source:'documentation'});
+ assert.equal(profile.model_catalog.fetched_at,null);assert.equal(profile.model_catalog.models[1].image_generation,null);
 });

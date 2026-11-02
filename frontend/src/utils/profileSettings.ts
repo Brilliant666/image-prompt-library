@@ -47,15 +47,30 @@ export function imageModelCapability(model?: Pick<CatalogModel, 'image_generatio
   return 'unknown';
 }
 
+type ModelProfile = Pick<OpenAICompatibleProfile, 'models' | 'model' | 'model_catalog' | 'protocol' | 'image_capabilities' | 'service_preset'>;
+
+/** A named preset supplies documented roles only, never a claim of discovery or access. */
+export function profileModelInfo(profile: ModelProfile | undefined, id: string): CatalogModel | undefined {
+  const listed = profile?.model_catalog?.models.find(model => model.id.trim() === id.trim());
+  if (profile?.service_preset !== 'muse') return listed;
+  const roles: Record<string, [boolean, boolean]> = {
+    'muse-image': [true, false], 'muse-spark': [false, true], 'muse-video': [false, false],
+  };
+  const role = roles[id.trim()];
+  if (!role) return listed;
+  if (listed?.image_generation != null && listed.text_generation != null) return listed;
+  return { ...listed, id, image_generation: listed?.image_generation ?? role[0],
+    text_generation: listed?.text_generation ?? role[1], capability_source: 'documentation' };
+}
+
 /** Recommend declared image outputs, retain unknown aliases and selected history. */
-export function profileModelChoices(profile: Pick<OpenAICompatibleProfile, 'models' | 'model' | 'model_catalog' | 'protocol' | 'image_capabilities'> | undefined, selected: string, fallback: string[] = []): string[] {
+export function profileModelChoices(profile: ModelProfile | undefined, selected: string, fallback: string[] = []): string[] {
   const configured = profile?.models?.length ? profile.models : fallback;
   const catalog = profile?.model_catalog?.models || [];
-  const byId = new Map(catalog.map(model => [model.id.trim(), model]));
   const nativeReferences = profile?.protocol && profile.protocol !== 'openai_compatible' ? profile.image_capabilities?.known_models || [] : [];
   const candidates = [...new Set([profile?.model || '', ...configured, ...catalog.map(model => model.id), ...nativeReferences].map(id => id.trim()).filter(Boolean))]
-    .filter(id => imageModelCapability(byId.get(id)) !== 'non-image')
-    .sort((a,b) => Number(imageModelCapability(byId.get(b)) === 'image') - Number(imageModelCapability(byId.get(a)) === 'image'));
+    .filter(id => imageModelCapability(profileModelInfo(profile,id)) !== 'non-image')
+    .sort((a,b) => Number(imageModelCapability(profileModelInfo(profile,b)) === 'image') - Number(imageModelCapability(profileModelInfo(profile,a)) === 'image'));
   // Preserve intentional/manual selections even if absent or explicitly excluded.
   // This is a UI list; it does not change the connection protocol or model value.
   return [...new Set([selected.trim(), ...candidates].filter(Boolean))];

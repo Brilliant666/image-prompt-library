@@ -10,7 +10,7 @@ export function validateGalleryDraft(value: unknown): GalleryDraft | undefined {
   const fallback=emptyGalleryDraft();
   // Historical transport overrides belong to this current card only. The normal
   // per-profile preference reader deliberately excludes them for future tasks.
-  const recipe={...readGenerationPreference({getItem:()=>JSON.stringify(draft.recipe),setItem:()=>undefined},'',draft.recipe?.model||''),...(draft.provider==='openai_compatible'?{...pickCompatibleTransportOverrides(draft.recipe),...(draft.recipe?.transportLegacyDerived===true?{transportLegacyDerived:true as const}:{})}:{})};
+  const recipe={...readGenerationPreference({getItem:()=>JSON.stringify(draft.recipe),setItem:()=>undefined},'',draft.recipe?.model||'',draft.recipe?.protocol,draft.recipe?.service_preset),...(draft.provider==='openai_compatible'?{...pickCompatibleTransportOverrides(draft.recipe),...(draft.recipe?.transportLegacyDerived===true?{transportLegacyDerived:true as const}:{})}:{})};
   const templateValues=draft.templateValues&&typeof draft.templateValues==='object'?Object.fromEntries(Object.entries(draft.templateValues).filter(([key,value])=>key.length<=200&&typeof value==='string'&&value.length<=200000)):undefined;
   const inputs:GalleryDraft['inputs']=[];
   for(const input of draft.inputs){

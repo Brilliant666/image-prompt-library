@@ -47,7 +47,8 @@ def fingerprint(value):
 
 def profile_digest(profile):
     return fingerprint({**{k: v for k, v in profile.items() if k not in NETWORK_DEFAULTS
-                            and not (k == 'protocol' and v == 'openai_compatible')},
+                            and not (k == 'protocol' and v == 'openai_compatible')
+                            and not (k == 'service_preset' and v == 'generic')},
                         **network_identity(profile)})
 
 
@@ -63,6 +64,8 @@ def public_profile_digest(profile):
     values = {k: profile.get(k) for k in ("id", "base_url", "model", "timeout")}
     if profile.get('protocol', 'openai_compatible') != 'openai_compatible':
         values['protocol'] = profile['protocol']
+    if profile.get('service_preset', 'generic') != 'generic':
+        values['service_preset'] = profile['service_preset']
     return fingerprint(values)
 
 
@@ -699,6 +702,8 @@ class AgentRepository:
             raise AgentError("configuration_incomplete", "所选文本 API 配置不存在。", 400) from None
         if text.get('protocol', 'openai_compatible') != 'openai_compatible':
             raise AgentError('capability_unsupported', 'Agent 文字主控需要 OpenAI Responses 连接；原生 Gemini/Seedream 连接仅用于 Hybrid 图片。', 400)
+        if text.get('service_preset') == 'muse':
+            raise AgentError('capability_unsupported', 'Muse Spark 的 Responses 不支持本项目所需的视觉输入和工具调用；请为 Agent 文字主控选择其他 Responses 连接，Muse 用于 Hybrid 图片。', 400)
         if not text["api_key"] or not text["base_url"]:
             raise AgentError("configuration_incomplete", "文本 API 配置不完整。", 400)
         auth = body.authorization

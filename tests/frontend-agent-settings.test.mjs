@@ -463,3 +463,24 @@ test('failed settings saves after close do not announce success or replay and re
   readReply.resolve(value); await loading.flush();
   assert.deepEqual(loading.events, []); assert.equal(loading.lateUpdates, 0);
 });
+
+test('Muse Hybrid options show only Muse controls and switching from generic resets pending image parameters explicitly',async t=>{
+ const h=imageOptions(t);await h.flush();const config=structuredClone(h.config);config.profiles.push({...profile('muse'),model:'muse-image',service_preset:'muse'});
+ h.update({config});await h.flush();h.fields().find(field=>field.label==='生图供应商').onChange('muse');await h.flush();
+ const changed=h.changes.at(-1);assert.equal(changed.imageConfig.profileId,'muse');assert.equal(changed.imageConfig.model,'muse-image');
+ assert.equal(changed.params.service_preset,'muse');assert.equal(changed.params.requested_aspect_ratio,'auto');assert.equal(changed.params.output_format,'auto');assert.equal(changed.sizeMode,undefined);
+ const control=h.find('NativeImageParameters')[0];assert.equal(control.servicePreset,'muse');
+ assert.equal(h.fields().find(field=>field.label==='图片质量'),undefined);assert.equal(h.fields().find(field=>field.label==='图片背景'),undefined);
+ control.onChange({requested_aspect_ratio:'4:3',size:'auto',quality:'auto',background:'auto',output_format:'auto'});await h.flush();
+ assert.equal(h.changes.at(-1).params.requested_aspect_ratio,'4:3');assert.equal(h.changes.at(-1).params.service_preset,'muse');assert.equal(h.sizes.length,0);
+ assert.equal(config.config.textProfileId,'a');assert.equal(config.config.textModel,'text-model');
+});
+
+test('saved Muse model IDs remain a complete text catalog but image recommendations use documented roles',async t=>{
+ const saved={...profile('muse',{models:[],fetched_at:null,checked_at:null,error:null}),service_preset:'muse',model:'muse-image',models:['muse-image','muse-spark','muse-video']};
+ const h=picker(t,{profile:saved,imageRecommendations:true,value:'muse-image'});h.cache.set('muse',{models:[],fetched_at:null,checked_at:null,error:null});await h.flush();h.open();await h.flush();
+ let options=h.find('button',p=>p.role==='option');assert.equal(options.length,1);assert.ok(text({props:options[0]}).includes('muse-image'));assert.ok(text({props:options[0]}).includes('文档参考'));
+ h.update({imageRecommendations:false});await h.flush();options=h.find('button',p=>p.role==='option');
+ assert.equal(options.length,3);assert.ok(options.some(p=>text({props:p}).includes('muse-spark')));assert.ok(options.some(p=>text({props:p}).includes('视频')));
+ assert.equal(saved.model_catalog.fetched_at,null);assert.equal(h.calls.some(([kind])=>kind==='refresh'),false);
+});

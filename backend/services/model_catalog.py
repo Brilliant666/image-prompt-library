@@ -43,6 +43,8 @@ def connection_fingerprint(settings, normalized_root):
     value = [normalized_root, settings.get("base_url_mode", "versioned"), settings.get("api_key", "")]
     if settings.get('protocol', 'openai_compatible') != 'openai_compatible':
         value.append({'protocol': settings['protocol']})
+    if settings.get('service_preset', 'generic') != 'generic':
+        value.append({'service_preset': settings['service_preset']})
     network = network_identity(settings)
     if network:
         value.append(network)

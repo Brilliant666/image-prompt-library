@@ -96,6 +96,8 @@ class AgentMask(AgentModel):
 
 
 class AgentParams(AgentModel):
+    service_preset: Literal['generic', 'muse'] | None = None
+    requested_aspect_ratio: str | None = Field(default=None, max_length=20)
     size: str = "1024x1024"
     quality: str = "auto"
     output_format: Literal["auto", "png", "jpeg", "webp"] = "png"

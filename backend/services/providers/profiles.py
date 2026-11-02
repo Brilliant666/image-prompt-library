@@ -47,10 +47,16 @@ def execution_identity(settings):
     selected = {key: settings.get(key) for key in
                 ('id', 'base_url', 'api_key', 'model', 'timeout', 'base_url_mode', 'stream', 'partial_images', 'response_format')}
     selected.update(protocol=protocol(settings), network=network_identity(settings))
+    from .muse import service_preset
+    if service_preset(settings) != 'generic':
+        selected['service_preset'] = settings['service_preset']
     return hashlib.sha256(json.dumps(selected, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
 
 
 def normalize_profile_parameters(parameters, settings, default_model=None):
+    from .muse import service_preset, normalize_parameters
+    if service_preset(settings) == 'muse':
+        return normalize_parameters(parameters, settings.get('model', '') if default_model is None else default_model)
     from .registry import get_provider
     selected = protocol(settings)
     mapper = get_provider(selected).mapper_factory

@@ -30,6 +30,7 @@ export default function ApiConnectionsSettings({ onSaved, uiLanguage, isDefaultC
   const [message,setMessage]=useState('');
   const [picker,setPicker]=useState(false);
   const [custom,setCustom]=useState(false);
+  const [pendingPreset,setPendingPreset]=useState<'generic'|'muse'>();
   const [pendingType,setPendingType]=useState<ConnectionType>();
   const [deletePending,setDeletePending]=useState(false);
   const [resetPending,setResetPending]=useState(false);
@@ -48,6 +49,7 @@ export default function ApiConnectionsSettings({ onSaved, uiLanguage, isDefaultC
   const modelInput=useRef<HTMLInputElement>(null);
   const stored=collection?.profiles.find(value=>value.id===config?.id);
   const selectedProtocol=config?.protocol || 'openai_compatible';
+  const muse=config?.service_preset==='muse';
   const targetChanged=Boolean(config&&connectionTargetChanged(config,stored));
   const dirty=Boolean(apiKey||proxyUrl||removeProxy||(config&&(stored?!sameForm(config,stored)||JSON.stringify(parseProfileModels(modelsText))!==JSON.stringify(stored.models||[]):
     JSON.stringify({...config,id:''})!==JSON.stringify({...newConnectionProfile(),id:''})||modelsText.trim())));
@@ -63,13 +65,13 @@ export default function ApiConnectionsSettings({ onSaved, uiLanguage, isDefaultC
     setConfig(value=>value?{...value,...patch}:value); setMessage('');
   };
   const choose=(profile:ApiConnectionProfile,preserved?:ModelCatalog,verified?:ConnectionModelDiscovery)=>{
-    invalidateCatalog(); selected.current=profile.id;
+    invalidateCatalog(); setPendingPreset(undefined); selected.current=profile.id;
     setConfig({...profile}); setApiKey(''); setProxyUrl(''); setRemoveProxy(false);
     setModelsText((profile.models||[]).join('\n')); setSearch(''); setFilter('all'); setMessage('');
     setDeletePending(false); setResetPending(false); setPendingType(undefined); setCustom(false);
     setPicker(!profile.configured&&!profile.base_url&&!profile.display_name);
     setCatalog(preserved||profile.model_catalog||emptyCatalog()); setDiscovery(verified);
-    try{setRemembered(readGenerationPreference(localStorage,profile.id,profile.model,profile.protocol));}catch{setRemembered(undefined);}
+    try{setRemembered(readGenerationPreference(localStorage,profile.id,profile.model,profile.protocol,profile.service_preset));}catch{setRemembered(undefined);}
     if(profile.configured&&!preserved){
       const ticket=++catalogEpoch.current;
       void connections.catalog(profile.id).then(value=>{
@@ -123,7 +125,7 @@ export default function ApiConnectionsSettings({ onSaved, uiLanguage, isDefaultC
     const ticket=++catalogEpoch.current, id=config.id;
     setCatalogBusy(true);setCatalogError('');setDiscovery(undefined);setMessage('');
     try{
-      const value=await connections.discover({...(stored?{profile_id:id}:{}),protocol:selectedProtocol,base_url:config.base_url,
+      const value=await connections.discover({...(stored?{profile_id:id}:{}),protocol:selectedProtocol,service_preset:config.service_preset||'generic',base_url:config.base_url,
         base_url_mode:config.base_url_mode||'versioned',...(apiKey.trim()?{api_key:apiKey.trim()}:{}),
         ...apiNetworkPayload(apiNetworkMode(config.network_mode),{proxyUrl,removeProxy})},controller.signal);
       if(!mounted.current||controller.signal.aborted||ticket!==catalogEpoch.current||selected.current!==id)return;
@@ -148,7 +150,7 @@ export default function ApiConnectionsSettings({ onSaved, uiLanguage, isDefaultC
     const previous=stored?.model||'';
     void mutate(()=>connections.save(id,{...fields,models,...apiNetworkPayload(apiNetworkMode(config.network_mode),{proxyUrl,removeProxy}),...(apiKey.trim()?{api_key:apiKey.trim()}: {})}),id,value=>{
       const saved=value.profiles.find(p=>p.id===id);if(!saved||saved.model===previous)return;
-      try{updateRememberedModel(localStorage,id,saved.model,saved.protocol);}catch{/* local storage may be disabled */}
+      try{updateRememberedModel(localStorage,id,saved.model,saved.protocol,saved.service_preset);}catch{/* local storage may be disabled */}
       window.dispatchEvent(new CustomEvent('ipl:profile-model-saved',{detail:{profileId:id,model:saved.model}}));
     },true);
   };
@@ -160,17 +162,18 @@ export default function ApiConnectionsSettings({ onSaved, uiLanguage, isDefaultC
   const confirmType=(choice:ConnectionType)=>{
     if(!config)return;
     invalidateCatalog();setConfig(applyConnectionType(config,choice));setApiKey('');setModelsText('');
-    setPicker(false);setCustom(false);setPendingType(undefined);setMessage('');
+    setPicker(false);setCustom(false);setPendingType(undefined);setPendingPreset(undefined);setMessage('');
   };
   const selectModel=(model:CatalogModel)=>{
     if(!config||busy)return;
+    if(muse&&model.id==='muse-video'){setMessage(en?'Video is not supported in this project.':'视频暂未接入本项目。');return;}
     const values=parseProfileModels(modelsText);
     if(!values.includes(model.id)){
       if(values.length>=100){setMessage(en?'At most 100 selected models.':'最多保存 100 个模型。');return;}
       setModelsText([...values,model.id].join('\n'));
     }
     if(canUseAsImageDefault(model)) edit({model:model.id});
-    else setMessage(en?'Added to available models. Select it in Agent text settings.':'已加入可用模型，可在 Agent 文字设置中选择。');
+    else setMessage(muse?(en?'Recorded as a text model; Muse Responses cannot control Agent tools.':'已记录文字模型；Muse Responses 不能作为 Agent 工具主控。'):(en?'Added to available models. Select it in Agent text settings.':'已加入可用模型，可在 Agent 文字设置中选择。'));
   };
   const move=(from:string,to:string)=>{
     if(!collection||dirty||busy||from===to)return;
@@ -190,8 +193,8 @@ export default function ApiConnectionsSettings({ onSaved, uiLanguage, isDefaultC
   const resetRecipe=()=>{
     if(!config||dirty||busy)return;
     try{
-      if(!resetGenerationPreference(localStorage,config.id,config.protocol))throw Error();
-      setRemembered(readGenerationPreference(localStorage,config.id,config.model,config.protocol));setResetPending(false);
+      if(!resetGenerationPreference(localStorage,config.id,config.protocol,config.service_preset))throw Error();
+      setRemembered(readGenerationPreference(localStorage,config.id,config.model,config.protocol,config.service_preset));setResetPending(false);
       window.dispatchEvent(new CustomEvent('ipl:generation-preference-reset',{detail:{profileId:config.id}}));
       setMessage(en?'Browser image settings reset; prompts and references are unchanged.':'本浏览器参数已重置，提示词和参考图保留。');
     }catch{setMessage(en?'Browser storage is unavailable.':'浏览器存储不可用，未重置参数。');}
@@ -210,7 +213,7 @@ export default function ApiConnectionsSettings({ onSaved, uiLanguage, isDefaultC
           onDrop={event=>{event.preventDefault();if(dragged)move(dragged,profile.id);setDragged(undefined);}} onDragEnd={()=>setDragged(undefined)}>
           <button type="button" className={`api-connection-option${config?.id===profile.id?' active':''}`} aria-pressed={config?.id===profile.id}
             disabled={busy||dirty&&config?.id!==profile.id} onClick={()=>{if(!dirty)choose(profile);}}>
-            <strong>{profile.display_name}</strong><span>{connectionProtocolLabel(profile.protocol||'openai_compatible',en)}</span>
+            <strong>{profile.display_name}</strong><span>{profile.service_preset==='muse'?'Muse · ':''}{connectionProtocolLabel(profile.protocol||'openai_compatible',en)}</span>
             <small>{profile.id===collection.default_profile_id?(en?'Default · ':'默认 · '):''}{profile.configured?(en?'Saved':'已保存'):(en?'Incomplete':'待完善')}</small>
           </button><div className="api-connection-order"><button type="button" aria-label={`${en?'Move up':'上移'} ${profile.display_name}`} disabled={busy||dirty||index===0} onClick={()=>move(profile.id,collection.profiles[index-1].id)}><ArrowUp size={13}/></button><button type="button" aria-label={`${en?'Move down':'下移'} ${profile.display_name}`} disabled={busy||dirty||index===collection.profiles.length-1} onClick={()=>move(profile.id,collection.profiles[index+1].id)}><ArrowDown size={13}/></button></div>
         </div>)}</div>
@@ -226,7 +229,9 @@ export default function ApiConnectionsSettings({ onSaved, uiLanguage, isDefaultC
             <div className="api-custom-protocols"><p>{en?'Choose the protocol in your service documentation.':'选择服务文档规定的协议。'}</p>{API_PROTOCOLS.map(protocol=><button type="button" key={protocol} data-protocol={protocol} onClick={()=>selectType({id:'custom',protocol,url:'',name:en?'Custom connection':'自定义连接',mark:'+'})}>{connectionProtocolLabel(protocol,en)}</button>)}<button type="button" className="api-link" onClick={()=>setCustom(false)}>{en?'Back to services':'返回服务商'}</button></div>}
           {pendingType&&<div className="api-change-confirm" role="alertdialog" aria-label={en?'Confirm connection type change':'确认更换连接类型'}><strong>{en?'Replace connection fields?':'确认更换连接类型？'}</strong><p>{en?'The name and network settings stay. The address changes; the key, selected models and protocol transport options are reset. Nothing changes until you confirm.':'保留名称和网络设置；将更换地址，清空已填写的 Key 和模型，并恢复协议传输默认值。确认前不会改变当前内容。'}</p><div><button type="button" className="secondary" onClick={()=>{setPendingType(undefined);setPicker(false);}}>{en?'Cancel':'取消'}</button><button type="button" className="primary" onClick={()=>confirmType(pendingType)}>{en?'Confirm change':'确认更换'}</button></div></div>}
         </section>:config&&<form onSubmit={save} className="api-connection-form" autoComplete="off"><fieldset disabled={busy}>
-          <div className="api-type-summary"><div><strong>{connectionProtocolLabel(selectedProtocol,en)}</strong><p>{connectionUsage(selectedProtocol,en)}</p></div><button type="button" className="api-link" onClick={()=>{setPicker(true);setCustom(false);}}>{en?'Change':'更换'}</button></div>
+          <div className="api-type-summary"><div><strong>{muse?'Muse · ':''}{connectionProtocolLabel(selectedProtocol,en)}</strong><p>{muse?(en?'Images: muse-image. Muse text Responses does not support Agent tools; video is not supported here.':'生图使用 muse-image；Muse 文字 Responses 不支持 Agent 工具调用，本项目暂不支持视频。'):connectionUsage(selectedProtocol,en)}</p></div><button type="button" className="api-link" onClick={()=>{setPicker(true);setCustom(false);}}>{en?'Change':'更换'}</button></div>
+          {selectedProtocol==='openai_compatible'&&<div className="api-model-filters" role="group" aria-label={en?'Service adaptation':'服务适配'}>{(['generic','muse'] as const).map(value=><button type="button" key={value} aria-pressed={(config.service_preset||'generic')===value} disabled={busy} onClick={()=>{if((config.service_preset||'generic')!==value)setPendingPreset(value);}}>{value==='muse'?'Muse':en?'Standard OpenAI compatible':'标准 OpenAI 兼容'}</button>)}</div>}
+          {pendingPreset&&<div className="api-change-confirm" role="alertdialog" aria-label={en?'Confirm service adaptation':'确认服务适配'}><p>{en?'Apply this service’s image parameters? Address, key, prompt and images are retained.':'切换此连接的图片参数适配？地址、密钥、提示词和图片保留。'}</p><button type="button" onClick={()=>setPendingPreset(undefined)}>{en?'Cancel adaptation':'取消适配'}</button><button type="button" onClick={()=>{edit({service_preset:pendingPreset,stream:false,partial_images:0},true);setPendingPreset(undefined);}}>{en?'Apply adaptation':'确认适配'}</button></div>}
           <div className="api-basic-fields">
             <label>{en?'Name':'名称'}<input aria-label={en?'Connection name':'连接名称'} required maxLength={100} value={config.display_name} onChange={e=>edit({display_name:e.target.value})} placeholder={en?'e.g. My image service':'例如：我的图片服务'}/></label>
             <label>Base URL<input aria-label="Base URL" required type="url" spellCheck={false} value={config.base_url} onChange={e=>edit({base_url:e.target.value},true)} placeholder="https://api.example.com"/></label>
@@ -240,7 +245,7 @@ export default function ApiConnectionsSettings({ onSaved, uiLanguage, isDefaultC
             {catalog.models.length>0&&<><input type="search" aria-label={en?'Search models':'搜索模型'} placeholder={en?'Search model IDs':'搜索模型 ID'} value={search} onChange={e=>setSearch(e.target.value)}/><div className="api-model-filters">{(['all','image','text','unknown'] as ModelFilter[]).map(value=><button key={value} type="button" aria-pressed={filter===value} onClick={()=>setFilter(value)}>{({all:en?'All':'全部',image:en?'Image':'图片',text:en?'Text':'文字',unknown:en?'Unknown':'待确认'})[value]}</button>)}</div>
               <div className="api-model-list">{visibleModels.map(model=><button key={model.id} type="button" data-catalog-model={model.id} aria-pressed={config.model===model.id||choices.includes(model.id)}
                 disabled={busy||!canUseAsImageDefault(model)&&(selectedProtocol!=='openai_compatible'||model.text_generation===false)} onClick={()=>selectModel(model)}>
-                <span><strong>{model.id}</strong><small>{modelCapabilityLabel(model,en)}{model.capability_source==='documentation'?(en?' · reference':' · 文档参考'):''}</small></span><span className="api-model-choice">{config.model===model.id?<><Check size={13}/>{en?'Image default':'图片默认'}</>:choices.includes(model.id)?<Check size={14}/>:!canUseAsImageDefault(model)?(en?'Add':'添加'):(en?'Use':'选择')}</span>
+                <span><strong>{model.id}</strong><small>{muse&&model.id==='muse-video'?(en?'Video · not supported here':'视频 · 本项目暂不支持'):modelCapabilityLabel(model,en)}{model.capability_source==='documentation'?(en?' · reference':' · 文档参考'):''}</small></span><span className="api-model-choice">{config.model===model.id?<><Check size={13}/>{en?'Image default':'图片默认'}</>:choices.includes(model.id)?<Check size={14}/>:!canUseAsImageDefault(model)?(en?'Add':'添加'):(en?'Use':'选择')}</span>
               </button>)}</div>{!visibleModels.length&&<p className="api-empty">{en?'No matching models.':'没有匹配的模型。'}</p>}</>}
             <label className="api-default-model">{en?'Default image model (optional)':'默认图片模型（可选）'}<input ref={modelInput} list="connection-known-models" aria-label={en?'Default image model':'默认图片模型'} value={config.model} onChange={e=>edit({model:e.target.value})} spellCheck={false} placeholder={en?'Select above or enter an exact ID':'从上方选择，或填写完整模型 ID'}/><datalist id="connection-known-models">{[...new Set([...choices,...catalog.models.map(m=>m.id)])].map(id=><option key={id} value={id}/>)}</datalist></label>
             {choices.length>0&&<div className="api-selected-models" aria-label={en?'Selected models':'已选择模型'}>{choices.map(id=><span key={id}>{id}<button type="button" aria-label={`${en?'Remove model':'移除模型'} ${id}`} onClick={()=>setModelsText(choices.filter(value=>value!==id).join('\n'))}>×</button></span>)}</div>}
@@ -251,10 +256,10 @@ export default function ApiConnectionsSettings({ onSaved, uiLanguage, isDefaultC
             <section><h5>{en?'Network':'网络'}</h5><ApiNetworkSettings key={config.id} uiLanguage={uiLanguage} mode={apiNetworkMode(config.network_mode)} proxyUrl={proxyUrl} proxyUrlPresent={config.proxy_url_present===true} proxyEndpoint={config.proxy_endpoint} removeProxy={removeProxy} disabled={busy} onModeChange={mode=>edit({network_mode:mode},true)} onProxyUrlChange={value=>{invalidateCatalog();setProxyUrl(value);}} onRemoveProxyChange={value=>{invalidateCatalog();setRemoveProxy(value);}}/>
               <label>{en?'Timeout (seconds)':'请求超时（秒）'}<input required type="number" min="1" max="1800" step="1" value={config.timeout} onChange={e=>edit({timeout:Number(e.target.value)})}/></label></section>
             <section><h5>{en?'Protocol transport':'协议传输'}</h5>{selectedProtocol==='openai_compatible'?<>
-              <label className="api-switch">{en?'Streaming':'流式传输'}<input type="checkbox" role="switch" aria-label={en?'Streaming':'流式传输'} checked={config.stream||false} onChange={e=>edit({stream:e.target.checked})}/></label>
-              <label>{en?'Partial preview count':'中间预览图数量'}<select aria-label={en?'Partial preview count':'中间预览图数量'} disabled={!config.stream} value={config.partial_images||0} onChange={e=>edit({partial_images:Number(e.target.value)})}>{[0,1,2,3].map(n=><option key={n} value={n}>{n}</option>)}</select></label>
+              {!muse&&<><label className="api-switch">{en?'Streaming':'流式传输'}<input type="checkbox" role="switch" aria-label={en?'Streaming':'流式传输'} checked={config.stream||false} onChange={e=>edit({stream:e.target.checked})}/></label>
+              <label>{en?'Partial preview count':'中间预览图数量'}<select aria-label={en?'Partial preview count':'中间预览图数量'} disabled={!config.stream} value={config.partial_images||0} onChange={e=>edit({partial_images:Number(e.target.value)})}>{[0,1,2,3].map(n=><option key={n} value={n}>{n}</option>)}</select></label></>}
               <label className="api-switch">{en?'Request Base64 result':'返回 Base64 图片数据'}<input type="checkbox" role="switch" aria-label={en?'Request Base64 result':'返回 Base64 图片数据'} checked={config.response_format==='b64_json'} onChange={e=>edit({response_format:e.target.checked?'b64_json':'auto'})}/></label>
-              <p>{en?'Requires service support; previews may be billed. No automatic retry after a timeout.':'需要服务支持；中间预览可能计费，超时不自动重试。'}</p></>:selectedProtocol==='seedream_native'?<label>{en?'Result delivery':'生成结果返回方式'}<select value={config.response_format||'auto'} onChange={e=>edit({response_format:e.target.value as 'auto'|'b64_json'|'url'})}><option value="auto">{en?'Service default':'服务默认'}</option><option value="b64_json">Base64</option><option value="url">URL</option></select></label>:<p>{en?'Non-streaming GenerateContent; final image returned as inlineData.':'非流式 GenerateContent，最终图片由 inlineData 返回。'}</p>}</section>
+              <p>{muse?(en?'Muse returns a final image without streaming previews. No automatic retry.':'Muse 返回最终图片，不使用流式预览；不会自动重试。'):(en?'Requires service support; previews may be billed. No automatic retry after a timeout.':'需要服务支持；中间预览可能计费，超时不自动重试。')}</p></>:selectedProtocol==='seedream_native'?<label>{en?'Result delivery':'生成结果返回方式'}<select value={config.response_format||'auto'} onChange={e=>edit({response_format:e.target.value as 'auto'|'b64_json'|'url'})}><option value="auto">{en?'Service default':'服务默认'}</option><option value="b64_json">Base64</option><option value="url">URL</option></select></label>:<p>{en?'Non-streaming GenerateContent; final image returned as inlineData.':'非流式 GenerateContent，最终图片由 inlineData 返回。'}</p>}</section>
             <section><h5>{en?'Additional model IDs':'补充模型 ID'}</h5><textarea aria-label={en?'Available models':'可用模型'} rows={3} value={modelsText} onChange={e=>setModelsText(e.target.value)} placeholder={en?'One model ID per line':'每行一个完整模型 ID'} spellCheck={false}/></section>
             {(catalog.checked_at||catalog.fetched_at)&&<section className="api-catalog-diagnostics"><h5>{en?'Model discovery details':'模型识别详情'}</h5><dl className="api-endpoints">{[[en?'Last successful list':'上次成功清单',catalog.fetched_at],[en?'Last attempt':'上次尝试',catalog.checked_at]].filter(([,stamp])=>stamp).map(([label,stamp])=><div key={label}><dt>{label}</dt><dd><time dateTime={stamp!}>{new Date(stamp!).toLocaleString(en?'en-US':'zh-CN')}</time></dd></div>)}</dl><p>{en?'Model-list access does not verify generation or billing.':'模型清单读取成功不代表生成能力或费用已经验证。'}</p></section>}
             {stored&&remembered&&<section className="api-remembered"><h5>{en?'This browser’s image settings':'本浏览器记忆的生图参数'}</h5><dl><div><dt>{en?'Model':'模型'}</dt><dd>{remembered.model||'—'}</dd></div><div><dt>{en?'Size / quality':'尺寸 / 质量'}</dt><dd>{remembered.size} · {remembered.quality}</dd></div></dl><button type="button" className="secondary" disabled={dirty||busy} onClick={()=>setResetPending(true)}>{en?'Reset browser parameters':'重置本浏览器参数'}</button>{resetPending&&<div className="api-change-confirm"><p>{en?'Reset this connection’s image settings? Prompts, references and jobs remain.':'重置此连接的生图参数？提示词、参考图和任务都会保留。'}</p><button type="button" onClick={()=>setResetPending(false)}>{en?'Cancel':'取消'}</button><button type="button" onClick={resetRecipe}>{en?'Reset parameters':'确认重置'}</button></div>}</section>}

@@ -222,12 +222,14 @@ class OpenAICompatibleConfig:
     def _defaults():
         return {"display_name": "Third-party API", "base_url": "", "api_key": "", "model": "", "timeout": 300,
                 "models": [], "base_url_mode": "versioned", "stream": False, "partial_images": 0,
-                "response_format": "auto", "protocol": "openai_compatible", **NETWORK_DEFAULTS}
+                "response_format": "auto", "protocol": "openai_compatible", "service_preset": "generic", **NETWORK_DEFAULTS}
 
     @staticmethod
     def _validate_options(value):
         from backend.services.providers.profiles import protocol
         selected_protocol = protocol(value)
+        from backend.services.providers.muse import service_preset
+        preset = service_preset(value)
         value.update(validate_network_settings(value))
         if not isinstance(value["models"], list) or len(value["models"]) > 100 or any(
             not isinstance(model, str) or not model.strip() or len(model.strip()) > 200 or
@@ -246,6 +248,8 @@ class OpenAICompatibleConfig:
             raise OpenAICompatibleError("Response format is not supported by the selected protocol")
         if selected_protocol != 'openai_compatible' and (value['stream'] or value['partial_images']):
             raise OpenAICompatibleError('Native image streaming is not yet enabled; disable stream and partial previews')
+        if preset == 'muse' and (value['stream'] or value['partial_images']):
+            raise OpenAICompatibleError('Muse Images does not support streaming or partial previews')
 
     def _document(self):
         try:
@@ -293,13 +297,14 @@ class OpenAICompatibleConfig:
 
     def _public(self, value):
         from backend.services.providers.native_params import protocol_capabilities
+        from backend.services.providers.muse import service_preset, capabilities
         catalog = self._cached_model_catalog(value)
         value = dict(value)
         present = bool(value.pop("api_key", ""))
         network = public_network_settings(value)
         value.pop("proxy_url", None)
         return {**value, "api_key_present": present, "configured": bool(value["base_url"] and present),
-                "model_catalog": catalog, "image_capabilities": protocol_capabilities(value.get("protocol", "openai_compatible")), **network}
+                "model_catalog": catalog, "image_capabilities": capabilities() if service_preset(value) == 'muse' else protocol_capabilities(value.get("protocol", "openai_compatible")), **network}
 
     def _cached_model_catalog(self, settings):
         if not settings["base_url"] or not settings["api_key"]:
@@ -309,8 +314,10 @@ class OpenAICompatibleConfig:
             root = normalize_profile_url(settings["base_url"], settings["base_url_mode"], protocol(settings))
         except OpenAICompatibleError:
             return empty_catalog()
-        return ModelCatalogCache(self.path).read(
+        catalog = ModelCatalogCache(self.path).read(
             settings["id"], connection_fingerprint(settings, root), settings["api_key"])
+        from backend.services.providers.muse import service_preset, annotate_models
+        return {**catalog, 'models': annotate_models(catalog['models'])} if service_preset(settings) == 'muse' else catalog
 
     def _catalog_profile(self, profile_id):
         self._validate_id(profile_id)
@@ -366,7 +373,7 @@ class OpenAICompatibleConfig:
                     cache.write(profile_id, fingerprint, catalog, self._document()["profiles"], self.library_path)
                 except (OSError, ValueError, TypeError):
                     raise OpenAICompatibleError("Could not save model catalog") from None
-                return catalog
+                return self._cached_model_catalog(current)
         finally:
             with _config_lock:
                 if _catalog_refreshes.get(refresh_key) is token:
@@ -410,7 +417,7 @@ class OpenAICompatibleConfig:
             for field in ("display_name", "base_url", "model"):
                 if field in payload:
                     value[field] = str(payload[field] or "").strip()
-            for field in ("models", "base_url_mode", "stream", "partial_images", "response_format", "protocol"):
+            for field in ("models", "base_url_mode", "stream", "partial_images", "response_format", "protocol", "service_preset"):
                 if field in payload:
                     value[field] = payload[field]
             self._validate_options(value)
@@ -583,12 +590,25 @@ class OpenAICompatibleProvider:
 
     def generate(self, prompt, parameters, input_images=None, on_partial=None):
         settings = self.config.read(parameters.get("compatible_profile_id"))
+        from backend.services.providers.muse import service_preset, normalize_parameters, image_payload
+        preset = service_preset(settings)
+        if parameters.get('service_preset', 'generic') != preset:
+            raise OpenAICompatibleError('The saved service preset changed; create a new explicit request')
         if settings.get('protocol', 'openai_compatible') != 'openai_compatible' or parameters.get('protocol', 'openai_compatible') != 'openai_compatible':
             raise OpenAICompatibleError('The saved API protocol changed; create a new explicit request')
         if not settings["api_key"]:
             raise OpenAICompatibleError("Image API key is missing")
         from backend.services.providers.params import CanonicalImageRequest, OpenAIImageParamMapper
-        mapped = OpenAIImageParamMapper().to_wire(CanonicalImageRequest(prompt, parameters), settings)
+        if preset == 'muse':
+            from backend.services.providers.params import MappedImageRequest
+            normalized = normalize_parameters(parameters, settings['model'])
+            transport = {key: normalized.get(key, settings[key]) for key in ('base_url_mode', 'stream', 'partial_images', 'response_format')}
+            OpenAICompatibleConfig._validate_options({**settings, **transport})
+            if not isinstance(prompt, str) or not prompt.strip():
+                raise OpenAICompatibleError('Generation prompt is required')
+            mapped = MappedImageRequest(normalized, transport, image_payload(prompt, normalized, transport, input_images or []), prompt)
+        else:
+            mapped = OpenAIImageParamMapper().to_wire(CanonicalImageRequest(prompt, parameters), settings)
         normalized, transport, payload = mapped.normalized, mapped.transport, mapped.payload
         request_prompt = mapped.effective_prompt
         inputs = input_images or []
@@ -612,7 +632,7 @@ class OpenAICompatibleProvider:
         client = self.http_client
         try:
             client = client or create_api_client(settings, timeout=settings["timeout"])
-            kwargs = {"data": {k: (str(v).lower() if type(v) is bool else str(v)) for k, v in payload.items()}, "files": [("image[]", item) for item in inputs]} if inputs else {"json": payload}
+            kwargs = {"data": {k: (str(v).lower() if type(v) is bool else str(v)) for k, v in payload.items()}, "files": [("image" if preset == 'muse' else "image[]", item) for item in inputs]} if inputs else {"json": payload}
             accept = "text/event-stream, application/json" if transport["stream"] else "application/json"
             http_started = time.monotonic()
             with client.stream("POST", url, headers={"Authorization": "Bearer " + settings["api_key"], "Accept": accept},
@@ -700,16 +720,18 @@ class OpenAICompatibleProvider:
         requested.update(transport)
         requested["compatible_profile_id"] = settings["id"]
         requested["compatible_profile_name"] = parameters.get("compatible_profile_name") or settings["display_name"]
+        if preset == 'muse':
+            requested['service_preset'] = preset
         if "requested_aspect_ratio" in parameters:
             requested["requested_aspect_ratio"] = parameters["requested_aspect_ratio"]
         if normalized.get("aspect_ratio_prompt_injection") is True:
             requested["aspect_ratio_prompt_injection"] = True
         mismatches = image_dimension_mismatches(requested, decoded)
-        if payload["output_format"] != fmt.lower():
+        if "output_format" in payload and payload["output_format"] != fmt.lower():
             mismatches.append({"field": "output_format", "requested": payload["output_format"], "actual": fmt.lower()})
-        if payload["background"] == "transparent" and not decoded["has_transparent_pixels"]:
+        if payload.get("background") == "transparent" and not decoded["has_transparent_pixels"]:
             mismatches.append({"field": "background", "requested": "transparent", "actual": "no_transparent_pixels"})
-        if payload["quality"] != "auto" and actual.get("quality") and payload["quality"] != actual["quality"]:
+        if "quality" in payload and payload["quality"] != "auto" and actual.get("quality") and payload["quality"] != actual["quality"]:
             mismatches.append({"field": "quality", "requested": payload["quality"], "actual": actual["quality"]})
         metadata = {"provider": PROVIDER_ID, "auth_mode": AUTH_MODE, "requested": requested, "response": actual,
                     "model": actual.get("model"), "image_model": actual.get("model"), "decoded_image": decoded, "mismatches": mismatches,

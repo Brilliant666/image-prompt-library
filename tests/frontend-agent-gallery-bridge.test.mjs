@@ -252,3 +252,37 @@ test('actual InputBar native commands call the Agent bridge instead of restoring
   assert.deepEqual(sent[1], [native, 'conversation']);
   assert.equal(h.node('textarea', props => props['aria-label'] === '画廊提示词').value, '');
 });
+
+test('actual Muse Gallery composer shares ratio settings and submits the original prompt without GPT output controls',async t=>{
+ const sent=[],exact='  Synthetic prompt\nkeep original spacing  ';
+ const draft={...recipe.emptyGalleryDraft(),profileId:'muse',prompt:exact,recipe:{...compatible.museRecipeDefaults(),requested_aspect_ratio:'3:4'}};
+ const api={openAICompatibleProfiles:async()=>({profiles:[{id:'muse',model:'muse-image',display_name:'Muse',configured:true,service_preset:'muse'}],default_profile_id:'muse'}),createGenerationJob:async payload=>{sent.push(payload);return job({model:'muse-image'});}};
+ const h=harness(t,'InputBar',{preferences:{persistInputOnRestart:true}},{draft,api});await h.flush();
+ assert.equal(h.node('button',p=>p.className?.includes('pg-param-quality')),undefined);
+ assert.equal(h.reports.at(-1).service_preset,'muse');assert.equal(h.reports.at(-1).params.requested_aspect_ratio,'3:4');
+ h.node('button',p=>p.className?.includes('pg-param-size')).onClick();await h.flush();
+ const control=h.node('NativeImageParameters');assert.equal(control.servicePreset,'muse');assert.equal(h.node('SizeDialog'),undefined);
+ control.onChange({requested_aspect_ratio:'9:16',size:'auto',quality:'auto',background:'auto',output_format:'auto'});await h.flush();
+ assert.equal(h.node('textarea',p=>p['aria-label']==='画廊提示词').value,exact);
+ await h.node('button',p=>p['aria-label']==='生成图片').onClick();await h.flush();
+ assert.equal(sent.length,1);assert.equal(sent[0].prompt_text,exact);assert.equal(sent[0].edited_prompt_text,undefined);
+ assert.equal(sent[0].parameters.service_preset,'muse');assert.equal(sent[0].parameters.requested_aspect_ratio,'9:16');
+ assert.equal(sent[0].parameters.output_format,'auto');assert.equal(sent[0].parameters.quality,'auto');assert.equal(sent[0].parameters.size_mode,undefined);
+});
+
+test('changing a Muse connection back to generic preserves the restored draft and blocks its stale recipe before submission',async t=>{
+ const sent=[],draft={...recipe.emptyGalleryDraft(),profileId:'images',prompt:'keep draft',recipe:compatible.museRecipeDefaults()};
+ const h=harness(t,'InputBar',{preferences:{persistInputOnRestart:true}},{draft,api:{createGenerationJob:async payload=>{sent.push(payload);return job();}}});await h.flush();
+ assert.match(h.reports.at(-1).unavailable,/服务适配已改变/);await h.node('button',p=>p['aria-label']==='生成图片').onClick();await h.flush();
+ assert.equal(sent.length,0);assert.equal(h.node('textarea',p=>p['aria-label']==='画廊提示词').value,'keep draft');
+ assert.ok(h.nodes().some(node=>text(node).includes('原草稿保留')));
+});
+
+test('saved Muse model IDs use documentation roles in the actual Gallery without a discovered catalog',async t=>{
+ const profile={id:'muse',model:'muse-image',models:['muse-image','muse-spark','muse-video'],display_name:'Muse',configured:true,service_preset:'muse'};
+ const h=harness(t,'InputBar',{}, {api:{openAICompatibleProfiles:async()=>({profiles:[profile],default_profile_id:'muse'})}});await h.flush();
+ h.node('button',p=>p.className?.includes('pg-param-model')).onClick();await h.flush();
+ const choices=h.nodes().filter(node=>node.type==='button'&&node.props['data-model-id']);
+ assert.deepEqual(choices.map(node=>node.props['data-model-id']),['muse-image']);assert.ok(text(choices[0]).includes('文档参考'));
+ assert.equal(profile.model_catalog,undefined);assert.equal(h.calls.length,0);
+});

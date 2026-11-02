@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
 import { ChevronDown, Check, RefreshCw } from 'lucide-react';
 import { api } from '../../api/client';
 import type { ModelCatalog, OpenAICompatibleProfile } from '../../types';
-import { imageModelCapability, profileModelChoices } from '../../utils/profileSettings';
+import { imageModelCapability, profileModelChoices, profileModelInfo } from '../../utils/profileSettings';
 import './AgentModelPicker.css';
 
 // Sharing an in-flight discovery prevents the text and image fields from
@@ -53,7 +53,7 @@ export default function AgentModelPicker({ label, value, onChange, profile, acti
     window.addEventListener('ipl:model-catalog-changed', changed);
     void read();
     return () => { scope.current += 1; sequence.current += 1; window.removeEventListener('ipl:model-catalog-changed', changed); };
-  }, [active, profile?.id, profile?.base_url, profile?.base_url_mode, profile?.api_key_present, profile?.configured]);
+  }, [active, profile?.id, profile?.base_url, profile?.base_url_mode, profile?.api_key_present, profile?.configured, profile?.service_preset]);
 
   const refresh = async () => {
     const profileId = profile?.id;
@@ -87,9 +87,11 @@ export default function AgentModelPicker({ label, value, onChange, profile, acti
     const next = index < 0 ? event.key === 'ArrowDown' ? 0 : options.length - 1 : (index + (event.key === 'ArrowDown' ? 1 : -1) + options.length) % options.length;
     options[next]?.focus();
   };
+  const currentCatalogProfile = profile ? { ...profile, model_catalog: catalog } : undefined;
   const candidates: ModelCatalog['models'] = imageRecommendations
-    ? profileModelChoices(profile ? { ...profile, model_catalog: catalog } : undefined, value).map(id => catalog.models.find(model => model.id === id) || { id, image_generation: null })
-    : catalog.models;
+    ? profileModelChoices(currentCatalogProfile, value).map(id => profileModelInfo(currentCatalogProfile,id) || { id, image_generation: null })
+    : [...new Set([...catalog.models.map(model=>model.id), ...(profile?.service_preset==='muse' ? profile.models || [] : [])])]
+      .map(id => profileModelInfo(currentCatalogProfile,id) || { id, image_generation: null });
   const options = candidates.filter(model => model.id.toLocaleLowerCase().includes(query.toLocaleLowerCase()));
   const capabilityLabel = (model: ModelCatalog['models'][number]) => {
     if (imageRecommendations) {
@@ -100,6 +102,11 @@ export default function AgentModelPicker({ label, value, onChange, profile, acti
       if (kind === 'non-image') return en ? 'Not an image recommendation; selection retained' : '非图片输出，保留当前选择';
       return en ? 'Image capability unconfirmed' : '图片能力待确认';
     }
+    if(model.capability_source==='documentation')return profile?.service_preset==='muse'&&model.id==='muse-video'
+      ? en?'Documentation: video; not supported here':'文档参考：视频，本项目暂不支持'
+      : model.image_generation===true ? en?'Documentation: image output; unverified':'文档参考：图片输出，权限未验证'
+      : model.text_generation===true ? en?'Documentation: text output; unverified':'文档参考：文字输出，权限未验证'
+      : en?'Documentation reference; unverified':'文档参考，权限未验证';
     return model.image_generation === true ? en ? 'Image generation declared' : '接口声明支持生图'
       : model.image_generation === false ? en ? 'Image generation not declared' : '接口未声明支持生图'
       : en ? 'Capabilities unspecified' : '能力未声明';

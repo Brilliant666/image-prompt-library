@@ -241,3 +241,32 @@ test('a failed second discovery retains the list without presenting the previous
  assert.ok(h.text.includes('无法连接'));assert.ok(!h.text.includes('private-server-error'));
  assert.equal(h.calls.save.length,0);assert.equal(h.input('默认图片模型').value,'old-model');
 });
+
+test('Muse preset keeps the service URL explicit and offers only supported image transport',async t=>{
+ const h=harness(t);await h.flush();await startNew(h,'muse');
+ assert.equal(h.input('Base URL').value,'');assert.equal(h.input('默认图片模型').value,'muse-image');
+ assert.equal(h.input('流式传输'),undefined);assert.equal(h.find('select',p=>p['aria-label']==='中间预览图数量'),undefined);
+ assert.ok(h.input('返回 Base64 图片数据'));assert.ok(h.text.includes('暂不支持视频'));
+ await h.fill('Base URL','https://muse.invalid/v1');await h.fill('API Key','synthetic-key');await h.click('识别模型');
+ assert.equal(h.calls.discover[0].payload.protocol,'openai_compatible');assert.equal(h.calls.discover[0].payload.service_preset,'muse');
+ await h.submit();assert.equal(h.calls.save[0].payload.service_preset,'muse');assert.equal(h.calls.save[0].payload.model,'muse-image');
+ assert.equal(h.calls.save[0].payload.stream,false);assert.equal(h.calls.save[0].payload.partial_images,0);assert.equal(h.calls.discover.length,1);
+});
+
+test('existing Muse adaptation requires confirmation and preserves same-target saved credentials',async t=>{
+ const h=harness(t);await h.flush();await h.fill('API Key','unsaved-key');await h.click('Muse');
+ assert.ok(h.find('div',p=>p['aria-label']==='确认服务适配'));await h.click('取消适配');
+ assert.equal(h.input('API Key').value,'unsaved-key');assert.ok(h.input('流式传输'));
+ await h.click('Muse');await h.click('确认适配');
+ assert.equal(h.input('API Key').value,'unsaved-key');assert.equal(h.input('Base URL').value,'https://a.invalid/v1');assert.equal(h.input('连接名称').value,'Connection A');
+ assert.equal(h.input('流式传输'),undefined);assert.equal(h.calls.save.length,0);assert.equal(h.calls.discover.length,0);
+ await h.fill('API Key','');await h.submit();assert.equal(h.calls.save[0].payload.service_preset,'muse');assert.equal(h.calls.save[0].payload.api_key,undefined);
+});
+
+test('Muse capability rows distinguish video from available image output and do not select text as the image default',async t=>{
+ const models=[{id:'muse-image',image_generation:true,text_generation:false,capability_source:'documentation'},{id:'muse-spark',image_generation:false,text_generation:true,capability_source:'documentation'},{id:'muse-video',image_generation:false,text_generation:false,capability_source:'documentation'}];
+ const h=harness(t,{discover:async()=>result({models})},{profiles:[{id:'muse',display_name:'Muse',base_url:'https://muse.invalid/v1',model:'muse-image',models:[],timeout:300,service_preset:'muse',api_key_present:true,configured:true}]});await h.flush();await h.click('识别模型');
+ assert.ok(h.text.includes('视频 · 本项目暂不支持'));h.find('button',p=>p['data-catalog-model']==='muse-spark').onClick();await h.flush();
+ assert.equal(h.input('默认图片模型').value,'muse-image');assert.ok(h.text.includes('不能作为 Agent 工具主控'));
+ assert.equal(h.find('button',p=>p['data-catalog-model']==='muse-video').disabled,true);assert.equal(h.calls.save.length,0);
+});

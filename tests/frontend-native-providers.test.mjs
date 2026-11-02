@@ -115,3 +115,37 @@ test('native Gallery/Agent sharing contains no prompt or reference transfer and 
   assert.deepEqual(changed.recipe.provider_options,{aspect_ratio:'3:4'});
   assert.equal(draft.profileId,'old');
 });
+
+test('Muse controls emit only ratio choices and service defaults without changing the source recipe',()=>{
+ const original={model:'muse-image',quality:'max',size:'2048x1536',background:'transparent',output_format:'png',moderation:'low'};
+ const changes=[];const tree=component.exports.default({servicePreset:'muse',protocol:'openai_compatible',model:'muse-image',params:original,onChange:value=>changes.push(value)});
+ const select=nodes(tree).find(node=>node.type==='select'&&node.props['aria-label']==='Muse 画面比例');
+ assert.deepEqual(nodes(tree).filter(node=>node.type==='option').map(node=>node.props.value),['auto','1:1','16:9','9:16','4:3','3:4']);
+ assert.equal(select.props.value,'4:3');assert.equal(nodes(tree).filter(node=>node.type==='select').length,1);assert.equal(changes.length,0);
+ select.props.onChange({target:{value:'9:16'}});assert.equal(changes[0].requested_aspect_ratio,'9:16');assert.equal(changes[0].size,'auto');assert.equal(changes[0].output_format,'auto');
+ assert.equal(original.quality,'max');assert.equal(original.size,'2048x1536');assert.equal(original.background,'transparent');
+});
+
+test('Muse recipes preserve exact ratio, share it with Agent and isolate remembered generic parameters',()=>{
+ const recipe={...recipes.museRecipeDefaults(),requested_aspect_ratio:'3:4'};
+ const sent=recipes.compatibleParameters(recipe);assert.equal(sent.requested_aspect_ratio,'3:4');assert.equal(sent.output_format,'auto');assert.equal(sent.service_preset,'muse');
+ const restored=recipes.restoreCompatibleRecipe({parameters:recipe,metadata:{},model:'muse-image'});assert.equal(restored.requested_aspect_ratio,'3:4');
+ const memory=new Map(),storage={getItem:key=>memory.get(key)||null,setItem:(key,value)=>memory.set(key,value)};
+ preferences.writeGenerationPreference(storage,'same-profile',{model:'generic-image',size:'1024x1024',quality:'high',background:'auto',output_format:'png'});
+ preferences.writeGenerationPreference(storage,'same-profile',recipe);
+ assert.equal(preferences.readGenerationPreference(storage,'same-profile','muse-image','openai_compatible','muse').requested_aspect_ratio,'3:4');
+ assert.equal(preferences.readGenerationPreference(storage,'same-profile').model,'generic-image');
+ const old={prompt:'  Original\ntext  ',inputs:[{id:'reference'}],recipe:recipes.nativeRecipeDefaults('openai_compatible','old'),profileId:'old'};
+ const shared=bridge.applyGalleryImageSettings(old,{provider:'openai_compatible',service_preset:'muse',profileId:'muse',model:'muse-image',params:sent});
+ assert.equal(shared.recipe.requested_aspect_ratio,'3:4');assert.equal(shared.recipe.service_preset,'muse');assert.equal(shared.prompt,old.prompt);assert.equal(shared.inputs,old.inputs);
+ assert.throws(()=>recipes.compatibleParameters({...recipe,model:'muse-video'}));assert.throws(()=>recipes.compatibleParameters({...recipe,model:'muse-spark'}));
+});
+
+test('unsupported historical Muse ratios remain visible and block submission instead of becoming auto',()=>{
+ const saved={...recipes.museRecipeDefaults(),size:'1200x2400'};
+ assert.equal(recipes.museAspectRatio(saved),'1:2');assert.throws(()=>recipes.compatibleParameters(saved));
+ const tree=component.exports.default({servicePreset:'muse',protocol:'openai_compatible',model:'muse-image',params:saved,onChange(){throw Error('render changed recipe');}});
+ assert.ok(nodes(tree).find(node=>node.props?.role==='alert'));
+ assert.equal(nodes(tree).find(node=>node.type==='option'&&node.props.value==='1:2').props.disabled,true);
+ assert.equal(saved.size,'1200x2400');
+});

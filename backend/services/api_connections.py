@@ -15,7 +15,7 @@ from backend.services.providers.registry import catalog_for_profile
 ApiConnectionProfiles = OpenAICompatibleConfig
 _DISCOVERY_SLOTS = BoundedSemaphore(4)
 MAX_DRAFT_BYTES = 32 * 1024
-_FIELDS = {'profile_id', 'protocol', 'base_url', 'base_url_mode', 'api_key',
+_FIELDS = {'profile_id', 'protocol', 'service_preset', 'base_url', 'base_url_mode', 'api_key',
            'network_mode', 'proxy_url', 'remove_proxy_url'}
 _MESSAGES = {
     'invalid_draft': 'Check the draft address, protocol and network settings.',
@@ -60,7 +60,7 @@ def prepare_discovery_draft(store, payload):
     value = store._defaults()
     if previous:
         value.update(previous)
-    for key in ('protocol', 'base_url', 'base_url_mode'):
+    for key in ('protocol', 'service_preset', 'base_url', 'base_url_mode'):
         if key in payload:
             if not isinstance(payload[key], str) or len(payload[key]) > 2048:
                 raise ConnectionDraftError()
@@ -70,6 +70,8 @@ def prepare_discovery_draft(store, payload):
         raise ConnectionDraftError()
     try:
         selected = protocol(value)
+        from backend.services.providers.muse import service_preset
+        service_preset(value)
         root = _root(value)
         if not root:
             raise ConnectionDraftError()
@@ -120,6 +122,9 @@ def discover_connection_draft(store, payload, http_client=None):
                 return result
         # Static reference models never prove reachability, key validity or access.
         checked_at = datetime.now(timezone.utc).isoformat() if source == 'remote' else None
+        if settings.get('service_preset') == 'muse':
+            from backend.services.providers.muse import annotate_models
+            models = annotate_models(models)
         result.update(models=models, fetched_at=checked_at, checked_at=checked_at,
                       connection_checked=source == 'remote')
         return result

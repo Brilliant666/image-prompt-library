@@ -13,7 +13,7 @@ export interface CompatibleTransportOverrides {
   partial_images?: number;
   response_format?: 'auto' | 'b64_json' | 'url';
 }
-export interface CompatibleRecipe extends CompatibleTransportOverrides { protocol?: ApiProtocol; provider_options?: Record<string,string|number|boolean>; model: string; quality: string; size: string; background: string; output_format: string; output_compression?: number; moderation?: 'auto'|'low'; size_mode?: 'auto4k'; legacyDerived?: boolean; transportLegacyDerived?: true }
+export interface CompatibleRecipe extends CompatibleTransportOverrides { service_preset?: 'generic'|'muse'; requested_aspect_ratio?: string; protocol?: ApiProtocol; provider_options?: Record<string,string|number|boolean>; model: string; quality: string; size: string; background: string; output_format: string; output_compression?: number; moderation?: 'auto'|'low'; size_mode?: 'auto4k'; legacyDerived?: boolean; transportLegacyDerived?: true }
 const TRANSPORT_KEYS = ['base_url_mode', 'stream', 'partial_images', 'response_format'] as const;
 // Same defaults used by run_job for historical requests predating these options.
 // New composers intentionally omit these keys, allowing the selected API defaults.
@@ -46,6 +46,7 @@ export function restoreCompatibleRecipe(job: Pick<GenerationJobRecord, 'paramete
   const transport = { ...LEGACY_TRANSPORT, ...recordedTransport };
   const transportLegacyDerived = TRANSPORT_KEYS.some(key => recordedTransport[key] === undefined);
   const text = (key: string, fallback: string) => typeof values[key] === 'string' ? values[key] as string : fallback;
+  if (values.service_preset === 'muse') return {...recordedTransport,...museRecipeDefaults(text('model',job.model||'')),requested_aspect_ratio:museAspectRatio(values)};
   if (values.protocol === 'gemini_native' || values.protocol === 'seedream_native') {
     const options = values.provider_options && typeof values.provider_options === 'object' && !Array.isArray(values.provider_options)
       ? Object.fromEntries(Object.entries(values.provider_options).filter((entry): entry is [string,string|number|boolean] => ['string','number','boolean'].includes(typeof entry[1]))) : {};
@@ -58,6 +59,7 @@ export function restoreCompatibleRecipe(job: Pick<GenerationJobRecord, 'paramete
 }
 export function compatibleValidation(recipe: CompatibleRecipe): Parameters<Translator>[0] | undefined {
   if (!recipe.model.trim()) return 'imageModelRequired';
+  if (recipe.service_preset==='muse') return recipe.model==='muse-image' && MUSE_ASPECT_RATIOS.includes(museAspectRatio(recipe)) ? undefined : 'imageQualityUnsupported';
   if (recipe.protocol && recipe.protocol !== 'openai_compatible') return nativeParameterIssue(recipe) ? 'imageQualityUnsupported' : undefined;
   if (!imageQualities(recipe.model).includes(recipe.quality)) return 'imageQualityUnsupported';
   if (!['auto', 'opaque', 'transparent'].includes(recipe.background)) return 'imageBackgroundInvalid';
@@ -73,6 +75,10 @@ export function compatibleValidation(recipe: CompatibleRecipe): Parameters<Trans
   }
 }
 export function compatibleParameters(recipe: CompatibleRecipe) {
+  if (recipe.service_preset==='muse') {
+    const error=compatibleValidation(recipe);if(error)throw new Error(error);
+    return {model:recipe.model,service_preset:'muse' as const,size:'auto',quality:'auto',background:'auto',output_format:'auto',requested_aspect_ratio:museAspectRatio(recipe),...pickCompatibleTransportOverrides(recipe),n:1};
+  }
   if (recipe.protocol && recipe.protocol !== 'openai_compatible') {
     const error = nativeParameterIssue(recipe);
     if (error) throw new Error(error);
@@ -243,4 +249,26 @@ export function resolveAuto4k(prompt: string, reference?: { width: number; heigh
   }
   if (!width || !height) return { error: 'imageSizeInvalid' as const };
   return { size: `${width}x${height}`, source, ratio: `${w / d}:${h / d}` };
+}
+
+/** Muse's documented composition ratios are hints, never pixel-size guarantees. */
+export const MUSE_ASPECT_RATIOS = ['auto','1:1','16:9','9:16','4:3','3:4'];
+export function museAspectRatio(value: {requested_aspect_ratio?: unknown; size?: unknown}): string {
+  if (typeof value.requested_aspect_ratio === 'string' && value.requested_aspect_ratio !== 'auto') return value.requested_aspect_ratio;
+  const pixels = typeof value.size === 'string' ? /^([1-9][0-9]*)x([1-9][0-9]*)$/.exec(value.size) : null;
+  if (pixels) {
+    const width = Number(pixels[1]), height = Number(pixels[2]), ratio = width / height;
+    const documented = MUSE_ASPECT_RATIOS.slice(1).find(text => {
+      const [w,h] = text.split(':').map(Number);
+      return Math.abs(ratio / (w/h) - 1) <= .01;
+    });
+    if (documented) return documented;
+    const gcd = (a:number,b:number):number => b ? gcd(b,a%b) : a;
+    const divisor = gcd(width,height);
+    return `${width/divisor}:${height/divisor}`;
+  }
+  return 'auto';
+}
+export function museRecipeDefaults(model='muse-image'): CompatibleRecipe {
+  return {service_preset:'muse',model,size:'auto',requested_aspect_ratio:'auto',quality:'auto',background:'auto',output_format:'auto'};
 }

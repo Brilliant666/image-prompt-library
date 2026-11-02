@@ -6,6 +6,7 @@ import type { GalleryDraft } from './galleryRecipe';
 // resolves automatic dimensions at send time, and freezes its submitted request.
 // Credentials and historical transport overrides never travel with these choices.
 export interface GalleryImageSettings {
+  service_preset?: 'generic'|'muse';
   protocol?: ApiProtocol;
   provider: string;
   profileId: string;
@@ -30,6 +31,7 @@ export function applyGalleryImageSettings(draft: GalleryDraft, settings: Gallery
   return { ...draft, provider: settings.provider, profileId: settings.profileId,
     // Shared dimensions replace any historical prompt-injected ratio as well.
     aspectRatio: 'auto', aspectInjection: undefined, recipe: {
+    ...(settings.service_preset==='muse'?{service_preset:'muse' as const,requested_aspect_ratio:params.requested_aspect_ratio||'auto'}:{}),
     model: settings.model, size: params.size, quality: params.quality,
     ...(settings.protocol&&settings.protocol!=='openai_compatible'?{protocol:settings.protocol}:{}),
     ...(params.provider_options?{provider_options:{...params.provider_options}}:{}),

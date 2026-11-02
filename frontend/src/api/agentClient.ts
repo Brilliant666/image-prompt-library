@@ -178,6 +178,7 @@ export interface AgentConversationSummary {
   roundCount: number; runningRequestId: string | null; revision: number;
 }
 export interface AgentImageParams {
+  service_preset?: 'generic'|'muse'; requested_aspect_ratio?: string;
   provider_options?: Record<string,string|number|boolean>;
   size: string; quality: string; output_format: 'auto' | 'png' | 'jpeg' | 'webp';
   output_compression?: number | null; moderation?: string; background?: string;
