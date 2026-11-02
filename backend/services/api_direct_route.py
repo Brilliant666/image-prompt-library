@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from sys import executable as _PYTHON
 import threading
 import time
 from urllib.parse import urlsplit
@@ -183,6 +184,7 @@ def _select_source(payload: object) -> str | None:
 
 
 def _probe_windows(host: str, *, timeout: float) -> str | None:
+    deadline = time.monotonic() + timeout
     encoded_host = base64.b64encode(host.encode("utf-8")).decode("ascii")
     script = _POWERSHELL_QUERY.replace("__HOST__", encoded_host)
     encoded_script = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
@@ -196,16 +198,33 @@ def _probe_windows(host: str, *, timeout: float) -> str | None:
         if result.returncode != 0 or len(result.stdout) > 512 * 1024:
             raise DirectRouteError(_NO_ROUTE)
         payload = json.loads(result.stdout.decode("utf-8-sig"))
+        if isinstance(payload, dict) and payload.get('inventoryAvailable') is False:
+            # Fallback only for unavailable WMI inventory, not an ambiguous or
+            # rejected route. DNS/Fake-IP/local restrictions still apply first.
+            resolved = payload.get('targetAddresses')
+            if isinstance(resolved, list) and 0 < len(resolved) <= 128:
+                targets = [_address(value) for value in resolved]
+                if all(address.is_global and not _is_fake(address) and not _is_local(address)
+                       and getattr(address, 'ipv4_mapped', None) is None for address in targets):
+                    helper = Path(__file__).with_name('api_windows_inventory.py')
+                    result = subprocess.run([_PYTHON, '-I', '-B', str(helper), json.dumps(resolved)],
+                        capture_output=True, timeout=_remaining(deadline, cap=timeout), check=False,
+                        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000))
+                    if result.returncode != 0 or len(result.stdout) > 512 * 1024:
+                        raise DirectRouteError(_NO_ROUTE)
+                    payload = json.loads(result.stdout.decode('utf-8-sig'))
+                    if not isinstance(payload, dict) or payload.get('targetAddresses') != resolved:
+                        raise DirectRouteError(_NO_ROUTE)
     except (OSError, subprocess.SubprocessError, UnicodeError, ValueError):
         raise DirectRouteError(_NO_ROUTE) from None
     return _select_source(payload)
 
 
-def _remaining(deadline: float) -> float:
+def _remaining(deadline: float, *, cap: float = _QUERY_TIMEOUT_SECONDS) -> float:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise DirectRouteError(_NO_ROUTE)
-    return min(_QUERY_TIMEOUT_SECONDS, remaining)
+    return min(_QUERY_TIMEOUT_SECONDS, cap, remaining)
 
 
 def direct_local_address(url: str, *, timeout: float | None = None) -> str | None:
@@ -222,7 +241,8 @@ def direct_local_address(url: str, *, timeout: float | None = None) -> str | Non
     if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
                                 or not math.isfinite(timeout) or timeout <= 0):
         raise DirectRouteError(_NO_ROUTE)
-    deadline = time.monotonic() + min(_QUERY_TIMEOUT_SECONDS, timeout if timeout is not None else _QUERY_TIMEOUT_SECONDS)
+    budget = min(_QUERY_TIMEOUT_SECONDS, timeout if timeout is not None else _QUERY_TIMEOUT_SECONDS)
+    deadline = time.monotonic() + budget
     try:
         parsed = urlsplit(url)
         host = (parsed.hostname or "").rstrip(".").lower()
@@ -244,7 +264,7 @@ def direct_local_address(url: str, *, timeout: float | None = None) -> str | Non
             raise DirectRouteError(_FAKE_IP)
         if _is_local(literal):
             return None
-    if not _cache_lock.acquire(timeout=_remaining(deadline)):
+    if not _cache_lock.acquire(timeout=_remaining(deadline, cap=budget)):
         raise DirectRouteError(_NO_ROUTE)
     try:
         _remaining(deadline)
@@ -257,8 +277,8 @@ def direct_local_address(url: str, *, timeout: float | None = None) -> str | Non
         _cache_lock.release()
     # Do not serialize slow subprocesses behind the cache lock. Concurrent
     # misses may perform duplicate read-only probes, each with its own deadline.
-    value = _probe_windows(host, timeout=_remaining(deadline))
-    if not _cache_lock.acquire(timeout=_remaining(deadline)):
+    value = _probe_windows(host, timeout=_remaining(deadline, cap=budget))
+    if not _cache_lock.acquire(timeout=_remaining(deadline, cap=budget)):
         raise DirectRouteError(_NO_ROUTE)
     try:
         _remaining(deadline)

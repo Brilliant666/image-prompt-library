@@ -1,6 +1,6 @@
 import type { AgentModelInfo, AgentRequest, AgentResponseDetails as Details, AgentTokenUsage, AgentRound } from '../../api/agentClient';
 import type { GenerationJobRecord } from '../../types';
-import { getAgentFailure, getAgentJobFailure, getAgentRoundSummary } from '../../utils/playground/agentAssistantBlocks';
+import { getAgentAssistantBlocks, getAgentFailure, getAgentInternalToolStatus, getAgentJobFailure, getAgentRoundSummary, getAgentToolLabel, isAgentInternalTool } from '../../utils/playground/agentAssistantBlocks';
 import { AgentMarkdown } from './AgentMarkdown';
 import './AgentResponseDetails.css';
 
@@ -48,6 +48,7 @@ export function AgentResponseDetails({ details, modelInfo, request, round, jobs 
   const returnedModels = modelInfo?.returnedModels || [];
   const summary = round ? getAgentRoundSummary(round, jobs, request) : undefined;
   const roundJobs = round ? jobs.filter(job => round.outputTaskIds.includes(job.id)) : [];
+  const internalTools = round ? getAgentAssistantBlocks(round, [], '').flatMap(block => block.type === 'tool' && isAgentInternalTool(block.name) ? [block] : []) : [];
   const hasAdvanced = Boolean(returnedModels.length || request || hasUsage || extraUsage || steps.length || skills.length || round);
   if (!modelInfo?.providerName && !modelInfo?.requestedModel && !hasUsage && !skillNames.length && !summaries.length && !hasAdvanced) return null;
 
@@ -65,6 +66,7 @@ export function AgentResponseDetails({ details, modelInfo, request, round, jobs 
       {summaries.map((summary, index) => <div key={`${summary.id}:${index}`}>{summaries.length > 1 && <p className="agent-help">模型步骤 {summary.step}</p>}<AgentMarkdown text={summary.text} /></div>)}
     </details>}
     {hasAdvanced && <details className="agent-response-advanced"><summary>高级信息</summary>
+      {internalTools.length > 0 && <section aria-label="内部步骤"><h4>内部步骤</h4><dl>{internalTools.map(tool => <div key={tool.key}><dt>{getAgentToolLabel(tool.name)}</dt><dd>{getAgentInternalToolStatus(tool.state)}</dd></div>)}</dl></section>}
       {(returnedModels.length > 0 || request) && <dl>
         {returnedModels.length > 0 && <div><dt>返回模型</dt><dd>{returnedModels.join('、')}</dd></div>}
         {request && <div><dt>模型步骤</dt><dd>{request.usage.responseStepsStarted} / {request.authorization.maxToolRounds}</dd></div>}
