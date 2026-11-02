@@ -7,6 +7,8 @@
 .pg-composer .pg-model-options button:hover{background:color-mix(in srgb,var(--ink) 5%,transparent)}
 .pg-composer .pg-model-options button[aria-pressed=true]{background:color-mix(in srgb,var(--accent) 12%,transparent);color:var(--accent-strong)}
 .pg-model-name{flex:1;min-width:0;overflow-wrap:anywhere}
+.pg-model-name .pg-model-capability{display:block;margin-top:2px;color:var(--muted);font-size:10px;line-height:1.4}
+.pg-model-search{width:100%;box-sizing:border-box;margin:0 0 8px;padding:8px 10px;border:1px solid var(--line);border-radius:9px;background:var(--surface);color:var(--ink);font:inherit;font-size:12px}
 .pg-model-default{flex:none;padding:1px 5px;border-radius:5px;background:color-mix(in srgb,var(--ink) 6%,transparent);color:var(--muted);font-size:10px;line-height:1.5}
 .pg-model-check{display:flex;align-items:center;justify-content:center;flex:0 0 16px;color:var(--accent-strong)}
 .pg-composer .pg-parameters-panel[data-panel=model]>small{flex:none;margin:0;font-size:11px;line-height:1.6}

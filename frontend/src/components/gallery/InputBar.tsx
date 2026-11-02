@@ -8,7 +8,7 @@ import type { LocalPreferences } from '../../utils/localPreferences';
 import { resolveAuto4k, clearCompatibleTransportOverrides, compatibleValidation, nativeParameterIssue, IMAGE25_QUALITIES } from '../../utils/compatibleRecipe';
 import { agentJobSource, applyGalleryImageSettings, sharedImageCount, type GalleryImageSettings, type GalleryImageSettingsCommand } from '../../utils/agentGalleryBridge';
 import { readGenerationPreference, writeGenerationPreference, lastGenerationProfile } from '../../utils/generationPreferences';
-import { isGptImageModelName, profileModelChoices } from '../../utils/profileSettings';
+import { imageModelCapability, profileModelChoices } from '../../utils/profileSettings';
 import { recipeInputs, restoreRecipeInputs, type RecipeInput } from '../../utils/recipeInputs';
 import { draftFromJob, emptyGalleryDraft, galleryPayload, libraryRecipeImage, type GalleryDraft } from '../../utils/galleryRecipe';
 import { readGalleryDraft, saveGalleryDraft } from '../../utils/galleryDraft';
@@ -35,6 +35,8 @@ export default function InputBar({command,imageSettingsCommand,preferences,t,act
   const referenceSource=useRef<RecipeInput|undefined>(undefined);
   const measuredReferenceSize=draft.inputs[0]&&referenceSource.current===draft.inputs[0]?referenceSize:undefined;
   const [panel,setPanel]=useState(''),[picker,setPicker]=useState(false);
+  const [modelQuery,setModelQuery]=useState('');
+  useEffect(()=>{if(panel!=='model')setModelQuery('');},[panel]);
   const fileRef=useRef<HTMLInputElement>(null),textRef=useRef<HTMLTextAreaElement>(null),submitLock=useRef(false),readSequence=useRef(0),initialized=useRef(false),persistSequence=useRef(Promise.resolve());
   const consumedCommand=useRef<number|undefined>(undefined);
   const editRevision=useRef(0);
@@ -224,16 +226,18 @@ export default function InputBar({command,imageSettingsCommand,preferences,t,act
       {panel==='provider'&&<><div className="pg-option-list">{profiles.map(p=><button key={p.id} aria-pressed={draft.provider==='openai_compatible'&&draft.profileId===p.id} onClick={()=>{editDraft(current=>({...current,provider:'openai_compatible',profileId:p.id,aspectRatio:'auto',aspectInjection:undefined,recipe:clearCompatibleTransportOverrides(readGenerationPreference(localStorage,p.id,p.model,p.protocol))}));setPanel('');}}>{p.display_name}<small>{p.configured?'已配置 · 调用能力以实际响应为准':'未完成配置'}</small></button>)}{providers.filter(p=>p.provider!=='openai_compatible'&&(!['openai_codex_oauth_native','xai_grok_oauth'].includes(p.provider)||p.authenticated===true)).map(p=><button key={p.provider} onClick={()=>{editDraft(current=>({...current,provider:p.provider,recipe:{...clearCompatibleTransportOverrides(current.recipe),model:p.default_image_model||p.model||'',quality:'medium'}}));setPanel('');}}>{p.display_name}<small>{p.can_generate?'可用':'未连接'}</small></button>)}</div><button onClick={onOpenSettings}>管理 API 配置</button></>}
       {panel==='model'&&<>
         <input className="pg-model-input" aria-label="请求模型完整 ID" value={draft.recipe.model} spellCheck={false} onChange={e=>recipe({model:e.target.value})}/>
-        <div className="pg-option-list pg-model-options" aria-label="此配置的模型">{models.map(model=>{
+        <input type="search" className="pg-model-search" aria-label="搜索生图模型" placeholder="搜索模型清单…" value={modelQuery} onChange={e=>setModelQuery(e.target.value)}/>
+        <div className="pg-option-list pg-model-options" aria-label="此配置的模型">{models.filter(model=>model.toLowerCase().includes(modelQuery.trim().toLowerCase())).map(model=>{
           const detected=catalog?.models.find(entry=>entry.id===model);
-          const capability=detected?(detected.image_generation===true?'接口标注：图片输出':detected.image_generation===false?'接口标注：非图片输出':isGptImageModelName(model)?'名称匹配：生图候选（未验证）':'接口未标注图片生成能力'):'';
+          const kind=imageModelCapability(detected);
+          const capability=kind==='image'?(detected?.capability_source==='documentation'?'文档参考：图片输出（权限未验证）':'接口标注：图片输出（未验证）'):kind==='non-image'?'非图片输出，保留当前选择':'图片能力待确认';
           return <button type="button" key={model} data-model-id={model} aria-label={model} title={capability?`${model} · ${capability}`:model} aria-pressed={draft.recipe.model===model} onClick={()=>{recipe({model});setPanel('');}}>
-            <span className="pg-model-name">{model}</span>
+            <span className="pg-model-name">{model}<small className="pg-model-capability">{capability}</small></span>
             {model===profile?.model&&<span className="pg-model-default">默认</span>}
             <span className="pg-model-check" aria-hidden="true">{draft.recipe.model===model&&<Check size={16}/>}</span>
           </button>;
         })}</div>
-        <small className="pg-model-hint">{draft.provider==='openai_compatible'?(nativeApi?'来自当前协议的模型清单与文档参考；支持手填完整 ID，实际权限尚未验证。':'仅推荐 gpt-image 系列；支持手填完整 ID，接口是否支持以实际响应为准。'):'可选择账号提供的图片模型，或填写完整模型 ID。'}</small>
+        <small className="pg-model-hint">{draft.provider==='openai_compatible'?'优先显示声明图片输出的模型；能力待确认仍可选择或手填，实际权限与协议支持以接口为准。':'可选择账号提供的图片模型，或填写完整模型 ID。'}</small>
         {absentFromCatalog&&<small role="status">上次读取的接口列表中未找到当前模型，已保留本次选择。可在设置中刷新列表。</small>}
         {catalog?.error&&<small role="status">最近读取模型列表失败，继续显示上次成功读取的结果。</small>}
         {draft.provider==='openai_compatible'&&profile?.model&&models.includes(profile.model)&&draft.recipe.model!==profile.model&&<button type="button" className="pg-model-reset" onClick={()=>{recipe({model:profile.model});setPanel('');}}>使用此配置的默认模型</button>}

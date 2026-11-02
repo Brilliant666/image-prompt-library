@@ -161,17 +161,36 @@ test('reset removes only this profile recipe and preserves selection, other APIs
   assert.equal(resetGenerationPreference({ removeItem() { throw Error('denied'); } }, 'a'), false);
 });
 
-test('custom root mode never appends v1 and non-gpt image choices only preserve the selected historical ID', () => {
+test('custom root mode never appends v1 and image choices preserve configured and historical aliases', () => {
   assert.equal(compatibleEndpointPreview('https://example.test/gateway/', 'custom').generate, 'https://example.test/gateway/images/generations');
   assert.equal(compatibleEndpointPreview('https://example.test/v1/v1/', 'custom').base, 'https://example.test/v1/v1');
   assert.equal(compatibleEndpointPreview('https://example.test/', 'custom').responses, 'https://example.test/responses');
   assert.equal(compatibleEndpointPreview('https://key:secret@example.test/', 'custom'), undefined);
   assert.deepEqual(parseProfileModels(' alpha, beta\r\nalpha， gamma\n'), ['alpha', 'beta', 'gamma']);
   assert.deepEqual(parseProfileModels(' \n,'), []);
-  assert.deepEqual(profileModelChoices({ model: 'default-id', models: ['alpha', 'beta', 'alpha'] }, 'historical-id', ['legacy']), ['historical-id']);
-  assert.deepEqual(profileModelChoices({ model: 'default-id', models: [] }, '', ['legacy']), []);
+  assert.deepEqual(profileModelChoices({ model: 'default-id', models: ['alpha', 'beta', 'alpha'] }, 'historical-id', ['legacy']), ['historical-id', 'default-id', 'alpha', 'beta']);
+  assert.deepEqual(profileModelChoices({ model: 'default-id', models: [] }, '', ['legacy']), ['default-id', 'legacy']);
   for (const partial_images of [-1, 4, 1.5, NaN]) assert.equal(profileValidation({ display_name: 'API', base_url: 'https://example.test', timeout: 300, partial_images }), 'partial_images');
   for (const models of [Array.from({ length: 101 }, (_, index) => `model-${index}`), ['a'.repeat(201)], ['model\tname']]) assert.equal(profileValidation({ display_name: 'API', base_url: 'https://example.test', timeout: 300, models }), 'models');
+});
+
+test('image choices follow output capabilities across protocols, not model families', () => {
+  const models = [
+    {id:'flux-image',image_generation:true,text_generation:false},
+    {id:'dual-output',image_generation:true,text_generation:true},
+    {id:'text-only',image_generation:null,text_generation:true},
+    {id:'not-image',image_generation:false,text_generation:null},
+    {id:'custom-alias',image_generation:null,text_generation:null},
+    {id:'gpt-image-not-supported',image_generation:false},
+  ];
+  for (const protocol of ['openai_compatible','gemini_native','seedream_native']) {
+    const profile={protocol,model:'text-only',models:['custom-alias','not-image'],model_catalog:{models}};
+    assert.deepEqual(profileModelChoices(profile,'historical-manual'),['historical-manual','flux-image','dual-output','custom-alias']);
+    assert.deepEqual(profileModelChoices(profile,'not-image'),['not-image','flux-image','dual-output','custom-alias']);
+    assert.equal(profileModelChoices(profile,'').includes('text-only'),false);
+    assert.deepEqual(profile.model_catalog.models,models,'candidate selection does not mutate catalog declarations');
+  }
+  assert.deepEqual(profileModelChoices({protocol:'seedream_native',model:'custom-endpoint',image_capabilities:{known_models:['doc-reference']}},''),['custom-endpoint','doc-reference']);
 });
 
 async function componentJs(path) {

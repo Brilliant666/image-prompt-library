@@ -126,15 +126,67 @@ test('model search lets composition keys pass and arrows navigate options only a
   assert.equal(prevented, 2, 'catalog search must not submit the enclosing settings form');
 });
 
-test('image recommendation mode reuses Gallery filtering and preserves custom selections without changing full text catalogs', async t => {
-  const h = picker(t, { imageRecommendations: true }); await h.flush(); h.open(); await h.flush();
-  assert.deepEqual(h.find('button', props => props.role === 'option').map(props => text({ props }).replace('能力未声明', '')), ['historical-manual-model', 'gpt-image-a']);
-  h.update({ value: 'new-custom-image-model' }); await h.flush();
-  assert.ok(h.text().includes('new-custom-image-model'));
-  assert.ok(!h.text().includes('reasoning-a'));
+test('image picker uses declared capabilities across model brands and keeps unknown/manual choices', async t => {
+  const models = {
+    ...catalog(),
+    models: [
+      { id: 'text-only', image_generation: null, text_generation: true },
+      { id: 'gpt-image-disabled', image_generation: false },
+      { id: 'vendor-image-output', image_generation: true, text_generation: false },
+      { id: 'vendor-multimodal-output', image_generation: true, text_generation: true },
+      { id: 'endpoint-alias', image_generation: null, text_generation: null },
+      { id: 'gpt-image-unknown', image_generation: null },
+    ],
+  };
+  const initialProfile = { ...profile('a', models), model: 'vendor-image-output', models: ['manual-endpoint'] };
+  const h = picker(t, { imageRecommendations: true, profile: initialProfile });
+  h.cache.set('a', models);
+  h.notify('a');
+  await h.flush(); h.open(); await h.flush();
+  const ids = () => h.find('button', props => props.role === 'option').map(props => props.children[0].props.children[0]);
+  assert.deepEqual(new Set(ids()), new Set(['historical-manual-model', 'vendor-image-output', 'vendor-multimodal-output', 'manual-endpoint', 'endpoint-alias', 'gpt-image-unknown']));
+  assert.equal(ids()[0], 'historical-manual-model', 'historical/custom selection remains editable');
+  assert.ok(ids().indexOf('vendor-image-output') < ids().indexOf('endpoint-alias'));
+  assert.ok(ids().indexOf('vendor-multimodal-output') < ids().indexOf('endpoint-alias'));
+  assert.ok(h.text().includes('图片能力待确认'));
+  assert.equal(h.find('input', props => props.maxLength)[0].value, 'historical-manual-model', 'catalog loading never chooses the first candidate');
   assert.equal(h.calls.filter(([kind]) => kind === 'refresh').length, 0);
+  assert.deepEqual(h.values, []);
+
+  h.update({ value: 'gpt-image-disabled' }); await h.flush();
+  assert.equal(ids()[0], 'gpt-image-disabled', 'a selected non-image historical ID is retained');
+  h.update({ value: 'new-custom-image-model' }); await h.flush();
+  assert.equal(ids()[0], 'new-custom-image-model');
+  assert.ok(!ids().includes('gpt-image-disabled'), 'unselected non-image models are not recommended');
+
   h.update({ imageRecommendations: false }); await h.flush();
-  assert.ok(h.text().includes('reasoning-a'), 'native and text pickers retain the complete cached model catalog');
+  assert.deepEqual(ids(), models.models.map(model => model.id), 'native and text pickers retain the complete cached model catalog');
+  assert.equal(h.find('input', props => props.maxLength)[0].value, 'new-custom-image-model');
+  assert.equal(h.calls.filter(([kind]) => kind === 'refresh').length, 0);
+});
+
+test('image picker searches and selects non-GPT image models without refresh, generation or config writes', async t => {
+  const models = { ...catalog(), models: [{ id: 'vendor/portrait-v2', image_generation: true }, { id: 'endpoint-alias', image_generation: null }] };
+  const savedProfile = { ...profile('a', models), model: 'vendor/portrait-v2' };
+  const originalProfile = structuredClone(savedProfile);
+  const h = picker(t, { imageRecommendations: true, profile: savedProfile });
+  h.cache.set('a', models);
+  h.notify('a');
+  await h.flush(); h.open(); await h.flush();
+  h.find('input', props => props['aria-label'] === '搜索模型清单')[0].onChange({ target: { value: 'portrait' } });
+  await h.flush();
+  const options = h.find('button', props => props.role === 'option');
+  assert.equal(options.length, 1);
+  assert.ok(text({ props: options[0] }).includes('vendor/portrait-v2'));
+  const mainInput = h.find('input', props => props.maxLength)[0];
+  mainInput.ref.current = { focus() {} };
+  options[0].onClick(); await h.flush();
+  assert.deepEqual(h.values, ['vendor/portrait-v2']);
+  assert.equal(h.find('input', props => props.maxLength)[0].value, 'vendor/portrait-v2');
+  assert.ok(h.calls.every(([kind, id]) => kind === 'read' && id === 'a'), 'mock rejects any API outside local catalog reads and explicit refresh');
+  assert.equal(h.calls.length, 2, 'opening, searching and selecting add no API calls beyond the initial and notification cache reads');
+  assert.deepEqual(savedProfile, originalProfile, 'capability metadata and saved profile stay unchanged');
+  assert.equal(h.events.length, 1, 'selecting a draft model does not save or broadcast beyond the incoming cache notification');
 });
 
 function imageOptions(t, overrides = {}) {
@@ -261,6 +313,7 @@ const settings = (t, config = agentConfig, status = {}) => {
 
 test('actual Agent settings binds text and image candidates separately and changing profile never overwrites models or other unsaved settings', async t => {
   const h = settings(t); await h.flush(); assert.deepEqual(h.fields().map(field => field.profile.id), ['a', 'b']);
+  assert.deepEqual(h.fields().map(field => Boolean(field.imageRecommendations)), [false,true]);
   h.fields()[0].onChange('unsaved-model'); await h.flush();
   const imageProfile = h.find('label').find(props => text({ props }).includes('图片模型 API 配置'));
   nodes({ props: imageProfile }).find(node => node.type === 'select').props.onChange({ target: { value: 'a' } }); await h.flush();
@@ -273,7 +326,14 @@ test('actual Agent settings binds text and image candidates separately and chang
 test('current workspace API mode never displays the unrelated fixed profile catalog or sends discovery requests', async t => {
   const h = settings(t, { ...agentConfig, apiConfigMode: 'off' }); await h.flush();
   assert.deepEqual(h.fields().map(field => field.profile), [undefined, undefined]);
+  assert.ok(h.fields().every(field => !field.imageRecommendations));
   assert.ok(h.fields().every(field => field.unavailableHint.includes('工作区')));
+  assert.deepEqual(h.saves, []);
+});
+
+test('Native Agent settings keep both Responses model catalogs unrestricted', async t => {
+  const h = settings(t, { ...agentConfig, apiConfigMode: 'native' }); await h.flush();
+  assert.ok(h.fields().every(field => !field.imageRecommendations));
   assert.deepEqual(h.saves, []);
 });
 

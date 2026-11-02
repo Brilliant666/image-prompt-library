@@ -1,4 +1,4 @@
-import type { ApiProtocol, OpenAICompatibleProfile } from '../types';
+import type { ApiProtocol, CatalogModel, OpenAICompatibleProfile } from '../types';
 
 /** Mirrors the backend Base URL contract; never includes URL credentials. */
 export function compatibleEndpointPreview(value: string, mode: 'versioned' | 'custom' = 'versioned', protocol:ApiProtocol='openai_compatible', model='MODEL_ID'): { base: string; generate: string; edit: string; responses: string } | undefined {
@@ -40,23 +40,25 @@ export function isGptImageModelName(id: string): boolean {
   return /(?:^|[/:_\s-])gpt[-_]image(?:[-_]|$)/i.test(id);
 }
 
-/** Recommend images without losing a selected historical/custom model. */
+/** Output declarations, not names or visual-input support, guide image choices. */
+export function imageModelCapability(model?: Pick<CatalogModel, 'image_generation' | 'text_generation'>): 'image' | 'unknown' | 'non-image' {
+  if (model?.image_generation === true) return 'image';
+  if (model?.image_generation === false || model?.text_generation === true) return 'non-image';
+  return 'unknown';
+}
+
+/** Recommend declared image outputs, retain unknown aliases and selected history. */
 export function profileModelChoices(profile: Pick<OpenAICompatibleProfile, 'models' | 'model' | 'model_catalog' | 'protocol' | 'image_capabilities'> | undefined, selected: string, fallback: string[] = []): string[] {
   const configured = profile?.models?.length ? profile.models : fallback;
-  if (profile?.protocol && profile.protocol !== 'openai_compatible') return [...new Set([
-    selected,profile.model,...configured,...(profile.model_catalog?.models||[]).filter(entry=>entry.image_generation!==false).map(entry=>entry.id),
-    ...(profile.image_capabilities?.known_models||[]),
-  ].map(value=>value.trim()).filter(Boolean))];
   const catalog = profile?.model_catalog?.models || [];
-  const byId = new Map(catalog.map(model => [model.id, model]));
-  const recommends = (id: string) => {
-    const detected = byId.get(id.trim());
-    if (detected?.image_generation === false) return false;
-    return isGptImageModelName(id);
-  };
-  const defaultModel = profile?.model?.trim() || '';
-  const discovered = catalog.filter(model => recommends(model.id)).sort((a,b) => Number(b.image_generation === true) - Number(a.image_generation === true));
-  return [...new Set([selected, recommends(defaultModel) ? defaultModel : '', ...configured.filter(recommends), ...discovered.map(model => model.id)].map(model => model.trim()).filter(Boolean))];
+  const byId = new Map(catalog.map(model => [model.id.trim(), model]));
+  const nativeReferences = profile?.protocol && profile.protocol !== 'openai_compatible' ? profile.image_capabilities?.known_models || [] : [];
+  const candidates = [...new Set([profile?.model || '', ...configured, ...catalog.map(model => model.id), ...nativeReferences].map(id => id.trim()).filter(Boolean))]
+    .filter(id => imageModelCapability(byId.get(id)) !== 'non-image')
+    .sort((a,b) => Number(imageModelCapability(byId.get(b)) === 'image') - Number(imageModelCapability(byId.get(a)) === 'image'));
+  // Preserve intentional/manual selections even if absent or explicitly excluded.
+  // This is a UI list; it does not change the connection protocol or model value.
+  return [...new Set([selected.trim(), ...candidates].filter(Boolean))];
 }
 
 /** Neutral name for connection-level callers; the legacy export is retained. */
