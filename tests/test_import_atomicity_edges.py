@@ -43,7 +43,7 @@ def no_formal_rows(repo, draft):
 @pytest.mark.parametrize("kind", ["unsupported", "pixel_limit", "file_limit", "empty"])
 def test_actual_format_pixel_file_limits_are_preflight_failures(tmp_path, kind):
     if kind == "unsupported": data = png(fmt="BMP")
-    elif kind == "pixel_limit": data = png(size=(4001, 4000))
+    elif kind == "pixel_limit": data = png(size=(5001, 4000))
     elif kind == "empty": data = b""
     else: data = png()
     repo, path, draft = fixture(tmp_path, data)

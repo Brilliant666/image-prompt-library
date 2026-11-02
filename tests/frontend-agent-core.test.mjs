@@ -1266,7 +1266,7 @@ test('different image calls retain individual result cards while one result area
   assert.equal(h.submissions.length, 0);
 });
 
-test('actual result area counts running jobs once and removes successful image tool bars without hiding non-image tools', async t => {
+test('actual result area counts running jobs once and removes completed image and internal tool bars', async t => {
   const data = displaySnapshot('waiting_for_jobs'), round = data.conversation.rounds[0]; round.status = 'running';
   round.outputTaskIds = ['ok', 'pending'];
   round.responseOutput = [{ type: 'function_call', call_id: 'skill', name: 'read_agent_skill', status: 'completed' },
@@ -1278,14 +1278,43 @@ test('actual result area counts running jobs once and removes successful image t
   assert.equal(imageProgress(h).length, 1); assert.match(JSON.stringify(imageProgress(h)), /正在生成 2 张 · 已完成 1 张/);
   assert.doesNotMatch(JSON.stringify(imageProgress(h)), /10|%|批量生成/);
   assert.equal(h.find('p', p => p.className === 'agent-round-outcome').length, 0);
-  assert.equal(h.find('div', p => p.className === 'agent-tool-status').length, 1);
-  assert.match(JSON.stringify(h.find('div', p => p.className === 'agent-tool-status')), /读取创作技能/);
+  assert.equal(h.find('div', p => p.className === 'agent-tool-status').length, 0);
   const complete = { ...structuredClone(h.snapshot), ...structuredClone(data) }; complete.revision = 20; complete.request.state = 'completed'; complete.conversation.rounds[0].status = 'done'; complete.jobs[1].status = 'succeeded'; complete.jobs[1].result_path = '/second.png';
   h.watchers[0].next(complete); await h.flush();
   assert.equal(imageProgress(h).length, 0); assert.equal(h.find('p', p => p.className === 'agent-round-outcome').length, 0);
-  assert.equal(h.find('div', p => p.className === 'agent-tool-status').length, 1);
+  assert.equal(h.find('div', p => p.className === 'agent-tool-status').length, 0);
   assert.equal(h.resultCard(0).some(node => node.props?.['aria-label'] === '复制图片'), true);
   assert.equal(h.resultCard(1).some(node => node.props?.['aria-label'] === '复制图片'), true);
+  assert.deepEqual(savedDraft(h), draft); assert.equal(h.submissions.length, 0);
+});
+
+test('production workspace hides successful internal steps while retaining search and unchanged drafts', async t => {
+  const data = displaySnapshot('completed'), round = data.conversation.rounds[0];
+  round.responseOutput = ['read_task_history', 'update_task_context', 'select_image_references', 'read_agent_skill'].flatMap((name, i) => [
+    { type: 'function_call', call_id: `internal-${i}`, name, status: 'completed' },
+    { type: 'function_call_output', call_id: `internal-${i}`, output: '{}' },
+  ]);
+  round.responseOutput.push({ type: 'web_search_call', id: 'search', status: 'completed' });
+  const h = harness(t, { snapshot: data }); await h.flush(); const draft = savedDraft(h);
+  const bars = h.find('div', p => p.className === 'agent-tool-status');
+  assert.equal(bars.length, 1); assert.match(JSON.stringify(bars), /网络搜索/);
+  assert.doesNotMatch(JSON.stringify(bars), /执行工具|读取创作技能|读取相关对话|整理创作要求|确认参考图片/);
+  assert.deepEqual(savedDraft(h), draft); assert.equal(h.submissions.length, 0);
+});
+
+test('production workspace keeps internal progress readable and preserves failed or uncertain execution', async t => {
+  const data = displaySnapshot('running'), round = data.conversation.rounds[0]; round.status = 'running';
+  round.responseOutput = [{ type: 'function_call', call_id: 'history', name: 'read_task_history', status: 'completed' }];
+  const h = harness(t, { snapshot: data }); await h.flush(); const draft = savedDraft(h);
+  assert.match(JSON.stringify(h.find('p', p => p.className === 'agent-live-progress')), /读取相关对话/);
+  assert.equal(h.find('div', p => p.className === 'agent-tool-status').length, 0);
+  for (const [output, label] of [[JSON.stringify({ error: 'Missing source.' }), '执行失败'], ['{unfinished', '结果未知']]) {
+    const next = { ...structuredClone(h.snapshot), ...structuredClone(data) }; next.revision = label === '执行失败' ? 30 : 31;
+    next.conversation.rounds[0].responseOutput.push({ type: 'function_call_output', call_id: 'history', output });
+    h.watchers[0].next(next); await h.flush();
+    const bars = h.find('div', p => p.className === 'agent-tool-status');
+    assert.equal(bars.length, 1); assert.match(JSON.stringify(bars), new RegExp(label));
+  }
   assert.deepEqual(savedDraft(h), draft); assert.equal(h.submissions.length, 0);
 });
 

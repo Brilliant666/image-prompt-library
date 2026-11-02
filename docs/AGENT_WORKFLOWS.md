@@ -4,8 +4,9 @@ The Agent is an API-based assistant for visual analysis, prompt writing, reverse
 
 ## Using the workflows
 
-Agent references accept PNG, JPEG and WebP, up to 30 MiB and 16,000,000 pixels
-per image. These are separate limits: a small JPEG file may still exceed the
+Agent references accept PNG, JPEG and WebP, up to 30 MiB and 20,000,000 pixels
+per image. The bounded pixel budget also covers supported native-provider 4K
+results when they are reused as references; original files are not resized. These are separate limits: a small JPEG file may still exceed the
 pixel limit. Upload errors distinguish size, resolution, unsupported format and
 decode failures without changing the original file. Successful attachments and
 the current text remain available if a later file in the selection fails.

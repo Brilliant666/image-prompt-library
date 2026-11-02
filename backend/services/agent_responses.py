@@ -16,10 +16,16 @@ MAX_RESPONSE_BYTES = 80 * 1024 * 1024
 
 
 @contextmanager
-def response_stream(client, *args, is_complete, **kwargs):
+def response_stream(client, *args, is_complete, text_provider=None, **kwargs):
     """A validated terminal receipt outranks subsequent transport teardown."""
     try:
-        with client.stream(*args, **kwargs) as response:
+        if text_provider is not None:
+            if len(args) != 2 or args[0] != 'POST':
+                raise ValueError('Responses providers require one explicit POST endpoint')
+            stream = text_provider.complete(client, args[1], **kwargs)
+        else:
+            stream = client.stream(*args, **kwargs)
+        with stream as response:
             yield response
     except httpx.TransportError:
         if not is_complete():

@@ -1,6 +1,7 @@
 """Durable Agent conversations, frozen requests and references in the main library."""
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
@@ -45,7 +46,8 @@ def fingerprint(value):
 
 
 def profile_digest(profile):
-    return fingerprint({**{k: v for k, v in profile.items() if k not in NETWORK_DEFAULTS},
+    return fingerprint({**{k: v for k, v in profile.items() if k not in NETWORK_DEFAULTS
+                            and not (k == 'protocol' and v == 'openai_compatible')},
                         **network_identity(profile)})
 
 
@@ -58,7 +60,10 @@ class AgentError(ValueError):
 
 
 def public_profile_digest(profile):
-    return fingerprint({k: profile.get(k) for k in ("id", "base_url", "model", "timeout")})
+    values = {k: profile.get(k) for k in ("id", "base_url", "model", "timeout")}
+    if profile.get('protocol', 'openai_compatible') != 'openai_compatible':
+        values['protocol'] = profile['protocol']
+    return fingerprint(values)
 
 
 def safe_model_label(value, secrets=()):
@@ -692,6 +697,8 @@ class AgentRepository:
             text = store.read(text_id)
         except (ValueError, OpenAICompatibleError):
             raise AgentError("configuration_incomplete", "所选文本 API 配置不存在。", 400) from None
+        if text.get('protocol', 'openai_compatible') != 'openai_compatible':
+            raise AgentError('capability_unsupported', 'Agent 文字主控需要 OpenAI Responses 连接；原生 Gemini/Seedream 连接仅用于 Hybrid 图片。', 400)
         if not text["api_key"] or not text["base_url"]:
             raise AgentError("configuration_incomplete", "文本 API 配置不完整。", 400)
         auth = body.authorization
@@ -773,7 +780,13 @@ class AgentRepository:
             rounds = self._rounds(conn, cid)
         frozen = self.resolve_config(body)
         try:
-            normalize_image_parameters(body.params.model_dump(exclude_none=True), default_model=frozen["imageModel"] or "native-image-generation")
+            if frozen['apiConfigMode'] == 'hybrid' and frozen['imageProfileId']:
+                from backend.services.providers.profiles import normalize_profile_parameters
+                image_settings = OpenAICompatibleConfig(library_path=self.library).read(frozen['imageProfileId'])
+                normalize_profile_parameters(body.params.model_dump(exclude_none=True), image_settings,
+                                             default_model=frozen['imageModel'])
+            elif frozen['apiConfigMode'] != 'hybrid':
+                normalize_image_parameters(body.params.model_dump(exclude_none=True), default_model=frozen["imageModel"] or "native-image-generation")
         except OpenAICompatibleError as exc:
             raise AgentError("invalid_parameters", str(exc), 400) from None
         if not body.prompt.strip():
@@ -878,6 +891,24 @@ class AgentRepository:
         checked_context = task_state.current(conversation, rounds, branches.source_branch(body))
         self._check_task_revision(checked_context, body.taskRevision)
         inherited_task, inherited_context = branches.submission_seed(conversation, rounds, body, original_request)
+        manual_branch = editing.branch_key(body.parentRoundId) in json.loads(conversation['editing_tasks'])
+        explicit_locator = bool(editing._TAG.search(body.prompt) or editing._ROUND.search(body.prompt)
+                                or editing._CURRENT.search(body.prompt) or re.search(r'第\s*\d+\s*轮', body.prompt))
+        if (body.origin == 'send' and body.contextScope == 'task' and not inputs and not body.mask
+                and not explicit_locator and not manual_branch and not editing.task_boundary(body.prompt)
+                and not (inherited_context or {}).get('targetExplicit')
+                and not (inherited_context or {}).get('pendingUserTask')):
+            if inherited_context:
+                # Resolve existing, locally proven role receipts against their
+                # original binding before advancing to its derived result.
+                inherited_context = task_state.reconcile(copy.deepcopy(inherited_context),
+                    history=self._task_history_role_evidence(history, inherited_context))
+            inherited_task = editing.working_result_task(self, inherited_task, inherited_context, history)
+            if inherited_context and inherited_task and inherited_task.get('workingResult'):
+                # Freeze the chosen pre-answer working binding, not the source
+                # answer's later model updates, into edit/regenerate seeds too.
+                inherited_context = dict(inherited_context, target=inherited_task.get('target'),
+                                         auxiliaries=inherited_task.get('auxiliaries', []))
         frozen_task_input = branches.input_state(inherited_task, inherited_context)
         pending_selection = bool(inherited_context and inherited_context.get('pendingUserTask') and inherited_task)
         if pending_selection or inherited_context and inherited_context.get('targetExplicit') and inputs and not editing.task_boundary(body.prompt):

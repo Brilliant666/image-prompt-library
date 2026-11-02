@@ -59,6 +59,66 @@ def references(history, inputs, current_index):
     return result
 
 
+def working_result_task(repo, previous, context, history):
+    """Advance a new automatic request to a proven result in this task's path.
+
+    This is a working image binding, not user acceptance or authorization.
+    Never search a different task, skip a failed image turn, or choose the
+    first picture of a batch. The caller protects explicit/manual selections
+    and freezes this pre-answer binding for subsequent edit/regenerate forks.
+    """
+    from backend.db import connect
+    if not context or context.get('taskType') not in {'image_edit', 'image_generation'}:
+        return previous
+    # Only the immediate predecessor can introduce a new working result. Once
+    # bound, it carries forward in task state across text-only turns. Searching
+    # past those turns could undo a newer attachment or conversational choice.
+    for row in history[-1:]:
+        if (row.get('taskContext') or {}).get('taskId') != context.get('taskId'):
+            return previous
+        job_ids = list(dict.fromkeys(all_output_ids(row)))
+        image_call = any(item.get('type') == 'image_generation_call' or
+                         item.get('type') == 'function_call' and item.get('name') in
+                         {'generate_image', 'generate_image_batch'} for item in row.get('responseOutput', []))
+        if not job_ids and not image_call:
+            continue
+        if row.get('status') != 'done' or not job_ids:
+            return previous
+        with connect(repo.library) as conn:
+            request = conn.execute('SELECT state,stop_requested,upstream_outcome FROM agent_requests WHERE id=?',
+                                   (row['requestId'],)).fetchone()
+        if not request or request['state'] != 'completed' or request['stop_requested'] or request['upstream_outcome'] != 'known':
+            return previous
+        assets = row.get('frozenOutputImages', [])
+        if len(assets) != len(job_ids) or any(not aid for aid in assets):
+            return previous
+        try:
+            jobs = [repo.jobs.get_job(jid) for jid in job_ids]
+        except KeyError:
+            return previous
+        if any(job.status not in {'succeeded', 'accepted'} or not job.result_path for job in jobs):
+            return previous
+        # resolve_frozen has already checked the bytes. Recheck current job
+        # truth as well: a retained frozen asset is not proof of current success.
+        if any(repo.image('output_' + job.id)['status'] != 'available' for job in jobs):
+            return previous
+        selections = [asset_selection(repo, aid) for aid in assets]
+        if any(image['source'] != {'kind': 'job', 'jobId': jid} for image, jid in zip(selections, job_ids)):
+            return previous
+        value = copy.deepcopy(previous) if previous else {
+            'version': 1, 'requirements': '', 'constraints': [], 'workflow': 'auto', 'auxiliaries': []}
+        if not value.get('originalTarget') and value.get('target'):
+            value['originalTarget'] = copy.deepcopy(value['target'])
+        value.update(target=selections[0] if len(selections) == 1 else None,
+                     candidates=selections if len(selections) > 1 else [],
+                     needsTargetSelection=len(selections) != 1, continuesTask=True,
+                     workingResult={'roundId': row['id'], 'roundIndex': row['index'], 'jobIds': job_ids})
+        selected = {image['assetId'] for image in selections}
+        value['auxiliaries'] = [image for image in value.get('auxiliaries', []) if image['assetId'] not in selected]
+        return value
+    return previous
+
+
 def infer_task(repo, previous, *, conversation_id, parent_id, prompt, inputs, history, config):
     """Resolve concrete selectors first; unknown multi-image roles stay unknown.
 

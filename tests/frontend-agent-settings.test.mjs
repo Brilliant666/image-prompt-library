@@ -9,6 +9,9 @@ const profileSettingsCode = ts.transpileModule(await readFile(new URL('../fronte
 const profileSettingsModule = { exports: {} };
 new Function('module', 'exports', profileSettingsCode)(profileSettingsModule, profileSettingsModule.exports);
 const imageOptionsCode = ts.transpileModule(await readFile(new URL('../frontend/src/components/agent/AgentImageOptions.tsx', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
+const compatibleCode = ts.transpileModule(await readFile(new URL('../frontend/src/utils/compatibleRecipe.ts', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+const compatibleModule = { exports: {} };
+new Function('module', 'exports', compatibleCode)(compatibleModule, compatibleModule.exports);
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const nodes = node => !node || typeof node !== 'object' ? [] : [node, ...[node.props?.children].flat(Infinity).flatMap(nodes)];
 const text = node => node == null || typeof node === 'boolean' ? '' : typeof node !== 'object' ? String(node) : [node.props?.children].flat(Infinity).map(text).join('');
@@ -28,7 +31,7 @@ function harness(t, code, dependencies, initialProps, eventTarget = new EventTar
   };
   const jsx = (type, props) => ({ type, props });
   const window = { addEventListener: (...args) => eventTarget.addEventListener(...args), removeEventListener: (...args) => eventTarget.removeEventListener(...args), dispatchEvent(event) { events.push(event); return eventTarget.dispatchEvent(event); } };
-  const deps = { react: hooks, 'react/jsx-runtime': { jsx, jsxs: jsx }, 'lucide-react': new Proxy({}, { get: (_, key) => key }), './AgentModelPicker.css': {}, '../../utils/profileSettings': profileSettingsModule.exports, ...dependencies };
+  const deps = { react: hooks, 'react/jsx-runtime': { jsx, jsxs: jsx }, 'lucide-react': new Proxy({}, { get: (_, key) => key }), './AgentModelPicker.css': {}, '../../utils/profileSettings': profileSettingsModule.exports, '../../utils/compatibleRecipe': compatibleModule.exports, '../NativeImageParameters': { __esModule: true, default: 'NativeImageParameters' }, ...dependencies };
   const module = { exports: {} };
   const document = { activeElement: null };
   new Function('require', 'module', 'exports', 'window', 'document', code)(name => { assert.ok(name in deps, `Unmocked dependency: ${name}`); return deps[name]; }, module, module.exports, window, document);

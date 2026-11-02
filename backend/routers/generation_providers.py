@@ -1,5 +1,9 @@
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
+from starlette.responses import JSONResponse
+import json
+from backend.services.api_connections import ApiConnectionProfiles, ConnectionDraftError, MAX_DRAFT_BYTES, discover_connection_draft
 from backend.services.openai_compatible import OpenAICompatibleApiKeyRequired, OpenAICompatibleConfig, OpenAICompatibleError, ModelCatalogProfileNotFound
 
 from backend.services.openai_codex_native import (
@@ -73,6 +77,28 @@ def list_generation_providers(request: Request):
         GrokOAuthAuthStore().status(),
         OpenAICompatibleConfig(library_path=request.app.state.library_path).status(),
     ]
+
+
+@router.post('/api-connections/models/preview')
+async def preview_api_connection_models(request: Request):
+    # Manual bounded parsing avoids framework errors that echo submitted secrets.
+    try:
+        raw = bytearray()
+        async for chunk in request.stream():
+            raw.extend(chunk)
+            if len(raw) > MAX_DRAFT_BYTES:
+                raise ConnectionDraftError()
+        payload = json.loads(raw)
+        store = ApiConnectionProfiles(library_path=request.app.state.library_path)
+        result = await run_in_threadpool(discover_connection_draft, store, payload)
+        return JSONResponse(result, headers={'Cache-Control': 'no-store'})
+    except ConnectionDraftError as exc:
+        return JSONResponse({'detail': {'code': exc.code, 'message': str(exc)}},
+                            status_code=429 if exc.code == 'busy' else 422,
+                            headers={'Cache-Control': 'no-store'})
+    except (ValueError, TypeError, OSError, RecursionError, OpenAICompatibleError):
+        return JSONResponse({'detail': {'code': 'invalid_draft', 'message': 'Invalid connection draft.'}},
+                            status_code=400, headers={'Cache-Control': 'no-store'})
 
 
 @router.get("/openai-compatible/config")

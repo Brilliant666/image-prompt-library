@@ -32,6 +32,7 @@ from backend.services.agent_protocol import function_tool, native_image_paramete
 from backend.services.agent_context_pipeline import (
     build_input, refs_for_request, history_items, skill_context_items, validated_skill_tool_outputs, prepare_context,
 )
+from backend.services.providers.registry import text_provider_for_profile
 from backend.services import agent_execution_timing as timing
 from backend.services import agent_editing_task as editing
 from backend.services.agent_diagnostics import safe_diagnostics, network_configuration_diagnostics
@@ -443,7 +444,7 @@ def call_responses(repo, request_id, step, refs, *, body_override=None, native_c
         except Exception:
             repo.update(request_id, outcome='known')
             raise
-        with response_stream(client, "POST", profile["base_url"].rstrip("/") + "/responses", is_complete=lambda: completed is not None,
+        with response_stream(client, "POST", profile["base_url"].rstrip("/") + "/responses", is_complete=lambda: completed is not None, text_provider=text_provider_for_profile(profile),
                            headers={"Authorization": "Bearer " + secret, "Content-Type": "application/json"}, json=body,
                            extensions={"trace": measured.transport.trace}) as response:
             measured.headers()
@@ -907,7 +908,8 @@ def fail_unstarted_agent_job(repo, job_id, message):
 
 def run_compatible_agent_job(library, job_id):
     """Resolve credentials once per dispatch; defaults cannot redirect this job."""
-    from backend.services.openai_compatible import OpenAICompatibleConfig, OpenAICompatibleProvider
+    from backend.services.openai_compatible import OpenAICompatibleConfig
+    from backend.services.providers.registry import image_provider_for_profile
     repo = AgentRepository(library)
     job = repo.jobs.get_job(job_id)
     link = job.metadata['agent']
@@ -930,9 +932,9 @@ def run_compatible_agent_job(library, job_id):
         with _lock:
             _clients[key] = client
         try:
-            provider_class = OpenAICompatibleProvider
+            provider_class = type(image_provider_for_profile(profile))
             if link.get('executionKind') == 'prompt_execution':
-                class RecipeProvider(OpenAICompatibleProvider):
+                class RecipeProvider(provider_class):
                     def _input_images(self, selected_job, library_path):
                         images = super()._input_images(selected_job, library_path)
                         verify_job_recipe(repo, check_active(repo, request_id), selected_job,
@@ -1009,7 +1011,7 @@ class NativeAgentImageProvider:
                 from backend.services.agent_recipe_execution import record_recipe_dispatch
                 record_recipe_dispatch(library, job)
             # No image is staged until a successful final response is validated.
-            with response_stream(client, "POST", profile["base_url"].rstrip("/") + "/responses", is_complete=lambda: payload is not None,
+            with response_stream(client, "POST", profile["base_url"].rstrip("/") + "/responses", is_complete=lambda: payload is not None, text_provider=text_provider_for_profile(profile),
                                  headers={"Authorization": "Bearer " + profile["api_key"]}, json=body) as response:
                 if not response.is_success:
                     raise AgentError("upstream_error", f"原生图片接口返回 HTTP {response.status_code}。",

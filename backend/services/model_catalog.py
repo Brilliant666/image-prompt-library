@@ -41,6 +41,8 @@ def empty_catalog():
 def connection_fingerprint(settings, normalized_root):
     # The digest is private cache metadata, never a credential or a public field.
     value = [normalized_root, settings.get("base_url_mode", "versioned"), settings.get("api_key", "")]
+    if settings.get('protocol', 'openai_compatible') != 'openai_compatible':
+        value.append({'protocol': settings['protocol']})
     network = network_identity(settings)
     if network:
         value.append(network)
@@ -72,7 +74,19 @@ def _image_generation(entry):
     return next(iter(claims)) if len(claims) == 1 else None
 
 
-def parse_models(payload, secret=""):
+def _text_output(entry):
+    claims = set()
+    caps = entry.get('capabilities')
+    if isinstance(caps, dict) and type(caps.get('text_generation')) is bool:
+        claims.add(caps['text_generation'])
+    for source in (entry, caps):
+        modalities = source.get('output_modalities') if isinstance(source, dict) else None
+        if isinstance(modalities, list) and modalities and all(isinstance(item, str) for item in modalities):
+            claims.add('text' in [item.lower() for item in modalities])
+    return next(iter(claims)) if len(claims) == 1 else None
+
+
+def parse_models(payload, secret="", *, include_metadata=False):
     if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
         raise ModelCatalogError("invalid")
     entries = payload["data"]
@@ -82,20 +96,29 @@ def parse_models(payload, secret=""):
         raise ModelCatalogError("empty")
     models = {}
     claims = {}
+    text_claims = {}
     for entry in entries:
         if not isinstance(entry, dict) or not _valid_id(entry.get("id"), secret):
             raise ModelCatalogError("invalid")
         model_id = entry["id"]
         models.setdefault(model_id, {"id": model_id, "image_generation": None})
+        text = _text_output(entry)
+        if text is not None:
+            text_claims.setdefault(model_id, set()).add(text)
         capability = _image_generation(entry)
         if capability is not None:
             claims.setdefault(model_id, set()).add(capability)
     for model_id, values in claims.items():
         models[model_id]["image_generation"] = next(iter(values)) if len(values) == 1 else None
+    if include_metadata:
+        for model_id, model in models.items():
+            values = text_claims.get(model_id, set())
+            model['text_generation'] = next(iter(values)) if len(values) == 1 else None
+            model['capability_source'] = 'api' if claims.get(model_id) or values else 'unknown'
     return list(models.values())
 
 
-def fetch_models(normalized_root, api_key, http_client=None, *, network_settings=None):
+def fetch_models(normalized_root, api_key, http_client=None, *, network_settings=None, include_metadata=False):
     """One GET only. Never follow redirects, retry, or send a generation request."""
     client = http_client
     started = time.monotonic()
@@ -124,7 +147,7 @@ def fetch_models(normalized_root, api_key, http_client=None, *, network_settings
                 payload = json.loads(b"".join(chunks))
             except (ValueError, UnicodeError, RecursionError):
                 raise ModelCatalogError("invalid") from None
-            return parse_models(payload, api_key)
+            return parse_models(payload, api_key, include_metadata=include_metadata)
     except ApiNetworkError:
         raise ModelCatalogError("network_config") from None
     except httpx.TimeoutException:
@@ -144,13 +167,13 @@ class ModelCatalogCache:
 
     def _document(self):
         if not self.path.exists():
-            return {"version": 1, "profiles": {}}
+            return {"version": 2, "profiles": {}}
         with self.path.open("rb") as stream:
             raw = stream.read(MAX_CACHE_BYTES + 1)
         if len(raw) > MAX_CACHE_BYTES:
             raise ValueError()
         document = json.loads(raw)
-        if not isinstance(document, dict) or document.get("version") != 1 or not isinstance(document.get("profiles"), dict):
+        if not isinstance(document, dict) or document.get("version") not in (1, 2) or not isinstance(document.get("profiles"), dict):
             raise ValueError()
         return document
 
@@ -189,7 +212,8 @@ class ModelCatalogCache:
         try:
             document = self._document()
         except (OSError, ValueError, TypeError, RecursionError):
-            document = {"version": 1, "profiles": {}}
+            document = {"version": 2, "profiles": {}}
+        document["version"] = 2
         # Never retain deleted profiles or prior connections in the disposable cache.
         document["profiles"] = {key: value for key, value in document["profiles"].items() if key in profile_ids}
         document["profiles"][profile_id] = {"fingerprint": fingerprint, "catalog": catalog}

@@ -24,6 +24,8 @@ from backend.services.generation_jobs import (
     sanitize_generation_parameters,
 )
 from backend.services.openai_compatible import OpenAICompatibleConfig, OpenAICompatibleError, OpenAICompatibleProvider, normalize_image_parameters
+from backend.services.providers.registry import image_provider_for_profile
+from backend.services.providers.registry import text_provider_for_profile
 from backend.services import agent_execution_timing as timing
 
 
@@ -31,7 +33,8 @@ class RetryParams(BaseModel):
     model_config = ConfigDict(extra='forbid')
     size: str
     quality: str
-    output_format: Literal['png', 'jpeg', 'webp']
+    output_format: Literal['auto', 'png', 'jpeg', 'webp']
+    provider_options: dict[str, str | int | bool] | None = None
     output_compression: int | None = Field(default=None, ge=0, le=100)
     moderation: Literal['auto', 'low'] | None = None
     background: Literal['auto', 'opaque', 'transparent'] | None = None
@@ -344,8 +347,8 @@ def run_agent_image_retry(library, job_id):
         if link.get('confirmedRecipe'):
             from backend.services.agent_recipe_execution import RecipeDispatchClient
             with create_api_client(profile, timeout=profile['timeout']) as client:
-                return OpenAICompatibleProvider(config=FrozenConfig(), http_client=RecipeDispatchClient(client, library, job)).run_job(library, job_id)
-        return OpenAICompatibleProvider(config=FrozenConfig()).run_job(library, job_id)
+                return image_provider_for_profile(profile, config=FrozenConfig(), http_client=RecipeDispatchClient(client, library, job)).run_job(library, job_id)
+        return image_provider_for_profile(profile, config=FrozenConfig()).run_job(library, job_id)
     except Exception as exc:
         # Only pre-dispatch queued failures belong to this wrapper. Never undo
         # another worker's claim or a result already durably persisted.
@@ -421,7 +424,7 @@ def _run_native_retry(library, job, profile):
                         for data, reference in zip(actual, recipe['references']))):
                     raise AgentError('reference_missing', '原配方图片已改变；未调用图片接口。', 400)
                 record_recipe_dispatch(library, job)
-            with response_stream(client, 'POST', profile['base_url'].rstrip('/') + '/responses', is_complete=lambda: payload is not None,
+            with response_stream(client, 'POST', profile['base_url'].rstrip('/') + '/responses', is_complete=lambda: payload is not None, text_provider=text_provider_for_profile(profile),
                                  headers={'Authorization': 'Bearer ' + profile['api_key']}, json=body) as response:
                 if not response.is_success:
                     raise AgentError('upstream_error', f'原生图片接口返回 HTTP {response.status_code}。', diagnostics=safe_http_failure(response))

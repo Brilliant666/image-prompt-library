@@ -207,7 +207,11 @@ def test_old_executed_selection_receipt_lazily_resolves_only_matching_role_depen
     assert not any(dep['reason'] == 'target_changed_requires_prior_evidence' for dep in state['historyDependencies'])
     assert not state['unresolvedItems']
     assert state['historyDependencies']
-    assert set(pixels(wires[-1])) == {repo.data_url(seeds['images'][1]['uploadId'])}
+    # The legacy role proof still resolves before automatic continuity advances
+    # from B to the verified result produced from B. It does not waive prose.
+    target = repo.request('continued')['round']['editingTask']['target']
+    assert target['source'] == {'kind': 'job', 'jobId': old['outputTaskIds'][0]}
+    assert set(pixels(wires[-1])) == {repo.data_url(target['assetId'])}
     assert repo.request('b')['round'] == before
 
 

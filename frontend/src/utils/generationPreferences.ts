@@ -1,21 +1,25 @@
+import type { ApiProtocol } from '../types';
 import type { CompatibleRecipe } from './compatibleRecipe';
 
 const PREFIX = 'image-prompt-library:generation:v1:';
+const preferenceKey = (profile:string,protocol:ApiProtocol='openai_compatible') => PREFIX + profile + (protocol === 'openai_compatible' ? '' : ':' + protocol);
 type StorageLike = Pick<Storage, 'getItem' | 'setItem'>;
-export function readGenerationPreference(storage: StorageLike, profile: string, model = ''): CompatibleRecipe {
+export function readGenerationPreference(storage: StorageLike, profile: string, model = '', protocol:ApiProtocol='openai_compatible'): CompatibleRecipe {
   // Request transport stays with a restored history card, not these ordinary
   // image choices. Future tasks must continue using their API profile defaults.
-  const fallback: CompatibleRecipe = { model, quality: 'auto', size: 'auto', background: 'auto', output_format: 'png' };
+  const native=protocol!=='openai_compatible';
+  const fallback: CompatibleRecipe = { model, quality: 'auto', size: 'auto', background: 'auto', output_format: native?'auto':'png', ...(native?{protocol,provider_options:{}}:{}) };
   try {
-    const value = JSON.parse(storage.getItem(PREFIX + profile) || 'null');
+    const value = JSON.parse(storage.getItem(preferenceKey(profile,protocol)) || 'null');
     if (!value || typeof value !== 'object') return fallback;
     return {
+      ...(native?{protocol,provider_options:Object.fromEntries(Object.entries(value.provider_options||{}).filter((entry):entry is [string,string|number|boolean]=>(protocol==='gemini_native'?['aspect_ratio','resolution']:['watermark']).includes(entry[0])&&['string','number','boolean'].includes(typeof entry[1])))}:{}),
       model: typeof value.model === 'string' && value.model.trim() ? value.model : model,
       quality: ['auto', 'low', 'medium', 'high', 'xhigh', 'max'].includes(value.quality) ? value.quality : 'auto',
-      size: typeof value.size === 'string' && /^(auto|[1-9][0-9]*x[1-9][0-9]*)$/.test(value.size) ? value.size : 'auto',
+      size: typeof value.size === 'string' && (native?/^(auto|1K|1\.5K|2K|3K|4K|[1-9][0-9]*x[1-9][0-9]*)$/:/^(auto|[1-9][0-9]*x[1-9][0-9]*)$/).test(value.size) ? value.size : 'auto',
       ...(value.size_mode === 'auto4k' ? { size_mode: 'auto4k' as const } : {}),
       background: ['auto', 'opaque', 'transparent'].includes(value.background) ? value.background : 'auto',
-      output_format: ['png', 'jpeg', 'webp'].includes(value.output_format) ? value.output_format : 'png',
+      output_format: (native?['auto','png','jpeg','webp']:['png','jpeg','webp']).includes(value.output_format) ? value.output_format : fallback.output_format,
       ...(value.moderation === 'auto' || value.moderation === 'low' ? { moderation: value.moderation } : {}),
       ...(Number.isInteger(value.output_compression) && value.output_compression >= 0 && value.output_compression <= 100 ? { output_compression: value.output_compression } : {}),
     };
@@ -25,15 +29,16 @@ export function writeGenerationPreference(storage: StorageLike, profile: string,
   try {
     // Explicit allowlist: never persist credentials, prompts, images, provider URLs,
     // or a historical card's transport overrides as defaults for future requests.
-    const { model, quality, size, background, output_format, output_compression, moderation, size_mode } = recipe;
-    storage.setItem(PREFIX + profile, JSON.stringify({ model, quality, size, background, output_format, output_compression, moderation, size_mode }));
+    const { model, quality, size, background, output_format, output_compression, moderation, size_mode, protocol, provider_options } = recipe;
+    const safeOptions=protocol&&protocol!=='openai_compatible'?Object.fromEntries(Object.entries(provider_options||{}).filter(([key,value])=>(protocol==='gemini_native'?['aspect_ratio','resolution']:['watermark']).includes(key)&&['string','number','boolean'].includes(typeof value))):undefined;
+    storage.setItem(preferenceKey(profile,protocol), JSON.stringify({ model, quality, size, background, output_format, output_compression, moderation, size_mode, ...(safeOptions?{protocol,provider_options:safeOptions}:{}) }));
     storage.setItem(PREFIX + 'selected-profile', profile);
   } catch { /* Storage may be unavailable or full; generation still works. */ }
 }
 /** A saved profile model changes no other choices and never selects that profile. */
-export function updateRememberedModel(storage: StorageLike, profile: string, model: string): boolean {
+export function updateRememberedModel(storage: StorageLike, profile: string, model: string, protocol:ApiProtocol='openai_compatible'): boolean {
   try {
-    storage.setItem(PREFIX + profile, JSON.stringify({ ...readGenerationPreference(storage, profile), model }));
+    storage.setItem(preferenceKey(profile,protocol), JSON.stringify({ ...readGenerationPreference(storage, profile, '', protocol), model }));
     return true;
   } catch { return false; }
 }
@@ -42,6 +47,6 @@ export function lastGenerationProfile(storage: StorageLike): string | null {
 }
 
 /** Reset only this profile's recipe. Keep the selected profile, drafts and other APIs. */
-export function resetGenerationPreference(storage: Pick<Storage, 'removeItem'>, profile: string): boolean {
-  try { storage.removeItem(PREFIX + profile); return true; } catch { return false; }
+export function resetGenerationPreference(storage: Pick<Storage, 'removeItem'>, profile: string, protocol:ApiProtocol='openai_compatible'): boolean {
+  try { storage.removeItem(preferenceKey(profile,protocol)); return true; } catch { return false; }
 }

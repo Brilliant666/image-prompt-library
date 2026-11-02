@@ -106,7 +106,10 @@ def test_compatible_generation_set_uses_single_image_jobs_without_retry(tmp_path
     monkeypatch.setattr(generation_queue, '_active_providers', {})
     with httpx.Client(transport=httpx.MockTransport(respond)) as transport:
         provider = OpenAICompatibleProvider(config, transport)
-        monkeypatch.setattr(generation_queue, 'OpenAICompatibleProvider', lambda: provider)
+        # The registry resolves the public implementation lazily; inject the
+        # synthetic transport at that implementation boundary, not the queue's
+        # obsolete imported alias. Production dispatch and all assertions remain.
+        monkeypatch.setattr('backend.services.openai_compatible.OpenAICompatibleProvider', lambda **_: provider)
         client = TestClient(create_app(library_path=library))
         created = client.post('/api/generation-jobs/sets', json={
             'count': count,

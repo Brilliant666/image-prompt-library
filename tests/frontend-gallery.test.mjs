@@ -225,6 +225,7 @@ function inputHarness(t, overrides = {}, apiOverrides = {}, environment = {}) {
     '../../utils/galleryDraft': { readGalleryDraft: environment.readGalleryDraft || (async () => undefined), saveGalleryDraft: async value => state.persisted.push(value) },
     './ReferencePicker': { __esModule: true, default: 'ReferencePicker' },
     './SizeDialog': { __esModule: true, default: 'SizeDialog' },
+    '../NativeImageParameters': { __esModule: true, default: 'NativeImageParameters' },
     './InputBar.css': {},
   };
   const module = { exports: {} };

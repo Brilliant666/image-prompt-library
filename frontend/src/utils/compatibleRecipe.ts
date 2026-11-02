@@ -1,5 +1,5 @@
 import type { Translator } from './i18n';
-import type { GenerationJobRecord } from '../types';
+import type { ApiProtocol, GenerationJobRecord } from '../types';
 export const IMAGE25_MODELS = ['gpt-image-2.5-flare', 'gpt-image-2.5-sunburst', 'gpt-image-2.5-flare-2026-09-08', 'gpt-image-2.5-sunburst-2026-09-08'];
 // Third-party model aliases: forward verbatim without asserting official capabilities.
 export const COMPATIBLE_ENTERPRISE_MODELS = ['gpt-image-2.5-flare-enterprise', 'gpt-image-2.5-sunburst-enterprise'];
@@ -11,9 +11,9 @@ export interface CompatibleTransportOverrides {
   base_url_mode?: 'versioned' | 'custom';
   stream?: boolean;
   partial_images?: number;
-  response_format?: 'auto' | 'b64_json';
+  response_format?: 'auto' | 'b64_json' | 'url';
 }
-export interface CompatibleRecipe extends CompatibleTransportOverrides { model: string; quality: string; size: string; background: string; output_format: string; output_compression?: number; moderation?: 'auto'|'low'; size_mode?: 'auto4k'; legacyDerived?: boolean; transportLegacyDerived?: true }
+export interface CompatibleRecipe extends CompatibleTransportOverrides { protocol?: ApiProtocol; provider_options?: Record<string,string|number|boolean>; model: string; quality: string; size: string; background: string; output_format: string; output_compression?: number; moderation?: 'auto'|'low'; size_mode?: 'auto4k'; legacyDerived?: boolean; transportLegacyDerived?: true }
 const TRANSPORT_KEYS = ['base_url_mode', 'stream', 'partial_images', 'response_format'] as const;
 // Same defaults used by run_job for historical requests predating these options.
 // New composers intentionally omit these keys, allowing the selected API defaults.
@@ -26,7 +26,7 @@ export function pickCompatibleTransportOverrides(value: unknown): CompatibleTran
     ...(source.base_url_mode === 'versioned' || source.base_url_mode === 'custom' ? { base_url_mode: source.base_url_mode } : {}),
     ...(typeof source.stream === 'boolean' ? { stream: source.stream } : {}),
     ...(typeof source.partial_images === 'number' && Number.isInteger(source.partial_images) && source.partial_images >= 0 && source.partial_images <= 3 ? { partial_images: source.partial_images } : {}),
-    ...(source.response_format === 'auto' || source.response_format === 'b64_json' ? { response_format: source.response_format } : {}),
+    ...(source.response_format === 'auto' || source.response_format === 'b64_json' || source.protocol === 'seedream_native' && source.response_format === 'url' ? { response_format: source.response_format } : {}),
   };
 }
 /** An explicit connection switch returns to its current API defaults. */
@@ -46,10 +46,19 @@ export function restoreCompatibleRecipe(job: Pick<GenerationJobRecord, 'paramete
   const transport = { ...LEGACY_TRANSPORT, ...recordedTransport };
   const transportLegacyDerived = TRANSPORT_KEYS.some(key => recordedTransport[key] === undefined);
   const text = (key: string, fallback: string) => typeof values[key] === 'string' ? values[key] as string : fallback;
+  if (values.protocol === 'gemini_native' || values.protocol === 'seedream_native') {
+    const options = values.provider_options && typeof values.provider_options === 'object' && !Array.isArray(values.provider_options)
+      ? Object.fromEntries(Object.entries(values.provider_options).filter((entry): entry is [string,string|number|boolean] => ['string','number','boolean'].includes(typeof entry[1]))) : {};
+    return {...recordedTransport, protocol:values.protocol, model:text('model',job.model||''), quality:text('quality','auto'), size:text('size','auto'),
+      background:text('background','auto'), output_format:text('output_format','auto'), provider_options:options,
+      ...(typeof values.output_compression==='number'?{output_compression:values.output_compression}:{}),
+      ...(values.moderation==='auto'||values.moderation==='low'?{moderation:values.moderation}:{})};
+  }
   return { ...transport, ...(transportLegacyDerived ? { transportLegacyDerived: true as const } : {}), ...(values.size_mode === 'auto4k' ? { size_mode: 'auto4k' as const } : {}), model: text('model', job.model || ''), quality: text('quality', 'low'), size: text('size', LEGACY_RATIO_SIZES[String(values.requested_aspect_ratio || 'auto')] || 'auto'), background: text('background', 'auto'), output_format: text('output_format', 'png'), ...(typeof values.output_compression === 'number' ? { output_compression: values.output_compression } : {}), ...(values.moderation === 'auto' || values.moderation === 'low' ? {moderation:values.moderation} : {}), legacyDerived: !values.size };
 }
 export function compatibleValidation(recipe: CompatibleRecipe): Parameters<Translator>[0] | undefined {
   if (!recipe.model.trim()) return 'imageModelRequired';
+  if (recipe.protocol && recipe.protocol !== 'openai_compatible') return nativeParameterIssue(recipe) ? 'imageQualityUnsupported' : undefined;
   if (!imageQualities(recipe.model).includes(recipe.quality)) return 'imageQualityUnsupported';
   if (!['auto', 'opaque', 'transparent'].includes(recipe.background)) return 'imageBackgroundInvalid';
   if (!['png', 'jpeg', 'webp'].includes(recipe.output_format)) return 'imageFormatInvalid';
@@ -64,6 +73,13 @@ export function compatibleValidation(recipe: CompatibleRecipe): Parameters<Trans
   }
 }
 export function compatibleParameters(recipe: CompatibleRecipe) {
+  if (recipe.protocol && recipe.protocol !== 'openai_compatible') {
+    const error = nativeParameterIssue(recipe);
+    if (error) throw new Error(error);
+    return {protocol:recipe.protocol,model:recipe.model,size:recipe.size,quality:recipe.quality,
+      background:recipe.background,output_format:recipe.output_format,provider_options:{...(recipe.provider_options||{})},
+      ...pickCompatibleTransportOverrides(recipe),n:1};
+  }
   const error = compatibleValidation(recipe);
   if (error) throw new Error(error);
   if (recipe.moderation !== undefined && !['auto','low'].includes(recipe.moderation)) throw new Error('审核强度须为 auto 或 low');
@@ -71,6 +87,62 @@ export function compatibleParameters(recipe: CompatibleRecipe) {
   if (TRANSPORT_KEYS.some(key => recipe[key] !== undefined && transport[key] === undefined)) throw new Error('历史请求的传输配置无效，请重新选择 API 配置');
   return { model: recipe.model, quality: recipe.quality, size: recipe.size, background: recipe.background, output_format: recipe.output_format, ...(recipe.output_format !== 'png' && recipe.output_compression !== undefined ? { output_compression: recipe.output_compression } : {}), ...(recipe.moderation !== undefined ? {moderation:recipe.moderation} : {}), ...transport, n: 1 };
 }
+/** Defaults apply only after an explicit connection/reset choice, never on a late catalog refresh. */
+export function nativeRecipeDefaults(protocol: ApiProtocol, model=''): CompatibleRecipe {
+  if (protocol === 'openai_compatible') return {model,quality:'auto',size:'auto',background:'auto',output_format:'png'};
+  return {protocol,model,quality:'auto',size:'auto',background:'auto',output_format:'auto',provider_options:{}};
+}
+
+/** Exact documented models narrow choices; aliases stay editable and unverified. */
+export function geminiModelOptions(model: string) {
+  const all = ['auto','1:1','1:4','4:1','1:8','8:1','2:3','3:2','3:4','4:3','4:5','5:4','9:16','16:9','21:9'];
+  const standard = all.filter(value => !['1:4','4:1','1:8','8:1'].includes(value));
+  const exact = model.replace(/^models\//,'');
+  if (['gemini-2.5-flash-image','gemini-2.5-flash-image-preview'].includes(exact)) return {ratios:standard,resolutions:['auto']};
+  if (['gemini-3-pro-image','gemini-3-pro-image-preview'].includes(exact)) return {ratios:standard,resolutions:['auto','1K','2K','4K']};
+  if (exact === 'gemini-nano-banana-2.1') return {ratios:all,resolutions:['auto','1K','2K','4K']};
+  if (exact === 'gemini-3.1-flash-lite-image') return {ratios:standard,resolutions:['auto','1K']};
+  return {ratios:all,resolutions:['auto','512','1K','2K','4K']};
+}
+export function seedreamModelOptions(model: string) {
+  if (['doubao-seedream-5-0-pro-260628','doubao-seedream-5-0-flash-260915'].includes(model)) return {sizes:['auto','1K','1.5K','2K'],minPixels:921600,maxPixels:4624220};
+  if (model === 'doubao-seedream-5-0-lite-260128') return {sizes:['auto','2K','3K','4K'],minPixels:3686400,maxPixels:16777216};
+  if (model === 'doubao-seedream-4-5-251128') return {sizes:['auto','2K','4K'],minPixels:3686400,maxPixels:16777216};
+  if (model === 'doubao-seedream-4-0-250828') return {sizes:['auto','1K','2K','4K'],minPixels:921600,maxPixels:16777216};
+  return {sizes:['auto','1K','1.5K','2K','3K','4K'],minPixels:921600,maxPixels:16777216};
+}
+
+/** Presentation preflight; the backend remains authoritative and validates model-specific bounds. */
+export function nativeParameterIssue(recipe: CompatibleRecipe): string | undefined {
+  const protocol = recipe.protocol || 'openai_compatible';
+  if (protocol === 'openai_compatible') return;
+  if (!recipe.model.trim()) return '请选择完整模型 ID。';
+  const options = recipe.provider_options || {};
+  const allowed = protocol === 'gemini_native' ? ['aspect_ratio','resolution'] : ['watermark'];
+  if (Object.keys(options).some(key=>!allowed.includes(key))) return '配方包含当前原生协议不支持的厂商选项，请明确调整。';
+  if (recipe.quality !== 'auto' || !['auto',''].includes(recipe.background || '') || recipe.moderation && recipe.moderation !== 'auto'
+      || recipe.output_compression !== undefined || recipe.stream === true || (recipe.partial_images || 0) !== 0 || recipe.size_mode)
+    return '已有质量、背景、压缩或传输设置不适用于当前原生协议，请明确调整；提示词和图片不会修改。';
+  if (protocol === 'gemini_native') {
+    if (recipe.size !== 'auto' || recipe.output_format !== 'auto' || recipe.response_format && recipe.response_format !== 'auto')
+      return 'Gemini 使用画面比例和分辨率，尺寸与格式需设为自动。';
+    const capability = geminiModelOptions(recipe.model);
+    if (options.aspect_ratio !== undefined && !capability.ratios.includes(String(options.aspect_ratio))) return '不支持此 Gemini 画面比例。';
+    if (options.resolution !== undefined && !capability.resolutions.includes(String(options.resolution))) return '不支持此 Gemini 分辨率。';
+    if (['gemini-2.5-flash-image','gemini-2.5-flash-image-preview'].includes(recipe.model.replace(/^models\//,'')) && options.resolution && options.resolution !== 'auto') return '此模型不支持明确的 imageSize，请使用模型默认。';
+  } else {
+    if (options.watermark !== undefined && typeof options.watermark !== 'boolean') return '水印选项必须为开或关。';
+    if (!['auto','png','jpeg'].includes(recipe.output_format)) return 'Seedream 的输出格式需为自动、PNG 或 JPEG。';
+    if (['doubao-seedream-4-5-251128','doubao-seedream-4-0-250828'].includes(recipe.model) && !['auto','jpeg'].includes(recipe.output_format)) return '此 Seedream 模型仅输出 JPEG，请调整格式。';
+    const capability = seedreamModelOptions(recipe.model);
+    const dimensions = /^([1-9][0-9]{0,4})x([1-9][0-9]{0,4})$/.exec(recipe.size);
+    if (dimensions) {
+      const width=Number(dimensions[1]),height=Number(dimensions[2]);
+      if (width*height < capability.minPixels || width*height > capability.maxPixels || Math.max(width,height)>16*Math.min(width,height)) return 'Seedream 尺寸超出所选模型范围。';
+    } else if (!capability.sizes.includes(recipe.size)) return 'Seedream 尺寸不适用于所选模型。';
+  }
+}
+
 // 1% relative ratio error tolerates integer pixel rounding; shared with the backend.
 export const ASPECT_RATIO_RELATIVE_TOLERANCE = 0.01;
 export function explicitAspectRatio(value: unknown): number | undefined {
@@ -101,7 +173,7 @@ export function compatibleMismatches(job: GenerationJobRecord): Parameters<Trans
     if (explicitSize && requested.size !== `${width}x${height}`) issues.push('imageSizeMismatch');
     else if (!explicitSize && target && ratioDiffers(width, height, target)) issues.push('imageAspectRatioMismatch');
   }
-  if (requested.output_format && decoded?.format && String(requested.output_format).toLowerCase().replace('jpg', 'jpeg') !== String(decoded?.format).toLowerCase().replace('jpg', 'jpeg')) issues.push('imageFormatMismatch');
+  if (requested.output_format && requested.output_format !== 'auto' && decoded?.format && String(requested.output_format).toLowerCase().replace('jpg', 'jpeg') !== String(decoded?.format).toLowerCase().replace('jpg', 'jpeg')) issues.push('imageFormatMismatch');
   if (requested.background === 'transparent' && decoded?.has_transparent_pixels === false) issues.push('imageAlphaMismatch');
   const response = job.metadata?.response as Record<string, unknown> | undefined;
   if (requested.quality && requested.quality !== 'auto' && response?.quality && requested.quality !== response.quality) issues.push('imageQualityMismatch');

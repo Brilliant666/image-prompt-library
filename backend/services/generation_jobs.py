@@ -426,7 +426,14 @@ class GenerationJobRepository:
         parameters["compatible_profile_name"] = config["display_name"]
         for key, default in (("base_url_mode", "versioned"), ("stream", False), ("partial_images", 0), ("response_format", "auto")):
             parameters.setdefault(key, config.get(key, default))
-        parameters = normalize_image_parameters(parameters, default_model=config["model"])
+        from .providers.profiles import protocol, normalize_profile_parameters, execution_identity
+        selected_protocol = protocol(config)
+        if 'protocol' in parameters and parameters['protocol'] != selected_protocol:
+            raise GenerationJobConflict('Saved recipe protocol differs from the selected connection; explicitly choose a new recipe')
+        if selected_protocol != 'openai_compatible':
+            parameters['protocol'] = selected_protocol
+            parameters['protocol_profile_fingerprint'] = execution_identity(config)
+        parameters = normalize_profile_parameters(parameters, config)
         return payload.model_copy(update={"model": parameters["model"], "parameters": parameters})
 
     def _restore_compatible_request(self, job: GenerationJobRecord) -> GenerationJobRecord:
@@ -435,10 +442,11 @@ class GenerationJobRepository:
         parameters = dict(job.parameters or {})
         requested = job.metadata.get("requested", {})
         if isinstance(requested, dict):
-            for key in ("model", "quality", "size", "requested_aspect_ratio", "aspect_ratio_prompt_injection", "background", "output_format", "output_compression", "moderation", "compatible_profile_id", "compatible_profile_name", "base_url_mode", "stream", "partial_images", "response_format"):
+            for key in ("model", "quality", "size", "requested_aspect_ratio", "aspect_ratio_prompt_injection", "background", "output_format", "output_compression", "moderation", "compatible_profile_id", "compatible_profile_name", "base_url_mode", "stream", "partial_images", "response_format", "protocol", "provider_options"):
                 if key in requested:
                     parameters[key] = requested[key]
         parameters.setdefault("compatible_profile_id", "legacy")
+        parameters.setdefault('protocol', 'openai_compatible')
         from .openai_compatible import OpenAICompatibleConfig, OpenAICompatibleError
         try:
             OpenAICompatibleConfig(library_path=self.library_path).read(parameters["compatible_profile_id"])

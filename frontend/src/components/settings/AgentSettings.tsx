@@ -59,7 +59,7 @@ export default function AgentSettings({ uiLanguage, active, workspaceProfileId }
     <span>{label}</span><select value={form?.[key] || ''} onChange={event => change(key, event.target.value || null)}>
       <option value="">{en ? 'Choose an API profile' : '请选择 API 配置'}</option>
       {form?.[key] && !saved?.profiles.some(profile => profile.id === form[key]) && <option value={form[key] || ''}>{en ? 'Previously selected profile is unavailable' : '原先选择的配置已不可用'}</option>}
-      {saved?.profiles.map(profile => <option key={profile.id} value={profile.id}>{profile.display_name}{!profile.configured ? en ? ' · incomplete' : ' · 待完善' : ''}</option>)}
+      {saved?.profiles.map(profile => <option key={profile.id} value={profile.id} disabled={key === 'textProfileId' && Boolean(profile.protocol && profile.protocol !== 'openai_compatible')}>{profile.display_name}{key === 'textProfileId' && profile.protocol && profile.protocol !== 'openai_compatible' ? en ? ' · image protocol only' : ' · 仅图片协议' : ''}{!profile.configured ? en ? ' · incomplete' : ' · 待完善' : ''}</option>)}
     </select>
   </label>;
   const imageIssueHint = (field: string | null) => field === 'imageProfileId'

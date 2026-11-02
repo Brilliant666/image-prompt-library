@@ -14,7 +14,10 @@ from backend.services.openai_codex_native import (
 from backend.services.xai_grok_oauth import PROVIDER_ID as GROK_PROVIDER_ID, XaiGrokOAuthProvider
 from backend.services.openai_compatible import PROVIDER_ID as COMPATIBLE_PROVIDER_ID, OpenAICompatibleProvider
 
-AUTOMATED_PROVIDER_IDS = frozenset({CODEX_PROVIDER_ID, GROK_PROVIDER_ID, COMPATIBLE_PROVIDER_ID, "agent_native_batch"})
+from backend.services.providers.registry import automated_provider_ids, executor_for
+from backend.services.providers.errors import ProviderError
+
+AUTOMATED_PROVIDER_IDS = automated_provider_ids()
 
 MAX_CONCURRENT_GENERATION_JOBS = 5
 QUEUE_RESUME_RETRY_SECONDS = 5
@@ -197,16 +200,10 @@ def _run_provider_job(library, job_id, provider):
 
 
 def _provider_for(provider: str):
-    if provider == "agent_native_batch":
-        from .agent_execution import NativeAgentImageProvider
-        return NativeAgentImageProvider()
-    if provider == COMPATIBLE_PROVIDER_ID:
-        return OpenAICompatibleProvider()
-    if provider == CODEX_PROVIDER_ID:
-        return OpenAICodexNativeProvider()
-    if provider == GROK_PROVIDER_ID:
-        return XaiGrokOAuthProvider()
-    raise GenerationJobConflict(f"Generation provider {provider} does not support automatic generation")
+    try:
+        return executor_for(provider)
+    except ProviderError:
+        raise GenerationJobConflict(f"Generation provider {provider} does not support automatic generation") from None
 
 
 def _schedule_pause_wake(library_path: Path, provider: str, delay_seconds: int) -> None:
