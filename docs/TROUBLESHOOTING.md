@@ -1,5 +1,7 @@
 # Troubleshooting
 
+Current source installation: [Quick start](QUICK_START.md). Static Cloudflare/Vercel and persistent full-server setup: [Deployment](DEPLOYMENT.md). Installer-specific sections below apply only to an existing managed installation.
+
 ## Windows: Python is missing or too old
 
 Native Windows support begins with v0.8.0 and requires Python 3.10+. The installer does not install Python. Install a supported version from <https://www.python.org/downloads/windows/>, open a new PowerShell window, then run the installer again.
@@ -123,3 +125,38 @@ image-prompt-library start --host 0.0.0.0
 ```
 
 Then check your OS firewall and router/VPN settings.
+
+
+## Static Cloudflare / Vercel site loads but API calls fail
+
+Ordinary `npm run build` produces the complete app frontend, which requires a
+same-origin backend. Static hosting does not provide `/api` or `/media` by itself.
+For a public read-only demo use `npx tsc` then
+`npx vite build --mode demo --base /`, and publish `frontend/dist` from the repository
+root. Do not rewrite API failures to `index.html`; HTML 200 responses are not an API.
+A `/image-prompt-library/` resource prefix on a root-domain deployment indicates the
+GitHub Pages demo command was used. See the [platform settings](DEPLOYMENT.md).
+
+## Local app unexpectedly shows a read-only demo
+
+Both builds target `frontend/dist`. Rebuild with `npm run build` for the full app,
+and remove any manually configured `VITE_DEMO_MODE=true` from the build environment.
+Do not replace a running installation's assets directly: prepare the right output
+and follow its normal update flow. No public model API key belongs in a `VITE_*`
+variable or public asset directory.
+
+## Split development UI cannot save or reaches the wrong library
+
+Set `BACKEND_PORT=8010` in the terminal running Vite, not only the backend terminal.
+Use port 5177 with `--strictPort`; another port needs an exact
+`IMAGE_PROMPT_LIBRARY_DEVELOPMENT_ORIGINS` value in the backend environment.
+Direct `uvicorn` does not load the repository `.env`. Never disable Origin checks
+or reuse daily library/credential paths to get a development test working.
+
+## Domain access works but POST requests return 403
+
+`IMAGE_PROMPT_LIBRARY_ALLOWED_HOSTS` accepts exact hostnames only. Behind a trusted
+reverse proxy, preserve Host and forward the correct HTTPS scheme; trust forwarded
+headers only from the proxy. The allowlist is not authentication. Keep full-app
+routes behind access control, including API, media and streaming paths. See
+[Cloudflare Tunnel and Access](DEPLOYMENT.md#cloudflare-tunnel).

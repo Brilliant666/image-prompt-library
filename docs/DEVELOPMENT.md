@@ -4,6 +4,11 @@ Use this path to develop the app or run from a checkout. `main` is the integrati
 branch; develop changes on a feature branch and submit a pull request to `main`.
 The former `codex/sub2api-images` branch is retained as history.
 
+For a Chinese walkthrough with complete Windows/macOS/Linux commands, see
+[Quick start](QUICK_START.md). For a public static showcase or a persistent full
+server, see [Deployment](DEPLOYMENT.md). A source checkout does not install the
+historical global application controller.
+
 ## Source setup
 
 Use Python 3.10+ and Node.js 24. The commands below are for macOS/Linux; Windows
@@ -60,7 +65,7 @@ paths above, start the development backend:
 In a second terminal at the checkout root, start Vite:
 
 ```bash
-BACKEND_PORT=8010 npm run dev -- --host 127.0.0.1 --port 5177
+BACKEND_PORT=8010 npm run dev -- --host 127.0.0.1 --port 5177 --strictPort
 ```
 
 Open <http://127.0.0.1:5177/>.
@@ -69,6 +74,28 @@ Ports in this isolated example (script defaults remain unchanged):
 
 - Backend API: <http://127.0.0.1:8010>
 - Vite frontend: <http://127.0.0.1:5177>
+
+### Windows hot reload
+
+Complete the isolated Windows setup in [Quick start](QUICK_START.md) first,
+including **all seven library/credential variables**. In that same backend shell:
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8010
+```
+
+A second PowerShell terminal in the same checkout runs only the frontend:
+
+```powershell
+$env:BACKEND_PORT = '8010'
+npm run dev -- --host 127.0.0.1 --port 5177 --strictPort
+```
+
+Set `BACKEND_PORT` in the **Vite terminal** so `/api` and `/media` do not reach a
+daily 8000 instance. `--strictPort` avoids silently moving to an unapproved origin.
+For another frontend port, explicitly allow its exact origin using
+`IMAGE_PROMPT_LIBRARY_DEVELOPMENT_ORIGINS` in the backend shell. Do not use a wildcard
+or disable Origin checks. Hot reload is for isolated development, not a live library.
 
 ## Configuration
 
@@ -123,7 +150,8 @@ Do not commit runtime `library/` data to git. It is your private prompt/image co
 For the current Gallery generation composer and Agent conversations, see
 [Playground workspaces](PLAYGROUND.md). [The older generation guide](GENERATION.md)
 describes OAuth generation; API-key profiles are documented in
-[OpenAI-compatible providers](OPENAI_COMPATIBLE.md).
+[API connections](API_CONNECTIONS.md), [OpenAI compatibility](OPENAI_COMPATIBLE.md)
+and [native Gemini/Seedream image protocols](NATIVE_IMAGE_PROVIDERS.md).
 
 ## Portable backup and safe restore
 
@@ -159,6 +187,37 @@ Stop the app before backup or restore. Restore validates and stages the complete
 See [`BACKUP_AND_RESTORE.md`](BACKUP_AND_RESTORE.md) for the exact payload, credential boundary, commands, failure behavior, and non-goals. Keep backups somewhere outside the repo and outside the active library if the library matters to you.
 
 ## Tests and contribution workflow
+
+Run commands from the checkout root using the prepared interpreter, with the
+isolated paths above still set. No real provider credentials are needed:
+
+```bash
+.venv/bin/python -m pytest -q tests/test_api_connection_drafts.py tests/test_model_catalog.py
+npm run test:frontend
+npm run build:extension
+npm run test:extension
+npm run build
+```
+
+On Windows use `.\.venv\Scripts\python.exe` instead of `.venv/bin/python`.
+For documentation changes:
+
+```bash
+.venv/bin/python -m pytest -q tests/test_readme_contract.py tests/test_quickstart_deployment_docs.py
+```
+
+`python -m pytest -q` is the full backend suite. It includes platform installer,
+subprocess and environment tests: run those in an isolated VM/CI runner, not on a
+daily Windows profile whose PATH must remain unchanged. The exact full jobs are in
+[CI](../.github/workflows/ci.yml); mocks do not verify supplier quality or billing.
+
+For the static demo, use `npx tsc` followed by
+`npx vite build --mode demo --base /`, output `frontend/dist`.
+This needs no Python backend or credentials. The existing `npm run build:demo`
+targets `/image-prompt-library/` for GitHub Pages, not a root-domain deployment.
+A demo build replaces the ordinary frontend output: run `npm run build` again
+before using a full local app. For real HTTP/UI checks with mock providers use
+[the offline Agent preview](AGENT_PREVIEW.md), not a personal library.
 
 See [CONTRIBUTING](../CONTRIBUTING.md) for local and final validation, and
 [AGENTS.md](../AGENTS.md) for the authoritative Draft PR, trial and merge workflow.

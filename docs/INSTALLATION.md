@@ -7,7 +7,29 @@
 > The upstream installation examples below are retained as historical reference;
 > they are not the update path for this customized branch.
 
-This guide keeps operational details out of the main README.
+## Current source edition: start here
+
+| Goal | Current instructions |
+| --- | --- |
+| Full app on Windows, macOS or Linux | [Quick start](QUICK_START.md) and [Development Guide](DEVELOPMENT.md) |
+| Isolated backend/frontend development and tests | [Development Guide](DEVELOPMENT.md) |
+| Read-only Cloudflare Pages / Vercel deployment | [Deployment Guide](DEPLOYMENT.md#static-demo) |
+| Full server with persistent data and protected access | [Persistent server](DEPLOYMENT.md#persistent-server) |
+
+Current source builds use Python 3.10+ and Node.js 24 with `uv.lock` and
+`package-lock.json`. Clone the independent repository, install locked dependencies,
+build the frontend and start a single Uvicorn process as shown in those guides.
+A clone does not install a global `image-prompt-library` command. Cloudflare/Vercel
+static deployment is a read-only demo, not the full writable application.
+
+The historical commands below can install/update **upstream software** and must not
+be used to update this customized edition. They are retained for existing installed
+controllers, compatibility behavior and provenance, not advertised as a new release.
+
+<details>
+<summary>Historical upstream installer and runtime reference — not the current source install path</summary>
+
+This retained reference keeps operational details out of the main README.
 
 ## Native Windows PowerShell (v0.8.0+)
 
@@ -124,7 +146,7 @@ For normal Unix/WSL release installs:
 For source/development installs:
 
 - Python 3.10+
-- Node.js 20+ recommended
+- Node.js 24 for the current source edition
 - npm
 
 Normal release installs do not require Node.js because tagged release assets include the built frontend.
@@ -306,3 +328,5 @@ If you run that from a script or non-interactive shell, add `--yes`:
 ```bash
 image-prompt-library uninstall --delete-library --yes
 ```
+
+</details>

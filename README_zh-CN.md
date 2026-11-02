@@ -65,13 +65,13 @@
 Agent 在本地服务中保存会话、消息分支和图片引用。编辑或重新生成消息会创建新分支，并保留原分支。可以搜索已保存的会话，将生成图作为参考继续使用，也可从结果返回来源会话。
 
 - **在聊天中自然继续任务。** 当前任务、工作提示词版本和图片角色由会话背后维护，不需要填写独立任务表。需要旧图时按具体来源取回，不会仅因旧问题尚未解决就附上全部历史图片；原文、原图和分支仍保留。
-- **从选定的提示词块直接生图。** 使用该块的原文、已确认的参考图和当前可见图片设置。Hybrid 直接进入 Images 队列，不额外请求文本模型规划；Native 使用其图片工具。图片重试复用实际执行的提示词和冻结参考图；结果未知时应核对原回执，不会自动重放。详见[确认提示词与重试边界](docs/AGENT_CONFIRMED_RECIPES.md)。
+- **从选定的提示词块直接生图。** 使用该块的原文、已确认的参考图和当前可见图片设置。Hybrid 直接进入所选图片 Provider 队列，不额外请求文本模型规划；Native 使用其图片工具。图片重试复用实际执行的提示词和冻结参考图；结果未知时应核对原回执，不会自动重放。详见[确认提示词与重试边界](docs/AGENT_CONFIRMED_RECIPES.md)。
 - **明确选择复制图片或提示词。** 成功图片卡片分别提供复制图片和复制生成提示词。剪贴板转换不会替换原文件；需要原始字节和元数据时使用下载。
-- **了解失败原因再尝试。** 详情区分上传限制、HTTP 413 请求大小拒绝、供应商错误和结果未知。显示可用的供应商错误码及脱敏后的简短说明，不猜测未提供的原因。Agent 参考图支持 PNG、JPEG、WebP，每张不超过 **30 MiB 和 16,000,000 像素**；不支持的格式与无法解码的文件会分别提示。
-- 选择兼容的 API 配置及完整的**文本模型 ID**。Hybrid 模式通过 Responses 执行文本与工具请求，通过所选 Images 配置执行生图任务；Native 模式接收 Responses 图片工具的结果。供应商需要支持所选方式。
+- **了解失败原因再尝试。** 详情区分上传限制、HTTP 413 请求大小拒绝、供应商错误和结果未知。显示可用的供应商错误码及脱敏后的简短说明，不猜测未提供的原因。Agent 参考图支持 PNG、JPEG、WebP，每张不超过 **30 MiB 和 20,000,000 像素**；不支持的格式与无法解码的文件会分别提示。
+- 选择兼容的 API 配置及完整的**文本模型 ID**。Hybrid 模式通过 Responses 执行文本与工具请求，通过所选图片协议配置执行生图任务；Native 模式接收 Responses 图片工具的结果。供应商需要支持所选方式。
 - **持续生图模式默认关闭。** 可以仅授权本轮生图，也可以主动开启生图模式，允许当前会话后续发送继续生成图片。每次请求仍会固定本轮的图片数量与模型步骤上限；网络搜索需要独立配置并逐轮授权。
 - 默认 **Enter 发送，Shift+Enter 换行**，输入法选字期间不会发送。服务接受请求后清空已提交的文本和参考图，保留生图参数；Gallery 与 Agent 的输入偏好可以分别调整。
-- **使用 Gallery 生图设置**会把有效的 Images 配置和参数复制到 Agent 草稿，不开启生图授权，也不改动两边的提示词。此操作不替代 OAuth 或原生 Responses 图片工具的配置。
+- **使用 Gallery 生图设置**会把有效的图片连接和参数复制到 Agent 草稿，不开启生图授权，也不改动两边的提示词。此操作不替代 OAuth 或原生 Responses 图片工具的配置。
 - 内置 `image-prompt-reverse` 和 `gpt-image` 指南，辅助图片分析、提示词优化及编辑。这些是从固定来源版本改编、按需加载的有限文字章节，不会安装或自动更新原技能仓库、执行其脚本，也不会授予生图权限。详见 [Agent 技能与许可](docs/agent-skills/README.md)。
 
 Responses 进度会实时推送至浏览器，连接不可用时退回只读轮询。刷新或重新连接不会重新提交付费请求。**停止**阻止新的调用，已经发送到供应商的请求仍可能完成或计费。详见[工作区行为与兼容限制](docs/PLAYGROUND.md)。
@@ -80,7 +80,23 @@ Responses 进度会实时推送至浏览器，连接不可用时退回只读轮�
 
 ## 快速开始
 
-源码构建需要 **Python 3.10+** 和 **Node.js 24**。在已有源码目录中按照[独立维护说明](docs/INDEPENDENT_MAINTENANCE.md)操作。Windows PowerShell 示例：
+需要 **Git、Python 3.10+**（推荐 3.11）及 **Node.js 24** / npm。先选择用途：
+
+| 我想做什么 | 使用入口 |
+| --- | --- |
+| 本机使用完整图库、画廊和 Agent | [详细快速开始](docs/QUICK_START.md) |
+| 本地开发、调试和测试 | [隔离开发与测试](docs/QUICK_START.md#5-隔离开发不要碰日常图库和-key) / [Development Guide](docs/DEVELOPMENT.md) |
+| 部署到 Cloudflare Pages / Vercel 展示公开示例 | [静态 demo 部署](docs/DEPLOYMENT.md#static-demo) |
+| 服务器上使用完整功能 | [持久化服务器部署](docs/DEPLOYMENT.md#persistent-server)，可选 Tunnel + Access |
+
+**首次获取源码**，使用新目录；已有 checkout 或安装版不要重新克隆覆盖：
+
+```sh
+git clone https://github.com/Brilliant666/image-prompt-library.git
+cd image-prompt-library
+```
+
+### Windows PowerShell
 
 ```powershell
 python -m venv .venv
@@ -90,35 +106,66 @@ $env:UV_PROJECT_ENVIRONMENT = Join-Path (Get-Location) '.venv'
 npm ci
 npm run build
 $env:IMAGE_PROMPT_LIBRARY_PATH = Join-Path $HOME 'ImagePromptLibrary'
-.\.venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+.\.venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --workers 1
 ```
 
-启动前选择图库路径，确认没有其他实例占用同一图库，且 8000 端口空闲。打开 [127.0.0.1:8000](http://127.0.0.1:8000)，在终端按 `Ctrl-C` 停止。macOS/Linux 启动方式见[开发指南](docs/DEVELOPMENT.md)。
-
-**开发与验证：**请使用[隔离开发示例](docs/INDEPENDENT_MAINTENANCE.md#从源码开发与启动)，同时隔离图库和凭据，并使用 8010 端口。上面的快速开始用于日常本地使用。
-
-新图库默认是空的。选择**快捷收录**，加入图片与原始提示词即可保存，不必先配置 AI。已有安装版可使用以下命令检查状态：
+### macOS / Linux
 
 ```bash
-image-prompt-library status
-image-prompt-library doctor
+python3 -m venv .venv
+.venv/bin/python -m pip install uv==0.12.16
+export UV_PROJECT_ENVIRONMENT="$PWD/.venv"
+.venv/bin/python -m uv sync --locked --extra dev --inexact --python .venv/bin/python
+npm ci
+npm run build
+export IMAGE_PROMPT_LIBRARY_PATH="$HOME/ImagePromptLibrary"
+.venv/bin/python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --workers 1
 ```
 
-修改或构建源码不会自动更新另一份已安装的程序。本独立仓库尚无 Releases；更新请遵循维护指南，并在切换版本前保留兼容的备份。
+打开 <http://127.0.0.1:8000/>，健康接口 <http://127.0.0.1:8000/api/health>
+应返回包含 `"ok": true` 的 JSON。保持终端开启，按 `Ctrl-C` 正常停止。
+启动前确认 8000 空闲、没有第二个实例使用同一图库。直接调用 `uvicorn`
+不会自动读取 checkout 的 `.env`；默认凭据目录是图库外的 `~/.image-prompt-library`。
+
+新图库为空是正常情况。先用**快捷收录**保存一张图片和原始提示词，不必先配置 AI。
+开发和测试要同时隔离图库及凭据，使用 8010 后端、5177 前端；完整变量、
+双终端命令、测试、备份和常见问题见[快速开始](docs/QUICK_START.md)。
+
+源码 clone 不会安装全局管理命令；`image-prompt-library status`、
+`image-prompt-library doctor` 仅适用于已有受管理的安装版。修改源码不会更新
+另一份安装。当前没有本仓库 Releases，更新遵循[源码维护说明](docs/INDEPENDENT_MAINTENANCE.md)。
+
+### Cloudflare / Vercel 配置速查
+
+发布的是**公开只读 demo**：项目根目录选仓库根目录，安装 `npm ci`，
+构建 `npx tsc && npx vite build --mode demo --base /`，输出目录填 **`frontend/dist`**，
+Node 选 24。Vercel Framework 选 **Other**，不要自动部署 FastAPI。
+不添加模型 Key，不上传私人图库。
+
+静态 demo 不支持私人条目写入、Gallery 生图或 Agent。
+原 `npm run build:demo` 带 GitHub Pages 子路径 `/image-prompt-library/`，
+根域名部署使用上面的显式命令。详见 [Cloudflare 步骤](docs/DEPLOYMENT.md#cloudflare-pages)
+和 [Vercel 步骤](docs/DEPLOYMENT.md#vercel)；完整应用需要持久化后端，不是上传前端即可。
 
 ## API 与生图设置
 
-打开**设置 → API**。API Key 配置支持 sub2api 等同步 OpenAI 兼容服务，可分别保存名称、基础地址、密钥、模型列表和默认值。账号连接保留 **ChatGPT / Codex OAuth** 和实验性的 **Grok OAuth**；单次生成可覆盖默认 AI 供应商。
+打开**设置 → API 配置 → API Key 配置**：先选择服务商或协议，填写名称、Base URL、Key，
+可以**保存前识别模型**，也可以手填，然后保存。支持 `openai_compatible`（含 sub2api 等中转）、
+`gemini_native` 和 `seedream_native`；第三方也可以提供原生协议，不根据模型名称猜测，
+失败后不自动切协议或线路重发。账号连接保留 **ChatGPT / Codex OAuth** 和实验性的
+**Grok OAuth**，默认 AI 供应商仍可单独选择。
 
 | 设置 | 含义 |
 | --- | --- |
-| 模型目录 | **刷新模型**读取当前配置的模型列表。列表只是候选，不代表已验证 Images、Responses 或工具兼容性。手填及历史模型 ID 会保留；图片模型菜单优先推荐 `gpt-image` 名称，也允许手动输入完整模型 ID。 |
-| 尺寸与比例 | 自动、比例预设和自定义尺寸决定请求像素。4K 目标不保证返回 4K，详情会区分请求与图片实际解码尺寸；不会拉伸已保存的原图。 |
-| 质量与格式 | 可用设置取决于请求方式。透明输出需要 PNG 或 WebP，压缩仅在支持时适用；供应商可能拒绝或忽略可选参数。 |
-| 流式输出 | 可选的 Images 流式输出和中间预览取决于接口支持。部分图片只是进度，不代表最终生成成功。 |
-| 授权 | 保存或切换配置不会执行付费生图测试。OAuth 的访问权限、配额和费用仍由供应商决定。 |
+| 模型识别 | 草稿可直接读取清单，不提前保存配置。文字/图片/待确认标签依据明确声明；手填 ID 保留。Seedream 显示文档参考模型，不冒充 Key 验证。 |
+| 文字与图片 | Agent Hybrid 分别选择 Responses 文字连接与图片协议连接。Native Agent 保持 Responses 图片工具；Gemini 原生图片连接不等于 Gemini 文字 Agent。 |
+| 修改连接 | 已填写内容更换类型需确认，取消保留输入；旧 Key 不随地址/协议变化静默转用，文字模型不会覆盖默认图片模型。 |
+| 生图参数 | 在 Gallery / Agent 按协议和模型调整尺寸、比例、质量、格式及原生选项。请求 4K 不保证返回 4K；原图保持。 |
+| 高级设置 | 地址规则、网络与协议传输集中配置，模型清单处于主流程。 |
+| 授权 | 保存不执行付费生成测试；未知结果或已有本地结果不自动重放。真实调用可能发送素材并计费。 |
 
-接口规则、参考图限制和故障处理见 [OpenAI 兼容配置](docs/OPENAI_COMPATIBLE.md)与[生图指南](docs/GENERATION.md)。模拟测试不能确认真实供应商的模型身份、费用、分辨率或原生工具支持。
+详细用法见 [API 连接](docs/API_CONNECTIONS.md)、[Gemini / Seedream 原生协议](docs/NATIVE_IMAGE_PROVIDERS.md)
+和 [OpenAI 兼容配置](docs/OPENAI_COMPATIBLE.md)。清单读取成功不代表真实模型权限、画质或账单已验证。
 
 <details>
 <summary>历史截图：选择 Grok 账号供应商</summary>
@@ -131,7 +178,7 @@ image-prompt-library doctor
 
 ## 隐私
 
-- 私人图片与提示词图库保存在你的电脑，没有托管用户数据库或内置云同步；应用默认监听 `127.0.0.1`。
+- 私人图片与提示词图库保存在运行后端的机器上（默认是你的电脑，也可以是自己的持久化服务器），没有托管用户数据库或内置云同步；应用默认监听 `127.0.0.1`。
 - 生图会将提示词和所选参考图发送至指定供应商。Agent 还会向配置的模型发送当前会话分支及所需图片上下文；图库本地保存不代表 AI 在本地运行。
 - **建议标题（Suggest title）只发送提示词文本**。先检查建议，再选择 **Use title** 应用。生成结果的建议显示 **via ChatGPT** 或 **via Grok**；所选供应商不可用时，不会悄悄把请求改发到其他服务。
 - 可选的收录整理与视觉命名使用单独配置的视觉服务，**会发送图片内容**。为 Gallery 收录结果进行视觉命名，需要选择命名选项，并配置、启用整理服务；手动填写的标题会保留。这与仅发送文本的标题建议是不同功能。
@@ -169,7 +216,7 @@ image-prompt-library doctor
 
 ![上游线上只读 demo 的 Explore 集合页面](docs/assets/screenshots/public-demo-explore.png)
 
-编辑、私人图库管理及图片生成需要本地安装。
+编辑、私人图库管理及图片生成需要本机或持久化服务器上的完整应用，不是这个静态 demo。
 
 </details>
 
@@ -194,7 +241,7 @@ image-prompt-library sample-data zh_hant
 
 ## 文档
 
-[独立维护与源码启动](docs/INDEPENDENT_MAINTENANCE.md) · [工作区与 Agent](docs/PLAYGROUND.md) · [API 配置](docs/OPENAI_COMPATIBLE.md) · [图片生成](docs/GENERATION.md) · [浏览器收录](docs/BROWSER_CAPTURE.md) · [备份与恢复](docs/BACKUP_AND_RESTORE.md) · [故障排查](docs/TROUBLESHOOTING.md) · [开发指南](docs/DEVELOPMENT.md) · [参与开发](CONTRIBUTING.md)
+[详细快速开始](docs/QUICK_START.md) · [Cloudflare / Vercel / 服务器部署](docs/DEPLOYMENT.md) · [API 连接](docs/API_CONNECTIONS.md) · [原生图片协议](docs/NATIVE_IMAGE_PROVIDERS.md) · [独立维护与源码启动](docs/INDEPENDENT_MAINTENANCE.md) · [工作区与 Agent](docs/PLAYGROUND.md) · [API 配置](docs/OPENAI_COMPATIBLE.md) · [图片生成](docs/GENERATION.md) · [浏览器收录](docs/BROWSER_CAPTURE.md) · [备份与恢复](docs/BACKUP_AND_RESTORE.md) · [故障排查](docs/TROUBLESHOOTING.md) · [开发指南](docs/DEVELOPMENT.md) · [参与开发](CONTRIBUTING.md)
 
 ## 许可与致谢
 

@@ -65,13 +65,13 @@
 Agent 將對話、訊息分支和圖片參考保存在本機伺服器。編輯或重新生成訊息會建立分支，原有分支仍保留。你可以搜尋已儲存的對話、將生成圖片用作參考，或從結果返回來源對話。
 
 - **在對話中自然延續任務。** 目前任務、工作提示詞版本與圖片角色由對話背後維護，不必填寫獨立任務表。需要舊圖時會依具體來源取回，不會只因舊問題尚未解決就附上全部歷史圖片；原文、原圖與分支仍保留。
-- **從選定的提示詞區塊直接生圖。** 使用該區塊的原文、已確認的參考圖與目前可見的圖片設定。Hybrid 直接進入 Images 佇列，不額外請求文字模型規劃；Native 使用其圖片工具。圖片重試沿用實際執行的提示詞與凍結參考圖；結果未知時應核對原回執，不會自動重播。詳見[確認提示詞與重試邊界](docs/AGENT_CONFIRMED_RECIPES.md)。
+- **從選定的提示詞區塊直接生圖。** 使用該區塊的原文、已確認的參考圖與目前可見的圖片設定。Hybrid 直接進入所選圖片 Provider 佇列，不額外請求文字模型規劃；Native 使用其圖片工具。圖片重試沿用實際執行的提示詞與凍結參考圖；結果未知時應核對原回執，不會自動重播。詳見[確認提示詞與重試邊界](docs/AGENT_CONFIRMED_RECIPES.md)。
 - **明確選擇複製圖片或提示詞。** 成功圖片卡片分別提供複製圖片與複製生成提示詞。剪貼簿轉換不會取代原始檔案；需要原始位元組與中繼資料時請使用下載。
-- **了解失敗原因後再嘗試。** 詳情區分上傳限制、HTTP 413 請求大小拒絕、供應商錯誤與結果未知。顯示可用的供應商錯誤碼與去除敏感資料後的簡短說明，不猜測未提供的原因。Agent 參考圖支援 PNG、JPEG、WebP，每張不超過 **30 MiB 與 16,000,000 像素**；不支援的格式與無法解碼的檔案會分別提示。
-- 選擇相容的 API 設定檔與完整的**文字模型 ID**。Hybrid 模式透過 Responses 處理文字與工具，再使用選定的 Images 設定檔建立圖片任務；Native 模式接收 Responses 圖片工具的結果。供應商必須支援所選路徑。
+- **了解失敗原因後再嘗試。** 詳情區分上傳限制、HTTP 413 請求大小拒絕、供應商錯誤與結果未知。顯示可用的供應商錯誤碼與去除敏感資料後的簡短說明，不猜測未提供的原因。Agent 參考圖支援 PNG、JPEG、WebP，每張不超過 **30 MiB 與 20,000,000 像素**；不支援的格式與無法解碼的檔案會分別提示。
+- 選擇相容的 API 設定檔與完整的**文字模型 ID**。Hybrid 模式透過 Responses 處理文字與工具，再使用選定的圖片協定連線建立圖片任務；Native 模式接收 Responses 圖片工具的結果。供應商必須支援所選路徑。
 - **持續生圖模式預設關閉。** 你可以只授權某一輪生成圖片，或明確開啟生圖模式，讓目前對話之後送出的訊息也能生成圖片。每次請求仍會固定其圖片數量及模型步數上限。網路搜尋需要另外設定，並逐輪授權。
 - 預設為 **Enter 送出**、**Shift+Enter 換行**，輸入法組字時不會送出。伺服器接受請求後會清空文字與參考圖，保留圖片設定；畫廊和 Agent 的輸入偏好可分別調整。
-- **使用畫廊圖片設定**會將有效的 Images 設定檔與參數複製至 Agent 草稿，不會啟用生圖，也不會改動兩邊的提示詞。OAuth 與原生 Responses 圖片工具路徑不能以此方式替換。
+- **使用畫廊圖片設定**會將有效的圖片連線與參數複製至 Agent 草稿，不會啟用生圖，也不會改動兩邊的提示詞。OAuth 與原生 Responses 圖片工具路徑不能以此方式替換。
 - 內建的 `image-prompt-reverse` 與 `gpt-image` 指引協助分析圖片、改善提示詞及編輯圖片。這些是從固定來源版本改編、保留出處的文字章節，會在相關任務中載入；不會安裝或自動更新原始 skill 倉庫、執行其腳本，或授權生成圖片。詳見 [Agent 指引與授權](docs/agent-skills/README.md)。
 
 Responses 的進度會串流至瀏覽器，無法串流時改用唯讀輪詢。重新整理或重新連線不會再次送出付費請求。**停止**會阻止新的呼叫；已送至上游的請求仍可能完成或計費。詳見[工作區行為與相容性限制](docs/PLAYGROUND.md)。
@@ -80,7 +80,23 @@ Responses 的進度會串流至瀏覽器，無法串流時改用唯讀輪詢。�
 
 ## 快速開始
 
-從原始碼建置需要 **Python 3.10+** 和 **Node.js 24**。請在既有原始碼目錄依照[啟動與維護說明](docs/INDEPENDENT_MAINTENANCE.md)操作。Windows PowerShell：
+需要 **Git、Python 3.10+**（建議 3.11）及 **Node.js 24** / npm。先選擇用途：
+
+| 目標 | 指南 |
+| --- | --- |
+| 本機完整圖庫、畫廊與 Agent | [詳細快速開始（簡中）](docs/QUICK_START.md) |
+| 隔離開發、除錯與測試 | [Development Guide](docs/DEVELOPMENT.md) |
+| Cloudflare Pages / Vercel 公開展示 | [靜態 demo 部署（簡中）](docs/DEPLOYMENT.md#static-demo) |
+| 伺服器完整應用 | [持久化伺服器（簡中）](docs/DEPLOYMENT.md#persistent-server)，可選 Tunnel + Access |
+
+**首次取得原始碼**時使用新目錄；既有 checkout 或安裝版不要重新複製覆蓋：
+
+```sh
+git clone https://github.com/Brilliant666/image-prompt-library.git
+cd image-prompt-library
+```
+
+### Windows PowerShell
 
 ```powershell
 python -m venv .venv
@@ -90,35 +106,65 @@ $env:UV_PROJECT_ENVIRONMENT = Join-Path (Get-Location) '.venv'
 npm ci
 npm run build
 $env:IMAGE_PROMPT_LIBRARY_PATH = Join-Path $HOME 'ImagePromptLibrary'
-.\.venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+.\.venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --workers 1
 ```
 
-啟動前請選定圖庫路徑，確認沒有其他執行個體使用同一圖庫，且 8000 連接埠空閒。開啟 [127.0.0.1:8000](http://127.0.0.1:8000)；在終端機按 `Ctrl-C` 停止。macOS/Linux 請參閱[開發指南](docs/DEVELOPMENT.md)。
-
-**開發與驗證：**請使用[隔離開發範例](docs/INDEPENDENT_MAINTENANCE.md#从源码开发与启动)，同時隔離圖庫與憑證，並使用 8010 連接埠。上方快速開始用於日常本機使用。
-
-新圖庫預設為空。選擇**快速收錄**，加入圖片與原始提示詞後儲存；AI 設定為選用。既有安裝副本可透過以下指令檢查：
+### macOS / Linux
 
 ```bash
-image-prompt-library status
-image-prompt-library doctor
+python3 -m venv .venv
+.venv/bin/python -m pip install uv==0.12.16
+export UV_PROJECT_ENVIRONMENT="$PWD/.venv"
+.venv/bin/python -m uv sync --locked --extra dev --inexact --python .venv/bin/python
+npm ci
+npm run build
+export IMAGE_PROMPT_LIBRARY_PATH="$HOME/ImagePromptLibrary"
+.venv/bin/python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --workers 1
 ```
 
-編輯或建置原始碼目錄不會更新另外安裝的副本。本獨立倉庫尚未建立 Releases；更新請依維護指南進行，切換版本前保留相容的備份。
+開啟 <http://127.0.0.1:8000/>；健康介面 <http://127.0.0.1:8000/api/health>
+應回傳含 `"ok": true` 的 JSON。保持終端機開啟，以 `Ctrl-C` 正常停止。
+先確認 8000 未被占用、同一圖庫沒有其他執行個體。直接啟動 `uvicorn`
+不會自動載入 checkout 的 `.env`；憑證預設放在圖庫外的 `~/.image-prompt-library`。
+
+新圖庫預設為空；先用**快速收錄**保存圖片與原始提示詞，不必設定 AI。
+開發需同時隔離圖庫和憑證，使用 8010 後端、5177 前端；雙終端操作、測試和
+備份說明見[快速開始](docs/QUICK_START.md)。
+
+原始碼 clone 不會安裝全域管理指令；`image-prompt-library status`、
+`image-prompt-library doctor` 僅管理既有安裝版，不管理上述終端機程序。
+本倉庫尚未建立 Releases，維護依[原始碼說明](docs/INDEPENDENT_MAINTENANCE.md)進行。
+
+### Cloudflare / Vercel 設定速查
+
+**唯讀 demo**：專案根目錄為倉庫根目錄，安裝命令 `npm ci`，
+建置命令 `npx tsc && npx vite build --mode demo --base /`，輸出 **`frontend/dist`**，
+Node 選 24。Vercel Framework 選 **Other**，不要自動部署 FastAPI。
+不需要模型 Key，不上傳私人圖庫。
+
+這不是完整後端，不能寫入私人條目、使用 Gallery 生成或 Agent。
+原 `npm run build:demo` 帶 `/image-prompt-library/` 子路徑；根網域使用上面的明確命令。
+詳見 [Cloudflare](docs/DEPLOYMENT.md#cloudflare-pages) / [Vercel](docs/DEPLOYMENT.md#vercel)。
 
 ## API 與圖片設定
 
-開啟**設定 → API**。API Key 設定檔支援 sub2api 等同步 OpenAI 相容服務，各自保存名稱、Base URL、金鑰、模型清單及預設值。帳號連線保留 **ChatGPT / Codex OAuth** 和實驗性的 **Grok OAuth**；個別工作階段可以暫時選用不同於 **Default AI provider** 的供應商。
+開啟**設定 → API → API Key 連線**，先選服務商/協定，再填名稱、Base URL、Key，
+可**儲存前辨識模型**，也可手填。支援 `openai_compatible`（含 sub2api 等中轉）、
+`gemini_native` 與 `seedream_native`。中轉亦可提供原生協定；不從模型名稱猜測協定，
+不在失敗後自動切換路徑重送。保留 **ChatGPT / Codex OAuth**、實驗性的 **Grok OAuth**
+及 **Default AI provider** 選擇。
 
 | 設定 | 說明 |
 | --- | --- |
-| 模型清單 | **重新整理模型**會取得所選設定檔的模型清單。清單只是候選項，不保證支援 Images、Responses 或工具。手動輸入及歷史模型 ID 仍可使用；圖片模型選單推薦 `gpt-image` 名稱，也接受手動輸入完整模型 ID。 |
-| 尺寸與比例 | 自動、比例預設及自訂尺寸用於選擇請求像素。4K 目標不保證回傳 4K；詳情會區分請求尺寸與實際解碼尺寸。儲存的原圖不會被拉伸。 |
-| 品質與格式 | 可用設定取決於呼叫路徑。透明背景需要 PNG 或 WebP；壓縮只在支援時適用。供應商可能拒絕或忽略選用參數。 |
-| 串流 | Images 串流及中間預覽取決於端點支援。部分圖片只代表進度，不代表最終成功結果。 |
-| 授權 | 儲存或切換設定檔不會執行付費生圖測試。OAuth 的存取權、限制及計費仍由供應商決定。 |
+| 模型清單 | 未儲存草稿可辨識模型；文字/圖片/待確認標籤依明確資訊。Seedream 是文件參考清單，不是 Key 驗證；手填 ID 仍保留。 |
+| 文字與圖片 | Agent Hybrid 可分別選 Responses 文字連線及原生或相容圖片連線。Native Agent 仍使用 Responses 圖片工具，不自動改用 Gemini 文字介面。 |
+| 修改連線 | 更換已填類型需要確認，取消保留輸入；舊 Key 不自動轉用到新地址或協定。文字模型不覆蓋預設圖片模型。 |
+| 生成參數 | Gallery / Agent 依協定及模型設定尺寸、比例、品質、格式與原生選項。請求解析度不是回傳保證；原圖保留。 |
+| 進階設定 | 地址規則、網路、協定傳輸分組，模型清單保留在主要流程。 |
+| 授權 | 儲存不執行付費生成；未知結果或既有本機結果不自動重送。真實呼叫可能傳送素材並計費。 |
 
-端點規則、參考圖限制及疑難排解請見 [OpenAI 相容 API 設定](docs/OPENAI_COMPATIBLE.md)及[生成指南](docs/GENERATION.md)。模擬測試無法證實真實供應商的模型身分、計費、解析度或原生工具支援。
+詳見 [API 連線](docs/API_CONNECTIONS.md)、[原生圖片協定](docs/NATIVE_IMAGE_PROVIDERS.md)
+及 [OpenAI 相容設定](docs/OPENAI_COMPATIBLE.md)。讀取清單不代表模型權限、品質或帳單已驗證。
 
 <details>
 <summary>歷史截圖：選擇 Grok 帳號供應商</summary>
@@ -131,7 +177,7 @@ image-prompt-library doctor
 
 ## 隱私
 
-- **私人提示詞與圖片圖庫**保存在你的電腦，沒有託管使用者資料庫或內建雲端同步；應用程式預設監聽 `127.0.0.1`。
+- **私人提示詞與圖片圖庫**保存在執行後端的機器（預設是你的電腦，也可以是自己的持久化伺服器），沒有託管使用者資料庫或內建雲端同步；應用程式預設監聽 `127.0.0.1`。
 - 生成圖片會將提示詞和選定的參考圖傳送至所選供應商。Agent 也會把選定的對話分支及必要圖片內容傳送至設定的模型；本機圖庫不代表 AI 推論在本機執行。
 - **建議標題**只傳送**提示詞文字**。先檢視建議，再選擇 **Use title** 套用。生成結果的建議會標示 **via ChatGPT** 或 **via Grok**；所選供應商無法使用時，不會悄悄改送到其他服務。
 - 選用的收錄整理與視覺命名使用另外設定的視覺服務，會**傳送圖片內容**。為已收錄的畫廊結果進行視覺命名，需要開啟命名選項，並已設定且啟用整理服務；手動填寫的標題會保留。此功能與只傳送文字的標題建議不同。
@@ -169,7 +215,7 @@ image-prompt-library doctor
 
 ![上游線上唯讀 demo 的 Explore 收藏集](docs/assets/screenshots/public-demo-explore.png)
 
-編輯、私人圖庫管理及生成圖片僅在本機安裝中提供。
+編輯、私人圖庫管理及生成圖片需要本機或持久化伺服器上的完整應用，不是這個靜態 demo。
 
 </details>
 
@@ -194,7 +240,7 @@ image-prompt-library sample-data zh_hant
 
 ## 文件
 
-[獨立維護與原始碼啟動](docs/INDEPENDENT_MAINTENANCE.md) · [工作區與 Agent](docs/PLAYGROUND.md) · [API 設定檔](docs/OPENAI_COMPATIBLE.md) · [生成圖片](docs/GENERATION.md) · [瀏覽器收錄](docs/BROWSER_CAPTURE.md) · [備份與還原](docs/BACKUP_AND_RESTORE.md) · [疑難排解](docs/TROUBLESHOOTING.md) · [開發](docs/DEVELOPMENT.md) · [參與開發](CONTRIBUTING.md)
+[詳細快速開始（簡中）](docs/QUICK_START.md) · [Cloudflare / Vercel / 伺服器部署（簡中）](docs/DEPLOYMENT.md) · [API 連線](docs/API_CONNECTIONS.md) · [原生圖片協定](docs/NATIVE_IMAGE_PROVIDERS.md) · [獨立維護與原始碼啟動](docs/INDEPENDENT_MAINTENANCE.md) · [工作區與 Agent](docs/PLAYGROUND.md) · [API 設定檔](docs/OPENAI_COMPATIBLE.md) · [生成圖片](docs/GENERATION.md) · [瀏覽器收錄](docs/BROWSER_CAPTURE.md) · [備份與還原](docs/BACKUP_AND_RESTORE.md) · [疑難排解](docs/TROUBLESHOOTING.md) · [開發](docs/DEVELOPMENT.md) · [參與開發](CONTRIBUTING.md)
 
 ## 授權與致謝
 

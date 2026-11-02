@@ -362,7 +362,11 @@ def test_v0112_release_notes_explain_direct_images_and_limitations():
         for stale_label in ("Next-release change", "下一版改動", "下一版改动"):
             assert stale_label not in readme
     assert "next release" not in (ROOT / "docs" / "GENERATION.md").read_text(encoding="utf-8").lower()
-    assert "No unreleased changes" in (ROOT / "docs" / "releases" / "unreleased.md").read_text(encoding="utf-8")
+    source_notes = (ROOT / "docs" / "releases" / "unreleased.md").read_text(encoding="utf-8")
+    assert "independent source edition" in source_notes
+    assert "no standalone Release" in source_notes
+    assert "not a new" in source_notes and "upstream project" in source_notes
+    assert "No unreleased changes" not in source_notes
 
 
 def test_v0101_release_notes_explain_the_update_fix_to_users():
