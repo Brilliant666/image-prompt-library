@@ -222,7 +222,7 @@ class OpenAICompatibleConfig:
     def _defaults():
         return {"display_name": "Third-party API", "base_url": "", "api_key": "", "model": "", "timeout": 300,
                 "models": [], "base_url_mode": "versioned", "stream": False, "partial_images": 0,
-                "response_format": "auto", "protocol": "openai_compatible", "service_preset": "generic", **NETWORK_DEFAULTS}
+                "response_format": "auto", "protocol": "openai_compatible", "service_preset": "generic", "service_preset_mode": "auto", **NETWORK_DEFAULTS}
 
     @staticmethod
     def _validate_options(value):
@@ -417,7 +417,7 @@ class OpenAICompatibleConfig:
             for field in ("display_name", "base_url", "model"):
                 if field in payload:
                     value[field] = str(payload[field] or "").strip()
-            for field in ("models", "base_url_mode", "stream", "partial_images", "response_format", "protocol", "service_preset"):
+            for field in ("models", "base_url_mode", "stream", "partial_images", "response_format", "protocol", "service_preset", "service_preset_mode"):
                 if field in payload:
                     value[field] = payload[field]
             self._validate_options(value)

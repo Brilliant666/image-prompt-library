@@ -45,6 +45,8 @@ def connection_fingerprint(settings, normalized_root):
         value.append({'protocol': settings['protocol']})
     if settings.get('service_preset', 'generic') != 'generic':
         value.append({'service_preset': settings['service_preset']})
+    if settings.get('service_preset_mode', 'auto') != 'auto':
+        value.append({'service_preset_mode': settings['service_preset_mode']})
     network = network_identity(settings)
     if network:
         value.append(network)
@@ -99,10 +101,12 @@ def parse_models(payload, secret="", *, include_metadata=False):
     models = {}
     claims = {}
     text_claims = {}
+    muse_owners = {}
     for entry in entries:
         if not isinstance(entry, dict) or not _valid_id(entry.get("id"), secret):
             raise ModelCatalogError("invalid")
         model_id = entry["id"]
+        muse_owners.setdefault(model_id, set()).add(entry.get('owned_by') == 'muse')
         models.setdefault(model_id, {"id": model_id, "image_generation": None})
         text = _text_output(entry)
         if text is not None:
@@ -117,6 +121,10 @@ def parse_models(payload, secret="", *, include_metadata=False):
             values = text_claims.get(model_id, set())
             model['text_generation'] = next(iter(values)) if len(values) == 1 else None
             model['capability_source'] = 'api' if claims.get(model_id) or values else 'unknown'
+            # Public whitelist only; never echo arbitrary owner strings or secrets.
+            # Conflicting duplicate IDs cannot acquire a positive service identity.
+            if muse_owners.get(model_id) == {True}:
+                model['owned_by'] = 'muse'
     return list(models.values())
 
 

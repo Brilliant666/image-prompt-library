@@ -1,4 +1,4 @@
-"""Explicit muse2api Images adaptation; no endpoint or model-name detection.
+"""Muse Images adaptation with bounded model-list identity detection.
 
 Contract: czg86389-hub/muse2api@1cd01682533dbf2c015fa879a8dc09534b50b4a3.
 Uses the existing provider, queue, result validation and local recovery lifecycle.
@@ -13,9 +13,25 @@ MAX_TOTAL_REFERENCE_BYTES = 24 * 1024 * 1024
 def service_preset(settings):
     from backend.services.openai_compatible import OpenAICompatibleError
     value = settings.get('service_preset', 'generic')
+    if settings.get('service_preset_mode', 'auto') not in ('auto', 'manual'):
+        raise OpenAICompatibleError('Unsupported service preset selection mode')
     if value not in ('generic', 'muse') or (value == 'muse' and settings.get('protocol', 'openai_compatible') != 'openai_compatible'):
         raise OpenAICompatibleError('Unsupported service preset for this protocol')
     return value
+
+
+def detected_service_preset(models, settings):
+    """Only a complete authenticated Muse catalog identifies the adapter.
+
+    A key prefix, model name alone, cached list or mixed relay catalog cannot
+    establish the multipart contract. This suggests a draft change only.
+    """
+    expected = {'muse-image', 'muse-spark', 'muse-video'}
+    if settings.get('protocol', 'openai_compatible') != 'openai_compatible' or settings.get('service_preset_mode', 'auto') != 'auto':
+        return None
+    if len(models) == 3 and {model['id'] for model in models} == expected and all(model.get('owned_by') == 'muse' for model in models):
+        return 'muse'
+    return None
 
 
 def normalize_parameters(parameters, default_model=''):

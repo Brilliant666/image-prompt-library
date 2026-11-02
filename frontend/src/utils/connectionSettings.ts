@@ -3,10 +3,10 @@ import { connectionEndpointPreview } from './profileSettings';
 
 export interface ConnectionType { id: string; protocol: ApiProtocol; service_preset?: 'generic' | 'muse'; url: string; name: string; mark: string }
 export const CONNECTION_TYPES: ConnectionType[] = [
-  { id: 'muse', protocol: 'openai_compatible', service_preset: 'muse', url: '', name: 'Muse', mark: 'M' },
   { id: 'openai', protocol: 'openai_compatible', url: 'https://api.openai.com/v1', name: 'OpenAI', mark: 'O' },
   { id: 'gemini', protocol: 'gemini_native', url: 'https://generativelanguage.googleapis.com/v1beta', name: 'Google Gemini', mark: 'G' },
   { id: 'seedream', protocol: 'seedream_native', url: 'https://ark.cn-beijing.volces.com/api/v3', name: 'Seedream', mark: 'S' },
+  { id: 'muse', protocol: 'openai_compatible', service_preset: 'muse', url: '', name: 'Muse', mark: 'M' },
 ];
 export const API_PROTOCOLS: ApiProtocol[] = ['openai_compatible','gemini_native','seedream_native'];
 export function connectionProtocolLabel(protocol: ApiProtocol, en = false): string {
@@ -20,13 +20,13 @@ export function connectionVersionLabel(protocol: ApiProtocol, en=false): string 
   return {openai_compatible:'/v1',gemini_native:en?'/v1beta or /v1':'/v1beta（或 /v1）',seedream_native:'/api/v3'}[protocol];
 }
 export function newConnectionProfile(): ApiConnectionProfile {
-  return {id:crypto.randomUUID(),display_name:'',base_url:'',model:'',models:[],protocol:'openai_compatible',service_preset:'generic',
+  return {id:crypto.randomUUID(),display_name:'',base_url:'',model:'',models:[],protocol:'openai_compatible',service_preset:'generic',service_preset_mode:'auto',
     base_url_mode:'versioned',stream:false,partial_images:0,response_format:'auto',timeout:300,
     api_key_present:false,configured:false,network_mode:'direct'};
 }
 /** Apply only after the user confirms a type change; never called while hovering/selecting a draft. */
 export function applyConnectionType(current: ApiConnectionProfile, choice: ConnectionType): ApiConnectionProfile {
-  return {...current, protocol:choice.protocol, service_preset:choice.service_preset||'generic', base_url:choice.url, display_name:current.display_name || choice.name,
+  return {...current, protocol:choice.protocol, service_preset:choice.service_preset||'generic', service_preset_mode:choice.service_preset==='muse'?'manual':'auto', base_url:choice.url, display_name:current.display_name || choice.name,
     model:choice.service_preset==='muse'?'muse-image':'',models:[],base_url_mode:'versioned',stream:false,partial_images:0,response_format:'auto',model_catalog:undefined};
 }
 export function connectionTargetChanged(draft: ApiConnectionProfile, saved?: ApiConnectionProfile): boolean {

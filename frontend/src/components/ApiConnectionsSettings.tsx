@@ -14,7 +14,8 @@ import './ApiConnectionsSettings.css';
 const emptyCatalog = (): ModelCatalog => ({ models: [], fetched_at: null, checked_at: null, error: null });
 const sameForm = (a: ApiConnectionProfile, b: ApiConnectionProfile) => {
   const {model_catalog: _a, ...left}=a, {model_catalog: _b, ...right}=b;
-  return JSON.stringify(left)===JSON.stringify(right);
+  const comparable=(value:typeof left)=>Object.fromEntries(Object.entries({...value,service_preset_mode:value.service_preset_mode||'auto'}).sort(([a],[b])=>a.localeCompare(b)));
+  return JSON.stringify(comparable(left))===JSON.stringify(comparable(right));
 };
 
 export default function ApiConnectionsSettings({ onSaved, uiLanguage, isDefaultConnection=false, onSetDefaultConnection }: {
@@ -30,7 +31,8 @@ export default function ApiConnectionsSettings({ onSaved, uiLanguage, isDefaultC
   const [message,setMessage]=useState('');
   const [picker,setPicker]=useState(false);
   const [custom,setCustom]=useState(false);
-  const [pendingPreset,setPendingPreset]=useState<'generic'|'muse'>();
+  const [adaptationNeedsCheck,setAdaptationNeedsCheck]=useState(false);
+  const [pendingPreset,setPendingPreset]=useState<'auto'|'generic'|'muse'>();
   const [pendingType,setPendingType]=useState<ConnectionType>();
   const [deletePending,setDeletePending]=useState(false);
   const [resetPending,setResetPending]=useState(false);
@@ -50,22 +52,31 @@ export default function ApiConnectionsSettings({ onSaved, uiLanguage, isDefaultC
   const stored=collection?.profiles.find(value=>value.id===config?.id);
   const selectedProtocol=config?.protocol || 'openai_compatible';
   const muse=config?.service_preset==='muse';
+  const presetMode=config?.service_preset_mode||'auto';
+  const presetChoice=presetMode==='auto'?'auto':config?.service_preset||'generic';
+  const detectedMuse=selectedProtocol==='openai_compatible'&&presetMode==='auto'&&discovery?.detected_service_preset==='muse';
+  const museKeyHint=selectedProtocol==='openai_compatible'&&presetMode==='auto'&&apiKey.trim().startsWith('m2a_')&&!detectedMuse;
   const targetChanged=Boolean(config&&connectionTargetChanged(config,stored));
   const dirty=Boolean(apiKey||proxyUrl||removeProxy||(config&&(stored?!sameForm(config,stored)||JSON.stringify(parseProfileModels(modelsText))!==JSON.stringify(stored.models||[]):
     JSON.stringify({...config,id:''})!==JSON.stringify({...newConnectionProfile(),id:''})||modelsText.trim())));
   const endpoints=config?connectionEndpointPreview(config.base_url,config.base_url_mode,selectedProtocol,config.model||'MODEL_ID'):undefined;
   const canDiscover=Boolean(config&&endpoints&&(apiKey.trim()||!targetChanged&&stored?.api_key_present||selectedProtocol==='seedream_native'&&!targetChanged));
-  const invalidateCatalog=(clear=true)=>{
+  const invalidateCatalog=(clear=true,connectionChanged=false)=>{
     ++catalogEpoch.current; discoveryFlight.current?.abort(); discoveryFlight.current=undefined;
     setCatalogBusy(false); setDiscovery(undefined); setCatalogError('');
     if(clear) setCatalog(emptyCatalog());
+    if(connectionChanged&&config?.service_preset==='muse'&&(config.service_preset_mode||'auto')==='auto'){
+      const id=config.id;
+      setConfig(current=>current?.id===id&&(current.service_preset_mode||'auto')==='auto'?{...current,service_preset:'generic'}:current);
+      setAdaptationNeedsCheck(true);
+    }
   };
   const edit=(patch:Partial<ApiConnectionProfile>,changesConnection=false)=>{
-    if(changesConnection) invalidateCatalog();
+    if(changesConnection) invalidateCatalog(true,Object.entries(patch).some(([key,value])=>config?.[key as keyof ApiConnectionProfile]!==value));
     setConfig(value=>value?{...value,...patch}:value); setMessage('');
   };
   const choose=(profile:ApiConnectionProfile,preserved?:ModelCatalog,verified?:ConnectionModelDiscovery)=>{
-    invalidateCatalog(); setPendingPreset(undefined); selected.current=profile.id;
+    invalidateCatalog(); setPendingPreset(undefined); setAdaptationNeedsCheck(false); selected.current=profile.id;
     setConfig({...profile}); setApiKey(''); setProxyUrl(''); setRemoveProxy(false);
     setModelsText((profile.models||[]).join('\n')); setSearch(''); setFilter('all'); setMessage('');
     setDeletePending(false); setResetPending(false); setPendingType(undefined); setCustom(false);
@@ -125,12 +136,15 @@ export default function ApiConnectionsSettings({ onSaved, uiLanguage, isDefaultC
     const ticket=++catalogEpoch.current, id=config.id;
     setCatalogBusy(true);setCatalogError('');setDiscovery(undefined);setMessage('');
     try{
-      const value=await connections.discover({...(stored?{profile_id:id}:{}),protocol:selectedProtocol,service_preset:config.service_preset||'generic',base_url:config.base_url,
+      const value=await connections.discover({...(stored?{profile_id:id}:{}),protocol:selectedProtocol,service_preset:config.service_preset||'generic',service_preset_mode:config.service_preset_mode||'auto',base_url:config.base_url,
         base_url_mode:config.base_url_mode||'versioned',...(apiKey.trim()?{api_key:apiKey.trim()}:{}),
         ...apiNetworkPayload(apiNetworkMode(config.network_mode),{proxyUrl,removeProxy})},controller.signal);
       if(!mounted.current||controller.signal.aborted||ticket!==catalogEpoch.current||selected.current!==id)return;
       if(value.error_code){setCatalogError(discoveryMessage(value.error_code,en));setDiscovery(undefined);return;}
-      setCatalog(value);setDiscovery(value);
+      setCatalog(value);setDiscovery(value);setAdaptationNeedsCheck(false);
+      if(value.detected_service_preset==='muse'&&selectedProtocol==='openai_compatible'&&(config.service_preset_mode||'auto')==='auto'){
+        setConfig(current=>current?.id===id&&(current.service_preset_mode||'auto')==='auto'?{...current,service_preset:'muse',stream:false,partial_images:0}:current);
+      }
     }catch(reason){
       if(mounted.current&&!controller.signal.aborted&&ticket===catalogEpoch.current){
         const code=reason&&typeof reason==='object'&&'code' in reason?String(reason.code):'connection';
@@ -148,7 +162,7 @@ export default function ApiConnectionsSettings({ onSaved, uiLanguage, isDefaultC
     const problem=networkIssue();if(problem){setMessage(apiNetworkErrorMessage(problem,uiLanguage));return;}
     const {id,api_key_present:_key,configured:_configured,model_catalog:_catalog,proxy_url_present:_proxy,proxy_endpoint:_endpoint,image_capabilities:_capabilities,...fields}=config;
     const previous=stored?.model||'';
-    void mutate(()=>connections.save(id,{...fields,models,...apiNetworkPayload(apiNetworkMode(config.network_mode),{proxyUrl,removeProxy}),...(apiKey.trim()?{api_key:apiKey.trim()}: {})}),id,value=>{
+    void mutate(()=>connections.save(id,{...fields,service_preset_mode:config.service_preset_mode||'auto',models,...apiNetworkPayload(apiNetworkMode(config.network_mode),{proxyUrl,removeProxy}),...(apiKey.trim()?{api_key:apiKey.trim()}: {})}),id,value=>{
       const saved=value.profiles.find(p=>p.id===id);if(!saved||saved.model===previous)return;
       try{updateRememberedModel(localStorage,id,saved.model,saved.protocol,saved.service_preset);}catch{/* local storage may be disabled */}
       window.dispatchEvent(new CustomEvent('ipl:profile-model-saved',{detail:{profileId:id,model:saved.model}}));
@@ -162,7 +176,7 @@ export default function ApiConnectionsSettings({ onSaved, uiLanguage, isDefaultC
   const confirmType=(choice:ConnectionType)=>{
     if(!config)return;
     invalidateCatalog();setConfig(applyConnectionType(config,choice));setApiKey('');setModelsText('');
-    setPicker(false);setCustom(false);setPendingType(undefined);setPendingPreset(undefined);setMessage('');
+    setPicker(false);setCustom(false);setPendingType(undefined);setPendingPreset(undefined);setAdaptationNeedsCheck(false);setMessage('');
   };
   const selectModel=(model:CatalogModel)=>{
     if(!config||busy)return;
@@ -230,13 +244,14 @@ export default function ApiConnectionsSettings({ onSaved, uiLanguage, isDefaultC
           {pendingType&&<div className="api-change-confirm" role="alertdialog" aria-label={en?'Confirm connection type change':'确认更换连接类型'}><strong>{en?'Replace connection fields?':'确认更换连接类型？'}</strong><p>{en?'The name and network settings stay. The address changes; the key, selected models and protocol transport options are reset. Nothing changes until you confirm.':'保留名称和网络设置；将更换地址，清空已填写的 Key 和模型，并恢复协议传输默认值。确认前不会改变当前内容。'}</p><div><button type="button" className="secondary" onClick={()=>{setPendingType(undefined);setPicker(false);}}>{en?'Cancel':'取消'}</button><button type="button" className="primary" onClick={()=>confirmType(pendingType)}>{en?'Confirm change':'确认更换'}</button></div></div>}
         </section>:config&&<form onSubmit={save} className="api-connection-form" autoComplete="off"><fieldset disabled={busy}>
           <div className="api-type-summary"><div><strong>{muse?'Muse · ':''}{connectionProtocolLabel(selectedProtocol,en)}</strong><p>{muse?(en?'Images: muse-image. Muse text Responses does not support Agent tools; video is not supported here.':'生图使用 muse-image；Muse 文字 Responses 不支持 Agent 工具调用，本项目暂不支持视频。'):connectionUsage(selectedProtocol,en)}</p></div><button type="button" className="api-link" onClick={()=>{setPicker(true);setCustom(false);}}>{en?'Change':'更换'}</button></div>
-          {selectedProtocol==='openai_compatible'&&<div className="api-model-filters" role="group" aria-label={en?'Service adaptation':'服务适配'}>{(['generic','muse'] as const).map(value=><button type="button" key={value} aria-pressed={(config.service_preset||'generic')===value} disabled={busy} onClick={()=>{if((config.service_preset||'generic')!==value)setPendingPreset(value);}}>{value==='muse'?'Muse':en?'Standard OpenAI compatible':'标准 OpenAI 兼容'}</button>)}</div>}
-          {pendingPreset&&<div className="api-change-confirm" role="alertdialog" aria-label={en?'Confirm service adaptation':'确认服务适配'}><p>{en?'Apply this service’s image parameters? Address, key, prompt and images are retained.':'切换此连接的图片参数适配？地址、密钥、提示词和图片保留。'}</p><button type="button" onClick={()=>setPendingPreset(undefined)}>{en?'Cancel adaptation':'取消适配'}</button><button type="button" onClick={()=>{edit({service_preset:pendingPreset,stream:false,partial_images:0},true);setPendingPreset(undefined);}}>{en?'Apply adaptation':'确认适配'}</button></div>}
           <div className="api-basic-fields">
             <label>{en?'Name':'名称'}<input aria-label={en?'Connection name':'连接名称'} required maxLength={100} value={config.display_name} onChange={e=>edit({display_name:e.target.value})} placeholder={en?'e.g. My image service':'例如：我的图片服务'}/></label>
             <label>Base URL<input aria-label="Base URL" required type="url" spellCheck={false} value={config.base_url} onChange={e=>edit({base_url:e.target.value},true)} placeholder="https://api.example.com"/></label>
-            <label>API Key<input aria-label="API Key" type="password" autoComplete="new-password" spellCheck={false} value={apiKey} onChange={e=>{invalidateCatalog();setApiKey(e.target.value);}} placeholder={stored?.api_key_present&&!targetChanged?(en?'Saved; leave blank to retain':'已保存，留空保留'):(en?'Enter an API key':'填写 API Key')}/></label>
+            <label>API Key<input aria-label="API Key" type="password" autoComplete="new-password" spellCheck={false} value={apiKey} onChange={e=>{invalidateCatalog(true,e.target.value!==apiKey);setApiKey(e.target.value);}} placeholder={stored?.api_key_present&&!targetChanged?(en?'Saved; leave blank to retain':'已保存，留空保留'):(en?'Enter an API key':'填写 API Key')}/></label>
           </div>
+          {museKeyHint&&<p className="api-field-hint">{en?'This key may belong to Muse. Discover models to confirm.':'疑似 Muse，识别模型后确认。'}</p>}
+          {adaptationNeedsCheck&&presetMode==='auto'&&<p role="status" className="api-field-hint">{en?'Connection details changed. Discover models again to confirm service adaptation.':'连接信息已更改，请重新识别模型以确认服务适配。'}</p>}
+          {detectedMuse&&<p role="status" className="api-field-hint">{en?(dirty?'Muse detected automatically. Save the connection to apply.':'Muse detected automatically.'):(dirty?'已自动识别 Muse，保存连接后生效。':'已自动识别 Muse。')}</p>}
           {targetChanged&&stored?.api_key_present&&!apiKey&&<p className="api-field-warning"><KeyRound size={13}/>{discoveryMessage('key_reentry_required',en)}</p>}
           <div className="api-discovery-action"><button type="button" className="primary" aria-label={en?'Discover models':'识别模型'} disabled={!canDiscover||catalogBusy} onClick={()=>void discover()}><RefreshCw size={15} className={catalogBusy?'spin':''}/>{catalogBusy?(en?'Reading models…':'正在读取…'):selectedProtocol==='seedream_native'?(en?'Load reference models':'查看参考模型'):(en?'Discover models':'识别模型')}</button><button type="button" className="api-link" onClick={()=>modelInput.current?.focus()}>{en?'Enter a model manually':'手动填写模型'}</button></div>
           <section className="api-models" aria-label={en?'Models':'模型清单'}>
@@ -251,9 +266,21 @@ export default function ApiConnectionsSettings({ onSaved, uiLanguage, isDefaultC
             {choices.length>0&&<div className="api-selected-models" aria-label={en?'Selected models':'已选择模型'}>{choices.map(id=><span key={id}>{id}<button type="button" aria-label={`${en?'Remove model':'移除模型'} ${id}`} onClick={()=>setModelsText(choices.filter(value=>value!==id).join('\n'))}>×</button></span>)}</div>}
           </section>
           <details className="api-connection-advanced"><summary>{en?'Advanced settings':'高级设置'}</summary><div>
+            {selectedProtocol==='openai_compatible'&&<section><h5>{en?'Service adaptation':'服务适配'}</h5>
+              <div className="api-model-filters" role="group" aria-label={en?'Service adaptation':'服务适配'}>
+                {(['auto','generic','muse'] as const).map(value=><button type="button" key={value} aria-pressed={presetChoice===value} disabled={busy}
+                  onClick={()=>{if(presetChoice!==value)setPendingPreset(value);}}>{value==='auto'?(en?'Automatic (default)':'自动识别（默认）'):value==='muse'?(en?'Manual Muse':'手动 Muse'):(en?'Standard OpenAI compatible':'标准 OpenAI 兼容')}</button>)}
+              </div>
+              {pendingPreset&&<div className="api-change-confirm" role="alertdialog" aria-label={en?'Confirm service adaptation':'确认服务适配'}>
+                <p>{en?'Change service adaptation? Address, key, prompt and images are retained. Automatic mode keeps the current adaptation until the next model discovery.':'切换服务适配？地址、密钥、提示词和图片保留。自动模式会保留当前适配，待下次识别模型时确认。'}</p>
+                <button type="button" onClick={()=>setPendingPreset(undefined)}>{en?'Cancel adaptation':'取消适配'}</button>
+                <button type="button" onClick={()=>{edit({service_preset_mode:pendingPreset==='auto'?'auto':'manual',...(pendingPreset==='auto'?{}:{service_preset:pendingPreset}),...(pendingPreset==='muse'?{stream:false,partial_images:0}:{})},true);setPendingPreset(undefined);setAdaptationNeedsCheck(false);}}>{en?'Apply adaptation':'确认适配'}</button>
+              </div>}
+            </section>}
+
             <section><h5>{en?'Address rules':'地址规则'}</h5><label>{en?'Base URL mode':'地址拼接方式'}<select aria-label={en?'Base URL mode':'地址拼接方式'} value={config.base_url_mode||'versioned'} onChange={e=>edit({base_url_mode:e.target.value as 'versioned'|'custom'},true)}><option value="versioned">{en?'Protocol version path':'协议标准路径'} · {connectionVersionLabel(selectedProtocol,en)}</option><option value="custom">{en?'Use exact base path':'使用填写的根路径'}</option></select></label>
               {endpoints&&<dl className="api-endpoints">{[[en?'Generate':'生成',endpoints.generate],[en?'Edit':'编辑',endpoints.edit],['Responses',endpoints.responses]].filter(([,url])=>url).map(([name,url])=><div key={name}><dt>{name}</dt><dd><code>POST {url}</code></dd></div>)}</dl>}</section>
-            <section><h5>{en?'Network':'网络'}</h5><ApiNetworkSettings key={config.id} uiLanguage={uiLanguage} mode={apiNetworkMode(config.network_mode)} proxyUrl={proxyUrl} proxyUrlPresent={config.proxy_url_present===true} proxyEndpoint={config.proxy_endpoint} removeProxy={removeProxy} disabled={busy} onModeChange={mode=>edit({network_mode:mode},true)} onProxyUrlChange={value=>{invalidateCatalog();setProxyUrl(value);}} onRemoveProxyChange={value=>{invalidateCatalog();setRemoveProxy(value);}}/>
+            <section><h5>{en?'Network':'网络'}</h5><ApiNetworkSettings key={config.id} uiLanguage={uiLanguage} mode={apiNetworkMode(config.network_mode)} proxyUrl={proxyUrl} proxyUrlPresent={config.proxy_url_present===true} proxyEndpoint={config.proxy_endpoint} removeProxy={removeProxy} disabled={busy} onModeChange={mode=>edit({network_mode:mode},true)} onProxyUrlChange={value=>{invalidateCatalog(true,value!==proxyUrl);setProxyUrl(value);}} onRemoveProxyChange={value=>{invalidateCatalog(true,value!==removeProxy);setRemoveProxy(value);}}/>
               <label>{en?'Timeout (seconds)':'请求超时（秒）'}<input required type="number" min="1" max="1800" step="1" value={config.timeout} onChange={e=>edit({timeout:Number(e.target.value)})}/></label></section>
             <section><h5>{en?'Protocol transport':'协议传输'}</h5>{selectedProtocol==='openai_compatible'?<>
               {!muse&&<><label className="api-switch">{en?'Streaming':'流式传输'}<input type="checkbox" role="switch" aria-label={en?'Streaming':'流式传输'} checked={config.stream||false} onChange={e=>edit({stream:e.target.checked})}/></label>

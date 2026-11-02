@@ -48,7 +48,8 @@ def fingerprint(value):
 def profile_digest(profile):
     return fingerprint({**{k: v for k, v in profile.items() if k not in NETWORK_DEFAULTS
                             and not (k == 'protocol' and v == 'openai_compatible')
-                            and not (k == 'service_preset' and v == 'generic')},
+                            and not (k == 'service_preset' and v == 'generic')
+                            and not (k == 'service_preset_mode' and v == 'auto')},
                         **network_identity(profile)})
 
 
@@ -66,6 +67,8 @@ def public_profile_digest(profile):
         values['protocol'] = profile['protocol']
     if profile.get('service_preset', 'generic') != 'generic':
         values['service_preset'] = profile['service_preset']
+    if profile.get('service_preset_mode', 'auto') != 'auto':
+        values['service_preset_mode'] = profile['service_preset_mode']
     return fingerprint(values)
 
 
