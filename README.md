@@ -68,13 +68,13 @@ asset atomically. See [local recovery and import safety](docs/LOCAL_RESULT_RECOV
 Agent keeps conversations, message branches and image references on the local server. Edit or regenerate a message to create a branch while retaining the earlier one. Search saved conversations, reuse generated images as references, and return from an output to its source conversation.
 
 - **Continue naturally in chat.** The current task, working Prompt versions and image roles are maintained behind the conversation; no separate task form is required. Required older images are recovered from their specific sources instead of attaching every historical image merely because an old question is unresolved. Original text, images and branches remain saved.
-- **Generate from a chosen Prompt block.** Use its exact text and the confirmed references with the visible image settings. Hybrid goes straight to the Images queue without another text-model planning request; Native uses its image tool. Image retry reuses the actual execution Prompt and frozen references. Unknown outcomes require checking the existing receipt and are never automatically replayed. See [confirmed Prompts and retry boundaries](docs/AGENT_CONFIRMED_RECIPES.md).
+- **Generate from a chosen Prompt block.** Use its exact text and the confirmed references with the visible image settings. Hybrid goes straight to the selected image-provider queue without another text-model planning request; Native uses its image tool. Image retry reuses the actual execution Prompt and frozen references. Unknown outcomes require checking the existing receipt and are never automatically replayed. See [confirmed Prompts and retry boundaries](docs/AGENT_CONFIRMED_RECIPES.md).
 - **Copy the image or its Prompt explicitly.** Successful image cards offer separate image-copy and generation-Prompt actions. Clipboard conversion does not replace the original file; download it when you need the original bytes and metadata.
-- **Understand failures before trying again.** Details distinguish upload limits, HTTP 413 request-size rejection, provider errors and uncertain outcomes. Available provider codes and a short sanitized explanation are shown without inventing a missing reason. Agent references accept PNG, JPEG and WebP, up to **30 MiB and 16,000,000 pixels per image**; unsupported or undecodable files have separate errors.
-- Choose a compatible API profile and full **text model ID**. Hybrid mode uses Responses for text/tools and the selected Images profile for image jobs; Native mode accepts Responses image-tool results. Provider support must match the selected route.
+- **Understand failures before trying again.** Details distinguish upload limits, HTTP 413 request-size rejection, provider errors and uncertain outcomes. Available provider codes and a short sanitized explanation are shown without inventing a missing reason. Agent references accept PNG, JPEG and WebP, up to **30 MiB and 20,000,000 pixels per image**; unsupported or undecodable files have separate errors.
+- Choose a compatible API profile and full **text model ID**. Hybrid mode uses Responses for text/tools and the selected image-protocol profile for image jobs; Native mode accepts Responses image-tool results. Provider support must match the selected route.
 - **Continuous image mode is off by default.** Authorize images for one turn, or explicitly enable image mode to allow them on subsequent sends in the current conversation. Each request still freezes its image and model-step limits. Web search requires its own configuration and per-turn authorization.
 - By default, **Enter sends** and **Shift+Enter inserts a new line**. Input-method composition does not submit. Accepted submissions clear text/references while keeping image settings; Gallery and Agent input preferences can be adjusted independently.
-- **Use Gallery image settings** copies a valid Images profile and parameters into the Agent draft without enabling generation or changing either prompt. OAuth and native Responses image-tool routes cannot be substituted this way.
+- **Use Gallery image settings** copies a valid image connection and parameters into the Agent draft without enabling generation or changing either prompt. OAuth and native Responses image-tool routes cannot be substituted this way.
 - Built-in `image-prompt-reverse` and `gpt-image` guidance helps with image analysis, prompt refinement and edits. These are fixed, attributed text sections adapted from pinned sources, loaded when relevant; they do not install or automatically update the original skill repositories, run their scripts or authorize generation. See [Agent skills and licenses](docs/agent-skills/README.md).
 
 Responses stream progress to the browser, with read-only polling as a fallback. Refreshing or reconnecting does not resubmit a paid request. **Stop** prevents new calls; an upstream request already sent may still finish or be billed. See [workspace behavior and compatibility limits](docs/PLAYGROUND.md).
@@ -83,7 +83,25 @@ The [offline preview](docs/AGENT_PREVIEW.md) uses synthetic images and a mock pr
 
 ## Quick start
 
-Requires **Python 3.10+** and **Node.js 24** for source builds. In an existing checkout, follow [source setup and maintenance](docs/INDEPENDENT_MAINTENANCE.md). Windows PowerShell:
+Use **Git, Python 3.10+** (3.11 recommended) and **Node.js 24** with npm.
+Choose a path before installing:
+
+| Goal | Guide |
+| --- | --- |
+| Full local app, first capture, data paths and health checks | [Step-by-step quick start (简体中文)](docs/QUICK_START.md) |
+| Isolated development and tests | [Development Guide](docs/DEVELOPMENT.md) |
+| Read-only showcase on Cloudflare Pages or Vercel | [Static deployment settings (简体中文)](docs/DEPLOYMENT.md#static-demo) |
+| Full app on a persistent server, optionally behind Cloudflare Access | [Server deployment (简体中文)](docs/DEPLOYMENT.md#persistent-server) |
+
+**First checkout:** use a new source folder. Existing users should inspect their
+checkout and installed instance rather than cloning over them.
+
+```sh
+git clone https://github.com/Brilliant666/image-prompt-library.git
+cd image-prompt-library
+```
+
+### Windows PowerShell
 
 ```powershell
 python -m venv .venv
@@ -93,35 +111,74 @@ $env:UV_PROJECT_ENVIRONMENT = Join-Path (Get-Location) '.venv'
 npm ci
 npm run build
 $env:IMAGE_PROMPT_LIBRARY_PATH = Join-Path $HOME 'ImagePromptLibrary'
-.\.venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+.\.venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --workers 1
 ```
 
-Choose your library path before starting; ensure no other instance owns that library and port 8000 is free. Open [127.0.0.1:8000](http://127.0.0.1:8000); press `Ctrl-C` in the terminal to stop. For macOS/Linux, see the [development guide](docs/DEVELOPMENT.md).
-
-**Development and validation:** use the [isolated development setup](docs/INDEPENDENT_MAINTENANCE.md#从源码开发与启动), which separates both the library and credentials and uses port 8010. The quick start above is for normal local use.
-
-A fresh local library starts empty. Choose **Quick capture**, add an image and its original prompt, and save. AI configuration is optional. Existing installed copies can be inspected with:
+### macOS / Linux
 
 ```bash
-image-prompt-library status
-image-prompt-library doctor
+python3 -m venv .venv
+.venv/bin/python -m pip install uv==0.12.16
+export UV_PROJECT_ENVIRONMENT="$PWD/.venv"
+.venv/bin/python -m uv sync --locked --extra dev --inexact --python .venv/bin/python
+npm ci
+npm run build
+export IMAGE_PROMPT_LIBRARY_PATH="$HOME/ImagePromptLibrary"
+.venv/bin/python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --workers 1
 ```
 
-Editing or building a source checkout does not update a separate installed copy. This independent repository has no Releases yet; use the maintenance guide for updates and preserve a compatible backup before switching versions.
+Open <http://127.0.0.1:8000/>; <http://127.0.0.1:8000/api/health> should return
+JSON with `"ok": true`. Keep the terminal open; use `Ctrl-C` to stop gracefully.
+Choose the library path first, keep port 8000 free and run only one process per
+library. Direct `uvicorn` does not load a checkout `.env` automatically.
+Credentials default to `~/.image-prompt-library`, outside the library.
+
+A fresh local library starts empty. Use **Quick capture** to save one image and its original
+Prompt. No AI account is required. For code changes use the isolated library,
+credential paths and backend port 8010 in the [development guide](docs/DEVELOPMENT.md),
+not your daily data. Vite runs on 5177 and proxies to the isolated backend.
+
+The clone does not install a global management command. Only an existing managed
+installation can use `image-prompt-library status` and `image-prompt-library doctor`.
+Source changes do not update that separate installation. This independent repository
+has no Releases yet; follow [source maintenance](docs/INDEPENDENT_MAINTENANCE.md) and
+preserve compatible backups before changing a running version.
+
+### Cloudflare / Vercel quick reference
+
+For a **read-only demo**, set the project root to the repository root, install with
+`npm ci`, build with `npx tsc && npx vite build --mode demo --base /`, and publish
+**`frontend/dist`**. Select Node 24; Vercel must use the **Other** framework preset,
+not automatic FastAPI detection. No model Key or private library is needed.
+
+This is not the writable app: it cannot save private assets, run Gallery or Agent,
+or replace the local backend. The default `npm run build:demo` uses the GitHub Pages
+`/image-prompt-library/` subpath, so use the explicit root-base command above.
+See [Cloudflare](docs/DEPLOYMENT.md#cloudflare-pages) / [Vercel](docs/DEPLOYMENT.md#vercel)
+for exact settings, checks and limitations.
 
 ## API and image settings
 
-Open **Settings → API**. API Key profiles support named synchronous OpenAI-compatible services, including sub2api, with separate base URLs, keys, model lists and defaults. Account connections retain **ChatGPT / Codex OAuth** and experimental **Grok OAuth**; the **Default AI provider** can be overridden for an individual session.
+Open **Settings → API → API Key connections**. Choose a service/protocol once,
+enter name/Base URL/Key, optionally **Discover models before saving**, then save.
+Named connections support `openai_compatible` (including sub2api and compatible
+relays), `gemini_native` and `seedream_native`. A relay can expose a native format;
+the app never infers protocol from a model name or retries a different route.
+Account connections retain **ChatGPT / Codex OAuth** and experimental **Grok OAuth**;
+the **Default AI provider** remains independently selectable.
 
 | Setting | What it means |
 | --- | --- |
-| Model catalog | **Refresh models** fetches the selected profile's model list. Entries are candidates, not proof of Images, Responses or tool compatibility. Manual and historical IDs remain available; image menus recommend `gpt-image` names and also accept a full model ID entered by hand. |
-| Size and ratio | Auto, ratio presets and custom dimensions select requested pixels. A 4K target does not guarantee a 4K result; details distinguish the request from actual decoded dimensions. Saved originals are not stretched. |
-| Quality and format | Available settings depend on the route. Transparency requires PNG or WebP; compression applies where supported. A provider may reject or ignore optional parameters. |
-| Streaming | Optional Images streaming/intermediate previews depend on the endpoint. A partial image is progress, not a final successful result. |
-| Authorization | Saving a profile or switching it does not perform a paid generation test. OAuth access, limits and billing remain controlled by the provider. |
+| Model discovery | Unsaved drafts can read remote model lists without persisting a connection. Text/image/unknown labels are evidence-based; manual IDs remain supported. Seedream offers reference models, not a live Key test. |
+| Text and images | Agent Hybrid uses a separate Responses text connection and the selected image protocol. Native Agent still uses its Responses image tool; native image profiles are not Gemini text-Agent support. |
+| Connection changes | Changing an already filled type requires confirmation. Stored keys do not silently move to another URL/protocol. Discovery does not replace the image default with a text-only claim. |
+| Image parameters | Gallery/Agent show applicable dimensions, ratio, quality, format and native options. The requested resolution is not a guarantee of returned pixels. Originals are retained. |
+| Advanced settings | Address rules, network and protocol transport remain configurable. Models are in the main flow, not hidden behind advanced options. |
+| Safety | Saving never runs a generation test. Unknown outcomes and retained local results are not automatically replayed. Real calls may send private content and incur charges. |
 
-See [OpenAI-compatible API configuration](docs/OPENAI_COMPATIBLE.md) and the [generation guide](docs/GENERATION.md) for endpoint rules, reference limits and troubleshooting. Mock tests do not establish real-provider model identity, billing, resolution or native-tool support.
+Read [API connections](docs/API_CONNECTIONS.md), [native image protocols](docs/NATIVE_IMAGE_PROVIDERS.md)
+and [OpenAI compatibility](docs/OPENAI_COMPATIBLE.md) for detailed behavior.
+A successful catalog read is not proof of model access, generation quality or billing.
 
 <details>
 <summary>Historical screenshot: Grok account provider selection</summary>
@@ -134,7 +191,7 @@ This public screenshot predates the current grouped API settings.
 
 ## Privacy
 
-- Keep **your own private prompt/image library** on your computer. There is no hosted user database or built-in cloud sync; the app listens on `127.0.0.1` by default.
+- Keep **your own private prompt/image library** on the machine running the backend: your computer by default, or your own persistent server. There is no hosted user database or built-in cloud sync; the app listens on `127.0.0.1` by default.
 - Generation sends the prompt and selected references to the chosen provider. Agent also sends the selected conversation branch and required image context to its configured model; using a local library does not make AI inference local.
 - **Suggest title** sends **only prompt text**. Review the suggestion and choose **Use title** to apply it. Generated-result suggestions show **via ChatGPT** or **via Grok**; if the chosen provider is unavailable, the app does not silently send the request elsewhere.
 - Optional capture organization and visual naming use a separately configured vision service and **send image content**. Visual naming for a collected Gallery result requires the naming option and a configured, enabled organizer; it preserves a manually supplied title. This is separate from text-only title suggestions.
@@ -172,7 +229,7 @@ The [upstream online read-only demo](https://eddietyp.github.io/image-prompt-lib
 
 ![Upstream online read-only demo showing Explore collections](docs/assets/screenshots/public-demo-explore.png)
 
-Editing, private-library management, and generation are available only in a local install.
+Editing, private-library management, and generation require the full app on your computer or persistent server, not this static demo.
 
 </details>
 
@@ -197,7 +254,7 @@ See [sample-data/README.md](sample-data/README.md) for details and checksums. Sa
 
 ## Documentation
 
-[Independent maintenance and source setup](docs/INDEPENDENT_MAINTENANCE.md) · [Workspaces and Agent](docs/PLAYGROUND.md) · [API profiles](docs/OPENAI_COMPATIBLE.md) · [Generation](docs/GENERATION.md) · [Browser capture](docs/BROWSER_CAPTURE.md) · [Backup and restore](docs/BACKUP_AND_RESTORE.md) · [Troubleshooting](docs/TROUBLESHOOTING.md) · [Development](docs/DEVELOPMENT.md) · [Contributing](CONTRIBUTING.md)
+[Local quick start (简体中文)](docs/QUICK_START.md) · [Deployment: Cloudflare / Vercel / servers (简体中文)](docs/DEPLOYMENT.md) · [API connections](docs/API_CONNECTIONS.md) · [Native image protocols](docs/NATIVE_IMAGE_PROVIDERS.md) · [Independent maintenance and source setup](docs/INDEPENDENT_MAINTENANCE.md) · [Workspaces and Agent](docs/PLAYGROUND.md) · [API profiles](docs/OPENAI_COMPATIBLE.md) · [Generation](docs/GENERATION.md) · [Browser capture](docs/BROWSER_CAPTURE.md) · [Backup and restore](docs/BACKUP_AND_RESTORE.md) · [Troubleshooting](docs/TROUBLESHOOTING.md) · [Development](docs/DEVELOPMENT.md) · [Contributing](CONTRIBUTING.md)
 
 ## License and acknowledgments
 

@@ -2,6 +2,10 @@
 
 维护仓库为 [Brilliant666/image-prompt-library](https://github.com/Brilliant666/image-prompt-library)，集成分支为 `main`，日常修改在功能分支完成后通过 PR 合并。原 `codex/sub2api-images` 分支保留为历史记录。本项目基于 [EddieTYP/image-prompt-library](https://github.com/EddieTYP/image-prompt-library)，保留原作者声明及 AGPL-3.0-or-later 许可证；不是从零开发的项目。
 
+日常使用、隔离开发与健康检查见[快速开始](QUICK_START.md)；
+Cloudflare Pages / Vercel 只读展示、持久化服务器和 Tunnel 入口见[部署指南](DEPLOYMENT.md)。
+以下说明保留独立维护策略，不把历史安装器当成当前版本的发行入口。
+
 ## 来源与历史
 
 - 上游基线：`v0.11.2`，已核实的上游提交为 `e3d2ecddeeb09975e27826a4d7e5da2abab8cd99`。
@@ -58,4 +62,4 @@ Pages 发布、Release 发布和依赖已发布安装包的 Release candidate �
 
 ## 数据边界
 
-Git 只保存源码、测试、锁文件、文档和无密钥配置示例。个人 SQLite、原图、缩略图、生成结果、供应商凭据、OAuth 状态、日志、依赖目录与备份不应上传。已跟踪的上游测试素材和文档图片继续保留。当前画廊和 Agent 用法见 [Playground 工作区](PLAYGROUND.md)，供应商配置说明见 [OpenAI 兼容图片供应商](OPENAI_COMPATIBLE.md)。
+Git 只保存源码、测试、锁文件、文档和无密钥配置示例。个人 SQLite、原图、缩略图、生成结果、供应商凭据、OAuth 状态、日志、依赖目录与备份不应上传。已跟踪的上游测试素材和文档图片继续保留。当前画廊和 Agent 用法见 [Playground 工作区](PLAYGROUND.md)，供应商配置从 [API 连接](API_CONNECTIONS.md)开始；协议细节见 [OpenAI 兼容图片供应商](OPENAI_COMPATIBLE.md)与 [Gemini / Seedream 原生协议](NATIVE_IMAGE_PROVIDERS.md)。

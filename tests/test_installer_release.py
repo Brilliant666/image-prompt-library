@@ -619,7 +619,8 @@ def test_readme_prefers_independent_source_maintenance_and_preserves_historical_
     assert "Normal release installs do not require Node.js" in installation
     assert "~/ImagePromptLibrary" in installation
     assert "~/.image-prompt-library/app/versions" in installation
-    assert "Editing, private-library management, and generation are available only in a local install" in readme
+    assert "Editing, private-library management, and generation require the full app" in readme
+    assert "not this static demo" in readme
     assert "image-prompt-library start --host 0.0.0.0" in installation
     assert "Binding to `0.0.0.0` can expose the app" in installation
     assert "image-prompt-library doctor" in installation

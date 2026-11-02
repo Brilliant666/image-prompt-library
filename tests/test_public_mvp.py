@@ -124,13 +124,16 @@ def test_public_readme_explains_current_workflows_and_screenshots():
     assert "excluded from portable backups" in readme
     assert "does not silently send" in readme
     assert "127.0.0.1" in readme
-    assert "Editing, private-library management, and generation are available only in a local install" in readme
+    assert "Editing, private-library management, and generation require the full app" in readme
+    assert "not this static demo" in readme
     assert "openai_codex_oauth_native" not in readme
     assert "GenerationJob" not in readme
     assert "IMAGE_PROMPT_LIBRARY_CODEX_CLIENT_ID" not in readme
     assert "Use the next release tag" not in readme
     assert "main` release-ready" not in readme
-    assert "npm run build:demo" not in readme
+    assert "npx vite build --mode demo --base /" in readme
+    assert "`/image-prompt-library/` subpath" in readme
+    assert "docs/DEPLOYMENT.md" in readme
     assert "## Verification" not in readme
     assert "## Repository layout" not in readme
     assert "For the next version, the default is therefore" not in readme
