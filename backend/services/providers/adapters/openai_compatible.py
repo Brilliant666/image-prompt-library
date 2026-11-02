@@ -13,10 +13,13 @@ def image_provider(**options):
 
 
 class OpenAIModelCatalog:
-    def discover_models(self, normalized_root, api_key, http_client=None, *, network_settings=None):
+    def discover_models(self, normalized_root, api_key, http_client=None, *, network_settings=None, include_metadata=False):
         # Preserve the public injection boundary used by local API/transport tests.
         from backend.services.openai_compatible import fetch_models
-        return fetch_models(normalized_root, api_key, http_client, network_settings=network_settings)
+        options = {'network_settings': network_settings}
+        if include_metadata:
+            options['include_metadata'] = True
+        return fetch_models(normalized_root, api_key, http_client, **options)
 
 
 class ResponsesTextProvider:

@@ -47,7 +47,7 @@ function harness(t, options = {}) {
     '../utils/i18n': { UI_LANGUAGE_LABELS: {} }, '../utils/prompts': { getPromptCopyLanguageLabel: value => value },
     '../utils/localPreferences': { readLocalPreferences: () => ({}), saveLocalPreferences: () => true }, './ConfigPanel.css': {},
   };
-  for (const path of ['./OpenAICompatibleSettings', './BrowserCaptureSettings', './CaptureOrganizerSettings', './settings/GeneralSettings', './settings/AgentSettings']) deps[path] = { default: 'stub' };
+  for (const path of ['./ApiConnectionsSettings', './BrowserCaptureSettings', './CaptureOrganizerSettings', './settings/GeneralSettings', './settings/AgentSettings']) deps[path] = { default: 'stub' };
   const win = { requestAnimationFrame: cb => { frames.set(++frameId, cb); return frameId; }, cancelAnimationFrame: id => frames.delete(id), matchMedia: () => ({ matches: false }) };
   const module = { exports: {} };
   new Function('require', 'module', 'exports', 'window', 'document', 'location', 'HTMLElement', compiled)(name => { assert.ok(name in deps, name); return deps[name]; }, module, module.exports, win, doc, { search: '' }, Element);

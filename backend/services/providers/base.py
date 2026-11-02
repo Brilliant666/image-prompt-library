@@ -42,7 +42,8 @@ class GenerationExecutor(Protocol):
 
 class ModelCatalog(Protocol):
     def discover_models(self, normalized_root: str, api_key: str, http_client: Any = None,
-                        *, network_settings: Mapping[str, Any] | None = None) -> list[dict[str, Any]]: ...
+                        *, network_settings: Mapping[str, Any] | None = None,
+                        include_metadata: bool = False) -> list[dict[str, Any]]: ...
 
 
 class TextProvider(Protocol):

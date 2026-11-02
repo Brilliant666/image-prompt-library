@@ -58,3 +58,6 @@ export function profileModelChoices(profile: Pick<OpenAICompatibleProfile, 'mode
   const discovered = catalog.filter(model => recommends(model.id)).sort((a,b) => Number(b.image_generation === true) - Number(a.image_generation === true));
   return [...new Set([selected, recommends(defaultModel) ? defaultModel : '', ...configured.filter(recommends), ...discovered.map(model => model.id)].map(model => model.trim()).filter(Boolean))];
 }
+
+/** Neutral name for connection-level callers; the legacy export is retained. */
+export const connectionEndpointPreview = compatibleEndpointPreview;

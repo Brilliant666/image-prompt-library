@@ -12,7 +12,7 @@ from backend.services.providers.native_params import GEMINI_IMAGE_MODELS, SEEDRE
 
 
 class GeminiModelCatalog:
-    def discover_models(self, normalized_root, api_key, http_client=None, *, network_settings=None):
+    def discover_models(self, normalized_root, api_key, http_client=None, *, network_settings=None, include_metadata=False):
         client = http_client
         started = time.monotonic()
         models, token, seen_tokens, total = [], None, set(), 0
@@ -47,7 +47,11 @@ class GeminiModelCatalog:
                         raise ModelCatalogError('invalid')
                     image = True if identity.removeprefix('models/') in GEMINI_IMAGE_MODELS else (
                         False if methods and 'generateContent' not in methods else None)
-                    models.append({'id': identity, 'image_generation': image})
+                    model = {'id': identity, 'image_generation': image}
+                    if include_metadata:
+                        model.update(text_generation=False if methods and 'generateContent' not in methods else None,
+                                     capability_source='documentation' if image is True else 'api' if image is False else 'unknown')
+                    models.append(model)
                     if len(models) > MAX_CATALOG_MODELS: raise ModelCatalogError('limit')
                 token = body.get('nextPageToken')
                 if not token:
@@ -68,7 +72,9 @@ class GeminiModelCatalog:
 
 
 class SeedreamModelCatalog:
-    def discover_models(self, normalized_root, api_key, http_client=None, *, network_settings=None):
+    def discover_models(self, normalized_root, api_key, http_client=None, *, network_settings=None, include_metadata=False):
         # This documented reference list is NOT a network/permission test.
         # Endpoint IDs and other aliases can still be entered manually.
-        return [{'id': identity, 'image_generation': True} for identity in SEEDREAM_MODELS]
+        return [{'id': identity, 'image_generation': True,
+                 **({'text_generation': False, 'capability_source': 'documentation'} if include_metadata else {})}
+                for identity in SEEDREAM_MODELS]

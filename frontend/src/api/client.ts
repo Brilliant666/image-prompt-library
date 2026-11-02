@@ -1,3 +1,4 @@
+import type { ConnectionDiscoveryDraft, ConnectionModelDiscovery } from '../types';
 import type { TitleSuggestionProvider, OpenAICompatibleConfig, OpenAICompatibleProfiles, AppConfig, AppUpdateRequest, AppUpdateResult, AppUpdateStatus, CleanupApplyRequest, CleanupApplyResult, CleanupPreview, ClusterRecord, CodexNativeAuthPollRequest, CodexNativeAuthPollResponse, CodexNativeAuthStart, GenerationJobAcceptAsNewItemPayload, GenerationJobAcceptResult, GenerationJobCreate, GenerationJobList, GenerationJobRecord, GenerationJobRetryResult, GenerationJobSetCreate, GenerationJobSetRecord, GenerationProviderStatus, GrokOAuthPollRequest, ItemBatchRequest, ItemBatchResult, ItemCreate, ItemDetail, ItemImageUpdate, ItemList, ItemSortMode, ItemSummary, ProviderDeviceAuthStart, TagRecord, TitleSuggestionRequest, TitleSuggestionResponse, UploadImageRole } from '../types';
 import type { ImageRecord, ItemUpdate, ModelCatalog, OpenAICompatibleProfileSave } from '../types';
 import { readJson } from './readJson';
@@ -350,3 +351,33 @@ export const api = isDemoMode ? {
 };
 
 export { DEMO_DATA_BASE, isDemoMode };
+
+/** Neutral connection façade; old HTTP routes and callers remain supported. */
+export class ConnectionDiscoveryError extends Error {
+  constructor(public readonly code: string) { super(code); this.name = 'ConnectionDiscoveryError'; }
+}
+export const apiConnections = {
+  list: api.openAICompatibleProfiles,
+  catalog: api.openAICompatibleModels,
+  save: api.saveOpenAICompatibleProfile,
+  remove: api.deleteOpenAICompatibleProfile,
+  setDefault: api.defaultOpenAICompatibleProfile,
+  async discover(draft: ConnectionDiscoveryDraft, signal?: AbortSignal): Promise<ConnectionModelDiscovery> {
+    if (isDemoMode) return demoReadOnly();
+    const response = await fetch('/api/generation-providers/api-connections/models/preview', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin', redirect: 'error', cache: 'no-store',
+      body: JSON.stringify(draft), signal,
+    });
+    if (!response.ok) {
+      let code = 'invalid_draft';
+      try {
+        const body = await response.json();
+        const known = ['key_required','key_reentry_required','profile_missing','busy','invalid_draft'];
+        if (known.includes(body?.detail?.code)) code = body.detail.code;
+      } catch { /* Do not display arbitrary responses containing credentials. */ }
+      throw new ConnectionDiscoveryError(code);
+    }
+    return response.json();
+  },
+};

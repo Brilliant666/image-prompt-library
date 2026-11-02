@@ -2,6 +2,10 @@
 
 ## Connections and generation settings
 
+For the connection editor, unsaved model discovery and credential handling, see
+[API connections](API_CONNECTIONS.md). Discovery is explicit; saving does not
+automatically fetch models or execute generation.
+
 API settings retain multiple named connections, defaults, copying, ordering,
 manual models and network controls. New connections can start from OpenAI,
 Google Gemini, Seedream or custom-relay presets. A preset only fills the unsaved
