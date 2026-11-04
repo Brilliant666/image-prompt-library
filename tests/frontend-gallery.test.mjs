@@ -252,6 +252,50 @@ async function chooseCount(h, count) {
   assert.equal(children(h.tree).find(node => node.props?.['data-panel'] === 'count'), undefined);
 }
 
+const museProfileStore = async () => ({profiles:[{id:'original-api',display_name:'Muse',model:'muse-image',service_preset:'muse',configured:true}],default_profile_id:'original-api'});
+const museHistory = ratio => historicalJob({model:'muse-image',parameters:{...compatible.museRecipeDefaults(),compatible_profile_id:'original-api',requested_aspect_ratio:ratio}});
+
+test('Muse ratio and count controls submit the chosen recipe without duplicate settings or changing prompt/references', async t => {
+  const h=inputHarness(t,{command:{id:501,job:museHistory('9:16')}},{openAICompatibleProfiles:museProfileStore});await h.flush();
+  const text=value=>Array.isArray(value)?value.map(text).join(''):typeof value==='object'?text(value?.props?.children):String(value??'');
+  assert.ok(!children(h.tree).some(node=>node.type==='button'&&node.props.className?.includes('pg-param-more')));
+  assert.ok(!children(h.tree).some(node=>node.type==='button'&&node.props.className?.includes('pg-param-quality')));
+  assert.equal(text(h.find('button','画面比例 9:16').children),'比例9:16');
+  h.find('button','画面比例 9:16').onClick();await h.flush();
+  assert.equal(h.find('textarea','画廊提示词').value,originalPrompt);
+  const panel=children(h.tree).find(node=>node.props?.['aria-label']==='Muse 画面比例');
+  const options=children(panel).filter(node=>node.type==='button');
+  assert.deepEqual(options.map(node=>text(node.props.children)),['服务默认','1:1','16:9','9:16','4:3','3:4']);
+  assert.equal(options.find(node=>text(node.props.children)==='9:16').props['aria-pressed'],true);
+  options.find(node=>text(node.props.children)==='3:4').props.onClick();await h.flush();
+  assert.equal(h.find('button','画面比例 3:4')['aria-expanded'],false);
+  await chooseCount(h,3);
+  h.find('button','添加参考图').onClick();await h.flush();h.find('button','从 Library 或画廊选择参考图').onClick();await h.flush();
+  const picked=[input('first'),input('second')];
+  for(const reference of picked){children(h.tree).find(node=>node.type==='ReferencePicker').props.onSelect(reference);await h.flush();}
+  h.find('button','生成图片').onClick();await h.flush();
+  assert.equal(h.state.posts.length,1);const submission=h.state.posts[0],payload=submission.job;
+  assert.equal(submission.count,3);assert.equal(payload.prompt_text,originalPrompt);assert.equal(payload.model,'muse-image');
+  assert.equal(payload.parameters.service_preset,'muse');assert.equal(payload.parameters.requested_aspect_ratio,'3:4');assert.equal(payload.parameters.size,'auto');
+  assert.deepEqual(payload.parameters.input_images.map(value=>value.data_url),picked.map(value=>value.dataUrl));
+  assert.equal(h.find('textarea','画廊提示词').value,originalPrompt);
+});
+
+test('Muse keeps unsupported history visible and busy ratio callbacks cannot change a submitted request', async t => {
+  const pending=deferred();const h=inputHarness(t,{command:{id:502,job:museHistory('1:2')}},{openAICompatibleProfiles:museProfileStore,createGenerationJob:()=>pending.promise});await h.flush();
+  h.find('button','画面比例 1:2').onClick();await h.flush();
+  const text=value=>Array.isArray(value)?value.map(text).join(''):typeof value==='object'?text(value?.props?.children):String(value??'');
+  const options=()=>children(h.tree).filter(node=>node.type==='button'&&node.props['aria-pressed']!==undefined);
+  const unsupported=options().find(node=>text(node.props.children)==='1:2 · 不支持');assert.ok(unsupported?.props.disabled);
+  assert.equal(h.state.posts.length,0);assert.equal(h.find('textarea','画廊提示词').value,originalPrompt);
+  options().find(node=>text(node.props.children)==='1:1').props.onClick();await h.flush();
+  h.find('button','生成图片').onClick();await h.flush();assert.equal(h.find('button','生成图片')['aria-busy'],true);
+  h.find('button','画面比例 1:1').onClick();await h.flush();const choice=options().find(node=>text(node.props.children)==='3:4');
+  assert.equal(choice.props.disabled,true);choice.props.onClick();await h.flush();
+  assert.equal(h.find('button','画面比例 1:1')['aria-expanded'],true);
+  pending.resolve(historicalJob());await h.flush();
+});
+
 for (const count of [1, 3, 5, 10]) test(`confirmed creation immediately delivers returned jobs to the gallery (${count})`, async t => {
   const pending = deferred(), created = [];
   const records = Array.from({ length: count }, (_, index) => historicalJob({ id: `new-${index}`, status: 'queued' }));

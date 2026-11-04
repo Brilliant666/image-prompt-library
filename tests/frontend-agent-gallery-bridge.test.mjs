@@ -261,8 +261,10 @@ test('actual Muse Gallery composer shares ratio settings and submits the origina
  assert.equal(h.node('button',p=>p.className?.includes('pg-param-quality')),undefined);
  assert.equal(h.reports.at(-1).service_preset,'muse');assert.equal(h.reports.at(-1).params.requested_aspect_ratio,'3:4');
  h.node('button',p=>p.className?.includes('pg-param-size')).onClick();await h.flush();
- const control=h.node('NativeImageParameters');assert.equal(control.servicePreset,'muse');assert.equal(h.node('SizeDialog'),undefined);
- control.onChange({requested_aspect_ratio:'9:16',size:'auto',quality:'auto',background:'auto',output_format:'auto'});await h.flush();
+ assert.equal(h.node('div',p=>p['aria-label']==='Muse 画面比例').className,'pg-option-list');assert.equal(h.node('SizeDialog'),undefined);
+ assert.equal(h.node('button',p=>p.className?.includes('pg-param-more')),undefined);
+ h.node('button',p=>p.children==='9:16').onClick();await h.flush();
+ assert.equal(h.reports.at(-1).params.requested_aspect_ratio,'9:16');
  assert.equal(h.node('textarea',p=>p['aria-label']==='画廊提示词').value,exact);
  await h.node('button',p=>p['aria-label']==='生成图片').onClick();await h.flush();
  assert.equal(sent.length,1);assert.equal(sent[0].prompt_text,exact);assert.equal(sent[0].edited_prompt_text,undefined);

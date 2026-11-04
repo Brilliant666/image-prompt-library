@@ -13,7 +13,7 @@ import { recipeInputs, restoreRecipeInputs, type RecipeInput } from '../../utils
 import { draftFromJob, emptyGalleryDraft, galleryPayload, libraryRecipeImage, type GalleryDraft } from '../../utils/galleryRecipe';
 import { readGalleryDraft, saveGalleryDraft } from '../../utils/galleryDraft';
 import NativeImageParameters from '../NativeImageParameters';
-import { nativeRecipeDefaults, museAspectRatio } from '../../utils/compatibleRecipe';
+import { nativeRecipeDefaults, museAspectRatio, MUSE_ASPECT_RATIOS } from '../../utils/compatibleRecipe';
 import ReferencePicker from './ReferencePicker';
 import SizeDialog from './SizeDialog';
 import { extractPromptTemplateVariableRecords, resolvePromptTemplate } from '../../utils/promptTemplateVariables';
@@ -211,13 +211,13 @@ export default function InputBar({command,imageSettingsCommand,preferences,t,act
     {uncertain&&<button onClick={()=>{setUncertain(false);onCreated();}}>我已检查历史，允许新的提交</button>}
     </div>
     <div className="pg-provider-line"><span>供应商</span><button type="button" className="pg-provider-trigger" aria-label={providerLabel} title="选择供应商" aria-expanded={panel==='provider'} aria-controls="gallery-parameter-panel" onClick={()=>setPanel(panel==='provider'?'':'provider')}><Settings2 size={13}/><span>{providerLabel}</span><ChevronDown size={11}/></button></div>
-    <div className="pg-composer-toolbar">
+    <div className={`pg-composer-toolbar${museApi?' pg-composer-toolbar-muse':''}`}>
       <div className="pg-parameter-chips" aria-label="图片请求参数">
         {chip('model','',draft.recipe.model||'选择模型',`请求模型 ${draft.recipe.model||'未选择'}`)}
-        {chip('size','尺寸',sizeValue,sizeLabel)}
+        {chip('size',museApi?'比例':'尺寸',museApi&&sizeValue==='auto'?'服务默认':sizeValue,sizeLabel)}
         {!nativeApi&&!museApi&&chip('quality','质量',draft.recipe.quality)}
         {chip('count','数量',`${count} 张`,'生成数量')}
-        {chip('more','更多',moreValue)}
+        {!museApi&&chip('more','更多',moreValue)}
       </div>
       <div className="pg-composer-actions">
         <button type="button" className={`pg-add-image${panel==='add'?' active':''}`} title="添加参考图" aria-label="添加参考图" aria-expanded={panel==='add'} aria-controls="gallery-parameter-panel" disabled={busy} onClick={()=>setPanel(panel==='add'?'':'add')}><Plus size={21}/></button>
@@ -225,7 +225,7 @@ export default function InputBar({command,imageSettingsCommand,preferences,t,act
       </div>
     </div>
     {panel&&!(panel==='size'&&draft.provider==='openai_compatible'&&!nativeApi&&!museApi)&&<div id="gallery-parameter-panel" className="pg-control-popover pg-parameters-panel" data-panel={panel} role="region" aria-label="生成参数">
-      <header><b>{{provider:'API 配置',model:'请求模型',size:'请求尺寸',quality:'图片质量',count:'生成数量',more:'输出设置',add:'添加参考图'}[panel]}</b><button aria-label="关闭参数" onClick={()=>setPanel('')}><X size={16}/></button></header>
+      <header><b>{museApi&&panel==='size'?'画面比例':{provider:'API 配置',model:'请求模型',size:'请求尺寸',quality:'图片质量',count:'生成数量',more:'输出设置',add:'添加参考图'}[panel]}</b><button aria-label="关闭参数" onClick={()=>setPanel('')}><X size={16}/></button></header>
       {panel==='add'&&<div className="pg-add-options"><button type="button" aria-label="上传参考图" onClick={()=>{setPanel('');fileRef.current?.click();}}><ImagePlus size={18}/><span>上传图片文件</span></button><button type="button" aria-label="从 Library 或画廊选择参考图" onClick={()=>{setPanel('');setPicker(true);}}><Layers size={18}/><span>从 Library 或画廊选择</span></button><small>也可以粘贴图片或拖入文件，保留原图。</small></div>}
       {panel==='provider'&&<><div className="pg-option-list">{profiles.map(p=><button key={p.id} aria-pressed={draft.provider==='openai_compatible'&&draft.profileId===p.id} onClick={()=>{editDraft(current=>({...current,provider:'openai_compatible',profileId:p.id,aspectRatio:'auto',aspectInjection:undefined,recipe:clearCompatibleTransportOverrides(readGenerationPreference(localStorage,p.id,p.model,p.protocol,p.service_preset))}));setPanel('');}}>{p.display_name}<small>{p.configured?'已配置 · 调用能力以实际响应为准':'未完成配置'}</small></button>)}{providers.filter(p=>p.provider!=='openai_compatible'&&(!['openai_codex_oauth_native','xai_grok_oauth'].includes(p.provider)||p.authenticated===true)).map(p=><button key={p.provider} onClick={()=>{editDraft(current=>({...current,provider:p.provider,recipe:{...clearCompatibleTransportOverrides(current.recipe),model:p.default_image_model||p.model||'',quality:'medium'}}));setPanel('');}}>{p.display_name}<small>{p.can_generate?'可用':'未连接'}</small></button>)}</div><button onClick={onOpenSettings}>管理 API 配置</button></>}
       {panel==='model'&&<>
@@ -247,7 +247,17 @@ export default function InputBar({command,imageSettingsCommand,preferences,t,act
         {draft.provider==='openai_compatible'&&profile?.model&&models.includes(profile.model)&&draft.recipe.model!==profile.model&&<button type="button" className="pg-model-reset" onClick={()=>{recipe({model:profile.model});setPanel('');}}>使用此配置的默认模型</button>}
       </>}
       {panel==='size'&&draft.provider!=='openai_compatible'&&<><select aria-label="宽高比" value={draft.aspectRatio} onChange={e=>editDraft(current=>({...current,aspectRatio:e.target.value}))}>{['auto','1:1','2:3','3:4','9:16','4:3','16:9'].map(r=><option key={r}>{r}</option>)}</select>{draft.provider==='xai_grok_oauth'&&<select aria-label="Grok 分辨率" value={draft.resolution} onChange={e=>editDraft(current=>({...current,resolution:e.target.value}))}><option>1k</option><option>2k</option></select>}</>}
-      {museApi&&(panel==='size'||panel==='more')&&<NativeImageParameters servicePreset="muse" protocol={protocol} model={draft.recipe.model} params={draft.recipe} disabled={busy} onChange={patch=>recipe({...patch,background:patch.background||'auto',service_preset:'muse',size_mode:undefined,output_compression:undefined,moderation:undefined})}/>}
+      {museApi&&panel==='size'&&<div className="pg-muse-parameters">
+        <div className="pg-option-list" aria-label="Muse 画面比例">
+          {!MUSE_ASPECT_RATIOS.includes(sizeValue)&&<button type="button" disabled aria-pressed="true">{sizeValue} · 不支持</button>}
+          {MUSE_ASPECT_RATIOS.map(ratio=><button type="button" key={ratio} disabled={busy} aria-pressed={sizeValue===ratio} onClick={()=>{
+            if(busy)return;
+            recipe({requested_aspect_ratio:ratio,size:'auto',quality:'auto',background:'auto',output_format:'auto',service_preset:'muse',size_mode:undefined,output_compression:undefined,moderation:undefined});setPanel('');
+          }}>{ratio==='auto'?'服务默认':ratio}</button>)}
+        </div>
+        {!MUSE_ASPECT_RATIOS.includes(sizeValue)&&<p role="alert">请选择 Muse 支持的比例，原参数已保留。</p>}
+        <small>质量、实际尺寸和文件格式由 Muse 决定；最多 4 张参考图，每张 10 MiB、合计 24 MiB。</small>
+      </div>}
       {nativeApi&&(panel==='size'||panel==='more'||panel==='quality')&&<NativeImageParameters protocol={protocol} model={draft.recipe.model} params={draft.recipe} disabled={busy} onReset={()=>recipe({...nativeRecipeDefaults(protocol,draft.recipe.model),stream:undefined,partial_images:undefined,response_format:undefined,base_url_mode:undefined,size_mode:undefined,output_compression:undefined,moderation:undefined})} onChange={patch=>recipe({...patch,background:patch.background??draft.recipe.background,moderation:patch.moderation as 'auto'|'low'|undefined,output_compression:patch.output_compression??undefined,provider_options:patch.provider_options??draft.recipe.provider_options})}/>}
       {panel==='count'&&<div className="pg-option-list">{([1,3,5,10] as GenerationSetCount[]).map(n=><button type="button" key={n} disabled={busy} aria-pressed={count===n} onClick={()=>{if(busy)return;beginEdit();setCount(n);setPanel('');}}>{n} 张</button>)}</div>}
       {panel==='quality'&&!nativeApi&&!museApi&&<div className="pg-option-list">{(draft.provider==='openai_compatible'?IMAGE25_QUALITIES:draft.provider==='xai_grok_oauth'?['low','medium']:['low','medium','high']).map(quality=><button key={quality} aria-pressed={draft.recipe.quality===quality} onClick={()=>{recipe({quality});setPanel('');}}>{({auto:'自动',low:'低',medium:'中',high:'高',xhigh:'超高',max:'最高'} as Record<string,string>)[quality]} · {quality}</button>)}</div>}
