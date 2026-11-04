@@ -3,11 +3,61 @@
 Contract: czg86389-hub/muse2api@1cd01682533dbf2c015fa879a8dc09534b50b4a3.
 Uses the existing provider, queue, result validation and local recovery lifecycle.
 """
+from collections import OrderedDict
+import hashlib
+from pathlib import Path
 import re
+from threading import RLock
+from time import monotonic
 
 RATIOS = ('1:1', '16:9', '9:16', '4:3', '3:4')
 MAX_REFERENCE_BYTES = 10 * 1024 * 1024
 MAX_TOTAL_REFERENCE_BYTES = 24 * 1024 * 1024
+DISCOVERY_EVIDENCE_TTL = 5 * 60
+MAX_DISCOVERY_EVIDENCE = 64
+_discovery_evidence = OrderedDict()
+_evidence_lock = RLock()
+
+
+def discovery_target_identity(settings):
+    """Identify the authenticated target, independently of its suggested adapter."""
+    from backend.services.model_catalog import connection_fingerprint
+    from .profiles import normalize_profile_url, protocol
+    target = {key: value for key, value in settings.items()
+              if key not in {'service_preset', 'service_preset_mode'}}
+    return connection_fingerprint(target, normalize_profile_url(
+        target['base_url'], target.get('base_url_mode', 'versioned'), protocol(target)))
+
+
+def _evidence_identity(settings, config_path):
+    # Bind to this credential store without retaining paths, URLs or keys.
+    return hashlib.sha256((str(Path(config_path).resolve()) + '\0' +
+                           discovery_target_identity(settings)).encode()).hexdigest()
+
+
+def _expire_evidence(now):
+    for identity, deadline in list(_discovery_evidence.items()):
+        if deadline <= now:
+            del _discovery_evidence[identity]
+
+
+def remember_muse_detection(settings, config_path):
+    """Called only after fresh authenticated discovery passes exact Muse identity."""
+    identity = _evidence_identity(settings, config_path)
+    with _evidence_lock:
+        now = monotonic()
+        _expire_evidence(now)
+        _discovery_evidence.pop(identity, None)
+        _discovery_evidence[identity] = now + DISCOVERY_EVIDENCE_TTL
+        while len(_discovery_evidence) > MAX_DISCOVERY_EVIDENCE:
+            _discovery_evidence.popitem(last=False)
+
+
+def has_recent_muse_detection(settings, config_path):
+    identity = _evidence_identity(settings, config_path)
+    with _evidence_lock:
+        _expire_evidence(monotonic())
+        return identity in _discovery_evidence
 
 
 def service_preset(settings):

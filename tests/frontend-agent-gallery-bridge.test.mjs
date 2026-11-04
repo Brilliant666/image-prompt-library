@@ -66,7 +66,7 @@ function harness(t, name, props = {}, options = {}) {
     '../../utils/galleryRecipe': recipe, '../../utils/compatibleRecipe': compatible,
     '../../utils/recipeInputs': references, '../../utils/generationPreferences': preferences,
     '../../utils/profileSettings': profileSettings, '../../utils/promptTemplateVariables': templates,
-    '../../utils/galleryDraft': { readGalleryDraft: async () => options.draft, saveGalleryDraft: async () => {} },
+    '../../utils/galleryDraft': { readGalleryDraft: async () => options.draft, saveGalleryDraft: async value => { options.onSavedDraft?.(structuredClone(value)); } },
     '../../utils/clipboard': { copyTextToClipboard: async () => true }, '../../utils/imageClipboard': { copyFinalImageToClipboard: async () => { throw Error('Unexpected image copy in this harness'); } },
     '../../utils/galleryCardMeta': { galleryImageDimensions: () => undefined, galleryTaskElapsed: () => undefined },
     '../../utils/playground/virtualGrid': { getIndexesInRect: () => [] },
@@ -90,7 +90,7 @@ function harness(t, name, props = {}, options = {}) {
   const flush = async () => { for (let i = 0; i < 30; i++) { if (dirty) render(); await Promise.resolve(); } if (dirty) render(); };
   render();
   t.after(() => { slots.forEach(slot => slot?.cleanup?.()); if (oldStorage) Object.defineProperty(globalThis, 'localStorage', oldStorage); else delete globalThis.localStorage; });
-  return { reports, calls, flush, update(value) { currentProps = { ...currentProps, ...value }; render(); }, nodes: () => descendants(tree), node: (type, predicate = () => true) => descendants(tree).find(value => value.type === type && predicate(value.props))?.props };
+  return { reports, calls, flush, async flushTimers() { const pending = [...timers.values()]; timers.clear(); pending.forEach(callback => callback()); await flush(); }, update(value) { currentProps = { ...currentProps, ...value }; render(); }, nodes: () => descendants(tree), node: (type, predicate = () => true) => descendants(tree).find(value => value.type === type && predicate(value.props))?.props };
 }
 
 test('actual gallery cards use Agent metadata for source and only completed images can become references', async t => {
@@ -278,6 +278,37 @@ test('changing a Muse connection back to generic preserves the restored draft an
  assert.match(h.reports.at(-1).unavailable,/服务适配已改变/);await h.node('button',p=>p['aria-label']==='生成图片').onClick();await h.flush();
  assert.equal(sent.length,0);assert.equal(h.node('textarea',p=>p['aria-label']==='画廊提示词').value,'keep draft');
  assert.ok(h.nodes().some(node=>text(node).includes('原草稿保留')));
+});
+
+for(const servicePreset of [undefined,'generic'])test(`generic recipe (${servicePreset||'legacy absent preset'}) cannot silently become Muse without reselecting the connection`,async t=>{
+ const sent=[],savedDrafts=[],exact='  Synthetic original\r\nkeep whitespace\t ',dataUrl='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
+ const originalRecipe={...(servicePreset?{service_preset:servicePreset}:{}),model:'muse-image',size:'2048x1536',quality:'max',background:'opaque',output_format:'png',moderation:'low'};
+ const draft={...recipe.emptyGalleryDraft(),profileId:'muse',prompt:exact,recipe:originalRecipe,inputs:[{id:'original-reference',name:'synthetic.png',source:'uploaded',previewUrl:dataUrl,dataUrl}]};
+ const before=structuredClone(draft),profile={id:'muse',model:'muse-image',display_name:'Muse',configured:true,service_preset:'muse'};
+ const h=harness(t,'InputBar',{preferences:{persistInputOnRestart:true}},{draft,onSavedDraft:value=>savedDrafts.push(value),api:{openAICompatibleProfiles:async()=>({profiles:[profile],default_profile_id:'muse'}),createGenerationJob:async payload=>{sent.push(payload);return job({model:'muse-image'});}}});await h.flush();
+ assert.match(h.reports.at(-1).unavailable,/服务适配已改变/);
+ await h.node('button',p=>p['aria-label']==='生成图片').onClick();await h.flush();
+ assert.equal(sent.length,0,'a restored generic recipe must not submit using Muse transport');
+ assert.equal(h.node('textarea',p=>p['aria-label']==='画廊提示词').value,exact);
+ assert.equal(h.nodes().find(node=>node.type==='img')?.props.src,dataUrl);
+ await h.flushTimers();
+ assert.ok(savedDrafts.length,'the actual composer persistence effect ran');
+ const saved=savedDrafts.at(-1);
+ assert.deepEqual(saved.recipe,before.recipe,'the persisted recipe retains its original generic parameters');
+ assert.equal(saved.prompt,before.prompt);
+ assert.deepEqual(saved.inputs.map(({id,name,source,dataUrl,previewUrl})=>({id,name,source,dataUrl,previewUrl})),before.inputs);
+ assert.ok(h.nodes().some(node=>text(node).includes('原草稿保留')));
+
+ h.node('button',p=>p.className?.includes('pg-provider')).onClick();await h.flush();
+ h.node('button',p=>p['aria-pressed']===true&&text({props:p}).includes('Muse')).onClick();await h.flush();
+ assert.equal(h.reports.at(-1).unavailable,undefined);
+ await h.node('button',p=>p['aria-label']==='生成图片').onClick();await h.flush();
+ assert.equal(sent.length,1,'explicitly reselecting the connection creates a new Muse recipe');
+ assert.equal(sent[0].prompt_text,exact);assert.equal(sent[0].parameters.service_preset,'muse');
+ assert.equal(sent[0].parameters.requested_aspect_ratio,'auto');assert.equal(sent[0].parameters.quality,'auto');
+ assert.equal(sent[0].parameters.size,'auto');assert.equal(sent[0].parameters.output_format,'auto');
+ assert.equal(sent[0].parameters.moderation,undefined);
+ assert.deepEqual(sent[0].parameters.input_images.map(input=>[input.id,input.data_url]),[['original-reference',dataUrl]]);
 });
 
 test('saved Muse model IDs use documentation roles in the actual Gallery without a discovered catalog',async t=>{

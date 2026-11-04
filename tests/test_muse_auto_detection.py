@@ -54,6 +54,127 @@ def discover(store, payload, entries, callback=None):
     return value, calls
 
 
+TARGET_CHANGES = [
+    ({}, {'base_url': 'https://other.invalid', 'api_key': 'custom-synthetic-key'}),
+    ({}, {'api_key': 'replacement-synthetic-key'}),
+    ({}, {'base_url_mode': 'custom', 'api_key': 'custom-synthetic-key'}),
+    ({}, {'network_mode': 'direct'}),
+    ({}, {'network_mode': 'proxy', 'proxy_url': 'http://proxy.invalid:8080'}),
+    ({'network_mode': 'proxy', 'proxy_url': 'http://user:old@proxy.invalid:8080'},
+     {'proxy_url': 'http://user:new@proxy.invalid:8080'}),
+]
+
+
+def saved_auto_muse(store, initial):
+    store.save(draft(model='muse-image', service_preset='muse', service_preset_mode='auto', **initial),
+               profile_id='saved')
+
+
+@pytest.mark.parametrize('initial,change', TARGET_CHANGES)
+def test_changed_auto_muse_full_save_requires_fresh_target_evidence(store, initial, change):
+    saved_auto_muse(store, initial)
+    before = store.path.read_bytes()
+    full = {**store.read('saved'), **change}
+    with pytest.raises(OpenAICompatibleError, match='discovery'):
+        store.save(full, profile_id='saved')
+    assert store.path.read_bytes() == before
+
+
+@pytest.mark.parametrize('initial,change', TARGET_CHANGES)
+def test_changed_auto_muse_partial_save_invalidates_old_adapter(store, initial, change):
+    saved_auto_muse(store, initial)
+    store.save(change, profile_id='saved')
+    assert store.read('saved')['service_preset'] == 'generic'
+    assert store.read('saved')['service_preset_mode'] == 'auto'
+
+
+@pytest.mark.parametrize('initial,change', TARGET_CHANGES)
+def test_fresh_discovery_allows_one_changed_target_save_without_more_network(store, initial, change):
+    saved_auto_muse(store, initial)
+    target = {key: value for key, value in store.read('saved').items()
+              if key in {'base_url', 'api_key', 'base_url_mode', 'network_mode', 'proxy_url',
+                         'protocol', 'service_preset', 'service_preset_mode'}}
+    target.update(change, profile_id='saved')
+    result, calls = discover(store, target, muse_models())
+    assert result['detected_service_preset'] == 'muse'
+    store.save({**store.read('saved'), **change}, profile_id='saved')
+    assert store.read('saved')['service_preset'] == 'muse'
+    assert store.read('saved')['service_preset_mode'] == 'auto'
+    assert len(calls) == 1 and calls[0].method == 'GET'
+
+
+@pytest.mark.parametrize('initial,change', TARGET_CHANGES)
+def test_manual_muse_target_changes_do_not_require_discovery(store, initial, change):
+    saved_auto_muse(store, initial)
+    store.save({'service_preset_mode': 'manual'}, profile_id='saved')
+    store.save(change, profile_id='saved')
+    assert store.read('saved')['service_preset'] == 'muse'
+    assert store.read('saved')['service_preset_mode'] == 'manual'
+
+
+def test_unchanged_auto_muse_keeps_adapter_for_name_model_and_same_target_save(store):
+    saved_auto_muse(store, {})
+    store.save({'display_name': 'Renamed synthetic Muse', 'model': 'manual-image-alias'}, profile_id='saved')
+    store.save(store.read('saved'), profile_id='saved')
+    assert store.read('saved')['service_preset'] == 'muse'
+
+
+def test_failed_or_mixed_discovery_does_not_authorize_changed_auto_muse_save(store):
+    saved_auto_muse(store, {})
+    change = {'base_url': 'https://other.invalid', 'api_key': 'custom-synthetic-key'}
+    result, _ = discover(store, draft(profile_id='saved', **change), muse_models() + [{'id': 'another'}])
+    assert not result.get('detected_service_preset')
+    before = store.path.read_bytes()
+    with pytest.raises(OpenAICompatibleError, match='discovery'):
+        store.save({**store.read('saved'), **change}, profile_id='saved')
+    assert store.path.read_bytes() == before
+
+
+@pytest.mark.parametrize('lost', ['expiry', 'restart'])
+def test_changed_auto_muse_save_fails_closed_when_discovery_evidence_is_lost(store, monkeypatch, lost):
+    from collections import OrderedDict
+    from backend.services.providers import muse
+    clock = [100.0]
+    monkeypatch.setattr(muse, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(muse, '_discovery_evidence', OrderedDict())
+    saved_auto_muse(store, {})
+    change = {'base_url': 'https://other.invalid', 'api_key': 'custom-synthetic-key'}
+    result, calls = discover(store, draft(profile_id='saved', **change), muse_models())
+    assert result['detected_service_preset'] == 'muse'
+    if lost == 'expiry':
+        clock[0] += muse.DISCOVERY_EVIDENCE_TTL
+    else:
+        muse._discovery_evidence.clear()
+    before = store.path.read_bytes()
+    with pytest.raises(OpenAICompatibleError, match='discovery'):
+        store.save({**store.read('saved'), **change}, profile_id='saved')
+    assert store.path.read_bytes() == before and len(calls) == 1
+
+
+def test_discovery_evidence_is_bounded_and_scoped_to_the_credential_store(store, tmp_path, monkeypatch):
+    from collections import OrderedDict
+    from backend.services.providers import muse
+    monkeypatch.setattr(muse, '_discovery_evidence', OrderedDict())
+    targets = []
+    for index in range(muse.MAX_DISCOVERY_EVIDENCE + 1):
+        target = draft(base_url=f'https://service-{index}.invalid')
+        result, _ = discover(store, target, muse_models())
+        assert result['detected_service_preset'] == 'muse'
+        targets.append(target)
+    assert len(muse._discovery_evidence) == muse.MAX_DISCOVERY_EVIDENCE
+    assert all(len(identity) == 64 and isinstance(deadline, float)
+               for identity, deadline in muse._discovery_evidence.items())
+    assert not muse.has_recent_muse_detection(targets[0], store.path)
+    assert muse.has_recent_muse_detection(targets[-1], store.path)
+    other = OpenAICompatibleConfig(tmp_path / 'other-private' / 'connections.json', tmp_path / 'other-library')
+    saved_auto_muse(other, {})
+    before = other.path.read_bytes()
+    with pytest.raises(OpenAICompatibleError, match='discovery'):
+        other.save({**other.read('saved'), 'base_url': targets[-1]['base_url'],
+                    'api_key': 'custom-synthetic-key'}, profile_id='saved')
+    assert other.path.read_bytes() == before
+
+
 @pytest.mark.parametrize('key', ['custom-synthetic-key', 'm2a_fixture-key'])
 @pytest.mark.parametrize('mode', [None, 'auto'])
 def test_strong_model_identity_detects_muse_without_saving_or_generating(store, key, mode):

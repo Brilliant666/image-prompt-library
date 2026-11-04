@@ -122,9 +122,10 @@ def discover_connection_draft(store, payload, http_client=None):
                 return result
         # Static reference models never prove reachability, key validity or access.
         checked_at = datetime.now(timezone.utc).isoformat() if source == 'remote' else None
-        from backend.services.providers.muse import detected_service_preset, annotate_models
+        from backend.services.providers.muse import detected_service_preset, annotate_models, remember_muse_detection
         detected = detected_service_preset(models, settings)
         if detected:
+            remember_muse_detection(settings, store.path)
             result['detected_service_preset'] = detected
         if settings.get('service_preset') == 'muse' or detected == 'muse':
             models = annotate_models(models)

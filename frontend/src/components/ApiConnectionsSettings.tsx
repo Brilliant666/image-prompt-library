@@ -120,7 +120,8 @@ export default function ApiConnectionsSettings({ onSaved, uiLanguage, isDefaultC
     }catch(reason){
       if(mounted.current&&ticket===epoch.current){
         const keyRequired=reason instanceof Error&&reason.message.startsWith('Enter the API key again');
-        setMessage(keyRequired?discoveryMessage('key_reentry_required',en):en?'Could not confirm the result. Reload connections before retrying.':'暂时无法确认操作结果，请重新读取连接后再操作。');
+        const discoveryRequired=reason instanceof Error&&reason.message.startsWith('Run model discovery again for the changed connection');
+        setMessage(keyRequired?discoveryMessage('key_reentry_required',en):discoveryRequired?(en?'Run model discovery again, or choose the Muse adapter manually before saving.':'请重新识别模型，或手动选择 Muse 适配后再保存。'):en?'Could not confirm the result. Reload connections before retrying.':'暂时无法确认操作结果，请重新读取连接后再操作。');
       }
       return false;
     }finally{

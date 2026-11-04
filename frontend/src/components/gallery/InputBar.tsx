@@ -57,7 +57,7 @@ export default function InputBar({command,imageSettingsCommand,preferences,t,act
   const profile=profiles.find(p=>p.id===draft.profileId);
   const protocol=profile?.protocol||'openai_compatible';
   const museApi=draft.provider==='openai_compatible'&&profile?.service_preset==='muse';
-  const presetChanged=draft.provider==='openai_compatible'&&Boolean(draft.recipe.service_preset&&draft.recipe.service_preset!==(profile?.service_preset||'generic'));
+  const presetChanged=draft.provider==='openai_compatible'&&(draft.recipe.service_preset||'generic')!==(profile?.service_preset||'generic');
   const limit=museApi?4:provider?.max_input_images||4;
   const nativeApi=draft.provider==='openai_compatible'&&protocol!=='openai_compatible';
   const ready=draft.provider==='openai_compatible'?Boolean(profile?.configured):Boolean(provider?.can_generate??provider?.available);

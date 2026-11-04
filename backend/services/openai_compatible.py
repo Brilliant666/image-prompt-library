@@ -78,6 +78,10 @@ class OpenAICompatibleApiKeyRequired(OpenAICompatibleError):
     pass
 
 
+class OpenAICompatibleDiscoveryRequired(OpenAICompatibleError):
+    pass
+
+
 def requested_image_size(parameters):
     if parameters.get("aspect_ratio_prompt_injection") is True:
         ratio = parameters.get("requested_aspect_ratio", "auto")
@@ -445,6 +449,20 @@ class OpenAICompatibleConfig:
                     previous_url = ""
                 if previous_url != value["base_url"] or protocol(previous) != protocol(value):
                     raise OpenAICompatibleApiKeyRequired("Enter the API key again when changing the Base URL or protocol")
+            previous = document['profiles'].get(profile_id)
+            if (previous and previous.get('service_preset') == 'muse'
+                    and previous.get('service_preset_mode', 'auto') == 'auto'
+                    and value.get('service_preset') == 'muse'
+                    and value.get('service_preset_mode', 'auto') == 'auto'):
+                from backend.services.providers.muse import discovery_target_identity, has_recent_muse_detection
+                if discovery_target_identity(previous) != discovery_target_identity(value):
+                    if 'service_preset' in payload or 'service_preset_mode' in payload:
+                        if not has_recent_muse_detection(value, self.path):
+                            raise OpenAICompatibleDiscoveryRequired(
+                                'Run model discovery again for the changed connection, or choose the Muse adapter manually.')
+                    else:
+                        # Legacy partial saves cannot carry fresh adapter intent.
+                        value['service_preset'] = 'generic'
             document["profiles"][profile_id] = value
             if document["default_profile_id"] is None or payload.get("make_default") is True:
                 document["default_profile_id"] = profile_id

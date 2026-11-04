@@ -163,6 +163,15 @@ for(const outcome of ['failed','closed'])test(`${outcome} save does not announce
 test('default connection changes only after a confirmed successful action, never merely by viewing',async t=>{
  const h=harness(t);await h.flush();await selectProfile(h,'Connection B');assert.deepEqual(h.calls.default,[]);await h.click('设为默认连接');assert.deepEqual(h.calls.default,['b','global']);assert.equal(h.calls.discover.length,0);
 });
+
+test('expired Muse discovery asks for a new check and preserves the edited form',async t=>{
+ const h=harness(t,{save:async()=>{throw Error('Run model discovery again for the changed connection, or choose the Muse adapter manually.');}});
+ await h.flush();await h.fill('连接名称','Edited connection');await h.fill('默认图片模型','muse-image');await h.submit();
+ assert.ok(h.text.includes('请重新识别模型，或手动选择 Muse 适配后再保存。'));
+ assert.equal(h.input('连接名称').value,'Edited connection');assert.equal(h.input('默认图片模型').value,'muse-image');
+ assert.equal(h.calls.discover.length,0);assert.equal(h.events.length,0);
+ assert.ok(!h.text.includes('已保存，未发送生成请求'));
+});
 test('uncertain default change cannot switch the global selection',async t=>{
  const h=harness(t,{setDefault:async()=>{throw Error('private');}});await h.flush();await h.click('设为默认连接');assert.deepEqual(h.calls.default,['global'],'current existing default needs no provider mutation');await selectProfile(h,'Connection B');await h.click('设为默认连接');assert.deepEqual(h.calls.default,['global']);assert.ok(!h.text.includes('private'));
 });
