@@ -428,6 +428,11 @@ class GenerationJobRepository:
             parameters.setdefault(key, config.get(key, default))
         from .providers.profiles import protocol, normalize_profile_parameters, execution_identity
         selected_protocol = protocol(config)
+        preset = config.get('service_preset', 'generic')
+        if 'service_preset' in parameters and parameters['service_preset'] != preset:
+            raise GenerationJobConflict('Saved recipe service preset differs from the selected connection; explicitly choose a new recipe')
+        if preset != 'generic':
+            parameters['service_preset'] = preset
         if 'protocol' in parameters and parameters['protocol'] != selected_protocol:
             raise GenerationJobConflict('Saved recipe protocol differs from the selected connection; explicitly choose a new recipe')
         if selected_protocol != 'openai_compatible':
@@ -442,7 +447,7 @@ class GenerationJobRepository:
         parameters = dict(job.parameters or {})
         requested = job.metadata.get("requested", {})
         if isinstance(requested, dict):
-            for key in ("model", "quality", "size", "requested_aspect_ratio", "aspect_ratio_prompt_injection", "background", "output_format", "output_compression", "moderation", "compatible_profile_id", "compatible_profile_name", "base_url_mode", "stream", "partial_images", "response_format", "protocol", "provider_options"):
+            for key in ("model", "quality", "size", "requested_aspect_ratio", "aspect_ratio_prompt_injection", "background", "output_format", "output_compression", "moderation", "compatible_profile_id", "compatible_profile_name", "base_url_mode", "stream", "partial_images", "response_format", "protocol", "provider_options", "service_preset"):
                 if key in requested:
                     parameters[key] = requested[key]
         parameters.setdefault("compatible_profile_id", "legacy")

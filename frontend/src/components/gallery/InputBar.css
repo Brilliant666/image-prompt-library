@@ -7,6 +7,8 @@
 .pg-composer .pg-model-options button:hover{background:color-mix(in srgb,var(--ink) 5%,transparent)}
 .pg-composer .pg-model-options button[aria-pressed=true]{background:color-mix(in srgb,var(--accent) 12%,transparent);color:var(--accent-strong)}
 .pg-model-name{flex:1;min-width:0;overflow-wrap:anywhere}
+.pg-model-name .pg-model-capability{display:block;margin-top:2px;color:var(--muted);font-size:10px;line-height:1.4}
+.pg-model-search{width:100%;box-sizing:border-box;margin:0 0 8px;padding:8px 10px;border:1px solid var(--line);border-radius:9px;background:var(--surface);color:var(--ink);font:inherit;font-size:12px}
 .pg-model-default{flex:none;padding:1px 5px;border-radius:5px;background:color-mix(in srgb,var(--ink) 6%,transparent);color:var(--muted);font-size:10px;line-height:1.5}
 .pg-model-check{display:flex;align-items:center;justify-content:center;flex:0 0 16px;color:var(--accent-strong)}
 .pg-composer .pg-parameters-panel[data-panel=model]>small{flex:none;margin:0;font-size:11px;line-height:1.6}
@@ -30,6 +32,13 @@
 @container gallery-composer (min-width:820px){
   .pg-composer .pg-composer-toolbar{grid-template-columns:minmax(0,1.2fr) minmax(0,1.65fr) 104px 104px minmax(0,1.65fr) 80px;grid-template-areas:"model size quality count more actions"}
 }
+/* Muse exposes ratio and count only; absent controls must not reserve columns. */
+.pg-composer .pg-composer-toolbar-muse{grid-template-columns:repeat(2,minmax(0,1fr)) 80px;grid-template-areas:"model model model" "size count actions"}
+@container gallery-composer (min-width:560px){
+  .pg-composer .pg-composer-toolbar-muse{grid-template-columns:minmax(0,180px) 120px 104px minmax(0,1fr) 80px;grid-template-areas:"model size count . actions"}
+}
+.pg-muse-parameters>small{display:block;margin-top:12px;color:var(--muted);font-size:11px;line-height:1.6}
+.pg-muse-parameters>p[role=alert]{font-size:12px;color:var(--danger,var(--ink))}
 .pg-composer .pg-parameter-chips{display:contents}
 .pg-composer .pg-param-chip{display:inline-flex;align-items:center;justify-content:flex-start;gap:6px;min-width:0;width:100%;max-width:100%;min-height:32px;margin:0;padding:6px 11px;border:1px solid transparent;border-radius:999px;background:color-mix(in srgb,var(--ink) 4%,transparent);color:var(--ink);font-size:12px;line-height:1.4;box-shadow:none}
 .pg-composer button.pg-param-chip:hover,.pg-composer button.pg-param-chip.active,.pg-composer .pg-add-image:hover,.pg-composer .pg-add-image.active{background:color-mix(in srgb,var(--accent) 10%,transparent);color:var(--accent-strong)}

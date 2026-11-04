@@ -1,15 +1,15 @@
 import type { ApiProtocol } from '../types';
 import type { CompatibleRecipe } from '../utils/compatibleRecipe';
-import { nativeParameterIssue, nativeRecipeDefaults, geminiModelOptions, seedreamModelOptions } from '../utils/compatibleRecipe';
+import { nativeParameterIssue, nativeRecipeDefaults, geminiModelOptions, seedreamModelOptions, MUSE_ASPECT_RATIOS, museAspectRatio } from '../utils/compatibleRecipe';
 import './NativeImageParameters.css';
 
 export interface NativeImageValues {
-  size: string; quality: string; background?: string | null; output_format: string;
+  requested_aspect_ratio?: string; size: string; quality: string; background?: string | null; output_format: string;
   output_compression?: number | null; moderation?: string | null;
   provider_options?: Record<string, string | number | boolean>;
 }
 interface Props {
-  protocol: ApiProtocol; model: string; params: NativeImageValues;
+  servicePreset?: 'generic'|'muse'; protocol: ApiProtocol; model: string; params: NativeImageValues;
   disabled?: boolean; en?: boolean;
   onChange: (value: Partial<NativeImageValues>) => void;
   onReset?: () => void;
@@ -17,7 +17,23 @@ interface Props {
 
 
 /** Shared Gallery/Hybrid controls; these are native image options, never endpoints or keys. */
-export default function NativeImageParameters({protocol, model, params, disabled=false, en=false, onChange, onReset}: Props) {
+export default function NativeImageParameters({servicePreset,protocol, model, params, disabled=false, en=false, onChange, onReset}: Props) {
+  if (servicePreset === 'muse') {
+    const ratio = museAspectRatio(params);
+    const unsupported = !MUSE_ASPECT_RATIOS.includes(ratio);
+    return <section className="native-image-parameters" aria-label={en ? 'Muse image parameters' : 'Muse 图片参数'}>
+      <p className="native-image-caption">Muse · muse-image</p>
+      <div className="native-image-grid">
+        <label>{en ? 'Aspect ratio' : '画面比例'}<select disabled={disabled} aria-label={en ? 'Muse aspect ratio' : 'Muse 画面比例'} value={ratio}
+          onChange={event => { if (!disabled) onChange({requested_aspect_ratio:event.target.value,size:'auto',quality:'auto',background:'auto',output_format:'auto',output_compression:undefined,moderation:undefined}); }}>
+          {MUSE_ASPECT_RATIOS.map(value => <option key={value} value={value}>{value === 'auto' ? (en ? 'Service default' : '服务默认') : value}</option>)}
+          {unsupported && <option value={ratio} disabled>{ratio} · {en ? 'unsupported' : '不支持'}</option>}
+        </select></label>
+      </div>
+      {unsupported && <p role="alert">{en ? 'Choose a supported Muse ratio. The saved parameters are retained.' : '请选择 Muse 支持的比例，原参数已保留。'}</p>}
+      <small>{en ? 'Quality, dimensions and file format are decided by Muse. Up to 4 references, 10 MiB each and 24 MiB total.' : '质量、实际尺寸和文件格式由 Muse 决定；最多 4 张参考图，每张 10 MiB、合计 24 MiB。'}</small>
+    </section>;
+  }
   if (protocol === 'openai_compatible') return null;
   const options = params.provider_options || {};
   const gemini = protocol === 'gemini_native';

@@ -5,7 +5,7 @@ import ToolbarSelect from '../ToolbarSelect';
 import AgentModelPicker from '../settings/AgentModelPicker';
 import './AgentImageOptions.css';
 import NativeImageParameters from '../NativeImageParameters';
-import { nativeRecipeDefaults } from '../../utils/compatibleRecipe';
+import { nativeRecipeDefaults, museRecipeDefaults } from '../../utils/compatibleRecipe';
 
 export interface AgentImageSelection { profileId?: string | null; model: string }
 export interface AgentImageOptionsChange { imageConfig?: AgentImageSelection; params?: AgentImageParams; count?: GenerationSetCount; sizeMode?: 'auto4k' }
@@ -31,6 +31,7 @@ export default function AgentImageOptions({ config, activeProfileId, selection, 
   const imageProfileId = hybrid ? selection?.profileId ?? config.config.imageProfileId : textProfileId;
   const imageProfile = config.profiles.find(profile => profile.id === imageProfileId);
   const protocol = hybrid ? imageProfile?.protocol || 'openai_compatible' : 'openai_compatible';
+  const muse=hybrid&&imageProfile?.service_preset==='muse';
   const nativeApi = protocol !== 'openai_compatible';
   const imageModel = selection ? selection.model : config.config.imageModel;
   const effectiveModel = imageModel.trim() || (hybrid ? imageProfile?.model : '') || (en ? 'Provider default' : '接口默认');
@@ -58,7 +59,7 @@ export default function AgentImageOptions({ config, activeProfileId, selection, 
         const chosen=config.profiles.find(profile=>profile.id===profileId);
         if(disabled)return;
         const nextProtocol=chosen?.protocol||'openai_compatible';
-        if(nextProtocol!==protocol){const defaults=nativeRecipeDefaults(nextProtocol,chosen?.model||'');onChange({imageConfig:{profileId,model:chosen?.model||''},params:{size:defaults.size,quality:defaults.quality,background:defaults.background,output_format:defaults.output_format as AgentImageParams['output_format'],...(defaults.provider_options?{provider_options:defaults.provider_options}:{})},sizeMode:undefined});}
+        if(nextProtocol!==protocol||(chosen?.service_preset||'generic')!==(imageProfile?.service_preset||'generic')){const defaults=chosen?.service_preset==='muse'?museRecipeDefaults(chosen.model):nativeRecipeDefaults(nextProtocol,chosen?.model||'');onChange({imageConfig:{profileId,model:chosen?.model||''},params:{...(chosen?.service_preset==='muse'?{service_preset:'muse' as const,requested_aspect_ratio:'auto'}:{}),size:defaults.size,quality:defaults.quality,background:defaults.background,output_format:defaults.output_format as AgentImageParams['output_format'],...(defaults.provider_options?{provider_options:defaults.provider_options}:{})},sizeMode:undefined});}
         else changeImage({profileId,model:chosen?.model||''});
       }} />
         : <strong>{imageProfile?.display_name || unavailable}<small>{en ? 'Responses image tool' : 'Responses 生图工具'}</small></strong>}
@@ -68,8 +69,8 @@ export default function AgentImageOptions({ config, activeProfileId, selection, 
     {hybrid && imageModel.trim() && imageModel.trim() !== imageProfile?.model && <p className="agent-image-hint">{en ? 'Profile default: ' : '供应商默认模型：'}{imageProfile?.model || (en ? 'Not set' : '未设置')}{imageProfile?.model_catalog?.fetched_at && !imageProfile.model_catalog.models.some(model => model.id === imageModel.trim()) && (en ? ' · Manual model is not in the cached catalog; compatibility is unverified.' : ' · 手填模型不在缓存清单中，兼容性未验证。')}</p>}
     {!hybrid && <p className="agent-image-hint">{en ? 'This mode uses the text provider’s Responses image tool. Gallery Images API settings cannot be copied into it.' : '此模式通过文字接口的 Responses 生图工具生成，不能直接套用画廊的 Images API 配置。'}</p>}
     {hybrid && sharedUnavailable && <p className="agent-image-hint" role="status">{sharedUnavailable}</p>}
-    {nativeApi&&<><NativeImageParameters protocol={protocol} model={imageModel.trim()||imageProfile?.model||''} params={params} en={en} disabled={disabled} onChange={patch=>changeParams(patch as Partial<AgentImageParams>)}/><label className="agent-native-count">{en?'Count':'数量'}<ToolbarSelect label={en?'Image count':'生成数量'} value={String(count)} options={counts.map(value=>({value:String(value),label:en?`${value} images`:`${value} 张`}))} disabled={disabled} onChange={value=>{const selected=Number(value) as GenerationSetCount;if(!disabled&&counts.includes(selected))onChange({count:selected});}}/></label></>}
-    {!nativeApi&&<div className="agent-image-parameter-grid">
+    {(nativeApi||muse)&&<><NativeImageParameters servicePreset={muse?'muse':undefined} protocol={protocol} model={imageModel.trim()||imageProfile?.model||''} params={params} en={en} disabled={disabled} onChange={patch=>{if(muse&&!disabled)onChange({params:{...params,...patch,service_preset:'muse',background:patch.background||'auto',moderation:undefined,output_format:'auto'},sizeMode:undefined});else changeParams(patch as Partial<AgentImageParams>);}}/><label className="agent-native-count">{en?'Count':'数量'}<ToolbarSelect label={en?'Image count':'生成数量'} value={String(count)} options={counts.map(value=>({value:String(value),label:en?`${value} images`:`${value} 张`}))} disabled={disabled} onChange={value=>{const selected=Number(value) as GenerationSetCount;if(!disabled&&counts.includes(selected))onChange({count:selected});}}/></label></>}
+    {!nativeApi&&!muse&&<div className="agent-image-parameter-grid">
       <div className="agent-image-size-field"><span className="agent-image-field-label">{en ? 'Size' : '尺寸'}</span><button type="button" className="agent-image-size-button" disabled={disabled} onClick={() => { if (!disabled) onChooseSize(); }} aria-label={en ? 'Set image size' : '设置图像尺寸'}><span>{sizeMode === 'auto4k' ? en ? '4K · automatic ratio' : '4K · 自动比例' : params.size === 'auto' ? en ? 'Auto · provider decides' : '自动 · 服务决定' : params.size.replace('x', ' × ')}</span><ChevronDown size={14} aria-hidden="true" /></button></div>
       <div><span className="agent-image-field-label">{en ? 'Quality' : '质量'}</span><ToolbarSelect label={en ? 'Image quality' : '图片质量'} value={params.quality} options={qualities} disabled={disabled} onChange={quality => changeParams({ quality })} /></div>
       <div><span className="agent-image-field-label">{en ? 'Count' : '数量'}</span><ToolbarSelect label={en ? 'Image count' : '生成数量'} value={String(count)} options={counts.map(value => ({ value: String(value), label: en ? `${value} image${value === 1 ? '' : 's'}` : `${value} 张` }))} disabled={disabled} onChange={value => { const selected = Number(value) as GenerationSetCount; if (!disabled && counts.includes(selected)) onChange({ count: selected }); }} /></div>

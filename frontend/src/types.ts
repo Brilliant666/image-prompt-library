@@ -8,9 +8,10 @@ export type AiProvider = TitleSuggestionProvider | 'openai_compatible';
 export type ApiNetworkMode = 'direct' | 'environment' | 'proxy';
 export interface ApiNetworkConfig { network_mode?: ApiNetworkMode; proxy_url_present?: boolean; proxy_endpoint?: string }
 export interface ApiNetworkUpdate { network_mode: ApiNetworkMode; proxy_url?: string; remove_proxy_url?: boolean }
-export interface ApiConnectionConfig extends ApiNetworkConfig { protocol?: ApiProtocol; image_capabilities?: ImageProtocolCapabilities; display_name: string; base_url: string; model: string; timeout: number; api_key_present: boolean; models?: string[]; base_url_mode?: 'versioned' | 'custom'; stream?: boolean; partial_images?: number; response_format?: 'auto' | 'b64_json' | 'url' }
+export type ApiServicePreset = 'generic' | 'muse';
+export interface ApiConnectionConfig extends ApiNetworkConfig { protocol?: ApiProtocol; service_preset?: ApiServicePreset; service_preset_mode?: 'auto' | 'manual'; image_capabilities?: ImageProtocolCapabilities; display_name: string; base_url: string; model: string; timeout: number; api_key_present: boolean; models?: string[]; base_url_mode?: 'versioned' | 'custom'; stream?: boolean; partial_images?: number; response_format?: 'auto' | 'b64_json' | 'url' }
 export type ApiConnectionSave = Omit<ApiConnectionConfig, 'api_key_present' | 'proxy_url_present' | 'proxy_endpoint'> & Partial<ApiNetworkUpdate> & { api_key?: string; make_default?: boolean };
-export interface CatalogModel { id: string; image_generation: boolean | null; text_generation?: boolean | null; capability_source?: 'api' | 'documentation' | 'unknown' }
+export interface CatalogModel { owned_by?: 'muse'; id: string; image_generation: boolean | null; text_generation?: boolean | null; capability_source?: 'api' | 'documentation' | 'unknown' }
 export interface ModelCatalog { models: CatalogModel[]; fetched_at: string | null; checked_at: string | null; error: string | null }
 export interface ApiConnectionProfile extends ApiConnectionConfig { id: string; configured: boolean; model_catalog?: ModelCatalog }
 export interface ApiConnectionProfiles { profiles: ApiConnectionProfile[]; default_profile_id: string | null }
@@ -19,8 +20,8 @@ export type OpenAICompatibleConfig = ApiConnectionConfig;
 export type OpenAICompatibleProfileSave = ApiConnectionSave;
 export type OpenAICompatibleProfile = ApiConnectionProfile;
 export type OpenAICompatibleProfiles = ApiConnectionProfiles;
-export interface ConnectionDiscoveryDraft extends Partial<ApiNetworkUpdate> { profile_id?: string; protocol: ApiProtocol; base_url: string; base_url_mode: 'versioned' | 'custom'; api_key?: string }
-export interface ConnectionModelDiscovery extends ModelCatalog { source: 'remote' | 'reference'; connection_checked: boolean; generation_checked: false; error_code: string | null }
+export interface ConnectionDiscoveryDraft extends Partial<ApiNetworkUpdate> { service_preset?: ApiServicePreset; service_preset_mode?: 'auto' | 'manual'; profile_id?: string; protocol: ApiProtocol; base_url: string; base_url_mode: 'versioned' | 'custom'; api_key?: string }
+export interface ConnectionModelDiscovery extends ModelCatalog { detected_service_preset?: 'muse'; source: 'remote' | 'reference'; connection_checked: boolean; generation_checked: false; error_code: string | null }
 export type TitleSuggestionProvider = 'openai_codex_oauth_native' | 'xai_grok_oauth';
 export interface PromptRecord { id: string; item_id: string; language: string; text: string; is_primary: boolean; is_original?: boolean; provenance?: Record<string, unknown> }
 export interface ImageRecord { id: string; item_id: string; original_path: string; thumb_path?: string; preview_path?: string; width?: number; height?: number; generation_provider?: string | null; generation_model?: string | null; role?: UploadImageRole; sort_order?: number }

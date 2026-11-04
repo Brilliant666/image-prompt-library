@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
 import { ChevronDown, Check, RefreshCw } from 'lucide-react';
 import { api } from '../../api/client';
 import type { ModelCatalog, OpenAICompatibleProfile } from '../../types';
-import { profileModelChoices } from '../../utils/profileSettings';
+import { imageModelCapability, profileModelChoices, profileModelInfo } from '../../utils/profileSettings';
 import './AgentModelPicker.css';
 
 // Sharing an in-flight discovery prevents the text and image fields from
@@ -53,7 +53,7 @@ export default function AgentModelPicker({ label, value, onChange, profile, acti
     window.addEventListener('ipl:model-catalog-changed', changed);
     void read();
     return () => { scope.current += 1; sequence.current += 1; window.removeEventListener('ipl:model-catalog-changed', changed); };
-  }, [active, profile?.id, profile?.base_url, profile?.base_url_mode, profile?.api_key_present, profile?.configured]);
+  }, [active, profile?.id, profile?.base_url, profile?.base_url_mode, profile?.api_key_present, profile?.configured, profile?.service_preset]);
 
   const refresh = async () => {
     const profileId = profile?.id;
@@ -87,10 +87,30 @@ export default function AgentModelPicker({ label, value, onChange, profile, acti
     const next = index < 0 ? event.key === 'ArrowDown' ? 0 : options.length - 1 : (index + (event.key === 'ArrowDown' ? 1 : -1) + options.length) % options.length;
     options[next]?.focus();
   };
-  const candidates = imageRecommendations
-    ? profileModelChoices(profile ? { ...profile, model_catalog: catalog } : undefined, value).map(id => catalog.models.find(model => model.id === id) || { id, image_generation: null })
-    : catalog.models;
+  const currentCatalogProfile = profile ? { ...profile, model_catalog: catalog } : undefined;
+  const candidates: ModelCatalog['models'] = imageRecommendations
+    ? profileModelChoices(currentCatalogProfile, value).map(id => profileModelInfo(currentCatalogProfile,id) || { id, image_generation: null })
+    : [...new Set([...catalog.models.map(model=>model.id), ...(profile?.service_preset==='muse' ? profile.models || [] : [])])]
+      .map(id => profileModelInfo(currentCatalogProfile,id) || { id, image_generation: null });
   const options = candidates.filter(model => model.id.toLocaleLowerCase().includes(query.toLocaleLowerCase()));
+  const capabilityLabel = (model: ModelCatalog['models'][number]) => {
+    if (imageRecommendations) {
+      const kind = imageModelCapability(model);
+      if (kind === 'image') return model.capability_source === 'documentation'
+        ? en ? 'Documentation reference; unverified' : '文档参考，权限未验证'
+        : en ? 'Image output declared; unverified' : '声明图片输出，尚未验证';
+      if (kind === 'non-image') return en ? 'Not an image recommendation; selection retained' : '非图片输出，保留当前选择';
+      return en ? 'Image capability unconfirmed' : '图片能力待确认';
+    }
+    if(model.capability_source==='documentation')return profile?.service_preset==='muse'&&model.id==='muse-video'
+      ? en?'Documentation: video; not supported here':'文档参考：视频，本项目暂不支持'
+      : model.image_generation===true ? en?'Documentation: image output; unverified':'文档参考：图片输出，权限未验证'
+      : model.text_generation===true ? en?'Documentation: text output; unverified':'文档参考：文字输出，权限未验证'
+      : en?'Documentation reference; unverified':'文档参考，权限未验证';
+    return model.image_generation === true ? en ? 'Image generation declared' : '接口声明支持生图'
+      : model.image_generation === false ? en ? 'Image generation not declared' : '接口未声明支持生图'
+      : en ? 'Capabilities unspecified' : '能力未声明';
+  };
   return <div className="agent-model-picker" ref={root} onBlur={event => { if (!root.current?.contains(event.relatedTarget as Node | null)) setOpen(false); }}>
     <label className="settings-field" htmlFor={id}><span>{label}</span></label>
     <div className="agent-model-input-row">
@@ -102,10 +122,10 @@ export default function AgentModelPicker({ label, value, onChange, profile, acti
     {open && profile && <div id={`${id}-catalog`} className="agent-model-catalog" onKeyDown={move}>
       <input autoFocus aria-label={en ? 'Filter model catalog' : '搜索模型清单'} value={query} onChange={event => setQuery(event.target.value)} placeholder={en ? 'Search full model ID' : '搜索完整模型 ID'} />
       <div ref={list} className="agent-model-options" role="listbox" aria-label={`${label}${en ? ' catalog' : '目录'}`}>
-        {options.map(model => <button type="button" role="option" aria-selected={model.id === value} key={model.id} onClick={() => { onChange(model.id); setOpen(false); input.current?.focus(); }}><span>{model.id}<small>{model.image_generation === true ? en ? 'Image generation declared' : '接口声明支持生图' : model.image_generation === false ? en ? 'Image generation not declared' : '接口未声明支持生图' : en ? 'Capabilities unspecified' : '能力未声明'}</small></span>{model.id === value && <Check size={16} aria-hidden="true" />}</button>)}
+        {options.map(model => <button type="button" role="option" aria-selected={model.id === value} key={model.id} onClick={() => { onChange(model.id); setOpen(false); input.current?.focus(); }}><span>{model.id}<small>{capabilityLabel(model)}</small></span>{model.id === value && <Check size={16} aria-hidden="true" />}</button>)}
       </div>
       {!options.length && <p className="settings-help">{en ? 'No matching cached models. You can enter a model ID above.' : '暂无匹配的缓存模型，可在上方手动填写模型 ID。'}</p>}
-      <p className="settings-help">{imageRecommendations ? en ? 'Recommends gpt-image models, keeping your current selection. Manual model IDs are supported. Refresh only reads the catalog.' : '仅推荐 gpt-image 系列，保留当前选择，也可手填完整模型 ID。刷新仅读取模型清单。' : en ? 'The catalog does not verify Responses or image-tool support. Refresh reads only the model list; it does not run the Agent.' : '清单不代表已验证 Responses 或生图工具支持。刷新仅读取模型列表，不运行 Agent。'}</p>
+      <p className="settings-help">{imageRecommendations ? en ? 'Prioritizes declared image outputs. Unconfirmed and custom models remain selectable; protocol and permissions are unverified. Refresh only reads the catalog.' : '优先显示声明图片输出的模型；待确认和手填模型仍可选择，协议与权限尚未验证。刷新仅读取模型清单。' : en ? 'The catalog does not verify Responses or image-tool support. Refresh reads only the model list; it does not run the Agent.' : '清单不代表已验证 Responses 或生图工具支持。刷新仅读取模型列表，不运行 Agent。'}</p>
     </div>}
   </div>;
 }

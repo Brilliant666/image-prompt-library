@@ -4,7 +4,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse
 import json
 from backend.services.api_connections import ApiConnectionProfiles, ConnectionDraftError, MAX_DRAFT_BYTES, discover_connection_draft
-from backend.services.openai_compatible import OpenAICompatibleApiKeyRequired, OpenAICompatibleConfig, OpenAICompatibleError, ModelCatalogProfileNotFound
+from backend.services.openai_compatible import OpenAICompatibleApiKeyRequired, OpenAICompatibleDiscoveryRequired, OpenAICompatibleConfig, OpenAICompatibleError, ModelCatalogProfileNotFound
 
 from backend.services.openai_codex_native import (
     CodexDeviceCodeFlow,
@@ -27,6 +27,7 @@ from backend.services.xai_grok_oauth import (
 
 router = APIRouter(prefix="/generation-providers", tags=["generation-providers"])
 API_KEY_REQUIRED_DETAIL = "Enter the API key again when changing the Base URL. The saved key is not sent to a new address."
+DISCOVERY_REQUIRED_DETAIL = "Run model discovery again for the changed connection, or choose the Muse adapter manually."
 
 
 class CodexNativePollRequest(BaseModel):
@@ -120,6 +121,8 @@ async def save_openai_compatible_config(request: Request):
         return store.public()
     except OpenAICompatibleApiKeyRequired:
         raise HTTPException(status_code=422, detail=API_KEY_REQUIRED_DETAIL) from None
+    except OpenAICompatibleDiscoveryRequired:
+        raise HTTPException(status_code=422, detail=DISCOVERY_REQUIRED_DETAIL) from None
     except (ValueError, TypeError, OSError, OpenAICompatibleError):
         # Never echo submitted credentials or exceptions containing a request body.
         raise HTTPException(status_code=400, detail="Invalid compatible image provider configuration. Check the URL, model and timeout.") from None
@@ -188,6 +191,8 @@ async def save_openai_compatible_profile(profile_id: str, request: Request):
         return store.public_profiles()
     except OpenAICompatibleApiKeyRequired:
         raise HTTPException(status_code=422, detail=API_KEY_REQUIRED_DETAIL) from None
+    except OpenAICompatibleDiscoveryRequired:
+        raise HTTPException(status_code=422, detail=DISCOVERY_REQUIRED_DETAIL) from None
     except (ValueError, TypeError, OSError, OpenAICompatibleError):
         raise HTTPException(status_code=400, detail="Invalid third-party API profile. Check the name, URL and timeout.") from None
 

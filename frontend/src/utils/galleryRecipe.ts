@@ -27,7 +27,7 @@ export function galleryPayload(draft: GalleryDraft, maxInputs: number, reference
   if(variables.some(variable=>!draft.templateValues?.[variable.key]?.trim()))throw new Error('请填写所有提示词变量');
   const resolved=variables.length?resolvePromptTemplate(draft.prompt,draft.templateValues||{}):draft.prompt;
   let recipe = draft.recipe;
-  if (draft.provider === 'openai_compatible' && recipe.size_mode === 'auto4k') {
+  if (draft.provider === 'openai_compatible' && recipe.size_mode === 'auto4k' && recipe.service_preset!=='muse') {
     const target = resolveAuto4k(resolved, referenceSize);
     if ('error' in target) throw new Error('提示词存在多个冲突比例，请先确定本轮比例');
     recipe = {...recipe,size:target.size!};
@@ -36,7 +36,7 @@ export function galleryPayload(draft: GalleryDraft, maxInputs: number, reference
     provider:draft.provider,source_item_id:draft.sourceItemId,model:recipe.model || undefined,
     mode:draft.inputs.length?'image_edit':'text_to_image',prompt_text:draft.prompt,prompt_language:draft.promptLanguage,edited_prompt_text:resolved===draft.prompt?undefined:resolved,reference_image_ids:[],
     parameters:{
-      ...(draft.provider === 'openai_compatible' ? {...compatibleParameters(recipe),compatible_profile_id:draft.profileId,...(recipe.size_mode ? {size_mode:recipe.size_mode}: {}),...(draft.aspectRatio!=='auto'?{requested_aspect_ratio:draft.aspectRatio,aspect_ratio_prompt_injection:draft.aspectInjection??(recipe.size==='auto'&&recipe.size_mode!=='auto4k')}:{})} : {quality:recipe.quality,requested_aspect_ratio:draft.aspectRatio,aspect_ratio_prompt_injection:draft.aspectInjection??(draft.provider==='openai_codex_oauth_native'&&draft.aspectRatio!=='auto'),...(draft.provider==='xai_grok_oauth'?{resolution:draft.resolution}:{})}),
+      ...(draft.provider === 'openai_compatible' ? {...compatibleParameters(recipe),compatible_profile_id:draft.profileId,...(recipe.size_mode&&recipe.service_preset!=='muse' ? {size_mode:recipe.size_mode}: {}),...(draft.aspectRatio!=='auto'&&recipe.service_preset!=='muse'?{requested_aspect_ratio:draft.aspectRatio,aspect_ratio_prompt_injection:draft.aspectInjection??(recipe.size==='auto'&&recipe.size_mode!=='auto4k')}:{})} : {quality:recipe.quality,requested_aspect_ratio:draft.aspectRatio,aspect_ratio_prompt_injection:draft.aspectInjection??(draft.provider==='openai_codex_oauth_native'&&draft.aspectRatio!=='auto'),...(draft.provider==='xai_grok_oauth'?{resolution:draft.resolution}:{})}),
       input_images:draft.inputs.map(input=>({id:input.id,name:input.name,source:input.source,data_url:input.dataUrl,result_path:input.resultPath,image_id:input.imageId,source_item_id:input.sourceItemId,role:input.role})),
       ...(variables.length?{prompt_template:draft.prompt,prompt_template_values:Object.fromEntries(variables.map(variable=>[variable.key,draft.templateValues?.[variable.key]||''])),prompt_template_resolved_text:resolved}:{}),
     },

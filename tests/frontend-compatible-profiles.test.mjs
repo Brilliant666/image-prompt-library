@@ -133,7 +133,7 @@ test('profile copy and order send only identities to local routes and never retr
 
 const settingsSource = await readFile(new URL('../frontend/src/utils/profileSettings.ts', import.meta.url), 'utf8');
 const settingsJs = ts.transpileModule(settingsSource, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
-const { compatibleEndpointPreview, profileValidation, parseProfileModels, profileModelChoices } = await import(`data:text/javascript;base64,${Buffer.from(settingsJs).toString('base64')}`);
+const { compatibleEndpointPreview, profileValidation, parseProfileModels, profileModelChoices, profileModelInfo } = await import(`data:text/javascript;base64,${Buffer.from(settingsJs).toString('base64')}`);
 test('connection previews match the existing v1 contract and never expose credentials or accept image endpoints', () => {
   for (const base of ['https://api.example.test', 'https://api.example.test/', 'https://api.example.test/v1/', 'https://api.example.test/v1/v1']) {
     assert.deepEqual(compatibleEndpointPreview(base), { base: 'https://api.example.test/v1', generate: 'https://api.example.test/v1/images/generations', edit: 'https://api.example.test/v1/images/edits', responses: 'https://api.example.test/v1/responses' });
@@ -161,17 +161,36 @@ test('reset removes only this profile recipe and preserves selection, other APIs
   assert.equal(resetGenerationPreference({ removeItem() { throw Error('denied'); } }, 'a'), false);
 });
 
-test('custom root mode never appends v1 and non-gpt image choices only preserve the selected historical ID', () => {
+test('custom root mode never appends v1 and image choices preserve configured and historical aliases', () => {
   assert.equal(compatibleEndpointPreview('https://example.test/gateway/', 'custom').generate, 'https://example.test/gateway/images/generations');
   assert.equal(compatibleEndpointPreview('https://example.test/v1/v1/', 'custom').base, 'https://example.test/v1/v1');
   assert.equal(compatibleEndpointPreview('https://example.test/', 'custom').responses, 'https://example.test/responses');
   assert.equal(compatibleEndpointPreview('https://key:secret@example.test/', 'custom'), undefined);
   assert.deepEqual(parseProfileModels(' alpha, beta\r\nalpha， gamma\n'), ['alpha', 'beta', 'gamma']);
   assert.deepEqual(parseProfileModels(' \n,'), []);
-  assert.deepEqual(profileModelChoices({ model: 'default-id', models: ['alpha', 'beta', 'alpha'] }, 'historical-id', ['legacy']), ['historical-id']);
-  assert.deepEqual(profileModelChoices({ model: 'default-id', models: [] }, '', ['legacy']), []);
+  assert.deepEqual(profileModelChoices({ model: 'default-id', models: ['alpha', 'beta', 'alpha'] }, 'historical-id', ['legacy']), ['historical-id', 'default-id', 'alpha', 'beta']);
+  assert.deepEqual(profileModelChoices({ model: 'default-id', models: [] }, '', ['legacy']), ['default-id', 'legacy']);
   for (const partial_images of [-1, 4, 1.5, NaN]) assert.equal(profileValidation({ display_name: 'API', base_url: 'https://example.test', timeout: 300, partial_images }), 'partial_images');
   for (const models of [Array.from({ length: 101 }, (_, index) => `model-${index}`), ['a'.repeat(201)], ['model\tname']]) assert.equal(profileValidation({ display_name: 'API', base_url: 'https://example.test', timeout: 300, models }), 'models');
+});
+
+test('image choices follow output capabilities across protocols, not model families', () => {
+  const models = [
+    {id:'flux-image',image_generation:true,text_generation:false},
+    {id:'dual-output',image_generation:true,text_generation:true},
+    {id:'text-only',image_generation:null,text_generation:true},
+    {id:'not-image',image_generation:false,text_generation:null},
+    {id:'custom-alias',image_generation:null,text_generation:null},
+    {id:'gpt-image-not-supported',image_generation:false},
+  ];
+  for (const protocol of ['openai_compatible','gemini_native','seedream_native']) {
+    const profile={protocol,model:'text-only',models:['custom-alias','not-image'],model_catalog:{models}};
+    assert.deepEqual(profileModelChoices(profile,'historical-manual'),['historical-manual','flux-image','dual-output','custom-alias']);
+    assert.deepEqual(profileModelChoices(profile,'not-image'),['not-image','flux-image','dual-output','custom-alias']);
+    assert.equal(profileModelChoices(profile,'').includes('text-only'),false);
+    assert.deepEqual(profile.model_catalog.models,models,'candidate selection does not mutate catalog declarations');
+  }
+  assert.deepEqual(profileModelChoices({protocol:'seedream_native',model:'custom-endpoint',image_capabilities:{known_models:['doc-reference']}},''),['custom-endpoint','doc-reference']);
 });
 
 async function componentJs(path) {
@@ -267,4 +286,24 @@ test('grouped workflow controls preserve other preferences when changing one opt
   const switches = nodes.filter(node => node.type === 'input'); assert.equal(switches.length, 3);
   switches.at(-1).props.onChange({ target: { checked: true } });
   assert.deepEqual(changes[1], { ...value, notifyOnCompletion: true });
+});
+
+test('explicit Muse roles supplement missing catalog metadata without inventing discovered models or timestamps',()=>{
+ const models=['muse-image','muse-spark','muse-video'],profile={service_preset:'muse',model:'muse-image',models,protocol:'openai_compatible'};
+ const before=structuredClone(profile);assert.deepEqual(profileModelChoices(profile,''),['muse-image']);
+ assert.deepEqual(profileModelChoices(profile,'muse-spark'),['muse-spark','muse-image']);
+ assert.equal(profileModelInfo(profile,'muse-image').image_generation,true);assert.equal(profileModelInfo(profile,'muse-spark').text_generation,true);
+ assert.equal(profileModelInfo(profile,'muse-video').image_generation,false);assert.equal(profileModelInfo(profile,'muse-video').text_generation,false);
+ assert.equal(profileModelInfo(profile,'muse-image').capability_source,'documentation');assert.deepEqual(profile,before);
+ assert.deepEqual(profileModelChoices({...profile,model:'',models:['muse-spark']},''),[],'documented roles never add an absent muse-image');
+ assert.equal(profileModelInfo({...profile,service_preset:'generic'},'muse-image'),undefined);
+ assert.deepEqual(profileModelChoices({...profile,service_preset:'generic'},''),models,'generic aliases retain unknown capabilities');
+});
+
+test('explicit catalog capabilities override Muse documentation and unknown fields can use documented roles',()=>{
+ const model={id:'muse-image',image_generation:false,text_generation:true,capability_source:'api'};
+ const profile={service_preset:'muse',model:'',models:['muse-image','muse-spark'],model_catalog:{models:[model,{id:'muse-spark',image_generation:null,text_generation:null,capability_source:'unknown'}],fetched_at:null}};
+ assert.equal(profileModelInfo(profile,'muse-image'),model);assert.deepEqual(profileModelChoices(profile,''),[]);
+ assert.deepEqual(profileModelInfo(profile,'muse-spark'),{id:'muse-spark',image_generation:false,text_generation:true,capability_source:'documentation'});
+ assert.equal(profile.model_catalog.fetched_at,null);assert.equal(profile.model_catalog.models[1].image_generation,null);
 });

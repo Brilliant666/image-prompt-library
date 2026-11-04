@@ -252,6 +252,50 @@ async function chooseCount(h, count) {
   assert.equal(children(h.tree).find(node => node.props?.['data-panel'] === 'count'), undefined);
 }
 
+const museProfileStore = async () => ({profiles:[{id:'original-api',display_name:'Muse',model:'muse-image',service_preset:'muse',configured:true}],default_profile_id:'original-api'});
+const museHistory = ratio => historicalJob({model:'muse-image',parameters:{...compatible.museRecipeDefaults(),compatible_profile_id:'original-api',requested_aspect_ratio:ratio}});
+
+test('Muse ratio and count controls submit the chosen recipe without duplicate settings or changing prompt/references', async t => {
+  const h=inputHarness(t,{command:{id:501,job:museHistory('9:16')}},{openAICompatibleProfiles:museProfileStore});await h.flush();
+  const text=value=>Array.isArray(value)?value.map(text).join(''):typeof value==='object'?text(value?.props?.children):String(value??'');
+  assert.ok(!children(h.tree).some(node=>node.type==='button'&&node.props.className?.includes('pg-param-more')));
+  assert.ok(!children(h.tree).some(node=>node.type==='button'&&node.props.className?.includes('pg-param-quality')));
+  assert.equal(text(h.find('button','画面比例 9:16').children),'比例9:16');
+  h.find('button','画面比例 9:16').onClick();await h.flush();
+  assert.equal(h.find('textarea','画廊提示词').value,originalPrompt);
+  const panel=children(h.tree).find(node=>node.props?.['aria-label']==='Muse 画面比例');
+  const options=children(panel).filter(node=>node.type==='button');
+  assert.deepEqual(options.map(node=>text(node.props.children)),['服务默认','1:1','16:9','9:16','4:3','3:4']);
+  assert.equal(options.find(node=>text(node.props.children)==='9:16').props['aria-pressed'],true);
+  options.find(node=>text(node.props.children)==='3:4').props.onClick();await h.flush();
+  assert.equal(h.find('button','画面比例 3:4')['aria-expanded'],false);
+  await chooseCount(h,3);
+  h.find('button','添加参考图').onClick();await h.flush();h.find('button','从 Library 或画廊选择参考图').onClick();await h.flush();
+  const picked=[input('first'),input('second')];
+  for(const reference of picked){children(h.tree).find(node=>node.type==='ReferencePicker').props.onSelect(reference);await h.flush();}
+  h.find('button','生成图片').onClick();await h.flush();
+  assert.equal(h.state.posts.length,1);const submission=h.state.posts[0],payload=submission.job;
+  assert.equal(submission.count,3);assert.equal(payload.prompt_text,originalPrompt);assert.equal(payload.model,'muse-image');
+  assert.equal(payload.parameters.service_preset,'muse');assert.equal(payload.parameters.requested_aspect_ratio,'3:4');assert.equal(payload.parameters.size,'auto');
+  assert.deepEqual(payload.parameters.input_images.map(value=>value.data_url),picked.map(value=>value.dataUrl));
+  assert.equal(h.find('textarea','画廊提示词').value,originalPrompt);
+});
+
+test('Muse keeps unsupported history visible and busy ratio callbacks cannot change a submitted request', async t => {
+  const pending=deferred();const h=inputHarness(t,{command:{id:502,job:museHistory('1:2')}},{openAICompatibleProfiles:museProfileStore,createGenerationJob:()=>pending.promise});await h.flush();
+  h.find('button','画面比例 1:2').onClick();await h.flush();
+  const text=value=>Array.isArray(value)?value.map(text).join(''):typeof value==='object'?text(value?.props?.children):String(value??'');
+  const options=()=>children(h.tree).filter(node=>node.type==='button'&&node.props['aria-pressed']!==undefined);
+  const unsupported=options().find(node=>text(node.props.children)==='1:2 · 不支持');assert.ok(unsupported?.props.disabled);
+  assert.equal(h.state.posts.length,0);assert.equal(h.find('textarea','画廊提示词').value,originalPrompt);
+  options().find(node=>text(node.props.children)==='1:1').props.onClick();await h.flush();
+  h.find('button','生成图片').onClick();await h.flush();assert.equal(h.find('button','生成图片')['aria-busy'],true);
+  h.find('button','画面比例 1:1').onClick();await h.flush();const choice=options().find(node=>text(node.props.children)==='3:4');
+  assert.equal(choice.props.disabled,true);choice.props.onClick();await h.flush();
+  assert.equal(h.find('button','画面比例 1:1')['aria-expanded'],true);
+  pending.resolve(historicalJob());await h.flush();
+});
+
 for (const count of [1, 3, 5, 10]) test(`confirmed creation immediately delivers returned jobs to the gallery (${count})`, async t => {
   const pending = deferred(), created = [];
   const records = Array.from({ length: count }, (_, index) => historicalJob({ id: `new-${index}`, status: 'queued' }));
@@ -367,9 +411,9 @@ test('gallery model suggestions follow the current API list and retain a restore
   await harness.flush();
   harness.find('button', '请求模型 historical-model').onClick(); await harness.flush();
   const choices = () => children(harness.tree).filter(node => node.type === 'button' && node.props['data-model-id']).map(node => node.props['data-model-id']);
-  assert.deepEqual(choices(), ['historical-model']);
+  assert.deepEqual(choices(), ['historical-model','configured-default','model-one','model-two']);
   harness.find('input', '请求模型完整 ID').onChange({ target: { value: 'custom-entered-model' } }); await harness.flush();
-  assert.deepEqual(choices(), ['custom-entered-model']);
+  assert.deepEqual(choices(), ['custom-entered-model','configured-default','model-one','model-two']);
   assert.equal(harness.state.posts.length, 0, 'browsing and editing the model never submits a request');
 });
 
@@ -452,12 +496,12 @@ test('discovered gpt-image models preserve a missing historical selection and su
   await harness.flush();
   harness.find('button', '请求模型 gateway-original-alias').onClick(); await harness.flush();
   const choices=()=>children(harness.tree).filter(node=>node.type==='button'&&node.props['data-model-id']);
-  assert.deepEqual(choices().map(node=>node.props['data-model-id']), ['gateway-original-alias','gpt-image-new-model']);
+  assert.deepEqual(choices().map(node=>node.props['data-model-id']), ['gateway-original-alias','gpt-image-new-model','default-model','manual-alias','unknown-alias']);
   assert.ok(children(harness.tree).some(node=>node.props?.role==='status'&&String(node.props.children).includes('未找到当前模型')));
   assert.equal(harness.find('textarea','画廊提示词').value,originalPrompt);
   catalog={...catalog,error:'Models request timed out.'};
   harness.update({configurationRevision:1}); await harness.flush();
-  assert.equal(choices().length,2);
+  assert.equal(choices().length,5);
   harness.find('button','请求模型 gateway-original-alias');
   choices().find(node=>node.props['data-model-id']==='gpt-image-new-model').props.onClick(); await harness.flush();
   harness.find('button','生成图片').onClick(); await harness.flush();
@@ -465,14 +509,14 @@ test('discovered gpt-image models preserve a missing historical selection and su
   assert.equal(harness.state.posts[0].prompt_text,originalPrompt);
 });
 
-test('gallery only recommends gpt-image while preserving selected exceptions and unrestricted manual entry', async t => {
+test('gallery accepts image outputs from any family, searches unknown aliases and preserves draft inputs', async t => {
   const models = [
     ['claude-opus-5', null], ['gemini-3.1-flash-lite-preview', null], ['gpt-6-astra', null],
     ['gpt-image-2-4k', null], ['google/nano-banana-pro', null], ['gemini-3-pro-image-preview', null],
     ['midjourney-v7', null], ['google/imagen-4', null], ['black-forest-labs/FLUX.1-schnell', null],
     ['stable-diffusion-xl', null], ['custom-output-image', true], ['manual-unknown', null], ['gpt-image-declared', true],
     ['gpt-image-disabled', false], ['manual-disabled', false],
-  ].map(([id, image_generation]) => ({id, image_generation}));
+  ].map(([id, image_generation]) => ({id, image_generation, text_generation:['claude-opus-5','gemini-3.1-flash-lite-preview','gpt-6-astra'].includes(id)?true:null}));
   const catalog = {models, fetched_at: '2026-10-20T00:00:00Z', checked_at: '2026-10-20T00:00:00Z', error: null};
   const harness = inputHarness(t, {command: {id: 985, job: historicalJob()}}, {
     openAICompatibleProfiles: async () => ({profiles: [{id: 'original-api', display_name: 'Original API', configured: true, model: 'gpt-6-astra', models: ['manual-unknown', 'manual-disabled'], model_catalog: catalog}], default_profile_id: 'original-api'}),
@@ -481,22 +525,28 @@ test('gallery only recommends gpt-image while preserving selected exceptions and
   harness.find('button', '请求模型 gateway-original-alias').onClick(); await harness.flush();
   const choices = () => children(harness.tree).filter(node => node.type === 'button' && node.props['data-model-id']);
   assert.deepEqual(choices().map(node => node.props['data-model-id']), [
-    'gateway-original-alias', 'gpt-image-declared', 'gpt-image-2-4k',
+    'gateway-original-alias','custom-output-image','gpt-image-declared','manual-unknown','gpt-image-2-4k',
+    'google/nano-banana-pro','gemini-3-pro-image-preview','midjourney-v7','google/imagen-4',
+    'black-forest-labs/FLUX.1-schnell','stable-diffusion-xl',
   ]);
-  assert.match(choices().find(node => node.props['data-model-id'] === 'gpt-image-2-4k').props.title, /名称匹配.*未验证/, 'compact choices preserve the capability qualification in their tooltip');
-  assert.equal(choices().some(node => node.props['data-model-id'] === 'custom-output-image'), false, 'even explicit image capability does not widen the requested family');
+  assert.match(choices().find(node => node.props['data-model-id'] === 'gpt-image-2-4k').props.title, /图片能力待确认/, 'a familiar name does not prove image output');
+  assert.equal(choices().some(node => node.props['data-model-id'] === 'custom-output-image'), true);
   assert.equal(children(harness.tree).some(node => node.props?.children === '使用此配置的默认模型'), false);
   assert.equal(models.find(model => model.id === 'google/nano-banana-pro').image_generation, null, 'UI recommendations never mutate capability metadata');
   assert.equal(catalog.models.length, 15, 'gallery filtering leaves the settings catalog intact');
-  choices().find(node => node.props['data-model-id'] === 'gpt-image-2-4k').props.onClick(); await harness.flush();
+  harness.find('input','搜索生图模型').onChange({target:{value:'CUSTOM-output'}}); await harness.flush();
+  assert.deepEqual(choices().map(node=>node.props['data-model-id']),['custom-output-image']);
+  assert.equal(harness.state.posts.length,0,'searching never creates a task');
+  assert.equal(harness.find('textarea','画廊提示词').value,originalPrompt);
+  choices()[0].props.onClick(); await harness.flush();
   harness.find('button', '生成图片').onClick(); await harness.flush();
-  assert.equal(harness.state.posts[0].model, 'gpt-image-2-4k');
+  assert.equal(harness.state.posts[0].model, 'custom-output-image');
   assert.equal(harness.state.posts[0].prompt_text, originalPrompt);
 
-  harness.find('button', '请求模型 gpt-image-2-4k').onClick(); await harness.flush();
+  harness.find('button', '请求模型 custom-output-image').onClick(); await harness.flush();
   harness.find('input', '请求模型完整 ID').onChange({target: {value: 'gpt-image-disabled'}}); await harness.flush();
   assert.equal(choices()[0].props['data-model-id'], 'gpt-image-disabled', 'an intentional custom selection stays editable');
-  assert.match(choices()[0].props.title, /接口标注：非图片输出/);
+  assert.match(choices()[0].props.title, /非图片输出.*保留当前选择/);
   harness.find('input', '请求模型完整 ID').onChange({target: {value: 'tomorrows-custom-image-alias'}}); await harness.flush();
   assert.equal(choices().some(node => node.props['data-model-id'] === 'gpt-image-disabled'), false);
   harness.find('button', '生成图片').onClick(); await harness.flush();
@@ -1708,7 +1758,7 @@ test('catalog failure retains successful candidates, manual model and prompt; re
   h.find('button','请求模型 gateway-original-alias').onClick();await h.flush();
   h.find('input','请求模型完整 ID').onChange({target:{value:'manual-unknown-model'}});await h.flush();
   h.emitCatalogChanged('original-api');await h.flush();
-  assert.deepEqual(catalogChoices(h),['manual-unknown-model','gpt-image-catalog-new']);
+  assert.deepEqual(catalogChoices(h),['manual-unknown-model','gateway-original-alias','gpt-image-catalog-new']);
   assert.equal(h.find('textarea','画廊提示词').value,'my draft');
   h.update({active:false});await h.flush();h.update({active:true});await h.flush();
   assert.equal(calls,1);assert.equal(h.state.posts.length,0);

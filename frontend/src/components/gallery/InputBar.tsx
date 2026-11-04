@@ -8,12 +8,12 @@ import type { LocalPreferences } from '../../utils/localPreferences';
 import { resolveAuto4k, clearCompatibleTransportOverrides, compatibleValidation, nativeParameterIssue, IMAGE25_QUALITIES } from '../../utils/compatibleRecipe';
 import { agentJobSource, applyGalleryImageSettings, sharedImageCount, type GalleryImageSettings, type GalleryImageSettingsCommand } from '../../utils/agentGalleryBridge';
 import { readGenerationPreference, writeGenerationPreference, lastGenerationProfile } from '../../utils/generationPreferences';
-import { isGptImageModelName, profileModelChoices } from '../../utils/profileSettings';
+import { imageModelCapability, profileModelChoices, profileModelInfo } from '../../utils/profileSettings';
 import { recipeInputs, restoreRecipeInputs, type RecipeInput } from '../../utils/recipeInputs';
 import { draftFromJob, emptyGalleryDraft, galleryPayload, libraryRecipeImage, type GalleryDraft } from '../../utils/galleryRecipe';
 import { readGalleryDraft, saveGalleryDraft } from '../../utils/galleryDraft';
 import NativeImageParameters from '../NativeImageParameters';
-import { nativeRecipeDefaults } from '../../utils/compatibleRecipe';
+import { nativeRecipeDefaults, museAspectRatio, MUSE_ASPECT_RATIOS } from '../../utils/compatibleRecipe';
 import ReferencePicker from './ReferencePicker';
 import SizeDialog from './SizeDialog';
 import { extractPromptTemplateVariableRecords, resolvePromptTemplate } from '../../utils/promptTemplateVariables';
@@ -35,6 +35,8 @@ export default function InputBar({command,imageSettingsCommand,preferences,t,act
   const referenceSource=useRef<RecipeInput|undefined>(undefined);
   const measuredReferenceSize=draft.inputs[0]&&referenceSource.current===draft.inputs[0]?referenceSize:undefined;
   const [panel,setPanel]=useState(''),[picker,setPicker]=useState(false);
+  const [modelQuery,setModelQuery]=useState('');
+  useEffect(()=>{if(panel!=='model')setModelQuery('');},[panel]);
   const fileRef=useRef<HTMLInputElement>(null),textRef=useRef<HTMLTextAreaElement>(null),submitLock=useRef(false),readSequence=useRef(0),initialized=useRef(false),persistSequence=useRef(Promise.resolve());
   const consumedCommand=useRef<number|undefined>(undefined);
   const editRevision=useRef(0);
@@ -51,9 +53,12 @@ export default function InputBar({command,imageSettingsCommand,preferences,t,act
   useEffect(()=>{mounted.current=true;return()=>{mounted.current=false;readSequence.current++;fileReadSequence.current++;};},[]);
   useEffect(()=>{readSequence.current++;fileReadSequence.current++;pendingFiles.current=false;setReading(false);},[active]);
   useEffect(()=>{let current=true;setReferenceSize(undefined);setReferenceStatus('loading');if(draft.provider==='openai_compatible'&&(draft.recipe.size_mode==='auto4k'||panel==='size')&&draft.inputs[0])void verifiedInput(draft.inputs[0]).then(async data=>{const image=new Image();image.src=data;await image.decode();if(current){referenceSource.current=draft.inputs[0];setReferenceSize({width:image.naturalWidth,height:image.naturalHeight});setReferenceStatus('ready');}}).catch(()=>{if(current)setReferenceStatus('error');});return()=>{current=false;};},[draft.provider,draft.recipe.size_mode,draft.inputs[0],panel]);
-  const provider=providers.find(p=>p.provider===draft.provider),limit=provider?.max_input_images||4;
+  const provider=providers.find(p=>p.provider===draft.provider);
   const profile=profiles.find(p=>p.id===draft.profileId);
   const protocol=profile?.protocol||'openai_compatible';
+  const museApi=draft.provider==='openai_compatible'&&profile?.service_preset==='muse';
+  const presetChanged=draft.provider==='openai_compatible'&&(draft.recipe.service_preset||'generic')!==(profile?.service_preset||'generic');
+  const limit=museApi?4:provider?.max_input_images||4;
   const nativeApi=draft.provider==='openai_compatible'&&protocol!=='openai_compatible';
   const ready=draft.provider==='openai_compatible'?Boolean(profile?.configured):Boolean(provider?.can_generate??provider?.available);
   // Only first initialization gates history restoration. Refreshing configuration
@@ -76,7 +81,7 @@ export default function InputBar({command,imageSettingsCommand,preferences,t,act
       const selected=store.profiles.find(p=>p.id===lastGenerationProfile(localStorage))||store.profiles.find(p=>p.id===store.default_profile_id);
       const preferred=available.find(p=>p.provider===preferredProvider&&p.can_generate);
       const fallback=preferred?.provider||(selected?'openai_compatible':available.find(p=>p.can_generate)?.provider)||'openai_compatible';
-      setDraft(restored || {...emptyGalleryDraft(),provider:fallback,profileId:selected?.id||'',recipe:fallback==='openai_compatible'&&selected?readGenerationPreference(localStorage,selected.id,selected.model,selected.protocol):{...emptyGalleryDraft().recipe,model:available.find(p=>p.provider===fallback)?.default_image_model||'gpt-image-2',quality:'medium'}});
+      setDraft(restored || {...emptyGalleryDraft(),provider:fallback,profileId:selected?.id||'',recipe:fallback==='openai_compatible'&&selected?readGenerationPreference(localStorage,selected.id,selected.model,selected.protocol,selected.service_preset):{...emptyGalleryDraft().recipe,model:available.find(p=>p.provider===fallback)?.default_image_model||'gpt-image-2',quality:'medium'}});
     }
   }).catch(e=>alive&&setError(String(e))).finally(()=>{if(alive){setLoading(false);setRefreshing(false);}});return()=>{alive=false;};},[configurationRevision]);
   useEffect(()=>{
@@ -111,7 +116,7 @@ export default function InputBar({command,imageSettingsCommand,preferences,t,act
     return()=>window.removeEventListener('ipl:profile-model-saved',saved);
   },[draft.provider,draft.profileId,command?.id]);
   useEffect(()=>{
-    const reset=(event:Event)=>{const id=(event as CustomEvent<{profileId?:string}>).detail?.profileId;if(!id||draft.provider!=='openai_compatible'||draft.profileId!==id)return;editDraft(current=>({...current,recipe:clearCompatibleTransportOverrides(readGenerationPreference(localStorage,id,profiles.find(profile=>profile.id===id)?.model||'',profiles.find(profile=>profile.id===id)?.protocol))}));};
+    const reset=(event:Event)=>{const id=(event as CustomEvent<{profileId?:string}>).detail?.profileId;if(!id||draft.provider!=='openai_compatible'||draft.profileId!==id)return;editDraft(current=>({...current,recipe:clearCompatibleTransportOverrides(readGenerationPreference(localStorage,id,profiles.find(profile=>profile.id===id)?.model||'',profiles.find(profile=>profile.id===id)?.protocol,profiles.find(profile=>profile.id===id)?.service_preset))}));};
     window.addEventListener('ipl:generation-preference-reset',reset);
     return()=>window.removeEventListener('ipl:generation-preference-reset',reset);
   },[profiles,draft.provider,draft.profileId]);
@@ -148,8 +153,8 @@ export default function InputBar({command,imageSettingsCommand,preferences,t,act
   }
   async function submit() {
     if(submitLock.current||busy||reading||loading||refreshing||uncertain||!ready)return;submitLock.current=true;const submittedRevision=editRevision.current;setBusy(true);setError('');let posted=false;
-    try{if(draft.provider==='openai_compatible'&&(draft.recipe.protocol||'openai_compatible')!==protocol)throw new Error('连接协议已改变；请重新选择该连接以使用对应参数。原草稿保留。');let dimensions: {width:number;height:number}|undefined;if(draft.provider==='openai_compatible'&&draft.recipe.size_mode==='auto4k'&&draft.inputs[0]){const data=await verifiedInput(draft.inputs[0]);const image=new Image();image.src=data;await image.decode();dimensions={width:image.naturalWidth,height:image.naturalHeight};}
-      const payload=galleryPayload({...draft,promptLanguage:draft.promptLanguage||promptLanguage},limit,dimensions,promptVariablesEnabled);posted=true;
+    try{if(presetChanged)throw new Error('服务适配已改变，请重新选择该连接；原草稿保留。');if(draft.provider==='openai_compatible'&&(draft.recipe.protocol||'openai_compatible')!==protocol)throw new Error('连接协议已改变；请重新选择该连接以使用对应参数。原草稿保留。');let dimensions: {width:number;height:number}|undefined;if(draft.provider==='openai_compatible'&&!museApi&&draft.recipe.size_mode==='auto4k'&&draft.inputs[0]){const data=await verifiedInput(draft.inputs[0]);const image=new Image();image.src=data;await image.decode();dimensions={width:image.naturalWidth,height:image.naturalHeight};}
+      const payload=galleryPayload({...draft,recipe:{...draft.recipe,...(museApi?{service_preset:'muse' as const}:{})},promptLanguage:draft.promptLanguage||promptLanguage},limit,dimensions,promptVariablesEnabled);posted=true;
       const created=count===1?[await api.createGenerationJob(payload)]:(await api.createGenerationSet({job:payload,count})).jobs;
       onCreated(created);
       // A newer edit or accepted restore (even while its images are loading)
@@ -173,26 +178,27 @@ export default function InputBar({command,imageSettingsCommand,preferences,t,act
     if(loading||refreshing)unavailable='画廊配置正在读取，请稍后使用。';
     else if(draft.provider!=='openai_compatible')unavailable='当前画廊供应商不能直接用于 Agent 图片接口，请选择 API 配置。';
     else if(!ready||!model)unavailable='请先完成画廊图片 API 配置并选择生图模型。';
-    const validation=compatibleValidation({...draft.recipe,model,size:draft.recipe.size_mode==='auto4k'?'auto':size});
+    const validation=compatibleValidation({...draft.recipe,...(museApi?{service_preset:'muse' as const}:{}),model,size:draft.recipe.size_mode==='auto4k'?'auto':size});
     if(!unavailable&&validation)unavailable=nativeApi?(nativeParameterIssue({...draft.recipe,model,protocol})||t(validation)):t(validation);
     if(!unavailable&&draft.provider==='openai_compatible'&&(draft.recipe.protocol||'openai_compatible')!==protocol)unavailable='连接协议已改变，请重新选择该连接；原草稿保留。';
+    if(!unavailable&&presetChanged)unavailable='服务适配已改变，请重新选择该连接；原草稿保留。';
     // Transfer only image settings; a historical transport override never owns
     // the Agent's endpoint, credentials, streaming or response format.
-    const params:GalleryImageSettings['params']={size,quality:draft.recipe.quality,background:draft.recipe.background,output_format:draft.recipe.output_format as GalleryImageSettings['params']['output_format'],...(draft.recipe.output_format!=='png'&&draft.recipe.output_compression!==undefined?{output_compression:draft.recipe.output_compression}:{}),...(draft.recipe.moderation!==undefined?{moderation:draft.recipe.moderation}:{}),...(draft.recipe.provider_options?{provider_options:{...draft.recipe.provider_options}}:{})};
-    const settings:GalleryImageSettings={provider:draft.provider,profileId:draft.profileId,model,params,count,...(protocol!=='openai_compatible'?{protocol}:{}),...(draft.recipe.size_mode==='auto4k'?{sizeMode:'auto4k' as const}:{}),...(unavailable?{unavailable}:{})};
+    const params:GalleryImageSettings['params']={...(museApi?{service_preset:'muse' as const,requested_aspect_ratio:museAspectRatio(draft.recipe)}:{}),size:museApi?'auto':size,quality:museApi?'auto':draft.recipe.quality,background:museApi?'auto':draft.recipe.background,output_format:museApi?'auto':draft.recipe.output_format as GalleryImageSettings['params']['output_format'],...(draft.recipe.output_format!=='png'&&draft.recipe.output_compression!==undefined?{output_compression:draft.recipe.output_compression}:{}),...(draft.recipe.moderation!==undefined?{moderation:draft.recipe.moderation}:{}),...(draft.recipe.provider_options?{provider_options:{...draft.recipe.provider_options}}:{})};
+    const settings:GalleryImageSettings={...(museApi?{service_preset:'muse' as const}:{}),provider:draft.provider,profileId:draft.profileId,model,params,count,...(protocol!=='openai_compatible'?{protocol}:{}),...(!museApi&&draft.recipe.size_mode==='auto4k'?{sizeMode:'auto4k' as const}:{}),...(unavailable?{unavailable}:{})};
     const signature=JSON.stringify(settings);
     if(signature!==reportedImageSettings.current){reportedImageSettings.current=signature;onImageSettingsChange(settings);}
-  },[onImageSettingsChange,draft.provider,draft.profileId,draft.recipe,count,ready,loading,refreshing,t,imageSettingsCommand,appliedImageSettings,protocol,nativeApi]);
-  const sizePreview=draft.provider==='openai_compatible'&&draft.recipe.size_mode==='auto4k'?resolveAuto4k(variables.length?resolvePromptTemplate(draft.prompt,draft.templateValues||{}):draft.prompt,referenceSize):undefined;
+  },[onImageSettingsChange,draft.provider,draft.profileId,draft.recipe,count,ready,loading,refreshing,t,imageSettingsCommand,appliedImageSettings,protocol,nativeApi,museApi,presetChanged]);
+  const sizePreview=!museApi&&draft.provider==='openai_compatible'&&draft.recipe.size_mode==='auto4k'?resolveAuto4k(variables.length?resolvePromptTemplate(draft.prompt,draft.templateValues||{}):draft.prompt,referenceSize):undefined;
   const models=draft.provider==='openai_compatible'?profileModelChoices(profile,draft.recipe.model):[...new Set([draft.recipe.model,provider?.default_image_model||'',...(provider?.image_models||[])].map(model=>model.trim()).filter(Boolean))];
   const catalog=draft.provider==='openai_compatible'?profile?.model_catalog:undefined;
   const absentFromCatalog=Boolean(catalog?.fetched_at&&draft.recipe.model&&!catalog.models.some(model=>model.id===draft.recipe.model));
   const providerLabel=draft.provider==='openai_compatible'?(profile?.display_name||'API 配置'):(provider?.display_name||'API 配置');
-  const sizeValue=nativeApi?(protocol==='gemini_native'?`${String(draft.recipe.provider_options?.aspect_ratio||'auto')} · ${String(draft.recipe.provider_options?.resolution||'auto')}`:draft.recipe.size):draft.provider==='openai_compatible'?(draft.recipe.size_mode==='auto4k'?`4K 自动比例${sizePreview&&!('error' in sizePreview)?` · ${sizePreview.size.replace('x',' × ')}`:''}`:draft.recipe.size.replace('x',' × ')):`${draft.aspectRatio}${draft.provider==='xai_grok_oauth'?` · ${draft.resolution}`:''}`;
-  const sizeLabel=draft.provider==='openai_compatible'?(draft.recipe.size_mode==='auto4k'?'4K 自动比例':`请求尺寸 ${draft.recipe.size}`):draft.aspectRatio;
+  const sizeValue=museApi?museAspectRatio(draft.recipe):nativeApi?(protocol==='gemini_native'?`${String(draft.recipe.provider_options?.aspect_ratio||'auto')} · ${String(draft.recipe.provider_options?.resolution||'auto')}`:draft.recipe.size):draft.provider==='openai_compatible'?(draft.recipe.size_mode==='auto4k'?`4K 自动比例${sizePreview&&!('error' in sizePreview)?` · ${sizePreview.size.replace('x',' × ')}`:''}`:draft.recipe.size.replace('x',' × ')):`${draft.aspectRatio}${draft.provider==='xai_grok_oauth'?` · ${draft.resolution}`:''}`;
+  const sizeLabel=museApi?`画面比例 ${museAspectRatio(draft.recipe)}`:draft.provider==='openai_compatible'?(draft.recipe.size_mode==='auto4k'?'4K 自动比例':`请求尺寸 ${draft.recipe.size}`):draft.aspectRatio;
   const backgroundLabel=`透明 ${({auto:'auto',opaque:'false',transparent:'true'} as Record<string,string>)[draft.recipe.background||'auto']||draft.recipe.background}`;
-  const moreValue=nativeApi?(protocol==='gemini_native'?'原生图像设置':`${draft.recipe.output_format.toUpperCase()} · 水印 ${String(draft.recipe.provider_options?.watermark??'默认')}`):draft.provider==='openai_compatible'?`${draft.recipe.output_format.toUpperCase()} · ${backgroundLabel} · 审核 ${draft.recipe.moderation||'auto'}${draft.recipe.output_format!=='png'&&draft.recipe.output_compression!==undefined?` · 压缩 ${draft.recipe.output_compression}`:''}`:'供应商默认';
-  const chip=(name:string,label:string,value:string,ariaLabel=`${label} ${value}`)=><button type="button" className={`pg-param-chip pg-param-${name}${panel===name?' active':''}`} disabled={name==='count'&&busy} title={`${label} ${value}`} aria-label={ariaLabel} aria-expanded={panel===name} aria-haspopup={name==='size'&&draft.provider==='openai_compatible'?'dialog':undefined} aria-controls={name==='size'&&draft.provider==='openai_compatible'?'gallery-size-title':'gallery-parameter-panel'} onClick={()=>setPanel(panel===name?'':name)}>{label&&<span className="pg-param-label">{label}</span>}<span className="pg-param-value">{value}</span><ChevronDown size={12}/></button>;
+  const moreValue=museApi?'Muse 服务决定':nativeApi?(protocol==='gemini_native'?'原生图像设置':`${draft.recipe.output_format.toUpperCase()} · 水印 ${String(draft.recipe.provider_options?.watermark??'默认')}`):draft.provider==='openai_compatible'?`${draft.recipe.output_format.toUpperCase()} · ${backgroundLabel} · 审核 ${draft.recipe.moderation||'auto'}${draft.recipe.output_format!=='png'&&draft.recipe.output_compression!==undefined?` · 压缩 ${draft.recipe.output_compression}`:''}`:'供应商默认';
+  const chip=(name:string,label:string,value:string,ariaLabel=`${label} ${value}`)=><button type="button" className={`pg-param-chip pg-param-${name}${panel===name?' active':''}`} disabled={name==='count'&&busy} title={`${label} ${value}`} aria-label={ariaLabel} aria-expanded={panel===name} aria-haspopup={name==='size'&&draft.provider==='openai_compatible'&&!museApi?'dialog':undefined} aria-controls={name==='size'&&draft.provider==='openai_compatible'&&!museApi?'gallery-size-title':'gallery-parameter-panel'} onClick={()=>setPanel(panel===name?'':name)}>{label&&<span className="pg-param-label">{label}</span>}<span className="pg-param-value">{value}</span><ChevronDown size={12}/></button>;
   return <div className="pg-composer" data-input-bar hidden={!active} onKeyDown={event=>{if(event.key==='Escape'&&panel){event.stopPropagation();setPanel('');}}}>
     <div className="pg-composer-body">
     {draft.sourceItemId&&<div className="pg-composer-source">来自 Library 配方 <button onClick={()=>editDraft(current=>({...current,sourceItemId:undefined}))}>解除关联</button></div>}
@@ -205,47 +211,60 @@ export default function InputBar({command,imageSettingsCommand,preferences,t,act
     {uncertain&&<button onClick={()=>{setUncertain(false);onCreated();}}>我已检查历史，允许新的提交</button>}
     </div>
     <div className="pg-provider-line"><span>供应商</span><button type="button" className="pg-provider-trigger" aria-label={providerLabel} title="选择供应商" aria-expanded={panel==='provider'} aria-controls="gallery-parameter-panel" onClick={()=>setPanel(panel==='provider'?'':'provider')}><Settings2 size={13}/><span>{providerLabel}</span><ChevronDown size={11}/></button></div>
-    <div className="pg-composer-toolbar">
+    <div className={`pg-composer-toolbar${museApi?' pg-composer-toolbar-muse':''}`}>
       <div className="pg-parameter-chips" aria-label="图片请求参数">
         {chip('model','',draft.recipe.model||'选择模型',`请求模型 ${draft.recipe.model||'未选择'}`)}
-        {chip('size','尺寸',sizeValue,sizeLabel)}
-        {!nativeApi&&chip('quality','质量',draft.recipe.quality)}
+        {chip('size',museApi?'比例':'尺寸',museApi&&sizeValue==='auto'?'服务默认':sizeValue,sizeLabel)}
+        {!nativeApi&&!museApi&&chip('quality','质量',draft.recipe.quality)}
         {chip('count','数量',`${count} 张`,'生成数量')}
-        {chip('more','更多',moreValue)}
+        {!museApi&&chip('more','更多',moreValue)}
       </div>
       <div className="pg-composer-actions">
         <button type="button" className={`pg-add-image${panel==='add'?' active':''}`} title="添加参考图" aria-label="添加参考图" aria-expanded={panel==='add'} aria-controls="gallery-parameter-panel" disabled={busy} onClick={()=>setPanel(panel==='add'?'':'add')}><Plus size={21}/></button>
         <button type="button" className="pg-submit" aria-busy={busy} title={busy?'提交中':reading?'读取中':loading||refreshing?'加载中':count===1?'生成图片':`生成 ${count} 张图片`} disabled={loading||refreshing||reading||busy||uncertain||!ready||!draft.prompt.trim()||draft.inputs.some(i=>i.missing)} onClick={()=>void submit()} aria-label="生成图片">{busy||reading||loading||refreshing?<LoaderCircle size={20} className="spin"/>:<ArrowRight size={21}/>}</button>
       </div>
     </div>
-    {panel&&!(panel==='size'&&draft.provider==='openai_compatible'&&!nativeApi)&&<div id="gallery-parameter-panel" className="pg-control-popover pg-parameters-panel" data-panel={panel} role="region" aria-label="生成参数">
-      <header><b>{{provider:'API 配置',model:'请求模型',size:'请求尺寸',quality:'图片质量',count:'生成数量',more:'输出设置',add:'添加参考图'}[panel]}</b><button aria-label="关闭参数" onClick={()=>setPanel('')}><X size={16}/></button></header>
+    {panel&&!(panel==='size'&&draft.provider==='openai_compatible'&&!nativeApi&&!museApi)&&<div id="gallery-parameter-panel" className="pg-control-popover pg-parameters-panel" data-panel={panel} role="region" aria-label="生成参数">
+      <header><b>{museApi&&panel==='size'?'画面比例':{provider:'API 配置',model:'请求模型',size:'请求尺寸',quality:'图片质量',count:'生成数量',more:'输出设置',add:'添加参考图'}[panel]}</b><button aria-label="关闭参数" onClick={()=>setPanel('')}><X size={16}/></button></header>
       {panel==='add'&&<div className="pg-add-options"><button type="button" aria-label="上传参考图" onClick={()=>{setPanel('');fileRef.current?.click();}}><ImagePlus size={18}/><span>上传图片文件</span></button><button type="button" aria-label="从 Library 或画廊选择参考图" onClick={()=>{setPanel('');setPicker(true);}}><Layers size={18}/><span>从 Library 或画廊选择</span></button><small>也可以粘贴图片或拖入文件，保留原图。</small></div>}
-      {panel==='provider'&&<><div className="pg-option-list">{profiles.map(p=><button key={p.id} aria-pressed={draft.provider==='openai_compatible'&&draft.profileId===p.id} onClick={()=>{editDraft(current=>({...current,provider:'openai_compatible',profileId:p.id,aspectRatio:'auto',aspectInjection:undefined,recipe:clearCompatibleTransportOverrides(readGenerationPreference(localStorage,p.id,p.model,p.protocol))}));setPanel('');}}>{p.display_name}<small>{p.configured?'已配置 · 调用能力以实际响应为准':'未完成配置'}</small></button>)}{providers.filter(p=>p.provider!=='openai_compatible'&&(!['openai_codex_oauth_native','xai_grok_oauth'].includes(p.provider)||p.authenticated===true)).map(p=><button key={p.provider} onClick={()=>{editDraft(current=>({...current,provider:p.provider,recipe:{...clearCompatibleTransportOverrides(current.recipe),model:p.default_image_model||p.model||'',quality:'medium'}}));setPanel('');}}>{p.display_name}<small>{p.can_generate?'可用':'未连接'}</small></button>)}</div><button onClick={onOpenSettings}>管理 API 配置</button></>}
+      {panel==='provider'&&<><div className="pg-option-list">{profiles.map(p=><button key={p.id} aria-pressed={draft.provider==='openai_compatible'&&draft.profileId===p.id} onClick={()=>{editDraft(current=>({...current,provider:'openai_compatible',profileId:p.id,aspectRatio:'auto',aspectInjection:undefined,recipe:clearCompatibleTransportOverrides(readGenerationPreference(localStorage,p.id,p.model,p.protocol,p.service_preset))}));setPanel('');}}>{p.display_name}<small>{p.configured?'已配置 · 调用能力以实际响应为准':'未完成配置'}</small></button>)}{providers.filter(p=>p.provider!=='openai_compatible'&&(!['openai_codex_oauth_native','xai_grok_oauth'].includes(p.provider)||p.authenticated===true)).map(p=><button key={p.provider} onClick={()=>{editDraft(current=>({...current,provider:p.provider,recipe:{...clearCompatibleTransportOverrides(current.recipe),model:p.default_image_model||p.model||'',quality:'medium'}}));setPanel('');}}>{p.display_name}<small>{p.can_generate?'可用':'未连接'}</small></button>)}</div><button onClick={onOpenSettings}>管理 API 配置</button></>}
       {panel==='model'&&<>
         <input className="pg-model-input" aria-label="请求模型完整 ID" value={draft.recipe.model} spellCheck={false} onChange={e=>recipe({model:e.target.value})}/>
-        <div className="pg-option-list pg-model-options" aria-label="此配置的模型">{models.map(model=>{
-          const detected=catalog?.models.find(entry=>entry.id===model);
-          const capability=detected?(detected.image_generation===true?'接口标注：图片输出':detected.image_generation===false?'接口标注：非图片输出':isGptImageModelName(model)?'名称匹配：生图候选（未验证）':'接口未标注图片生成能力'):'';
+        <input type="search" className="pg-model-search" aria-label="搜索生图模型" placeholder="搜索模型清单…" value={modelQuery} onChange={e=>setModelQuery(e.target.value)}/>
+        <div className="pg-option-list pg-model-options" aria-label="此配置的模型">{models.filter(model=>model.toLowerCase().includes(modelQuery.trim().toLowerCase())).map(model=>{
+          const detected=profileModelInfo(profile,model);
+          const kind=imageModelCapability(detected);
+          const capability=kind==='image'?(detected?.capability_source==='documentation'?'文档参考：图片输出（权限未验证）':'接口标注：图片输出（未验证）'):kind==='non-image'?'非图片输出，保留当前选择':'图片能力待确认';
           return <button type="button" key={model} data-model-id={model} aria-label={model} title={capability?`${model} · ${capability}`:model} aria-pressed={draft.recipe.model===model} onClick={()=>{recipe({model});setPanel('');}}>
-            <span className="pg-model-name">{model}</span>
+            <span className="pg-model-name">{model}<small className="pg-model-capability">{capability}</small></span>
             {model===profile?.model&&<span className="pg-model-default">默认</span>}
             <span className="pg-model-check" aria-hidden="true">{draft.recipe.model===model&&<Check size={16}/>}</span>
           </button>;
         })}</div>
-        <small className="pg-model-hint">{draft.provider==='openai_compatible'?(nativeApi?'来自当前协议的模型清单与文档参考；支持手填完整 ID，实际权限尚未验证。':'仅推荐 gpt-image 系列；支持手填完整 ID，接口是否支持以实际响应为准。'):'可选择账号提供的图片模型，或填写完整模型 ID。'}</small>
+        <small className="pg-model-hint">{draft.provider==='openai_compatible'?'优先显示声明图片输出的模型；能力待确认仍可选择或手填，实际权限与协议支持以接口为准。':'可选择账号提供的图片模型，或填写完整模型 ID。'}</small>
         {absentFromCatalog&&<small role="status">上次读取的接口列表中未找到当前模型，已保留本次选择。可在设置中刷新列表。</small>}
         {catalog?.error&&<small role="status">最近读取模型列表失败，继续显示上次成功读取的结果。</small>}
         {draft.provider==='openai_compatible'&&profile?.model&&models.includes(profile.model)&&draft.recipe.model!==profile.model&&<button type="button" className="pg-model-reset" onClick={()=>{recipe({model:profile.model});setPanel('');}}>使用此配置的默认模型</button>}
       </>}
       {panel==='size'&&draft.provider!=='openai_compatible'&&<><select aria-label="宽高比" value={draft.aspectRatio} onChange={e=>editDraft(current=>({...current,aspectRatio:e.target.value}))}>{['auto','1:1','2:3','3:4','9:16','4:3','16:9'].map(r=><option key={r}>{r}</option>)}</select>{draft.provider==='xai_grok_oauth'&&<select aria-label="Grok 分辨率" value={draft.resolution} onChange={e=>editDraft(current=>({...current,resolution:e.target.value}))}><option>1k</option><option>2k</option></select>}</>}
+      {museApi&&panel==='size'&&<div className="pg-muse-parameters">
+        <div className="pg-option-list" aria-label="Muse 画面比例">
+          {!MUSE_ASPECT_RATIOS.includes(sizeValue)&&<button type="button" disabled aria-pressed="true">{sizeValue} · 不支持</button>}
+          {MUSE_ASPECT_RATIOS.map(ratio=><button type="button" key={ratio} disabled={busy} aria-pressed={sizeValue===ratio} onClick={()=>{
+            if(busy)return;
+            recipe({requested_aspect_ratio:ratio,size:'auto',quality:'auto',background:'auto',output_format:'auto',service_preset:'muse',size_mode:undefined,output_compression:undefined,moderation:undefined});setPanel('');
+          }}>{ratio==='auto'?'服务默认':ratio}</button>)}
+        </div>
+        {!MUSE_ASPECT_RATIOS.includes(sizeValue)&&<p role="alert">请选择 Muse 支持的比例，原参数已保留。</p>}
+        <small>质量、实际尺寸和文件格式由 Muse 决定；最多 4 张参考图，每张 10 MiB、合计 24 MiB。</small>
+      </div>}
       {nativeApi&&(panel==='size'||panel==='more'||panel==='quality')&&<NativeImageParameters protocol={protocol} model={draft.recipe.model} params={draft.recipe} disabled={busy} onReset={()=>recipe({...nativeRecipeDefaults(protocol,draft.recipe.model),stream:undefined,partial_images:undefined,response_format:undefined,base_url_mode:undefined,size_mode:undefined,output_compression:undefined,moderation:undefined})} onChange={patch=>recipe({...patch,background:patch.background??draft.recipe.background,moderation:patch.moderation as 'auto'|'low'|undefined,output_compression:patch.output_compression??undefined,provider_options:patch.provider_options??draft.recipe.provider_options})}/>}
       {panel==='count'&&<div className="pg-option-list">{([1,3,5,10] as GenerationSetCount[]).map(n=><button type="button" key={n} disabled={busy} aria-pressed={count===n} onClick={()=>{if(busy)return;beginEdit();setCount(n);setPanel('');}}>{n} 张</button>)}</div>}
-      {panel==='quality'&&!nativeApi&&<div className="pg-option-list">{(draft.provider==='openai_compatible'?IMAGE25_QUALITIES:draft.provider==='xai_grok_oauth'?['low','medium']:['low','medium','high']).map(quality=><button key={quality} aria-pressed={draft.recipe.quality===quality} onClick={()=>{recipe({quality});setPanel('');}}>{({auto:'自动',low:'低',medium:'中',high:'高',xhigh:'超高',max:'最高'} as Record<string,string>)[quality]} · {quality}</button>)}</div>}
-      {panel==='more'&&!nativeApi&&(draft.provider==='openai_compatible'?<div className="pg-more-fields"><label><span>格式</span><select aria-label="输出格式" value={draft.recipe.output_format} onChange={e=>recipe({output_format:e.target.value})}>{['png','jpeg','webp'].map(value=><option key={value} value={value}>{value.toUpperCase()}</option>)}</select></label><label><span>透明</span><select aria-label="图片背景" value={draft.recipe.background} onChange={e=>recipe({background:e.target.value})}><option value="auto">auto</option><option value="opaque">false</option><option value="transparent">true</option></select></label><label><span>审核</span><select aria-label="审核强度" value={draft.recipe.moderation||'auto'} onChange={e=>recipe({moderation:e.target.value as 'auto'|'low'})}><option value="auto">auto</option><option value="low">low</option></select></label>{draft.recipe.output_format!=='png'&&<label><span>压缩 <small>0–100</small></span><input aria-label="输出压缩" type="number" min={0} max={100} placeholder="默认" value={draft.recipe.output_compression??''} onChange={e=>recipe({output_compression:e.target.value===''?undefined:Number(e.target.value)})}/></label>}<small>透明 auto 由服务决定；参数按当前接口支持情况发送。</small></div>:<p>此供应商使用其原有输出格式。</p>)}
+      {panel==='quality'&&!nativeApi&&!museApi&&<div className="pg-option-list">{(draft.provider==='openai_compatible'?IMAGE25_QUALITIES:draft.provider==='xai_grok_oauth'?['low','medium']:['low','medium','high']).map(quality=><button key={quality} aria-pressed={draft.recipe.quality===quality} onClick={()=>{recipe({quality});setPanel('');}}>{({auto:'自动',low:'低',medium:'中',high:'高',xhigh:'超高',max:'最高'} as Record<string,string>)[quality]} · {quality}</button>)}</div>}
+      {panel==='more'&&!nativeApi&&!museApi&&(draft.provider==='openai_compatible'?<div className="pg-more-fields"><label><span>格式</span><select aria-label="输出格式" value={draft.recipe.output_format} onChange={e=>recipe({output_format:e.target.value})}>{['png','jpeg','webp'].map(value=><option key={value} value={value}>{value.toUpperCase()}</option>)}</select></label><label><span>透明</span><select aria-label="图片背景" value={draft.recipe.background} onChange={e=>recipe({background:e.target.value})}><option value="auto">auto</option><option value="opaque">false</option><option value="transparent">true</option></select></label><label><span>审核</span><select aria-label="审核强度" value={draft.recipe.moderation||'auto'} onChange={e=>recipe({moderation:e.target.value as 'auto'|'low'})}><option value="auto">auto</option><option value="low">low</option></select></label>{draft.recipe.output_format!=='png'&&<label><span>压缩 <small>0–100</small></span><input aria-label="输出压缩" type="number" min={0} max={100} placeholder="默认" value={draft.recipe.output_compression??''} onChange={e=>recipe({output_compression:e.target.value===''?undefined:Number(e.target.value)})}/></label>}<small>透明 auto 由服务决定；参数按当前接口支持情况发送。</small></div>:<p>此供应商使用其原有输出格式。</p>)}
     </div>}
     <input ref={fileRef} type="file" accept="image/*" multiple hidden onChange={e=>{void addFiles(Array.from(e.target.files||[]));e.target.value='';}}/>
-    {panel==='size'&&draft.provider==='openai_compatible'&&!nativeApi&&active&&<SizeDialog recipe={draft.recipe} prompt={variables.length?resolvePromptTemplate(draft.prompt,draft.templateValues||{}):draft.prompt} referenceSize={measuredReferenceSize} referenceStatus={draft.inputs[0]?(measuredReferenceSize?'ready':referenceStatus==='error'?'error':'loading'):undefined} onApply={recipe} onClose={()=>setPanel('')}/>}
+    {panel==='size'&&draft.provider==='openai_compatible'&&!nativeApi&&!museApi&&active&&<SizeDialog recipe={draft.recipe} prompt={variables.length?resolvePromptTemplate(draft.prompt,draft.templateValues||{}):draft.prompt} referenceSize={measuredReferenceSize} referenceStatus={draft.inputs[0]?(measuredReferenceSize?'ready':referenceStatus==='error'?'error':'loading'):undefined} onApply={recipe} onClose={()=>setPanel('')}/>}
     {picker&&<ReferencePicker onClose={()=>setPicker(false)} onSelect={input=>{if(draft.inputs.length>=limit)setError(`最多 ${limit} 张参考图，请先移除一张`);else editDraft(current=>({...current,inputs:[...current.inputs,input]}));}}/>}
   </div>;
 }

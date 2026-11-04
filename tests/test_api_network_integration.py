@@ -26,6 +26,29 @@ REAL_PROVIDER_INIT = compatible.OpenAICompatibleProvider.__init__
 POLICIES = [{'network_mode': mode, 'proxy_url': PROXY if mode == 'proxy' else ''}
             for mode in ('direct', 'environment', 'proxy')]
 CHANGED_PROXY = {**POLICIES[2], 'proxy_url': PROXY.replace('password', 'changed-password')}
+# Frozen receipts from before network/protocol support used exactly these fields.
+# Do not derive the historical schema by subtracting fields from today's read():
+# newly added defaults would otherwise become part of a nonexistent old identity.
+LEGACY_PROFILE_FIELDS = ('id', 'display_name', 'base_url', 'api_key', 'model', 'timeout',
+                         'models', 'base_url_mode', 'stream', 'partial_images', 'response_format')
+LEGACY_IDENTITY_CHANGES = [*POLICIES, CHANGED_PROXY,
+                           {'service_preset_mode': 'manual'},
+                           {'service_preset': 'muse', 'model': 'muse-image'},
+                           {'protocol': 'gemini_native'},
+                           {'api_key': 'replacement-key-not-real'},
+                           {'base_url': 'https://changed.invalid/v1'}]
+
+
+def legacy_profile_digest(profile):
+    return fingerprint({key: profile[key] for key in LEGACY_PROFILE_FIELDS})
+
+
+def save_identity_change(store, profile_id, change):
+    # Address/protocol changes require explicit key re-entry; keep its value
+    # unchanged so those cases isolate the address/protocol identity boundary.
+    if 'protocol' in change or 'base_url' in change:
+        change = {'api_key': store.read(profile_id)['api_key'], **change}
+    store.save(change, profile_id=profile_id)
 
 
 @pytest.fixture(autouse=True)
@@ -227,7 +250,7 @@ def test_agent_unknown_outcome_is_not_replayed_by_network_mode(app, monkeypatch,
     assert_public(result)
 
 
-@pytest.mark.parametrize('change', [*POLICIES, CHANGED_PROXY])
+@pytest.mark.parametrize('change', LEGACY_IDENTITY_CHANGES)
 def test_frozen_agent_legacy_direct_identity_survives_defaults_but_not_network_changes(app, monkeypatch, change):
     library, client = app
     selected, requests = factory_spy(monkeypatch, lambda r: httpx.Response(200, json=answer()))
@@ -236,18 +259,13 @@ def test_frozen_agent_legacy_direct_identity_survives_defaults_but_not_network_c
     repo = AgentRepository(library)
     frozen = repo.request(body['requestId'])['frozen']
     if initial['network_mode'] == 'direct':
-        # This receipt predates both network defaults and explicit protocols.
-        # read() now supplies protocol as a default, but an old wire identity
-        # must be reconstructed only from fields that existed in that version.
-        legacy = {k: v for k, v in store.read('mock').items()
-                  if k not in api_network.NETWORK_DEFAULTS and k != 'protocol'}
-        frozen['_profileDigests']['mock'] = fingerprint(legacy)
+        frozen['_profileDigests']['mock'] = legacy_profile_digest(store.read('mock'))
     with connect(library) as conn:
         conn.execute('UPDATE agent_requests SET frozen=? WHERE id=?', (encoded(frozen), body['requestId']))
-    store.save(change, profile_id='mock')
+    save_identity_change(store, 'mock', change)
     agent_execution.run_request(library, body['requestId'])
     result = client.get('/api/agent/requests/' + body['requestId']).json()
-    if change['network_mode'] == 'direct':
+    if change == POLICIES[0]:
         assert result['request']['state'] == 'completed' and len(requests) == 1
         assert_policy(selected, change)
     else:
@@ -299,7 +317,7 @@ def test_explicit_retry_dispatch_uses_current_selected_policy_once(source, monke
     assert_public(completed.model_dump())
 
 
-@pytest.mark.parametrize('change', [*POLICIES, CHANGED_PROXY])
+@pytest.mark.parametrize('change', LEGACY_IDENTITY_CHANGES)
 def test_explicit_retry_legacy_direct_digest_and_network_change_boundary(source, change):
     _, repo, _, _, calls = source
     store = compatible.OpenAICompatibleConfig(library_path=repo.library)
@@ -310,12 +328,11 @@ def test_explicit_retry_legacy_direct_digest_and_network_change_boundary(source,
     job = created.json()['job']
     metadata = repo.jobs.get_job(job['id']).metadata
     if change != CHANGED_PROXY:
-        metadata['agentRetry']['profileDigest'] = fingerprint({k: v for k, v in store.read('mock-b').items()
-                                                             if k not in api_network.NETWORK_DEFAULTS and k != 'protocol'})
+        metadata['agentRetry']['profileDigest'] = legacy_profile_digest(store.read('mock-b'))
     with connect(repo.library) as conn:
         conn.execute('UPDATE generation_jobs SET metadata=? WHERE id=?', (encoded(metadata), job['id']))
-    store.save(change, profile_id='mock-b')
-    if change['network_mode'] == 'direct':
+    save_identity_change(store, 'mock-b', change)
+    if change == POLICIES[0]:
         assert _run_provider_job(repo.library, job['id'], job['provider']).status == 'succeeded'
         assert len(calls) == 1
     else:

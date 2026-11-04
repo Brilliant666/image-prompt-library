@@ -35,6 +35,7 @@ function harness(t,overrides={},initial={}){
   save:async(id,payload)=>{calls.save.push({id,payload});let p=profiles.find(x=>x.id===id);if(!p){p={id};profiles.push(p);}const {api_key,proxy_url,remove_proxy_url,...fields}=payload;Object.assign(p,fields,{api_key_present:Boolean(api_key||p.api_key_present),configured:true},remove_proxy_url?{proxy_url_present:false,proxy_endpoint:''}:proxy_url?{proxy_url_present:true,proxy_endpoint:network.safeProxyEndpoint(proxy_url)}:{});return store;},
   setDefault:async id=>{calls.default.push(id);store.default_profile_id=id;return store;},remove:async id=>{calls.remove.push(id);store.profiles=store.profiles.filter(p=>p.id!==id);return store;},...overrides,
  };
+ if(overrides.discover){apis.discover=(payload,signal)=>{calls.discover.push({payload,signal});return overrides.discover(payload,signal);};}
  const slots=[],effects=[];let cursor=0,changed=false,tree,mounted=true,late=0;
  const hooks={
   useState(value){const i=cursor++;if(!(i in slots))slots[i]=typeof value==='function'?value():value;return [slots[i],next=>{if(!mounted){late++;return;}slots[i]=typeof next==='function'?next(slots[i]):next;changed=true;}];},
@@ -162,6 +163,15 @@ for(const outcome of ['failed','closed'])test(`${outcome} save does not announce
 test('default connection changes only after a confirmed successful action, never merely by viewing',async t=>{
  const h=harness(t);await h.flush();await selectProfile(h,'Connection B');assert.deepEqual(h.calls.default,[]);await h.click('设为默认连接');assert.deepEqual(h.calls.default,['b','global']);assert.equal(h.calls.discover.length,0);
 });
+
+test('expired Muse discovery asks for a new check and preserves the edited form',async t=>{
+ const h=harness(t,{save:async()=>{throw Error('Run model discovery again for the changed connection, or choose the Muse adapter manually.');}});
+ await h.flush();await h.fill('连接名称','Edited connection');await h.fill('默认图片模型','muse-image');await h.submit();
+ assert.ok(h.text.includes('请重新识别模型，或手动选择 Muse 适配后再保存。'));
+ assert.equal(h.input('连接名称').value,'Edited connection');assert.equal(h.input('默认图片模型').value,'muse-image');
+ assert.equal(h.calls.discover.length,0);assert.equal(h.events.length,0);
+ assert.ok(!h.text.includes('已保存，未发送生成请求'));
+});
 test('uncertain default change cannot switch the global selection',async t=>{
  const h=harness(t,{setDefault:async()=>{throw Error('private');}});await h.flush();await h.click('设为默认连接');assert.deepEqual(h.calls.default,['global'],'current existing default needs no provider mutation');await selectProfile(h,'Connection B');await h.click('设为默认连接');assert.deepEqual(h.calls.default,['global']);assert.ok(!h.text.includes('private'));
 });
@@ -240,4 +250,132 @@ test('a failed second discovery retains the list without presenting the previous
  assert.ok(!h.text.includes('已读取接口清单'),'the rejected check must invalidate its success label');
  assert.ok(h.text.includes('无法连接'));assert.ok(!h.text.includes('private-server-error'));
  assert.equal(h.calls.save.length,0);assert.equal(h.input('默认图片模型').value,'old-model');
+});
+
+test('Muse preset keeps the service URL explicit and offers only supported image transport',async t=>{
+ const h=harness(t);await h.flush();await startNew(h,'muse');
+ assert.equal(h.input('Base URL').value,'');assert.equal(h.input('默认图片模型').value,'muse-image');
+ assert.equal(h.input('流式传输'),undefined);assert.equal(h.find('select',p=>p['aria-label']==='中间预览图数量'),undefined);
+ assert.ok(h.input('返回 Base64 图片数据'));assert.ok(h.text.includes('暂不支持视频'));
+ await h.fill('Base URL','https://muse.invalid/v1');await h.fill('API Key','synthetic-key');await h.click('识别模型');
+ assert.equal(h.calls.discover[0].payload.protocol,'openai_compatible');assert.equal(h.calls.discover[0].payload.service_preset,'muse');
+ await h.submit();assert.equal(h.calls.save[0].payload.service_preset,'muse');assert.equal(h.calls.save[0].payload.service_preset_mode,'manual');assert.equal(h.calls.save[0].payload.model,'muse-image');
+ assert.equal(h.calls.save[0].payload.stream,false);assert.equal(h.calls.save[0].payload.partial_images,0);assert.equal(h.calls.discover.length,1);
+});
+
+test('existing Muse adaptation requires confirmation and preserves same-target saved credentials',async t=>{
+ const h=harness(t);await h.flush();await h.fill('API Key','unsaved-key');await h.click('手动 Muse');
+ assert.ok(h.find('div',p=>p['aria-label']==='确认服务适配'));await h.click('取消适配');
+ assert.equal(h.input('API Key').value,'unsaved-key');assert.ok(h.input('流式传输'));
+ await h.click('手动 Muse');await h.click('确认适配');
+ assert.equal(h.input('API Key').value,'unsaved-key');assert.equal(h.input('Base URL').value,'https://a.invalid/v1');assert.equal(h.input('连接名称').value,'Connection A');
+ assert.equal(h.input('流式传输'),undefined);assert.equal(h.calls.save.length,0);assert.equal(h.calls.discover.length,0);
+ await h.fill('API Key','');await h.submit();assert.equal(h.calls.save[0].payload.service_preset,'muse');assert.equal(h.calls.save[0].payload.api_key,undefined);
+});
+
+test('Muse capability rows distinguish video from available image output and do not select text as the image default',async t=>{
+ const models=[{id:'muse-image',image_generation:true,text_generation:false,capability_source:'documentation'},{id:'muse-spark',image_generation:false,text_generation:true,capability_source:'documentation'},{id:'muse-video',image_generation:false,text_generation:false,capability_source:'documentation'}];
+ const h=harness(t,{discover:async()=>result({models})},{profiles:[{id:'muse',display_name:'Muse',base_url:'https://muse.invalid/v1',model:'muse-image',models:[],timeout:300,service_preset:'muse',api_key_present:true,configured:true}]});await h.flush();await h.click('识别模型');
+ assert.ok(h.text.includes('视频 · 本项目暂不支持'));h.find('button',p=>p['data-catalog-model']==='muse-spark').onClick();await h.flush();
+ assert.equal(h.input('默认图片模型').value,'muse-image');assert.ok(h.text.includes('不能作为 Agent 工具主控'));
+ assert.equal(h.find('button',p=>p['data-catalog-model']==='muse-video').disabled,true);assert.equal(h.calls.save.length,0);
+});
+
+const museDiscovery=()=>result({models:[
+ {id:'muse-image',owned_by:'muse',image_generation:true,text_generation:false,capability_source:'documentation'},
+ {id:'muse-spark',owned_by:'muse',image_generation:false,text_generation:true,capability_source:'documentation'},
+ {id:'muse-video',owned_by:'muse',image_generation:false,text_generation:false,capability_source:'documentation'},
+],detected_service_preset:'muse'});
+
+test('connection brands retain OpenAI, Gemini, Seedream, Muse and custom order',async t=>{
+ const h=harness(t);await h.flush();await h.click('添加连接');
+ assert.deepEqual(walk(h.tree).filter(n=>n.type==='button'&&n.props['data-preset']).map(n=>n.props['data-preset']),['openai','gemini','seedream','muse','custom']);
+});
+
+test('automatic adaptation is the default advanced control and missing legacy mode is not an unsaved change',async t=>{
+ const h=harness(t);await h.flush();assert.equal(h.button('添加连接').disabled,false);assert.equal(h.button('放弃修改'),undefined);
+ const advanced=h.find('details',p=>p.className==='api-connection-advanced');assert.ok(advanced);
+ assert.ok(walk({props:advanced}).some(n=>n.props?.['aria-label']==='服务适配'));
+ assert.equal(h.button('自动识别（默认）')['aria-pressed'],true);assert.equal(h.calls.discover.length,0);assert.equal(h.calls.save.length,0);
+});
+
+test('verified model discovery applies Muse only to the current draft without changing user fields or saving',async t=>{
+ const h=harness(t,{discover:async()=>museDiscovery()});await h.flush();await h.fill('API Key','draft-secret');await h.fill('默认图片模型','user-selected-model');
+ h.input('流式传输').onChange({target:{checked:true}});await h.flush();await h.click('识别模型');
+ assert.equal(h.calls.discover.length,1);assert.equal(h.calls.discover[0].payload.service_preset_mode,'auto');assert.equal(h.calls.discover[0].payload.service_preset,'generic');
+ assert.ok(h.text.includes('已自动识别 Muse'));assert.equal(h.input('流式传输'),undefined);assert.equal(h.input('API Key').value,'draft-secret');
+ assert.equal(h.input('默认图片模型').value,'user-selected-model');assert.equal(h.input('连接名称').value,'Connection A');assert.equal(h.input('Base URL').value,'https://a.invalid/v1');
+ assert.equal(h.calls.save.length,0);assert.equal(h.calls.cache.length,1);await h.submit();
+ assert.equal(h.calls.save.length,1);assert.equal(h.calls.save[0].payload.service_preset,'muse');assert.equal(h.calls.save[0].payload.service_preset_mode,'auto');
+ assert.equal(h.calls.save[0].payload.stream,false);assert.equal(h.calls.save[0].payload.partial_images,0);assert.equal(h.calls.discover.length,1);
+ assert.ok(h.text.includes('已自动识别 Muse'));assert.ok(!h.text.includes('保存连接后生效'));
+});
+
+test('automatic detection preserves newer name and model edits made while discovery is pending',async t=>{
+ let complete;const h=harness(t,{discover:()=>new Promise(resolve=>complete=resolve)});await h.flush();h.button('识别模型').onClick();await h.flush();
+ await h.fill('连接名称','Name edited during discovery');await h.fill('默认图片模型','new-model');complete(museDiscovery());await h.flush();
+ assert.equal(h.input('连接名称').value,'Name edited during discovery');assert.equal(h.input('默认图片模型').value,'new-model');assert.ok(h.text.includes('已自动识别 Muse'));assert.equal(h.calls.save.length,0);
+});
+
+test('manual standard override invalidates an older automatic result and is never replaced by a detection marker',async t=>{
+ let complete;const h=harness(t,{discover:()=>new Promise(resolve=>complete=resolve)});await h.flush();h.button('识别模型').onClick();await h.flush();
+ const request=h.calls.discover[0];await h.click('标准 OpenAI 兼容');await h.click('确认适配');assert.equal(request.signal.aborted,true);
+ complete(museDiscovery());await h.flush();assert.ok(!h.text.includes('已自动识别 Muse'));assert.ok(h.input('流式传输'));assert.equal(h.button('标准 OpenAI 兼容')['aria-pressed'],true);
+ h.button('识别模型').onClick();await h.flush();complete(museDiscovery());await h.flush();
+ assert.equal(h.calls.discover[1].payload.service_preset_mode,'manual');assert.equal(h.calls.discover[1].payload.service_preset,'generic');assert.ok(h.input('流式传输'));assert.ok(!h.text.includes('已自动识别 Muse'));
+ assert.equal(h.calls.save.length,0);
+});
+
+test('returning to automatic mode keeps current effective adaptation and only the next discovery can confirm it',async t=>{
+ const saved={id:'muse',display_name:'Muse',base_url:'https://muse.invalid/v1',model:'muse-image',models:[],timeout:300,service_preset:'muse',service_preset_mode:'manual',api_key_present:true,configured:true};
+ const h=harness(t,{discover:async()=>result()},{profiles:[saved]});await h.flush();await h.click('自动识别（默认）');await h.click('确认适配');
+ assert.equal(h.input('流式传输'),undefined);assert.equal(h.button('自动识别（默认）')['aria-pressed'],true);assert.equal(h.calls.discover.length,0);assert.ok(!h.text.includes('已自动识别 Muse'));
+ await h.click('识别模型');assert.equal(h.input('流式传输'),undefined);assert.ok(!h.text.includes('已自动识别 Muse'));await h.submit();
+ assert.equal(h.calls.save[0].payload.service_preset,'muse');assert.equal(h.calls.save[0].payload.service_preset_mode,'auto');
+});
+
+test('key prefix is only a local hint, and models without a server detection marker do not choose Muse',async t=>{
+ const h=harness(t,{discover:async()=>{const value=museDiscovery();delete value.detected_service_preset;return value;}});await h.flush();await h.fill('API Key','m2a_synthetic');
+ assert.ok(h.text.includes('疑似 Muse'));assert.ok(h.input('流式传输'));assert.equal(h.calls.discover.length,0);assert.equal(h.calls.save.length,0);
+ await h.click('识别模型');assert.ok(h.input('流式传输'));assert.ok(!h.text.includes('已自动识别 Muse'));assert.equal(h.calls.save.length,0);
+});
+
+test('failed rediscovery clears automatic success notice while retaining effective Muse adaptation and user input',async t=>{
+ let attempt=0;const h=harness(t,{discover:async()=>{if(++attempt===1)return museDiscovery();throw Error('private failure');}});await h.flush();await h.click('识别模型');assert.ok(h.text.includes('已自动识别 Muse'));
+ await h.click('识别模型');assert.ok(!h.text.includes('已自动识别 Muse'));assert.ok(h.text.includes('无法连接'));assert.equal(h.input('流式传输'),undefined);assert.equal(h.input('默认图片模型').value,'old-model');assert.equal(h.calls.save.length,0);
+});
+
+for(const field of ['Base URL','API Key'])for(const outcome of ['ordinary','failure'])test(`auto-detected Muse is invalidated by ${field} changes before ${outcome} discovery and cannot contaminate a saved target`,async t=>{
+ let attempt=0;const h=harness(t,{discover:async()=>{if(++attempt===1)return museDiscovery();if(outcome==='failure')throw Error('synthetic connection failure');return result();}});
+ await h.flush();await h.fill('API Key','first-synthetic-key');await h.click('识别模型');assert.ok(h.text.includes('已自动识别 Muse'));await h.submit();
+ assert.equal(h.calls.save[0].payload.service_preset,'muse');assert.equal(h.calls.save[0].payload.service_preset_mode,'auto');
+ const originalModel=h.input('默认图片模型').value;await h.fill(field,field==='Base URL'?'https://ordinary.invalid/v1':'changed-synthetic-key');
+ if(field==='Base URL')await h.fill('API Key','ordinary-key');
+ assert.ok(h.input('流式传输'),'new target uses generic transport until Muse is verified again');assert.ok(!h.text.includes('已自动识别 Muse'));assert.ok(h.text.includes('连接信息已更改'));
+ assert.equal(h.input('默认图片模型').value,originalModel);assert.equal(h.calls.discover.length,1,'editing connection details adds no request');
+ await h.click('识别模型');await h.submit();assert.equal(h.calls.discover.length,2);assert.equal(h.calls.save.length,2);
+ assert.equal(h.calls.discover[1].payload.service_preset,'generic');assert.equal(h.calls.save[1].payload.service_preset,'generic');assert.equal(h.calls.save[1].payload.service_preset_mode,'auto');
+ assert.equal(h.calls.save[1].payload.model,originalModel);
+});
+
+for(const field of ['Base URL','API Key'])test(`manual Muse survives ${field} edits without automatic demotion`,async t=>{
+ const saved={id:'muse',display_name:'Muse',base_url:'https://muse.invalid/v1',model:'muse-image',models:[],timeout:300,service_preset:'muse',service_preset_mode:'manual',api_key_present:true,configured:true};
+ const h=harness(t,{}, {profiles:[saved]});await h.flush();await h.fill(field,field==='Base URL'?'https://manual-muse.invalid/v1':'manual-synthetic-key');if(field==='Base URL')await h.fill('API Key','manual-target-key');
+ assert.equal(h.input('流式传输'),undefined);assert.equal(h.button('手动 Muse')['aria-pressed'],true);assert.ok(!h.text.includes('连接信息已更改'));await h.submit();
+ assert.equal(h.calls.save[0].payload.service_preset,'muse');assert.equal(h.calls.save[0].payload.service_preset_mode,'manual');assert.equal(h.calls.discover.length,0);
+});
+
+test('unrelated name/model edits preserve an auto Muse identity while URL mode and network/proxy changes invalidate it',async t=>{
+ const saved={id:'muse',display_name:'Muse',base_url:'https://muse.invalid/v1',model:'muse-image',models:[],timeout:300,base_url_mode:'versioned',network_mode:'direct',service_preset:'muse',service_preset_mode:'auto',api_key_present:true,configured:true};
+ const h=harness(t,{}, {profiles:[saved]});await h.flush();await h.fill('连接名称','Renamed Muse');await h.fill('默认图片模型','muse-image');
+ assert.equal(h.input('流式传输'),undefined);await h.submit();assert.equal(h.calls.save[0].payload.service_preset,'muse');
+ h.find('select',p=>p['aria-label']==='地址拼接方式').onChange({target:{value:'custom'}});await h.flush();assert.ok(h.input('流式传输'));assert.equal(h.calls.discover.length,0);
+});
+
+for(const change of ['network','proxy','removeProxy'])test(`auto Muse evidence is invalidated by ${change} settings without a network request`,async t=>{
+ const saved={id:'muse',display_name:'Muse',base_url:'https://muse.invalid/v1',model:'muse-image',models:[],timeout:300,network_mode:'direct',service_preset:'muse',service_preset_mode:'auto',api_key_present:true,configured:true,proxy_url_present:true,proxy_endpoint:'http://proxy.invalid:8080'};
+ const h=harness(t,{}, {profiles:[saved]});await h.flush();const controls=h.find('ApiNetworkSettings');
+ if(change==='network')controls.onModeChange('environment');else if(change==='proxy')controls.onProxyUrlChange('http://new-proxy.invalid:8080');else controls.onRemoveProxyChange(true);
+ await h.flush();assert.ok(h.input('流式传输'));assert.ok(h.text.includes('连接信息已更改'));assert.equal(h.calls.discover.length,0);await h.submit();
+ assert.equal(h.calls.save[0].payload.service_preset,'generic');assert.equal(h.calls.save[0].payload.service_preset_mode,'auto');
 });
