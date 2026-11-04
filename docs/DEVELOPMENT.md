@@ -186,6 +186,25 @@ Stop the app before backup or restore. Restore validates and stages the complete
 
 See [`BACKUP_AND_RESTORE.md`](BACKUP_AND_RESTORE.md) for the exact payload, credential boundary, commands, failure behavior, and non-goals. Keep backups somewhere outside the repo and outside the active library if the library matters to you.
 
+## Database and request lifecycle
+
+`backend.db.connect()` returns a SQLite connection, not a generator. Use
+`with connect(library) as conn:` for an owned transaction scope: normal exit
+commits, exceptional exit rolls back, and the outermost scope closes the handle,
+including when commit fails. Do not return a live cursor or use the connection
+after leaving that scope. Nested scopes retain SQLite's existing transaction
+semantics; they do not create savepoints. Direct callers still own `close()`;
+`contextlib.closing()` alone does not commit pending work. Helpers borrowing a
+caller's connection must not close it or start another ownership scope.
+
+An Agent stop is claimed against the current durable request state under a write
+transaction. A completion, known failure or local-result-recovery receipt that
+commits first is retained; a stop that commits first retains its stopped state
+and existing dispatch guards. Child cancellation remains conditional and cannot cancel an already successful
+image. This does not promise that a request already sent to a supplier is cancelled
+or unbilled. Local-result repair continues to use the original task without a new
+supplier request.
+
 ## Tests and contribution workflow
 
 Run commands from the checkout root using the prepared interpreter, with the

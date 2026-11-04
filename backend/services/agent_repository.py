@@ -1409,35 +1409,41 @@ class AgentRepository:
         with connect(self.library) as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute("SELECT * FROM agent_requests WHERE id=?", (request_id,)).fetchone()
-            if row["stop_requested"] and state not in {None, "stopped"}:
-                state = "stopped"
-            round_data = json.loads(conn.execute("SELECT data FROM agent_rounds WHERE id=?", (row["round_id"],)).fetchone()[0])
-            if returned_model is not None:
-                info = model_info(json.loads(row["frozen"]), round_data)
-                label = safe_model_label(returned_model)
-                if label and label not in info["returnedModels"]:
-                    info["returnedModels"] = (info["returnedModels"] + [label])[:50]
-                round_data["modelInfo"] = info
-            if output is not None:
-                round_data["responseOutput"] = output
-            if text is not None:
-                round_data["assistantContent"] = text
-            if response_id:
-                round_data["responseId"] = response_id
-            if state:
-                round_data["status"] = "running" if state in ACTIVE_STATES else "done" if state == "completed" else "error"
-                round_data["finishedAt"] = None if state in ACTIVE_STATES else milliseconds()
-                if round_data.get('execution') and state not in ACTIVE_STATES:
-                    round_data['execution']['phase'] = state if state in {'completed', 'stopped', 'unknown'} else 'failed'
-                    for measured in round_data['execution']['modelSteps']:
-                        if measured['state'] == 'running':
-                            measured['state'] = 'interrupted'
-            if error:
-                round_data["error"] = error["message"]
-            self._save_round(conn, round_data)
-            conn.execute("UPDATE agent_requests SET state=?,error=?,upstream_outcome=? WHERE id=?",
-                         (state or row["state"], encoded(error) if error else row["error"], outcome or row["upstream_outcome"], request_id))
-            self._touch(conn, row["conversation_id"])
+            self._update_request(conn, row, state=state, output=output, text=text,
+                                 response_id=response_id, error=error, outcome=outcome, returned_model=returned_model)
+
+    def _update_request(self, conn, row, *, state=None, output=None, text=None, response_id=None, error=None, outcome=None, returned_model=None):
+        """Persist request and round together under the caller's write transaction."""
+        request_id = row['id']
+        if row["stop_requested"] and state not in {None, "stopped"}:
+            state = "stopped"
+        round_data = json.loads(conn.execute("SELECT data FROM agent_rounds WHERE id=?", (row["round_id"],)).fetchone()[0])
+        if returned_model is not None:
+            info = model_info(json.loads(row["frozen"]), round_data)
+            label = safe_model_label(returned_model)
+            if label and label not in info["returnedModels"]:
+                info["returnedModels"] = (info["returnedModels"] + [label])[:50]
+            round_data["modelInfo"] = info
+        if output is not None:
+            round_data["responseOutput"] = output
+        if text is not None:
+            round_data["assistantContent"] = text
+        if response_id:
+            round_data["responseId"] = response_id
+        if state:
+            round_data["status"] = "running" if state in ACTIVE_STATES else "done" if state == "completed" else "error"
+            round_data["finishedAt"] = None if state in ACTIVE_STATES else milliseconds()
+            if round_data.get('execution') and state not in ACTIVE_STATES:
+                round_data['execution']['phase'] = state if state in {'completed', 'stopped', 'unknown'} else 'failed'
+                for measured in round_data['execution']['modelSteps']:
+                    if measured['state'] == 'running':
+                        measured['state'] = 'interrupted'
+        if error:
+            round_data["error"] = error["message"]
+        self._save_round(conn, round_data)
+        conn.execute("UPDATE agent_requests SET state=?,error=?,upstream_outcome=? WHERE id=?",
+                     (state or row["state"], encoded(error) if error else row["error"], outcome or row["upstream_outcome"], request_id))
+        self._touch(conn, row["conversation_id"])
 
     def record_context_diagnostics(self, request_id, summary):
         """Latest bounded composition receipt, part of the existing round backup."""
@@ -1711,15 +1717,27 @@ class AgentRepository:
         request = self.request(request_id)
         if request["state"] not in ACTIVE_STATES:
             return self.snapshot(request_id=request_id)
+        job_ids = []
         with connect(self.library) as conn:
-            conn.execute("UPDATE agent_requests SET stop_requested=1 WHERE id=?", (request_id,))
-        for jid in request["round"]["outputTaskIds"]:
+            # Completion/local-recovery can commit after the initial snapshot.
+            # Claim stop and persist its terminal receipt atomically; never write
+            # another stopped state after cancellation of child jobs has waited.
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM agent_requests WHERE id=?", (request_id,)).fetchone()
+            if row is None:
+                raise AgentError('not_found', '请求不存在。', 404)
+            if row['state'] in ACTIVE_STATES:
+                current = json.loads(conn.execute("SELECT data FROM agent_rounds WHERE id=?", (row['round_id'],)).fetchone()[0])
+                job_ids = current['outputTaskIds']
+                conn.execute("UPDATE agent_requests SET stop_requested=1 WHERE id=?", (request_id,))
+                self._update_request(conn, dict(row, stop_requested=1), state="stopped",
+                                     error={"code": "stopped", "message": "已停止生成。"})
+        for jid in job_ids:
             try:
                 if self.jobs.get_job(jid).status in {"queued", "running"}:
                     self.jobs.cancel_job(jid)
             except (ValueError, KeyError):
                 pass
-        self.update(request_id, state="stopped", error={"code": "stopped", "message": "已停止生成。"})
         return self.snapshot(request_id=request_id)
 
     def _local_results_block_resume(self, request_id, *, connection=None):
