@@ -10,10 +10,37 @@ BUSY_TIMEOUT_SECONDS = 15
 def get_db_path(library_path=None) -> Path:
     return resolve_library_path(library_path) / "db.sqlite"
 
+class _ClosingConnection(sqlite3.Connection):
+    """Keep the DB-API connection interface and close the outer transaction scope.
+
+    sqlite3's context manager commits/rolls back, but does not close. Raw users
+    still own close(); contextlib.closing() and explicit transactions stay valid.
+    Nested scopes retain SQLite's transaction semantics, not savepoint semantics.
+    """
+
+    def __enter__(self):
+        result = super().__enter__()
+        self._scope_depth = getattr(self, "_scope_depth", 0) + 1
+        return result
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self._scope_depth -= 1
+            if self._scope_depth == 0:
+                self.close()
+
+
 def connect(library_path=None) -> sqlite3.Connection:
-    conn = sqlite3.connect(get_db_path(library_path), timeout=BUSY_TIMEOUT_SECONDS)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
+    conn = sqlite3.connect(get_db_path(library_path), timeout=BUSY_TIMEOUT_SECONDS,
+                           factory=_ClosingConnection)
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+    except BaseException:
+        conn.close()
+        raise
     return conn
 
 def init_db(library_path=None) -> Path:
