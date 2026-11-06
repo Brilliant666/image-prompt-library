@@ -42,7 +42,13 @@ function harness(t,overrides={},initial={}){
   useRef(value){const i=cursor++;if(!(i in slots))slots[i]={current:value};return slots[i];},
   useEffect(fn,deps){const i=cursor++;if(!slots[i]||deps.some((v,j)=>v!==slots[i].deps[j])){const previous=slots[i];slots[i]={deps,effect:fn};effects.push(()=>{previous?.cleanup?.();slots[i].cleanup=fn();});}},
  };
- const jsx=(type,props)=>({type,props});
+ const jsx=(type,props)=>{
+  if(props.ref&&initial.connectionList){
+   if(props.className==='api-connection-list')props.ref.current=initial.connectionList;
+   if(props.className==='api-connection-row')props.ref.current={getBoundingClientRect:()=>initial.rowBounds(text(props.children))};
+  }
+  return {type,props};
+ };
  const deps={react:hooks,'react/jsx-runtime':{jsx,jsxs:jsx,Fragment:'fragment'},'lucide-react':new Proxy({},{get:(_,k)=>k}),
  '../api/client':{apiConnections:apis},'../api/profileActions':{copyApiProfile:async(...args)=>{calls.copy.push(args);return store;},reorderApiProfiles:async ids=>{calls.order.push(ids);return store;}},
  '../utils/profileSettings':profileSettings,'../utils/connectionSettings':settings,'../utils/generationPreferences':preferences,'../utils/apiNetwork':network,
@@ -73,6 +79,29 @@ test('new connection chooses a type once, then shows fields with the chosen prot
  const h=harness(t);await h.flush();await startNew(h);assert.equal(h.input('Base URL').value,'https://generativelanguage.googleapis.com/v1beta');
  assert.equal(h.find('button',p=>p['data-preset']==='gemini'),undefined);assert.ok(h.text.includes('文字使用独立 Responses 连接'));
  assert.equal(h.find('select',p=>p['aria-label']==='接口协议'),undefined);assert.equal(h.button('识别模型').disabled,true);
+});
+test('saving a new connection reveals its clipped row in the saved list',async t=>{
+ const connectionList={scrollTop:0,getBoundingClientRect:()=>({top:0,bottom:390})};
+ const rowBounds=label=>label.startsWith('Official OpenAI')
+  ?{top:335-connectionList.scrollTop,bottom:415-connectionList.scrollTop}
+  :{top:0,bottom:80};
+ const h=harness(t,{}, {connectionList,rowBounds});
+ await h.flush();await startNew(h,'openai');
+ await h.fill('连接名称','Official OpenAI');await h.submit();
+ assert.equal(h.calls.save.length,1);
+ assert.equal(h.input('连接名称').value,'Official OpenAI');
+ assert.equal(connectionList.scrollTop,25);
+});
+test('deletion confirmation stays in the action bar and deletes only on confirmation',async t=>{
+ const h=harness(t);await h.flush();
+ await h.click('删除连接');
+ const bar=h.find('div',props=>props.className==='api-save-bar');
+ assert.ok(walk({props:bar}).some(node=>node.props?.['aria-label']==='确认删除连接'));
+ assert.deepEqual(h.calls.remove,[]);
+ await h.click('取消');assert.equal(h.button('确认删除'),undefined);
+ await h.click('删除连接');await h.click('确认删除');
+ assert.deepEqual(h.calls.remove,['a']);
+ assert.equal(h.input('连接名称').value,'Connection B');
 });
 test('custom services can explicitly select any native protocol without a second selector',async t=>{
  const h=harness(t);await h.flush();await startNew(h,'custom');assert.equal(h.find('form'),undefined);
