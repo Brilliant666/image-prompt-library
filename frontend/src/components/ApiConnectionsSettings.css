@@ -79,6 +79,7 @@
 .api-switch input{width:18px;height:18px;accent-color:var(--studio-accent)}
 .api-save-bar{position:sticky;bottom:-1px;display:flex;align-items:center;flex-wrap:wrap;gap:8px;background:var(--studio-surface);padding:13px 0;border-top:1px solid var(--studio-hairline);z-index:2}
 .api-save-bar>.primary,.api-save-bar>.secondary{font-size:12px!important;padding:9px 13px!important}
+.api-save-bar>.api-change-confirm{box-sizing:border-box;flex-basis:100%;margin-top:0}
 .api-delete{margin-left:auto;border:0;background:transparent;color:var(--studio-muted);padding:7px!important;display:grid;place-items:center}
 .api-change-confirm{margin-top:14px;border:1px solid var(--studio-hairline);border-radius:12px;padding:14px;font-size:12px;background:rgb(var(--studio-accent-rgb) / .035)}
 .api-change-confirm p{font-size:12px;line-height:1.7;margin:8px 0 12px}

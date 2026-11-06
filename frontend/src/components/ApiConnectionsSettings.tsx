@@ -49,7 +49,19 @@ export default function ApiConnectionsSettings({ onSaved, uiLanguage, isDefaultC
   const selected=useRef<string | undefined>(undefined);
   const discoveryFlight=useRef<AbortController | undefined>(undefined);
   const modelInput=useRef<HTMLInputElement>(null);
+  const connectionList=useRef<HTMLDivElement>(null);
+  const selectedRow=useRef<HTMLDivElement>(null);
   const stored=collection?.profiles.find(value=>value.id===config?.id);
+  const storedId=stored?.id;
+  useEffect(()=>{
+    const list=connectionList.current;
+    const row=selectedRow.current;
+    if(!storedId||!list||!row)return;
+    const viewport=list.getBoundingClientRect();
+    const bounds=row.getBoundingClientRect();
+    if(bounds.top<viewport.top)list.scrollTop+=bounds.top-viewport.top;
+    else if(bounds.bottom>viewport.bottom)list.scrollTop+=bounds.bottom-viewport.bottom;
+  },[collection,storedId]);
   const selectedProtocol=config?.protocol || 'openai_compatible';
   const muse=config?.service_preset==='muse';
   const presetMode=config?.service_preset_mode||'auto';
@@ -222,7 +234,7 @@ export default function ApiConnectionsSettings({ onSaved, uiLanguage, isDefaultC
       <button type="button" className="secondary" disabled={busy||dirty} aria-label={en?'Reload connections':'重新读取连接'} onClick={load}><RefreshCw size={16}/></button></header>
     {collection&&<div className="api-connections-layout">
       <aside className="api-connection-sidebar" aria-label={en?'Saved connections':'已保存连接'}>
-        <div className="api-connection-list">{collection.profiles.map((profile,index)=><div key={profile.id} className="api-connection-row" draggable={!busy&&!dirty}
+        <div ref={connectionList} className="api-connection-list">{collection.profiles.map((profile,index)=><div key={profile.id} ref={storedId===profile.id?selectedRow:undefined} className="api-connection-row" draggable={!busy&&!dirty}
           onDragStart={event=>{setDragged(profile.id);event.dataTransfer.setData('text/plain',profile.id);}}
           onDragOver={event=>{if(dragged&&!dirty)event.preventDefault();}}
           onDrop={event=>{event.preventDefault();if(dragged)move(dragged,profile.id);setDragged(undefined);}} onDragEnd={()=>setDragged(undefined)}>
@@ -294,8 +306,12 @@ export default function ApiConnectionsSettings({ onSaved, uiLanguage, isDefaultC
           </div></details>
           <div className="api-save-bar"><button type="submit" className="primary">{busy?(en?'Saving…':'保存中…'):(en?'Save connection':'保存连接')}</button>{dirty&&<button type="button" className="secondary" onClick={()=>choose(stored||newConnectionProfile())}>{en?'Discard changes':'放弃修改'}</button>}
             {stored&&(config.id!==collection.default_profile_id||!isDefaultConnection)&&<button type="button" className="api-link" disabled={dirty||!config.configured} onClick={()=>void setDefault()}>{en?'Use as default':'设为默认连接'}</button>}
-            {stored&&<button type="button" className="api-delete" aria-label={en?'Delete connection':'删除连接'} disabled={dirty} onClick={()=>setDeletePending(true)}><Trash2 size={15}/></button>}</div>
-          {deletePending&&<div className="api-change-confirm" role="alertdialog"><p>{en?`Delete “${config.display_name}” and its key? Images and history remain.`:`删除「${config.display_name}」及其 Key？图片和历史仍会保留。`}</p><button type="button" onClick={()=>setDeletePending(false)}>{en?'Cancel':'取消'}</button><button type="button" onClick={()=>void mutate(()=>connections.remove(config.id))}>{en?'Delete':'确认删除'}</button></div>}
+            {stored&&<button type="button" className="api-delete" aria-label={en?'Delete connection':'删除连接'} aria-expanded={deletePending} disabled={dirty} onClick={()=>setDeletePending(!deletePending)}><Trash2 size={15}/></button>}
+            {deletePending&&<div className="api-change-confirm" role="group" aria-label={en?'Confirm connection deletion':'确认删除连接'}>
+              <p>{en?`Delete “${config.display_name}” and its key? Images and history remain.`:`删除「${config.display_name}」及其 Key？图片和历史仍会保留。`}</p>
+              <div><button type="button" onClick={()=>setDeletePending(false)}>{en?'Cancel':'取消'}</button><button type="button" disabled={dirty} onClick={()=>void mutate(()=>connections.remove(config.id))}>{en?'Delete':'确认删除'}</button></div>
+            </div>}
+          </div>
         </fieldset></form>}
         {message&&<p role="status" className="api-connection-message">{message}</p>}
       </div>
